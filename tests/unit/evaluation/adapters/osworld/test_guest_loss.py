@@ -1152,7 +1152,7 @@ async def test_a_pre_action_path_failure_attempts_the_action_instead_of_dying(
     assert evidence["read_failed"] is True
     assert evidence["path_unreachable"] is True
     outcomes = evidence["probe_outcomes"]
-    assert len(outcomes) == 11, "one probe plus the backoff schedule"
+    assert len(outcomes) == 10, "one probe plus the backoff schedule"
     assert all(outcome["kind"] == "refused" for outcome in outcomes)
     assert all(outcome["errno"] == errno.ECONNREFUSED for outcome in outcomes)
     assert provider.transport_retry_summary()["retries"] == 0

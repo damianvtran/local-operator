@@ -1,11 +1,14 @@
 import json
+import math
+import os
 import re
 import time
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import IO, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
 from pydantic import BaseModel, Field, SecretStr
@@ -507,12 +510,80 @@ PREVIEW_ACCEPT_HEADER = "X-Radient-Accept-Unresolved"
 #: target it is only meaningful for -- never in the document -- and only on a COMMIT: a preview
 #: route refuses it, because consent is confirmed after the diff is seen.
 MODERATION_ALLOWANCE_PARAM = "moderation_allowance"
-#: How long a preview request may take. The server's own worst case is the transform call's 25 s
-#: attempt plus transport slack (≈50 s, p2p3 §2.5), so 60 s is that envelope plus margin. The
-#: COMMIT calls keep their deliberate no-timeout stance (see ``publish_agent_instruction_set``):
-#: a preview is non-mutating and can simply be re-run, while a commit the caller abandoned may
-#: still be landing on the hub.
-PREVIEW_TIMEOUT_SECONDS = 60.0
+#: The lowest budget a preview may be given. The server's documented worst case is the
+#: transform call's 25 s attempt plus transport slack (≈50 s, p2p3 §2.5), so a shorter
+#: client budget can only abandon calls the hub was about to answer. A configured value
+#: below this is clamped UP to it rather than honoured.
+PREVIEW_TIMEOUT_FLOOR_SECONDS = 60.0
+#: The preview budget when nothing overrides it. Deliberately well above the envelope above:
+#: that envelope priced one fixed 25 s transform attempt, and a full team document no longer
+#: fits it -- reported 2026-10-22 from ``lop teams push --org <tenant> <team>`` against the
+#: radientdev tenant, where the hub's generalizer completed but took minutes and the 60 s
+#: client bound reported the generic "Could not preview the team publication" instead of the
+#: preview. A preview is non-mutating, so waiting costs the caller a slot rather than a
+#: duplicate write.
+PREVIEW_TIMEOUT_DEFAULT_SECONDS = 300.0
+#: The environment variable that raises (or, down to the floor, lowers) the budget.
+#: ``LOCAL_OPERATOR_``-prefixed like the other runtime knobs (``LOCAL_OPERATOR_MCP_TIMEOUT_MS``)
+#: and read per call, because ``lop`` runs from a uv-tool install where an import-time value
+#: would need a rebuild to change -- exactly what this knob exists to avoid.
+PREVIEW_TIMEOUT_ENV = "LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS"
+
+
+def resolve_preview_timeout_seconds() -> float:
+    """The preview budget for one call, resolved at CALL time.
+
+    Precedence: ``LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS`` > the default. A parsed
+    value below :data:`PREVIEW_TIMEOUT_FLOOR_SECONDS` is clamped up to it (see the floor's
+    comment for why). A value that is not a positive finite number -- a typo like ``5m``,
+    an empty export, ``0`` or a negative -- falls back to the default rather than failing a
+    paid command on an environment variable; the effective budget is named in the timeout
+    error, so a typo surfaces there instead of silently changing nothing.
+
+    WHY ``0`` IS NOT "NO TIMEOUT" HERE, unlike :func:`resolve_mcp_timeout_s`: an MCP
+    server is a local transport the operator can see, while a preview is a paid call to a
+    remote hub whose transform pauses the caller's slot. Unbounding that is not a setting
+    anyone means to choose; it is a typo that would hold a paid call open indefinitely.
+    The asymmetry is deliberate, not an oversight of the MCP precedent.
+
+    Returns:
+        float: How many seconds this preview may take.
+    """
+    raw = os.environ.get(PREVIEW_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return PREVIEW_TIMEOUT_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return PREVIEW_TIMEOUT_DEFAULT_SECONDS
+    if not math.isfinite(seconds) or seconds <= 0:
+        return PREVIEW_TIMEOUT_DEFAULT_SECONDS
+    return max(seconds, PREVIEW_TIMEOUT_FLOOR_SECONDS)
+
+
+def preview_timeout_error(budget: float) -> APIError:
+    """The error a preview that exhausted its budget raises.
+
+    WHY IT IS NOT THE FALLBACK MESSAGE: "Could not preview the team publication" is
+    indistinguishable from a refusal, a 500 or a dead socket, and the only useful next
+    step -- wait longer -- is a setting the caller cannot guess. The message therefore
+    names the variable and a concrete larger value. The budget reported is the one
+    actually used, i.e. after any clamp, so a variable set below the floor reports the
+    floor rather than the value that was ignored.
+
+    Args:
+        budget: The effective budget in seconds that the request exceeded.
+
+    Returns:
+        APIError: ``code="preview_timeout"``, no status (the request never got one).
+    """
+    suggested = max(budget * 2, PREVIEW_TIMEOUT_DEFAULT_SECONDS)
+    return APIError(
+        f"Preview exceeded {budget:g} s; raise {PREVIEW_TIMEOUT_ENV} to {suggested:g} "
+        "and re-run (the hub's transform can take minutes on a full document).",
+        status_code=None,
+        code="preview_timeout",
+    )
 
 
 def _is_an_error_envelope(response: requests.Response) -> bool:
@@ -598,6 +669,23 @@ def new_correlation_id() -> str:
     every value inside it by construction.
     """
     return uuid.uuid4().hex
+
+
+@dataclass(frozen=True)
+class SkillBundleDownload:
+    """One ``GET /skills/{id}/bundle`` answer.
+
+    ``not_modified`` is a SUCCESS (the caller's ``If-None-Match`` matched): there
+    is no body, and ``dest`` was not written to. Otherwise exactly one of
+    ``data`` (a caller that asked for bytes) or the caller's stream holds the
+    archive; ``server_hash`` is the ``X-Skill-Bundle-Sha256`` header, offered so
+    a caller can compare it with the manifest before hashing the bytes itself.
+    """
+
+    data: Optional[bytes]
+    etag: Optional[str] = None
+    server_hash: Optional[str] = None
+    not_modified: bool = False
 
 
 class RadientClient:
@@ -1104,9 +1192,16 @@ class RadientClient:
         inside the document would be a 422 rather than a mechanism.
 
         WHY THE TIMEOUT: a preview is a paid, NON-mutating model call; unlike a
-        publish, nothing lands if the caller gives up, so this side may bound
-        itself (:data:`PREVIEW_TIMEOUT_SECONDS`). Commits keep their no-timeout
-        stance.
+        publish, nothing lands if the caller gives up, so this side may bound itself.
+        The budget is resolved per call (:func:`resolve_preview_timeout_seconds`,
+        ``LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS``) over
+        :data:`PREVIEW_TIMEOUT_DEFAULT_SECONDS`, because the transform is not a fixed
+        cost: the original 60 s figure priced one 25 s attempt, and a team document
+        big enough for the generalizer to walk takes minutes, so a client-side cut-off
+        discards a preview the hub completed. Running out raises
+        :func:`preview_timeout_error`, which names the variable and a larger budget --
+        never the generic fallback. Commits keep their no-timeout stance: a commit the
+        caller abandoned may still be landing on the hub.
 
         WHY NO REDIRECTS: same rule as every org call (S-2 of the security
         review) — a redirect to another origin would carry the credential with it;
@@ -1122,6 +1217,7 @@ class RadientClient:
             "preview_version": PREVIEW_ENVELOPE_VERSION,
             "document": dict(document),
         }
+        budget = resolve_preview_timeout_seconds()
         try:
             response = requests.request(
                 method,
@@ -1129,12 +1225,22 @@ class RadientClient:
                 headers=headers,
                 json=envelope,
                 params=params,
-                timeout=PREVIEW_TIMEOUT_SECONDS,
+                timeout=budget,
                 allow_redirects=False,
             )
             response.raise_for_status()
             self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:
+            # A READ timeout means the hub was reached and did not answer inside the
+            # budget -- the case the knob exists for. A CONNECT timeout never got there
+            # (refused, unreachable, DNS), so the budget is not what ran out and the
+            # "raise it" advice would send the caller to a knob that cannot help; it keeps
+            # the generic message. ConnectTimeout subclasses Timeout, so it has to be
+            # excluded by name rather than by except-clause ordering.
+            if isinstance(e, requests.exceptions.Timeout) and not isinstance(
+                e, requests.exceptions.ConnectTimeout
+            ):
+                raise preview_timeout_error(budget) from e
             raise api_error_from_response(
                 e.response,
                 fallback_message=fallback_message,
@@ -1518,6 +1624,81 @@ class RadientClient:
             ) from e
         return self._publication_result(response, action="pull the skill")
 
+    def probe_skill_capabilities(
+        self,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Observe the hub's advertised skill contract (``GET /skills?per_page=1``).
+
+        WHY A LIST PROBE. The bundle publication refuses without a per-source
+        ``skill_bundles`` attestation, and that attestation is normally recorded
+        by a check. A FRESH machine has never checked, so its first bundle
+        publication would otherwise be impossible; the smallest honest read is
+        the skills list -- same route family, carries the response's
+        ``sync_contract``, one row of it costs nothing.
+
+        OBSERVATION, NEVER ASSERTION: the returned mapping is the server's own
+        answer, ready for ``record_server_capabilities``. An older server that
+        carries no contract answers ``{}`` (a normal answer, not an error), and a
+        refusal/timeout raises so the caller can leave the store unchanged.
+
+        Args:
+            params: Query parameters; defaults to ``{"per_page": 1}``.
+            timeout: Request timeout in seconds; the caller's budget bounds it.
+
+        Returns:
+            The observed ``sync_contract`` mapping, or ``{}`` when none was sent.
+
+        Raises:
+            APIError: When the hub refuses or the response is not the hub's JSON.
+        """
+
+        query: Dict[str, Any] = dict(params) if params is not None else {"per_page": 1}
+        url = f"{self.base_url}/skills"
+        # Same posture as ``get_skill``: the bearer rides when the client has
+        # one (a public list is readable without it), and a missing key is never
+        # an error for a read. No redirect may be followed -- a 3xx is refused
+        # rather than re-sending the caller's bearer elsewhere.
+        headers = self._get_headers(content_type="application/json", require_api_key=False)
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key.get_secret_value()}"
+        try:
+            extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            response = requests.get(
+                url, headers=headers, params=query, allow_redirects=False, **extra
+            )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message=(
+                    "Could not read the skill capability contract from the Radient Agent Hub"
+                ),
+                secrets=self._credential_values(),
+            ) from e
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            # Same rule as ``_publication_result``: an unrecognised shape is
+            # reported without echoing a body that may be someone else's HTML.
+            raise APIError(
+                "The Radient Agent Hub returned an unrecognised response while "
+                f"reading its skill contract (HTTP {response.status_code}).",
+                status_code=response.status_code,
+            )
+        result = body.get("result")
+        contract = result.get("sync_contract") if isinstance(result, Mapping) else None
+        if not isinstance(contract, Mapping):
+            # Tolerate a top-level placement too: the contract is additive and
+            # older/newer envelopes may put it beside ``result``.
+            contract = body.get("sync_contract")
+        return dict(contract) if isinstance(contract, Mapping) else {}
+
     def publish_skill_document(
         self,
         document: Mapping[str, Any],
@@ -1587,6 +1768,165 @@ class RadientClient:
                 secrets=self._credential_values(),
             ) from e
         return self._publication_result(response, action="publish the skill")
+
+    def upload_skill_bundle(
+        self,
+        data: bytes,
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Upload one skill bundle archive (``POST /skills/bundles``).
+
+        The archive is sent as raw bytes with ``Content-Type: application/zip``
+        and the target's visibility/tenant as query parameters -- the same target
+        claim the document publish uses, so the server can refuse a mismatched
+        tenant before storing anything. The response is the server-verified
+        inventory (``hash``, ``size``, ``uncompressed_size``, ``file_count``,
+        ``entrypoint``, ``tree_hash``, ``name``, ``description``): the caller
+        publishes the manifest only after the server has accepted the bytes.
+
+        Args:
+            data: The archive bytes from ``skill_bundle.build_bundle``.
+            visibility: ``public``, or an organization scope with ``tenant_id``.
+            tenant_id: The organization the bundle is published into.
+
+        Returns:
+            The upload response body (the accepted inventory).
+
+        Raises:
+            ValueError: When the bytes are empty or exceed the carrier's bound.
+                Refused locally: an oversized body is useless to send.
+            APIError: When the hub refuses (validation, target claim, review).
+        """
+        # Lazy import: this low-level client is imported BY hub_sync (service,
+        # push, adapters), so it must not import hub_sync while loading.
+        from local_operator.hub_sync.skill_bundle import MAX_ARCHIVE_BYTES
+
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError("a skill bundle must be uploaded as bytes")
+        payload = bytes(data)
+        if not payload:
+            raise ValueError("a skill bundle archive must not be empty")
+        if len(payload) > MAX_ARCHIVE_BYTES:
+            raise ValueError("a skill bundle archive must not exceed its 64 MiB bound")
+        url = f"{self.base_url}/skills/bundles"
+        headers = self._get_headers(content_type="application/zip")
+        params = org_target_params(visibility, tenant_id)
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                data=payload,
+                params=params,
+                allow_redirects=False,
+            )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not upload the skill bundle to the Radient Agent Hub",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="upload the skill bundle")
+
+    def download_skill_bundle(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: Optional[str] = None,
+        max_bytes: Optional[int] = None,
+        bearer: bool = True,
+        dest: Optional[IO[bytes]] = None,
+    ) -> SkillBundleDownload:
+        """Download one skill bundle archive (``GET /skills/{id}/bundle``).
+
+        Streamed with an INCREMENTAL cap: the bound is enforced on bytes actually
+        received, never on ``Content-Length`` (a hostile or broken hop can lie
+        about it), and the connection is closed on every path. Nothing is
+        redirected: the route serves the blob directly and a redirect is a
+        refusal, not a hop to follow.
+
+        Args:
+            skill_id: The hub skill row id.
+            expected_revision: Sent as ``If-None-Match``. A matching revision
+                answers 304, which this method reports as ``not_modified``.
+            max_bytes: The receive ceiling; defaults to the carrier's 64 MiB.
+                Values above that or non-positive are refused locally.
+            bearer: Send the bearer token. Public rows are readable without it;
+                an org row needs it, and the server answers 404 otherwise.
+            dest: A binary file object to stream into. When omitted the archive
+                is returned in ``data``. On an over-cap or transport failure a
+                partially written ``dest`` is the CALLER's to discard -- this
+                method never truncates a stream it did not open.
+
+        Returns:
+            The archive bytes (or ``not_modified``), its ETag and the server's
+            advertised sha256.
+
+        Raises:
+            ValueError: When ``max_bytes`` is outside the carrier's bounds.
+            APIError: When the hub refuses (404 for a non-member, 413, 5xx).
+        """
+        # Lazy import, same reason as ``upload_skill_bundle``.
+        from local_operator.hub_sync.skill_bundle import MAX_ARCHIVE_BYTES
+
+        bound = MAX_ARCHIVE_BYTES if max_bytes is None else int(max_bytes)
+        if bound <= 0 or bound > MAX_ARCHIVE_BYTES:
+            raise ValueError("a skill bundle download bound must be within the carrier's limit")
+        url = f"{self.base_url}/skills/{skill_id}/bundle"
+        headers = self._get_headers(content_type=None, require_api_key=bearer)
+        if expected_revision:
+            headers["If-None-Match"] = expected_revision
+        try:
+            response = requests.get(url, headers=headers, stream=True, allow_redirects=False)
+            if response.status_code == 304:
+                return SkillBundleDownload(
+                    None,
+                    response.headers.get("ETag"),
+                    None,
+                    not_modified=True,
+                )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not download the skill bundle from the Radient Agent Hub",
+                secrets=self._credential_values(),
+            ) from e
+        etag = response.headers.get("ETag")
+        server_hash = response.headers.get("X-Skill-Bundle-Sha256")
+        received = 0
+        buffer = bytearray()
+        try:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > bound:
+                    # A named, local refusal: the hub is not trusted to honor the
+                    # manifest's declared size, and a partial body must never be
+                    # treated as an archive.
+                    raise APIError(
+                        "the hub served a skill bundle larger than its bound",
+                        status_code=413,
+                        code="payload_too_large",
+                        details={"limit_bytes": bound},
+                    )
+                if dest is not None:
+                    dest.write(chunk)
+                else:
+                    buffer.extend(chunk)
+        finally:
+            response.close()
+        return SkillBundleDownload(
+            None if dest is not None else bytes(buffer),
+            etag,
+            server_hash,
+            not_modified=False,
+        )
 
     def publish_team_document(
         self,

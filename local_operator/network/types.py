@@ -1398,6 +1398,15 @@ class MemberRecord:
     added_via: str = "invite"
     endpoints: list[str] = field(default_factory=list)
     last_seen_at: float | None = None
+    #: The ``host:port`` this device last saw the member's link ARRIVE from, with
+    #: the member's own declared listen port substituted for the ephemeral source
+    #: port. A FALLBACK dial candidate only, never a declaration: when every
+    #: declared endpoint has gone stale (an EC2 stop/start moved the public IP and
+    #: the row can only heal on a completed handshake), the address the member
+    #: actually reached us from is the best evidence of where it is now
+    #: (2026-10-21, cloud-node-1). Local to this device: not relayed in member
+    #: lists as an endpoint, and absent on rows from older builds.
+    observed_endpoint: str = ""
     last_seen_instance: str = ""
     #: How many times a second live process has claimed this device id outside
     #: the restart grace window — the copied-key detector's evidence.

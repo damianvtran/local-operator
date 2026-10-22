@@ -637,7 +637,13 @@ def managed_skill_read(config_dir: Path) -> Iterator[None]:
     under this same short root lock, not under slow staging/model work.
     """
     storage = ManagedSkillStorage(config_dir)
-    if not storage.root.exists() and not (storage.config_dir / "hub" / "transactions").exists():
+    # A bundle install shares this journal and this managed root. Recovery must
+    # therefore settle BOTH adapters before a reader sees the root: a crashed
+    # bundle swap is just as invisible/half-new to discovery as a text one.
+    from local_operator.hub_sync.skill_bundle_storage import ManagedBundleStorage
+
+    bundles = ManagedBundleStorage(config_dir)
+    if not storage.root.exists() and not (config_dir / "hub" / "transactions").exists():
         # Discovery of a never-created root is read-only. A first installation
         # swaps its complete staged directory into an absent alias atomically;
         # there is no old directory's two-rename gap to guard here. Existing
@@ -646,4 +652,5 @@ def managed_skill_read(config_dir: Path) -> Iterator[None]:
         return
     with config_write_lock(config_dir):
         storage.recover()
+        bundles.recover()
         yield

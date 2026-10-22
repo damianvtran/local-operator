@@ -29,7 +29,7 @@ import importlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from local_operator.remote_compute.request import RunCreateRequest
+from local_operator.remote_compute.request import RunCreateRequest, RunSpec
 from local_operator.remote_compute.resolve import (
     CODE_AMBIGUOUS_NETWORK,
     CODE_DUPLICATE_NETWORK_ID,
@@ -143,6 +143,7 @@ __all__ = [
     "NETWORK_ID_PATTERN",
     "NetworkBinding",
     "RunCreateRequest",
+    "RunSpec",
     "SETTING_PATH",
     "VerifiedAttestation",
     "is_enabled",

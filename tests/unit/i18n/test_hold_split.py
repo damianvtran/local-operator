@@ -44,9 +44,11 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # the /tag slice's independently re-audited 27-key `tui.tags` row makes it
     # TWENTY-FIVE. LOH-11's independently audited `relay.session.tags` row makes
     # it TWENTY-SIX. The remote_compute six-key wire.settings delta's
-    # independently audited row makes it TWENTY-SEVEN. The pin stays cardinal
-    # so an unrelated held namespace cannot slip in.
-    assert len(hindi) == 27
+    # independently audited row makes it TWENTY-SEVEN. The S3e remote-compute
+    # wave adds one row per carried namespace (`cli.exec_remote_help`,
+    # `wire.remote_compute`) -- TWENTY-NINE. The pin stays cardinal so an
+    # unrelated held namespace cannot slip in.
+    assert len(hindi) == 29
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

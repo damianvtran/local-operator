@@ -81,6 +81,10 @@ class ItemCheck:
     local: Mapping[str, Any] | None = None
     remote: Mapping[str, Any] | None = None
     base: Mapping[str, Any] | None = None
+    #: The publisher a bundle row NAMED (``published_by``), when it named one.
+    #: Carried so an apply can compare it with the link's persisted pin without a
+    #: second fetch; ``None`` when the row named none.
+    publisher: Mapping[str, Any] | None = None
     #: The record's explicit content state. ``absent`` means this link has no
     #: managed copy (subscribe-without-pull, or an unpulled copy): the check has
     #: no local side, and the runner/apply must never treat a merge as possible.
@@ -608,11 +612,22 @@ def check_hub_skills(
             continue
         tenant = record.tenant_id
         absent = record.content_state == "absent"
+        # FORM: a bundle link's baseline stores the archive manifest, and its
+        # local reading is the managed directory's tree hash. The adapter already
+        # dispatches on exactly this key, so the check reuses it instead of
+        # re-reading a bundle as a text document (which would refuse every file
+        # byte) -- design §8.2's fingerprints ARE those values.
+        is_bundle = "bundle" in (record.fields or {})
         local: Mapping[str, Any] | None = None
         local_fp: str | None = None
+        snapshot: Any = None
         if not absent:
             try:
-                snapshot = storage.snapshot(record.local_id)
+                if is_bundle:
+                    local = dict(adapter.snapshot(config_dir, record.local_id).fields)
+                    local_fp = prov.fingerprint_snapshot("skill", local)
+                else:
+                    snapshot = storage.snapshot(record.local_id)
             except Exception as error:  # noqa: BLE001
                 # A crashed unpull is settled from its own durable evidence. When
                 # that settles the record to absent this is a normal absent check;
@@ -646,8 +661,9 @@ def check_hub_skills(
                 record = settled
                 absent = True
             else:
-                local = adapter.canonical_fields(snapshot.document.to_json())
-                local_fp = prov.fingerprint_snapshot("skill", local)
+                if not is_bundle and snapshot is not None:
+                    local = adapter.canonical_fields(snapshot.document.to_json())
+                    local_fp = prov.fingerprint_snapshot("skill", local)
         client = client_for_tenant(tenant)
         if client is None:
             checks.append(
@@ -717,6 +733,7 @@ def check_hub_skills(
             continue
         remote_fp = prov.fingerprint_snapshot("skill", remote)
         revision, sync_contract = _remote_meta(document)
+        publisher = _document_publisher(document)
         if absent:
             # NO LOCAL SIDE TO COMPARE. The remote is reported as AVAILABLE, which
             # is the action the operator still has to take (an explicit pull);
@@ -739,6 +756,7 @@ def check_hub_skills(
                     sync_contract=sync_contract,
                     served_by=_served_by(client),
                     content_state="absent",
+                    publisher=publisher,
                 )
             )
             continue
@@ -753,7 +771,7 @@ def check_hub_skills(
         # alias rename is not an eternal both-changed, and so the merge/write
         # layer speaks one name; the write re-renders the alias (see _apply_skill).
         remote_name = str(document.get("name") or "")
-        if remote_name and str(local.get("name") or "") != remote_name:
+        if not is_bundle and remote_name and str(local.get("name") or "") != remote_name:
             from local_operator.hub_sync.skill_document import SkillDocument
 
             local = SkillDocument.from_json(dict(local)).with_name(remote_name).to_json()
@@ -784,9 +802,36 @@ def check_hub_skills(
                 sync_contract=sync_contract,
                 served_by=_served_by(client),
                 content_state=record.content_state,
+                publisher=publisher,
             )
         )
     return checks
+
+
+def _document_publisher(document: Mapping[str, Any]) -> dict[str, str] | None:
+    """The publisher a hub row NAMED (``published_by``), or None when it named none.
+
+    ``published_by.account_id`` is the binding value (design §6.2); a display
+    name is user-controlled and therefore optional. A missing object is None and
+    the CALLERS refuse or skip -- this never falls back to a top-level
+    ``account_id``, which in some envelopes is the requester's.
+    """
+
+    raw = document.get("published_by")
+    if not isinstance(raw, Mapping):
+        return None
+    account_id = raw.get("account_id")
+    if not isinstance(account_id, str) or not account_id.strip():
+        return None
+    name = raw.get("name")
+    if not isinstance(name, str) or not name.strip():
+        metadata = document.get("account_metadata")
+        candidate = metadata.get("name") if isinstance(metadata, Mapping) else None
+        name = candidate if isinstance(candidate, str) else ""
+    publisher = {"id": account_id.strip()}
+    if name.strip():
+        publisher["name"] = name.strip()
+    return publisher
 
 
 def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, Any]:

@@ -47,6 +47,11 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The remote-compute API override names the host that receives the
+    # operator's Radient bearer. Inheriting a developer's staging value would
+    # point the suite's remote-compute client at a real host; tests that cover
+    # the override set their own loopback value.
+    "LOP_REMOTE_COMPUTE_API_URL",
     # The per-build runtime image root (``procname.runtime_root``) is resolved
     # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
     # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
@@ -60,6 +65,10 @@ _AMBIENT_VARS = (
     # subprocess only sees an environment variable, not a monkeypatched
     # function).
     "LOCAL_OPERATOR_RUNTIME_ROOT",
+    # The memory admission floor's escape hatch (``memory_guard.admission_check``):
+    # an operator's inherited ``=0`` would waive the refusal the admission cells
+    # assert, so it is scrubbed; a cell that needs a floor sets its own.
+    "LOCAL_OPERATOR_ADMISSION_FLOOR_MB",
     # The open-frame trace names a real output file, read once at import.
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
@@ -161,6 +170,13 @@ _AMBIENT_VARS = (
     # a bound nobody runs (CI round 1 on PR #2575, 2026-10-17). Cells that mean
     # to exercise a bound set it through ``monkeypatch`` explicitly.
     "LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS",
+    # The Radient publish-preview budget (``clients/radient.PREVIEW_TIMEOUT_ENV``). The
+    # same ESCAPE-HATCH class as the bound above: the value MOVES how long a preview may
+    # take, so an inherited export would silently rewrite what every preview cell
+    # measures -- and the resolver reads it per call, which is exactly why nothing but a
+    # scrub can keep an operator's shell out of the reading. Cells that exercise a budget
+    # set it through ``monkeypatch`` explicitly, as ``test_radient_preview.py`` does.
+    "LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An

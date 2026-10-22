@@ -295,6 +295,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
+    "local_operator/remote_compute/config.py": (
+        2,
+        "``_ALABEL_PREFIX`` ('xn--') and ``_LOOPBACK_NAME`` ('localhost') are "
+        "URL-host vocabulary for validating the remote-compute API override — a "
+        "punycode label prefix and the loopback host name — not filesystem paths, "
+        "so nothing on disk travels or stays behind",
+    ),
     "local_operator/network/credentials/mcp_state.py": (
         2,
         "``MCP_AUTH_FILENAME``/``MCP_AUTH_LOCK_FILENAME`` ('mcp_auth.json' and its "
@@ -448,6 +455,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``OUTBOX_DIR``: the push outbox under ``<config>/hub/``, beside "
         "``sessions/`` — install-level publication state, never an entry of a session "
         "directory",
+    ),
+    # The carrier's HASH DOMAIN is not a path: ``TREE_HASH_PREFIX`` is the
+    # separator string every tree digest starts with ("skill-tree-v1\n"), the
+    # same kind of value as a version tag. The module's real filenames
+    # (``SKILL.md``, the archive name) are classified where they live, and no
+    # constant here names an entry of a session directory.
+    "local_operator/hub_sync/skill_bundle.py": (
+        1,
+        "``TREE_HASH_PREFIX``: the tree-hash domain separator, not a pathname",
     ),
     "local_operator/skills/discovery.py": (
         1,
