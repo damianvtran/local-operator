@@ -3,9 +3,10 @@ import re
 import time
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import IO, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
 from pydantic import BaseModel, Field, SecretStr
@@ -598,6 +599,23 @@ def new_correlation_id() -> str:
     every value inside it by construction.
     """
     return uuid.uuid4().hex
+
+
+@dataclass(frozen=True)
+class SkillBundleDownload:
+    """One ``GET /skills/{id}/bundle`` answer.
+
+    ``not_modified`` is a SUCCESS (the caller's ``If-None-Match`` matched): there
+    is no body, and ``dest`` was not written to. Otherwise exactly one of
+    ``data`` (a caller that asked for bytes) or the caller's stream holds the
+    archive; ``server_hash`` is the ``X-Skill-Bundle-Sha256`` header, offered so
+    a caller can compare it with the manifest before hashing the bytes itself.
+    """
+
+    data: Optional[bytes]
+    etag: Optional[str] = None
+    server_hash: Optional[str] = None
+    not_modified: bool = False
 
 
 class RadientClient:
@@ -1587,6 +1605,165 @@ class RadientClient:
                 secrets=self._credential_values(),
             ) from e
         return self._publication_result(response, action="publish the skill")
+
+    def upload_skill_bundle(
+        self,
+        data: bytes,
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Upload one skill bundle archive (``POST /skills/bundles``).
+
+        The archive is sent as raw bytes with ``Content-Type: application/zip``
+        and the target's visibility/tenant as query parameters -- the same target
+        claim the document publish uses, so the server can refuse a mismatched
+        tenant before storing anything. The response is the server-verified
+        inventory (``hash``, ``size``, ``uncompressed_size``, ``file_count``,
+        ``entrypoint``, ``tree_hash``, ``name``, ``description``): the caller
+        publishes the manifest only after the server has accepted the bytes.
+
+        Args:
+            data: The archive bytes from ``skill_bundle.build_bundle``.
+            visibility: ``public``, or an organization scope with ``tenant_id``.
+            tenant_id: The organization the bundle is published into.
+
+        Returns:
+            The upload response body (the accepted inventory).
+
+        Raises:
+            ValueError: When the bytes are empty or exceed the carrier's bound.
+                Refused locally: an oversized body is useless to send.
+            APIError: When the hub refuses (validation, target claim, review).
+        """
+        # Lazy import: this low-level client is imported BY hub_sync (service,
+        # push, adapters), so it must not import hub_sync while loading.
+        from local_operator.hub_sync.skill_bundle import MAX_ARCHIVE_BYTES
+
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError("a skill bundle must be uploaded as bytes")
+        payload = bytes(data)
+        if not payload:
+            raise ValueError("a skill bundle archive must not be empty")
+        if len(payload) > MAX_ARCHIVE_BYTES:
+            raise ValueError("a skill bundle archive must not exceed its 64 MiB bound")
+        url = f"{self.base_url}/skills/bundles"
+        headers = self._get_headers(content_type="application/zip")
+        params = org_target_params(visibility, tenant_id)
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                data=payload,
+                params=params,
+                allow_redirects=False,
+            )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not upload the skill bundle to the Radient Agent Hub",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="upload the skill bundle")
+
+    def download_skill_bundle(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: Optional[str] = None,
+        max_bytes: Optional[int] = None,
+        bearer: bool = True,
+        dest: Optional[IO[bytes]] = None,
+    ) -> SkillBundleDownload:
+        """Download one skill bundle archive (``GET /skills/{id}/bundle``).
+
+        Streamed with an INCREMENTAL cap: the bound is enforced on bytes actually
+        received, never on ``Content-Length`` (a hostile or broken hop can lie
+        about it), and the connection is closed on every path. Nothing is
+        redirected: the route serves the blob directly and a redirect is a
+        refusal, not a hop to follow.
+
+        Args:
+            skill_id: The hub skill row id.
+            expected_revision: Sent as ``If-None-Match``. A matching revision
+                answers 304, which this method reports as ``not_modified``.
+            max_bytes: The receive ceiling; defaults to the carrier's 64 MiB.
+                Values above that or non-positive are refused locally.
+            bearer: Send the bearer token. Public rows are readable without it;
+                an org row needs it, and the server answers 404 otherwise.
+            dest: A binary file object to stream into. When omitted the archive
+                is returned in ``data``. On an over-cap or transport failure a
+                partially written ``dest`` is the CALLER's to discard -- this
+                method never truncates a stream it did not open.
+
+        Returns:
+            The archive bytes (or ``not_modified``), its ETag and the server's
+            advertised sha256.
+
+        Raises:
+            ValueError: When ``max_bytes`` is outside the carrier's bounds.
+            APIError: When the hub refuses (404 for a non-member, 413, 5xx).
+        """
+        # Lazy import, same reason as ``upload_skill_bundle``.
+        from local_operator.hub_sync.skill_bundle import MAX_ARCHIVE_BYTES
+
+        bound = MAX_ARCHIVE_BYTES if max_bytes is None else int(max_bytes)
+        if bound <= 0 or bound > MAX_ARCHIVE_BYTES:
+            raise ValueError("a skill bundle download bound must be within the carrier's limit")
+        url = f"{self.base_url}/skills/{skill_id}/bundle"
+        headers = self._get_headers(content_type=None, require_api_key=bearer)
+        if expected_revision:
+            headers["If-None-Match"] = expected_revision
+        try:
+            response = requests.get(url, headers=headers, stream=True, allow_redirects=False)
+            if response.status_code == 304:
+                return SkillBundleDownload(
+                    None,
+                    response.headers.get("ETag"),
+                    None,
+                    not_modified=True,
+                )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not download the skill bundle from the Radient Agent Hub",
+                secrets=self._credential_values(),
+            ) from e
+        etag = response.headers.get("ETag")
+        server_hash = response.headers.get("X-Skill-Bundle-Sha256")
+        received = 0
+        buffer = bytearray()
+        try:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > bound:
+                    # A named, local refusal: the hub is not trusted to honor the
+                    # manifest's declared size, and a partial body must never be
+                    # treated as an archive.
+                    raise APIError(
+                        "the hub served a skill bundle larger than its bound",
+                        status_code=413,
+                        code="payload_too_large",
+                        details={"limit_bytes": bound},
+                    )
+                if dest is not None:
+                    dest.write(chunk)
+                else:
+                    buffer.extend(chunk)
+        finally:
+            response.close()
+        return SkillBundleDownload(
+            None if dest is not None else bytes(buffer),
+            etag,
+            server_hash,
+            not_modified=False,
+        )
 
     def publish_team_document(
         self,
