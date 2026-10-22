@@ -144,7 +144,6 @@ also keeps the import graph from growing an edge cycle through ``retention``.
 
 from __future__ import annotations
 
-import errno
 import gzip
 import hashlib
 import json
@@ -422,7 +421,14 @@ def transcript_source(directory: Path) -> tuple[Path, str | None]:
 # ---------------------------------------------------------------------------
 
 
-def _open_archive_reader(archive: Path, codec: str | None) -> BinaryIO:
+#: A decoded archive reader. ``gzip.GzipFile`` and ``compression.zstd.ZstdFile``
+#: are both file-like but neither is typed as ``BinaryIO`` (and the zstd type
+#: does not exist at all on a 3.12 build), so the annotation is ``Any`` with this
+#: note rather than a Protocol that has to restate two stdlib signatures.
+_ArchiveReader = Any
+
+
+def _open_archive_reader(archive: Path, codec: str | None) -> _ArchiveReader:
     """Open ``archive`` for streaming decompression.
 
     Raises :class:`ArchiveUnavailable` when this build has no decoder for the
@@ -447,7 +453,7 @@ def _open_archive_reader(archive: Path, codec: str | None) -> BinaryIO:
     raise ArchiveCorrupt(f"{archive.name}: not a known archive form")
 
 
-def _open_reader(directory: Path) -> tuple[BinaryIO, str | None]:
+def _open_reader(directory: Path) -> tuple[BinaryIO | _ArchiveReader, str | None]:
     """``(reader, codec)`` for the transcript of ``directory``."""
     path, codec = transcript_source(directory)
     if codec is None:
@@ -981,9 +987,15 @@ def _flock(fd: int) -> bool:
             return False
         return True
     if _msvcrt is not None:  # pragma: no cover - exercised on Windows only
+        # `getattr` rather than attributes: pyright's typeshed for `msvcrt` on a
+        # POSIX analysis host does not carry the locking members, and this branch
+        # never runs there anyway.
+        locker = getattr(_msvcrt, "locking", None)
+        if locker is None:
+            return True
         try:
             os.lseek(fd, 0, os.SEEK_SET)
-            _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
+            locker(fd, getattr(_msvcrt, "LK_NBLCK", 2), 1)
         except OSError:
             return False
         return True
@@ -997,9 +1009,12 @@ def _funlock(fd: int) -> None:
         except OSError:
             pass
     elif _msvcrt is not None:  # pragma: no cover - exercised on Windows only
+        unlocker = getattr(_msvcrt, "locking", None)
+        if unlocker is None:
+            return
         try:
             os.lseek(fd, 0, os.SEEK_SET)
-            _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+            unlocker(fd, getattr(_msvcrt, "LK_UNLCK", 0), 1)
         except OSError:
             pass
 
@@ -1224,7 +1239,9 @@ def _after_archive(directory: Path, archive: Path, codec: str) -> None:
         pass
 
 
-def compress_session(directory: Path, *, codec: str | None = None, now: float | None = None) -> Outcome:
+def compress_session(
+    directory: Path, *, codec: str | None = None, now: float | None = None
+) -> Outcome:
     """Compress ONE session's transcript, following the documented protocol.
 
     The mechanical half of the pass: it does not decide whether the session is
@@ -1276,7 +1293,9 @@ def _compress_session_locked(directory: Path, codec: str, started: float) -> Out
     except OSError as exc:
         # A tmp name that already exists means we must NOT adopt it; a new random
         # name would be needed, which is the caller's next pass.
-        logger.error("transcript compression: cannot create a tmp beside %s: %s", directory.name, exc)
+        logger.error(
+            "transcript compression: cannot create a tmp beside %s: %s", directory.name, exc
+        )
         return done("failed", "cannot create a tmp file")
     try:
         original_digest, original_size = _write_compressed(source, tmp, codec)
@@ -1500,7 +1519,9 @@ def run_compression(
         return result
 
     try:
-        entries = [entry for entry in os.scandir(sessions_dir) if entry.is_dir(follow_symlinks=False)]
+        entries = [
+            entry for entry in os.scandir(sessions_dir) if entry.is_dir(follow_symlinks=False)
+        ]
     except OSError as exc:
         logger.warning("transcript compression: cannot scan %s: %s", sessions_dir, exc)
         result.skipped = "cannot scan the store"
@@ -1541,7 +1562,10 @@ def run_compression(
         # second look could disagree with the first if a pass ran concurrently.
         plain_present = plain_path(directory).exists()
         if not plain_present:
-            skip(name, "already compressed" if archive_path(directory) is not None else "no transcript")
+            skip(
+                name,
+                "already compressed" if archive_path(directory) is not None else "no transcript",
+            )
             continue
         if activity is None:
             skip(name, "no activity clock")
