@@ -20488,8 +20488,9 @@ class OperatorApp(App[None]):
             return []
         if first.lower() == "new" and space:
             return []
-        if first.lower() in {"chart", "edit"} and space:
-            # Second slot: names feed either the chart or installed-team editor.
+        if first.lower() in {"chart", "edit", "promote"} and space:
+            # Second slot: names feed the chart, the installed-team editor, or the
+            # promote rehearsal (which then offers its own `replace`/`yes` rows).
             return [
                 ArgumentChoice(
                     f"{first.lower()} {team.name}",
@@ -20535,6 +20536,11 @@ class OperatorApp(App[None]):
                 ),
                 ArgumentChoice(
                     "edit", translate(keys.edit_hint()), detail=translate(keys.subcommand())
+                ),
+                ArgumentChoice(
+                    "promote",
+                    translate(keys.promote_hint()),
+                    detail=translate(keys.subcommand()),
                 ),
             ]
         )
@@ -21165,6 +21171,9 @@ class OperatorApp(App[None]):
         # implies charting — routing it to the talk path (attaching a team
         # literally named ``Chart``) would contradict what the UI just showed.
         # Consistent with ``get_team_by_name``'s own casefold.
+        if first.casefold() == "promote":
+            self._cmd_promote("team", rest.strip(), notice)
+            return
         if first.casefold() == "chart":
             self._cmd_team_chart(rest.strip(), registry, notice)
             return
@@ -21455,7 +21464,7 @@ class OperatorApp(App[None]):
                 for word, help_text in agent_subcommand_rows()
             )
             return rows
-        if first.casefold() not in {"class", "edit"}:
+        if first.casefold() not in {"class", "edit", "promote"}:
             return []
         return [
             ArgumentChoice(
@@ -21694,6 +21703,115 @@ class OperatorApp(App[None]):
         severity: NoticeKind = "warning" if getattr(result, "style", "") == "warning" else "info"
         notice(str(getattr(result, "text", "") or ""), severity)
 
+    def _cmd_promote(self, kind: str, rest: str, notice: NoticeFn) -> None:
+        """``/agent promote <name>`` / ``/team promote <name>`` — copy, rehearsed.
+
+        Two-step by construction (see :mod:`local_operator.tui.promote_verb`): a
+        bare call runs the SAME preflight with ``dry_run=True`` and reports what a
+        confirmed call would write, and only the ``yes`` spelling commits. That is
+        the confirmation design §7 asks for without a second picker or a modal —
+        the rehearsal names exactly the definitions, and under ``replace`` exactly
+        the ones that would be overwritten.
+
+        Runs in a worker: the promotion reads and writes both registries on disk
+        and takes the composite write lock, none of which may park the event loop.
+        ``authorized_by="surface:tui"`` is the audit origin: the user typed the
+        command on this surface, which is what the account-write rule requires.
+        """
+
+        from local_operator.i18n.keys import tui_authoring as keys
+        from local_operator.i18n.text import tr
+        from local_operator.tui.promote_verb import parse_promote
+
+        translate = tr("tui.authoring")
+        request = parse_promote(rest)
+        if request is None:
+            self._system_notice(
+                translate(keys.promote_usage(command=f"/{kind} promote")), "warning"
+            )
+            return
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        if kind == "agent":
+            registry = getattr(session, "agent_registry", None)
+            agents = registry
+        else:
+            registry = self._team_registry()
+            agents = getattr(session, "agent_registry", None)
+        if registry is None or not hasattr(registry, "promote"):
+            self._system_notice(
+                translate(keys.promote_failed(reason=translate(keys.registry_missing()))),
+                "warning",
+            )
+            return
+        self.run_worker(
+            self._promote_worker(kind, registry, agents, request, notice),
+            thread=False,
+            group="session",
+        )
+
+    async def _promote_worker(
+        self, kind: str, registry: Any, agents: Any, request: Any, notice: NoticeFn
+    ) -> None:
+        """Run one promote (rehearsal or committed) off the loop and report it."""
+
+        import asyncio
+
+        from local_operator.i18n.keys import tui_authoring as keys
+        from local_operator.i18n.text import tr
+        from local_operator.profile_scope import PromotionIncomplete, promote_missing
+
+        translate = tr("tui.authoring")
+
+        def run(*, dry_run: bool):
+            kwargs = {
+                "as_name": request.as_name,
+                "replace": request.replace,
+                "authorized_by": "surface:tui",
+                "dry_run": dry_run,
+            }
+            if kind == "team":
+                kwargs["agents"] = agents
+            return registry.promote(request.name, **kwargs)
+
+        try:
+            if not request.confirmed:
+                plan = await asyncio.to_thread(run, dry_run=True)
+                created = [row["name"] for row in plan.created]
+                lines: list[str] = []
+                if created:
+                    lines.append(translate(keys.promote_plan(names=", ".join(created))))
+                if plan.replaced:
+                    lines.append(
+                        translate(keys.promote_replace_plan(names=", ".join(plan.replaced)))
+                    )
+                # A plan always names at least one row (the composite refuses a
+                # call that would write nothing), so an empty pair is unreachable.
+                self._system_notice("\n".join(lines), "info")
+                return
+            result = await asyncio.to_thread(run, dry_run=False)
+        except KeyError:
+            noun = "agent" if kind == "agent" else "team"
+            self._system_notice(
+                translate(keys.promote_failed(reason=promote_missing(noun, request.name))),
+                "warning",
+            )
+            return
+        except (PromotionIncomplete, ValueError) as error:
+            self._system_notice(
+                translate(keys.promote_failed(reason=str(error))), "warning"
+            )
+            return
+        except Exception as error:  # noqa: BLE001 — a registry failure is a refusal here
+            self._system_notice(
+                translate(keys.promote_failed(reason=str(error))), "warning"
+            )
+            return
+        names = [row["name"] for row in result.created] + list(result.replaced)
+        notice(translate(keys.promote_receipt(names=", ".join(names))))
+
     def _cmd_agent(
         self,
         arg: str,
@@ -21751,6 +21869,9 @@ class OperatorApp(App[None]):
         verb = first.strip().casefold()
         if verb == "class":
             self._cmd_agent_class(rest.strip(), notice)
+            return
+        if verb == "promote":
+            self._cmd_promote("agent", rest.strip(), notice)
             return
         if verb in ("new", "edit"):
             from local_operator.i18n.keys import tui_authoring as author_keys
@@ -38387,7 +38508,7 @@ class OperatorApp(App[None]):
         """One leading escape protects both reserved verbs and literal '=' names."""
         return (
             "=" + name
-            if name.casefold() in {"chart", "new", "edit"} or name.startswith("=")
+            if name.casefold() in {"chart", "new", "edit", "promote"} or name.startswith("=")
             else name
         )
 

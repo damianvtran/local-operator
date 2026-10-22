@@ -289,6 +289,11 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the retry does not change — offering it there reproduced the same refusal
     byte for byte. Those two name the user-surface action instead. ``sync`` is
     account-only and has no conversation retry either.
+
+    ``promote`` (S4) has no retry of ANY kind: the definition is already in this
+    conversation, and what it asks for is a second copy elsewhere. Its remedy is
+    the two surfaces that have the user in front of them — the desktop action and
+    the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
     if reason == "declined":
@@ -304,10 +309,24 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
             "the confirmation channel failed before the user could answer, so nothing "
             "in their account was changed."
         )
+    elif intent.operation == "promote":
+        opening = (
+            f"copying this {intent.kind} into the user's account is their decision, and "
+            "this run has no way to ask."
+        )
     else:
         opening = (
             f"saving {article} {intent.kind} for every conversation needs the user's "
             "confirmation, and this run has no way to ask."
+        )
+    if intent.operation == "promote":
+        # The copy already exists HERE; what is missing is the user's own act on a
+        # surface that can show them exactly what will be copied.
+        noun = "/agent promote" if intent.kind == "agent" else "/team promote"
+        return (
+            f"{opening} Ask them to use the desktop's Use-in-all-conversations action "
+            f"or the TUI `{noun} {intent.name}` verb: both name exactly what will be "
+            "copied, and neither can be run on their behalf."
         )
     if intent.kind == "team":
         action = "the TUI `/team` form"

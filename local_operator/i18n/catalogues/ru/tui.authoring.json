@@ -39,5 +39,10 @@
   "tui.authoring.save_error": "Не удалось сохранить: {reason}",
   "tui.authoring.description_clear_unsupported": "Эта форма пока не позволяет очистить существующее описание.",
   "tui.authoring.notice_read_only": "Только чтение: рантайм этой беседы на другом устройстве, поэтому здесь нельзя изменять профили.",
-  "tui.authoring.scope_conversation": "эта беседа"
+  "tui.authoring.scope_conversation": "эта беседа",
+  "tui.authoring.promote_usage": "Используйте {command} <name> [replace] [yes].",
+  "tui.authoring.promote_plan": "Добавьте `yes`, чтобы скопировать {names} в свой аккаунт — пока ничего не изменилось.",
+  "tui.authoring.promote_replace_plan": "Добавьте `yes`, чтобы заменить {names} в своём аккаунте — пока ничего не изменилось.",
+  "tui.authoring.promote_receipt": "{names} скопировано в ваш аккаунт · эта беседа сохраняет свою копию",
+  "tui.authoring.promote_failed": "не удалось скопировать в аккаунт: {reason}"
 }

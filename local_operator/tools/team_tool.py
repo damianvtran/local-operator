@@ -18,6 +18,7 @@ full briefs. Mirrors how roles and skills are handled.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Iterable, Literal
 
@@ -88,10 +89,11 @@ class TeamOverride(BaseModel):
 class TeamParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "show", "create", "update"] = Field(
+    op: Literal["list", "show", "create", "update", "promote"] = Field(
         description=(
             "list/show: what teams exist and what they say; create/update: "
-            "author or fix a team. Use team_delete for irreversible removal."
+            "author or fix a team; promote: copy THIS conversation's team into "
+            "the user's account. Use team_delete for irreversible removal."
         )
     )
     name: str | None = Field(default=None, description="Team name (all ops but list).")
@@ -154,6 +156,20 @@ class TeamParams(BaseModel):
         description=(
             "'session' (default) is this conversation only; 'global' is the "
             "user's account and needs their confirmation."
+        ),
+    )
+    # ``as`` is a Python keyword, so the design's ``[as=Y]`` is ``as_name`` here
+    # too — one spelling on every surface rather than a translation per layer.
+    as_name: str | None = Field(
+        default=None,
+        description="promote: copy it under this name; the default is its own name.",
+    )
+    confirm_replace: bool = Field(
+        default=False,
+        description=(
+            "promote: the user's confirmation to OVERWRITE any account row this "
+            "promotion would replace (the team or a member). Only after they said "
+            "so — never on your own initiative."
         ),
     )
     overrides: list[TeamOverride] | None = Field(
@@ -692,7 +708,101 @@ async def execute_team(
         return await _op_list(context, tool_call_id)
     if params.op == "show":
         return await _op_show(context, tool_call_id, str(params.name))
+    if params.op == "promote":
+        return await _op_promote(context, tool_call_id, params)
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
+
+
+async def _op_promote(
+    context: ToolContext | None, tool_call_id: str, params: TeamParams
+) -> ToolResult:
+    """Copy a CONVERSATION team (and the members it needs) into the account.
+
+    Same rule as the agent twin (:func:`agent_tool._op_promote`): the copy is the
+    user's decision, so a tool call with no host grant is REFUSED with a remedy
+    naming the surfaces that can ask. The expansion is the composite's job — it
+    resolves the roster through the launch resolver and copies session-scoped
+    members in the same transaction — so this op only names the intent and
+    reports what came back.
+    """
+
+    from local_operator.profile_scope import (
+        PromotionIncomplete,
+        durable_write_decision,
+        durable_write_refusal,
+        promote_missing,
+    )
+
+    registry = _registry(context)
+    agents = getattr(context, "agent_registry", None) if context else None
+    if registry is None or getattr(registry, "session_registry", None) is None:
+        return _error(
+            tool_call_id,
+            "team",
+            "this run has no conversation store, so there is no conversation-scoped team "
+            "to promote. The user can author one on their own surface instead.",
+        )
+    if agents is None:
+        return _error(
+            tool_call_id,
+            "team",
+            "promoting a team needs this conversation's agent registry: its members must "
+            "resolve, and conversation-scoped ones are copied with it.",
+        )
+    name = str(params.name or "").strip()
+    if params.replace and not params.confirm_replace:
+        return _error(
+            tool_call_id,
+            "team",
+            f"replacing an account team or member named {identifier_text(context, repr(name))} "
+            "overwrites a definition the user owns. Ask them to confirm, then call again "
+            "with confirm_replace=true; nothing was promoted.",
+        )
+    intent = DurableWriteIntent(kind="team", operation="promote", name=name)
+    authorized_by, reason = await durable_write_decision(context, intent)
+    if authorized_by is None:
+        return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
+    try:
+        result = await asyncio.to_thread(
+            lambda: registry.promote(
+                name,
+                as_name=params.as_name,
+                replace=params.replace,
+                authorized_by=authorized_by,
+                agents=agents,
+            )
+        )
+    except KeyError:
+        return _error(tool_call_id, "team", promote_missing("team", name))
+    except PromotionIncomplete as error:
+        return _error(tool_call_id, "team", str(error))
+    except ValueError as error:
+        return _error(tool_call_id, "team", str(error))
+    target = str(params.as_name or name)
+    expanded = ""
+    if result.expanded:
+        # The receipt NAMES the members: a user who copied "one team" needs to
+        # know which roles came with it, because they are now account-wide too.
+        expanded = f" It also copied what the roster needs: {', '.join(result.expanded)}."
+    replaced = ""
+    if result.replaced:
+        replaced = f" It overwrote the account's existing {', '.join(result.replaced)}."
+    return _text(
+        tool_call_id,
+        "team",
+        f"copied team {identifier_text(context, repr(target))} to your account."
+        f"{expanded}{replaced} Every other conversation can use it and this one keeps "
+        "its own copy.",
+        details={
+            "name": target,
+            "scope": "global",
+            "authorized_by": authorized_by,
+            "created": result.created,
+            "expanded": result.expanded,
+            "replaced": result.replaced,
+            "provenance_ids": result.provenance_ids,
+        },
+    )
 
 
 def build_team_tool(context: ToolContext) -> AgentTool | None:

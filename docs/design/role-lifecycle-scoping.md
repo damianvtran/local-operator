@@ -337,10 +337,18 @@ and **all-or-nothing**:
   everywhere`).
 - **Preflight everything before the first write:** session row readable, target name free (or
   `replace` confirmed), instructions readable, provenance writable.
-- Write the global row with the same name (or `as`), then the `system_prompt.md`, then a
-  provenance sidecar `<config>/agents/<id>/provenance.json`
-  (`{"source":"session","session_id":…,"promoted_at":…,"authorized_by":…}`). Teams get
-  the twin under `<config>/teams/<id>/provenance.json`.
+- Write the global row with the same name (or `as_name`), then the `system_prompt.md`, then
+  one row in the DEVICE-LEVEL provenance index `<config>/role-provenance.jsonl`
+  (`{kind, id, name, source_session, at, authorized_by, replaced}`, one line per definition
+  created or overwritten). **Corrected from this section's first draft, which put a
+  `provenance.json` inside the row directory:** `TeamRegistry._save_team_locked` publishes a
+  team row by renaming a whole staged directory over it and writes exactly `team.yml`,
+  `instructions.md` and `project.md`, so any other file in a team row is destroyed on the
+  next save — a receipt pointing at a sidecar would be a promise the store does not keep.
+  The index is append-only, locked, and rotated past a bound, and its writability is part of
+  the preflight. The ROW is copied VERBATIM (a transported copy of the stored `AgentData`,
+  not a rebuild from `AgentEditFields`): `write_profile` re-derives tags, and the tags are
+  the role's kind and policy.
 - If any step fails, delete the rows this call created (rollback) and report exactly what
   remains if rollback itself fails. No partially promoted row is left silently.
 - If the global name exists: refuse, naming the existing row, unless `replace=true`.
@@ -352,20 +360,42 @@ and **all-or-nothing**:
 - Same durable-write grant and confirmation as the role path.
 - Preflight the team row, both briefs, every target name, and **every roster member** the
   team references **before the first write**.
-- Copy the team row + both briefs + provenance; copy session-scoped members in the same
-  transaction. Session-scoped members (and nested
+- Copy the team row + both briefs + one provenance row; copy session-scoped members in the
+  same transaction. Session-scoped members (and nested
   session teams, bounded by `teams.MAX_ORG_DEPTH`) must be promoted too or the team breaks in
-  another session: promote them in the same call and list them in the receipt, or refuse and
-  name them. Recommendation: promote automatically with a complete receipt; roll back rows
-  created by this call if a later write fails, and report exactly what remains if rollback
-  itself fails.
+  another session: they are promoted automatically in the same call and listed in the
+  receipt. **The roster is resolved through the LAUNCH resolver** (`profile_detail` per
+  member, recursion bounded by `MAX_ORG_DEPTH`, the same walk a launch validates), not by
+  store membership: a packaged starter that is merely not installed is resolvable everywhere
+  and needs no copy, so treating "absent from both stores" as missing would refuse a team that
+  launches fine. Rows created by this call are rolled back if a later write fails, and
+  exactly what remains is reported if rollback itself fails. A documented cap
+  (`profile_scope.MAX_PROMOTION_ROWS`) bounds the expansion breadth that depth alone does
+  not.
 - Any global name collision (team or member, including aliases) refuses the whole promotion
   unless `replace=true`.
 
-Desktop: `POST /v1/desktop/profiles/{name}/promote` and `/teams/{name}/promote`, body
-`{request_id, session_id, as?, confirm_replace?}`; response is the new global detail row.
+Desktop: **`POST /v1/desktop/sessions/{session_id}/promote`**, body
+`{request_id, kind: "agent"|"team", name, as_name?, confirm_replace?}`; response is the new
+ACCOUNT detail row plus an additive `promoted` receipt. **Corrected from this section's
+first draft** (`/profiles/{name}/promote` and `/teams/{name}/promote` with a `session_id` in
+the body): the SOURCE is a conversation-scoped row, reachable only through the session
+bridge, and the account-only profile routes are built over the global registry where that
+row does not exist — addressing the route by session is the shape `/command-entities`
+already uses. `as` is a Python keyword, so the field is `as_name` on every surface.
 The UI affordance is a single action on a session-scoped row: **"Use in all
 conversations"**, with a confirmation that names the created/copied definitions.
+
+The TUI has the same action as a reserved verb — `/agent promote <name>` and
+`/team promote <name>`, rehearsed and then confirmed with `yes` (the command grammar's own
+confirmation, as `/project delete` and `/delete` use it; no new picker and no modal, per §7).
+
+**The tool surfaces ship REFUSAL-ONLY (S4 decision D1).** `agent op='promote'` and
+`team op='promote'` exist and go through the durable-write seam with
+`operation="promote"`, and no host installs a consent producer in this slice — so today
+every tool-issued promotion is refused, naming the desktop action and the TUI verb as the
+way forward. Promotion is a user act on a user surface; installing an intent-specific
+confirmation producer remains the S2 deferral and is not smuggled in here.
 
 ### 3.7 Prompt and recommender guidance
 

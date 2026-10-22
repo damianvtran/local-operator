@@ -2964,6 +2964,7 @@ something alive or ready until then.
 | `open_frame` | 1 | `open_frame=1` on `GET .../{id}`, `GET .../{id}/history` and `GET .../{id}/events`: a page counted in PAINTABLE rows, cut back to the oldest included run's opening user row under a hard cap (with `head_cut` when the cap binds), with non-painted bytes stripped and `runs[]` / `runs_state` carry the per-run facts the bar needs — see [the open frame](#the-open-frame-a-turn-aligned-paint-only-page-open_frame-1) | the renderer sends no `open_frame` and receives today's page byte-for-byte: counts in journal entries, unstripped rows, no `runs`. It must NOT send the flag unless it reads `runs`/`head_cut`, because the unit of `limit` changes with it |
 | `supplements` | 1 | `features.supplements: 1` — the turn-supplement ("Highlights") contract is in the build: the `supplement_progress` event family, the `supplement_v1` journal row, the `supplements-v1` attach capability and the document assembler. It is a BUILD fact, NOT the attach gate: live events and the history projection reach a viewer only under the two-half `supplements-v1` gate (the owner's own capability string ANDed with the viewer's declaration — `auth["supplements"] = true`, or `?supplements=1` on the desktop live path). See [Turn supplements](#turn-supplements-the-supplement_v1-row-and-the-supplement_progress-event) | the renderer draws nothing supplement-shaped and is never refused for it: a viewer that does not declare is not sent a `supplement_progress` event or a supplement projection, and rows are journaled either way. It must NOT gate any existing surface on this key |
 | `profile_scope` | 1 | `scope: "global" \| "session"` on the rows of `GET /v1/desktop/profiles`, `GET /v1/desktop/profiles/{name}`, `GET /v1/desktop/teams`, `GET /v1/desktop/teams/{name}` and the `agent`/`team` rows of `GET /v1/desktop/sessions/{id}/command-entities` | the renderer paints no scope badge and sends no session id to a picker route; the fields are additive, so an older reader parses the same payload it did before |
+| `profile_promote` | 1 | `POST /v1/desktop/sessions/{session_id}/promote` — copy one CONVERSATION-scoped role or team into the account. Body `{request_id, kind: "agent" \| "team", name, as_name?, confirm_replace?}`; answer is the new ACCOUNT detail row (`GET /v1/desktop/profiles/{name}` / `/teams/{name}` shape) plus an additive `promoted` object naming what was created, expanded and replaced | the renderer offers no "use in all conversations" action on conversation-scoped rows and calls nothing. On a backend that does not advertise the key the session rows are still rendered, only without that action — do not send a `session_id` to any profile route to approximate it |
 | `session_files` | 1 | `GET /v1/desktop/sessions/{id}/files` and `POST …/files/{file_id}/materialise` — the authoritative per-session file inventory (written, edited, command outputs, screenshots, downloads, generated images/videos, subagent files, Highlights callouts), and the `details.artifacts` list the image/video tools now write | the Files view builds from its own transcript scan exactly as today, and the renderer MUST NOT call the route (an older backend answers 404). A 404 from a backend that DID advertise the key is a broken backend: treat it as definitive "unsupported" for the session |
 
 `profile_scope` STATES A ROW'S STORE, not a caller's permission. `GET /v1/desktop/profiles`,
@@ -2977,6 +2978,23 @@ THIS conversation, invisible to every other one and gone with it. Clients paint 
 from the field, never from a name or description; the mobile sheet reads the same field
 on the same route. On a backend that does not advertise the key, do not send `session_id`
 for a badge and keep the current rendering: the rows are the same, only unlabelled.
+
+PROMOTION IS SESSION-ADDRESSED FOR THE SAME REASON. `POST
+/v1/desktop/sessions/{session_id}/promote` copies a conversation-scoped row into the
+account; its SOURCE is the session's composite, which only the session bridge can
+reach, so it is addressed by session and lives beside `/command-entities` rather than
+in the account-only profile routes. It is a MUTATION, so it takes the control envelope
+(an answering owner), a `request_id` (a retry replays the first answer), and it is the
+desktop's own authorization origin. `kind` names which store the source is in; `name`
+is the source definition; `as_name` copies under another name (`as` is a Python
+keyword, so every surface spells it `as_name`); `confirm_replace` is the user's answer
+to "overwrite what is already there". A team expands: every conversation-scoped role or
+nested team its roster needs is copied in the same call, so the copy launches in
+another conversation, and `promoted.expanded` names them. The origin conversation keeps
+its own row — resolution is session-first, so it still launches its own copy, and the
+answer says so. Statuses: 404 unknown session or name, 409 any refusal (name already in
+the account without `confirm_replace`, an unusable roster, a rollback that could not
+finish), 422 a malformed body.
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

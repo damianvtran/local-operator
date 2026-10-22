@@ -39,5 +39,10 @@
   "tui.authoring.save_error": "Enregistrement impossible : {reason}",
   "tui.authoring.description_clear_unsupported": "Ce formulaire ne peut pas encore effacer une description existante.",
   "tui.authoring.notice_read_only": "Lecture seule : le runtime de cette conversation est sur un autre appareil ; les profils ne peuvent pas être modifiés ici.",
-  "tui.authoring.scope_conversation": "cette conversation"
+  "tui.authoring.scope_conversation": "cette conversation",
+  "tui.authoring.promote_usage": "Utilisez {command} <nom> [replace] [yes].",
+  "tui.authoring.promote_plan": "Ajoutez `yes` pour copier {names} dans votre compte — rien n’a encore changé.",
+  "tui.authoring.promote_replace_plan": "Ajoutez `yes` pour remplacer {names} dans votre compte — rien n’a encore changé.",
+  "tui.authoring.promote_receipt": "{names} a été copié dans votre compte · cette conversation garde sa propre copie",
+  "tui.authoring.promote_failed": "impossible de promouvoir : {reason}"
 }

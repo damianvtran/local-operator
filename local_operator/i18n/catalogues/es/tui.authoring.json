@@ -39,5 +39,10 @@
   "tui.authoring.save_error": "No se pudo guardar: {reason}",
   "tui.authoring.description_clear_unsupported": "Este formulario aún no permite borrar una descripción existente.",
   "tui.authoring.notice_read_only": "Solo lectura: el runtime de esta conversación está en otro dispositivo; aquí no puedes cambiar perfiles.",
-  "tui.authoring.scope_conversation": "esta conversación"
+  "tui.authoring.scope_conversation": "esta conversación",
+  "tui.authoring.promote_usage": "Usa {command} <nombre> [replace] [yes].",
+  "tui.authoring.promote_plan": "Añade `yes` para copiar {names} en tu cuenta — todavía no ha cambiado nada.",
+  "tui.authoring.promote_replace_plan": "Añade `yes` para reemplazar {names} en tu cuenta — todavía no ha cambiado nada.",
+  "tui.authoring.promote_receipt": "se copió {names} en tu cuenta · esta conversación conserva su propia copia",
+  "tui.authoring.promote_failed": "no se pudo promover: {reason}"
 }

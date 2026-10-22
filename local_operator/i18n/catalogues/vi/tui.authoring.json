@@ -39,5 +39,10 @@
   "tui.authoring.save_error": "Không lưu được: {reason}",
   "tui.authoring.description_clear_unsupported": "Biểu mẫu này chưa thể xóa mô tả hiện có.",
   "tui.authoring.notice_read_only": "Chỉ đọc: runtime của cuộc trò chuyện này ở thiết bị khác nên không thể sửa hồ sơ tại đây.",
-  "tui.authoring.scope_conversation": "cuộc trò chuyện này"
+  "tui.authoring.scope_conversation": "cuộc trò chuyện này",
+  "tui.authoring.promote_usage": "Dùng {command} <name> [replace] [yes].",
+  "tui.authoring.promote_plan": "Thêm `yes` để sao chép {names} vào tài khoản của bạn — chưa có gì thay đổi.",
+  "tui.authoring.promote_replace_plan": "Thêm `yes` để thay thế {names} trong tài khoản của bạn — chưa có gì thay đổi.",
+  "tui.authoring.promote_receipt": "đã sao chép {names} vào tài khoản của bạn · cuộc trò chuyện này giữ bản riêng",
+  "tui.authoring.promote_failed": "không thể chuyển vào tài khoản: {reason}"
 }

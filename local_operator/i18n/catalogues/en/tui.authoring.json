@@ -39,5 +39,10 @@
   "tui.authoring.save_error": "Could not save: {reason}",
   "tui.authoring.description_clear_unsupported": "This form cannot clear an existing description yet.",
   "tui.authoring.notice_read_only": "Read-only: this conversation's runtime is on another device, so profile changes are not available here.",
-  "tui.authoring.scope_conversation": "this conversation"
+  "tui.authoring.scope_conversation": "this conversation",
+  "tui.authoring.promote_usage": "Use {command} <name> [replace] [yes].",
+  "tui.authoring.promote_plan": "Add `yes` to copy {names} into your account — nothing has changed yet.",
+  "tui.authoring.promote_replace_plan": "Add `yes` to replace {names} in your account — nothing has changed yet.",
+  "tui.authoring.promote_receipt": "copied {names} to your account · this conversation keeps its own copy",
+  "tui.authoring.promote_failed": "could not promote: {reason}"
 }

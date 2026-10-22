@@ -110,6 +110,26 @@ def proactive() -> Msg:
     return Msg("tui.authoring.proactive", {})
 
 
+def promote_failed(*, reason: str) -> Msg:
+    return Msg("tui.authoring.promote_failed", {"reason": reason})
+
+
+def promote_plan(*, names: str) -> Msg:
+    return Msg("tui.authoring.promote_plan", {"names": names})
+
+
+def promote_receipt(*, names: str) -> Msg:
+    return Msg("tui.authoring.promote_receipt", {"names": names})
+
+
+def promote_replace_plan(*, names: str) -> Msg:
+    return Msg("tui.authoring.promote_replace_plan", {"names": names})
+
+
+def promote_usage(*, command: str) -> Msg:
+    return Msg("tui.authoring.promote_usage", {"command": command})
+
+
 def reactive() -> Msg:
     return Msg("tui.authoring.reactive", {})
 

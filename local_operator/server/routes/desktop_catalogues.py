@@ -18,7 +18,14 @@ from local_operator.providers.usage import META_MUSE_USAGE_NOTES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
-from local_operator.server.routes.desktop_sessions import errors, host, reply
+from local_operator.server.routes.desktop_sessions import (
+    Input,
+    RequestID,
+    errors,
+    host,
+    receipts,
+    reply,
+)
 from local_operator.server.utils.desktop_auth import DesktopAuth
 from local_operator.server.utils.desktop_commands import command_catalogue
 from local_operator.slash_commands import slash_command_for
@@ -880,3 +887,116 @@ async def entities(
                 if name:
                     current = profile_detail(registry, name)
         return reply({"command": spec.name, "entities": rows, "current": current})
+
+
+class SessionPromote(Input):
+    """One promotion: copy a CONVERSATION definition into the account (S4).
+
+    ``as_name`` rather than the design's ``as`` because ``as`` is a Python
+    keyword — one spelling on the wire, the tool schema and the composite, so no
+    layer translates it.
+
+    ``confirm_replace`` is the user's answer, not a preference: it is the only
+    way this body can authorise overwriting a definition they already own, and
+    the composite refuses a collision without it.
+    """
+
+    request_id: RequestID
+    kind: Literal["agent", "team"]
+    name: str = Field(min_length=1, max_length=128)
+    as_name: str | None = Field(default=None, min_length=1, max_length=128)
+    confirm_replace: bool = False
+
+
+@router.post("/v1/desktop/sessions/{session_id}/promote", response_model=CRUDResponse)
+async def promote_session_definition(body: SessionPromote, session_id: str, request: Request):
+    """Copy this conversation's role or team into the account ("use everywhere").
+
+    WHY THIS ROUTE IS ADDRESSED BY SESSION and lives beside the catalogues rather
+    than in ``desktop_profiles``: a promotion's SOURCE is a conversation-scoped
+    row, and that scope is reachable only through the session bridge (the same
+    seam ``/command-entities`` uses). The account-only profile routes are handed
+    a plain registry and could not see the row at all; giving them a session
+    parameter would make every one of them session-capable, which is a different
+    contract.
+
+    The write is the composite's: it preflights everything, copies the row and
+    its instructions verbatim, expands a team's conversation-scoped members, and
+    rolls back exactly what it created on failure. This handler translates the
+    HTTP shape and the surface's authorization origin, nothing else.
+
+    RESPONSE: the new ACCOUNT detail row (the same projection ``GET
+    /v1/desktop/profiles/{name}`` and ``/teams/{name}`` return), plus an additive
+    ``promoted`` object carrying what the operation created, expanded and
+    replaced. The client's confirmation named those rows; this is the receipt
+    that says what actually happened.
+
+    STATUS: 404 for an unknown session or name, 409 for a collision (or any
+    composite refusal — the body was well-formed, the conversation's state said
+    no), 422 for a malformed body. ``request_id`` makes a failed-and-retried
+    request idempotent: the second call replays the first answer.
+    """
+
+    async with errors(request), host(request).session(session_id) as bridge:
+        remote = bridge.remote
+        assert remote is not None
+
+        def mutate() -> dict[str, Any]:
+            agents = remote.agent_registry
+            teams = remote.team_registry
+            if agents is None or teams is None:
+                raise HTTPException(503, _wd.profile_registry_unavailable().envelope())
+            if body.kind == "agent":
+                result = agents.promote(
+                    body.name,
+                    as_name=body.as_name,
+                    replace=body.confirm_replace,
+                    authorized_by="surface:desktop",
+                )
+            else:
+                result = teams.promote(
+                    body.name,
+                    as_name=body.as_name,
+                    replace=body.confirm_replace,
+                    authorized_by="surface:desktop",
+                    agents=agents,
+                )
+            # The DETAIL row is read from the ACCOUNT store, not the composite:
+            # the conversation still holds its own copy, and session-first
+            # resolution would hand back the row this call did not write.
+            target = body.as_name or body.name
+            if body.kind == "agent":
+                from local_operator.server.utils.desktop_profiles import profile_detail
+
+                account_agents = getattr(agents, "global_registry", agents)
+                detail = profile_detail(account_agents, target)
+            else:
+                from local_operator.hub_sync.definition import definition_revision
+
+                account_teams = getattr(teams, "global_registry", teams)
+                row = account_teams.get_team_by_name(target)
+                if row is None:
+                    raise KeyError(target)
+                detail = row.model_dump(mode="json") | {"scope": "global"}
+                detail["definition_revision"] = definition_revision(
+                    "team", str(row.id), row.model_dump(mode="json")
+                )
+            return detail | {
+                "promoted": {
+                    "kind": body.kind,
+                    "created": result.created,
+                    "expanded": result.expanded,
+                    "replaced": result.replaced,
+                    "provenance_ids": result.provenance_ids,
+                    "authorized_by": "surface:desktop",
+                }
+            }
+
+        return reply(
+            await receipts(request).run(
+                "profile-promote:" + body.request_id,
+                body.model_dump(),
+                lambda: asyncio.to_thread(mutate),
+                retry_safe=True,
+            )
+        )

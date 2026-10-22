@@ -33,5 +33,6 @@
   "tui.team_authoring.new_hint": "टीम बनाएँ",
   "tui.team_authoring.edit_hint": "इंस्टॉल की गई टीम संपादित करें",
   "tui.team_authoring.subcommand": "उपकमांड",
-  "tui.team_authoring.talk_hint": "टीम से बात करें · {detail}"
+  "tui.team_authoring.talk_hint": "टीम से बात करें · {detail}",
+  "tui.team_authoring.promote_hint": "इस बातचीत की टीम को अपने खाते में कॉपी करें"
 }

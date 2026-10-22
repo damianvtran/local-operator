@@ -203,5 +203,30 @@
     "role": "facts badge in the agent/team picker",
     "tone": "plain, lowercase, no jargon",
     "note": "Marks a role or team that exists only in the current conversation. It rides a 27-cell facts line after the class token, so keep it short and concrete; it is never a warning and never uses error ink."
+  },
+  "tui.authoring.promote_usage": {
+    "role": "usage refusal for a reserved verb",
+    "tone": "brief, keyboard-first",
+    "note": "Printed when /agent promote or /team promote is typed wrong. {command} is a literal command path in backticks-free form ('/agent promote'); the bracketed flags are the grammar, kept literal."
+  },
+  "tui.authoring.promote_plan": {
+    "role": "rehearsal line before a confirmed copy",
+    "tone": "plain, calm, explicit that nothing changed",
+    "note": "{names} is a comma-joined list of the definitions a confirmed call would copy into the account. `yes` stays a literal token. Never reads as a warning: copying is a normal, reversible-in-effect act."
+  },
+  "tui.authoring.promote_replace_plan": {
+    "role": "rehearsal line before a confirmed overwrite",
+    "tone": "plain, direct, names what will be lost",
+    "note": "{names} is a comma-joined list of the account definitions the confirmed call would OVERWRITE. This is the one destructive rehearsal here, so it must state the replacement plainly; `yes` stays literal."
+  },
+  "tui.authoring.promote_receipt": {
+    "role": "completion receipt",
+    "tone": "past tense, plain",
+    "note": "{names} is the comma-joined list of what was copied. The second clause is the fact users get wrong (the origin conversation keeps launching its own row), so it is never dropped."
+  },
+  "tui.authoring.promote_failed": {
+    "role": "refusal wrapper",
+    "tone": "direct, no blame",
+    "note": "{reason} is the registry's own English sentence (collision, missing name, rollback remainder); the wrapper is the only translated part."
   }
 }
