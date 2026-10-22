@@ -643,7 +643,8 @@ def _image_provenance(channel_id: str, message: dict[str, Any], lines: list[str]
     the agent say what it is looking at. No hashes and no filenames.
     """
 
-    sender = message.get("sender") if isinstance(message.get("sender"), dict) else {}
+    raw_sender = message.get("sender")
+    sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
     label = str(sender.get("display_label") or "member").replace("\n", " ")[:200]
     kind = str(sender.get("kind") or "unknown")[:16]
     head = (
