@@ -126,17 +126,21 @@ def _handed_over(server_a: Any, server_b: Any, monkeypatch: pytest.MonkeyPatch) 
             link.close()
             closed += 1
     if not closed:
-        # A REFUSAL WITH NO LINK IS NOT THE EVENT THIS HELPER EXPLAINS. The CI red
-        # was a link that was alive and answered nothing; if there is nothing to
-        # close, the second ask may still succeed, but the reason is not the one
-        # written above — say so in the log instead of letting a future
+        # A REFUSAL WITH NO LINK OPEN IS NOT THE EVENT THIS HELPER EXPLAINS. The CI
+        # red was a link that was open, alive and answered nothing; if nothing was
+        # open to close, the second ask may still succeed, but the reason is not
+        # the one written above — say so in the log instead of letting a future
         # spurious-refusal bug be retried into a silent pass (QA round 1, Q1).
+        # Scoped to "nothing was open at the refusal", not "no silent link": an
+        # alive-silent link that died and was popped before this check is still a
+        # silent-link event, and claiming otherwise would be the false comment
+        # this repo treats as a defect (agent review round 3, R3-1).
         # A warning rather than an assertion on purpose: a link that was already
         # evicted is a legitimate state, and an assertion here would rebuild the
         # timing dependence this file just removed.
         warnings.warn(
-            "the hand-away answered unreachable with no link to the destination to close, "
-            "so a silent link does not explain it — re-asking anyway",
+            "the hand-away answered unreachable with no link to the destination open at "
+            "the refusal, so neither reason above is proved — re-asking anyway",
             RuntimeWarning,
             stacklevel=2,
         )
