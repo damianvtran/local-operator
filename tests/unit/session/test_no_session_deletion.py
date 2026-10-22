@@ -1860,6 +1860,33 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "one-shot fork-boundary sidecar FILE",
     ),
+    # The failed-fork discard (LOH-9 S3). ``fork_dir`` is the directory THIS
+    # call created and claimed one statement earlier, for a fork that does not
+    # exist yet; nothing under it is the user's work, and the parent directory
+    # is never named by this function. Removing it is how a refused roles copy
+    # (over the byte bound, a symlink, an I/O error) avoids leaving a fork whose
+    # inherited attachment points at no definitions.
+    (
+        "local_operator/fork.py::_discard_failed_fork",
+        "shutil.rmtree",
+        "the just-created, still-claimed destination fork dir only; parent never touched",
+    ),
+    # Publishing the roles copy: a staging directory inside the fork's OWN
+    # directory is renamed onto ``<fork>/roles`` with one atomic os.replace.
+    # Neither path can be an existing session: the fork dir was claimed above
+    # and the name is the fixed ``roles`` child of it.
+    (
+        "local_operator/fork.py::_copy_roles_tree",
+        "os.replace",
+        "staging dir -> <fork>/roles inside the just-created fork; never a session dir",
+    ),
+    (
+        "local_operator/fork.py::_copy_roles_tree",
+        "shutil.rmtree",
+        "only its own .roles-<hex> staging dir inside the fork dir on failure "
+        "(three branches: bound crossed mid-copy, OSError, cancelled copy)",
+        3,
+    ),
     (
         "local_operator/mobile/install.py::uninstall",
         "<path>.unlink",
