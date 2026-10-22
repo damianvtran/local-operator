@@ -163,7 +163,9 @@ async def test_v2_enrols_once_commits_the_v2_receipt_and_sends_no_consented_via(
     assert receipt == {"consent_version": CONSENT_VERSION_V2, "consent_ref": "bep_1"}
     # The receipt satisfies the accepted-set currency rule for the served v2
     # (scheduler._consent_receipt_is_current, #2778): with and without a set.
-    from local_operator.team_bridge.scheduler import _consent_receipt_is_current as current
+    from local_operator.team_bridge.scheduler import (
+        _consent_receipt_is_current as current,
+    )
 
     assert current(receipt["consent_version"], CONSENT_VERSION_V2, ())
     assert current(
