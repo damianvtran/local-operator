@@ -608,11 +608,22 @@ def check_hub_skills(
             continue
         tenant = record.tenant_id
         absent = record.content_state == "absent"
+        # FORM: a bundle link's baseline stores the archive manifest, and its
+        # local reading is the managed directory's tree hash. The adapter already
+        # dispatches on exactly this key, so the check reuses it instead of
+        # re-reading a bundle as a text document (which would refuse every file
+        # byte) -- design §8.2's fingerprints ARE those values.
+        is_bundle = "bundle" in (record.fields or {})
         local: Mapping[str, Any] | None = None
         local_fp: str | None = None
+        snapshot: Any = None
         if not absent:
             try:
-                snapshot = storage.snapshot(record.local_id)
+                if is_bundle:
+                    local = dict(adapter.snapshot(config_dir, record.local_id).fields)
+                    local_fp = prov.fingerprint_snapshot("skill", local)
+                else:
+                    snapshot = storage.snapshot(record.local_id)
             except Exception as error:  # noqa: BLE001
                 # A crashed unpull is settled from its own durable evidence. When
                 # that settles the record to absent this is a normal absent check;
@@ -646,8 +657,9 @@ def check_hub_skills(
                 record = settled
                 absent = True
             else:
-                local = adapter.canonical_fields(snapshot.document.to_json())
-                local_fp = prov.fingerprint_snapshot("skill", local)
+                if not is_bundle and snapshot is not None:
+                    local = adapter.canonical_fields(snapshot.document.to_json())
+                    local_fp = prov.fingerprint_snapshot("skill", local)
         client = client_for_tenant(tenant)
         if client is None:
             checks.append(
@@ -753,7 +765,7 @@ def check_hub_skills(
         # alias rename is not an eternal both-changed, and so the merge/write
         # layer speaks one name; the write re-renders the alias (see _apply_skill).
         remote_name = str(document.get("name") or "")
-        if remote_name and str(local.get("name") or "") != remote_name:
+        if not is_bundle and remote_name and str(local.get("name") or "") != remote_name:
             from local_operator.hub_sync.skill_document import SkillDocument
 
             local = SkillDocument.from_json(dict(local)).with_name(remote_name).to_json()

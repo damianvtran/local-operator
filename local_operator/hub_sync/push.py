@@ -184,7 +184,11 @@ class HttpPushTransport:
             PREVIEW_TOKEN_HEADER,
         )
 
-        headers: dict[str, str] = {PREVIEW_TOKEN_HEADER: preview_token}
+        headers: dict[str, str] = {}
+        if preview_token:
+            # A bundle commit carries no pin: the header is omitted entirely
+            # rather than sent empty, which the route would read as a refusal.
+            headers[PREVIEW_TOKEN_HEADER] = preview_token
         if accept_unresolved:
             headers[PREVIEW_ACCEPT_HEADER] = ",".join(str(entry) for entry in accept_unresolved)
         return await self._send(
@@ -326,6 +330,7 @@ async def push_item(
     budget: OperationBudget,
     opts: MergeOptions = MergeOptions(),
     document_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    bundle_attested: bool = False,
 ) -> PushOutcome:
     """Project and conditionally publish one authored item; settle the outbox.
 
@@ -419,46 +424,68 @@ async def push_item(
         logger.debug("hub publish document refused for %s %s: %s", kind, local_id, exc)
         return _settle_deterministic(outbox, operation_id, generation, code)
 
-    try:
-        preview = await transport.preview(
-            document=document, expected_revision=expected, budget=budget
-        )
-    except RemoteRevisionChanged:
-        return _settle_conflict(outbox, operation_id, generation)
-    except PushRefused as exc:
-        return _settle_refused(outbox, operation_id, generation, exc.code, outage=exc.outage)
-    except OperationDeadlineExceeded:
-        # A PREVIEW-stage deadline owes NOTHING: no commit was dispatched, so
-        # nothing can have been written. Retry with backoff -- an intent-less
-        # pending-reconciliation here used to wedge the record forever
-        # (round-2 R12c). Only a COMMIT-stage deadline is uncertain.
-        return _settle_deadline(outbox, operation_id, generation)
-
-    # POSITIVE CAS VERIFICATION before the commit spends anything further: the
-    # preview must name the SAME revision our merge derived from, and a preview
-    # that names none cannot be verified at all.
-    observed = str(preview.get("revision") or "")
-    if not observed:
-        return _settle_deterministic(outbox, operation_id, generation, "unsupported-precondition")
-    if observed != expected:
-        return _settle_conflict(outbox, operation_id, generation)
-
-    status = str(preview.get("status") or "")
-    unresolved = list(preview.get("unresolved") or [])
-    if status == "needs_ack" and unresolved:
-        # An unattended push never auto-acknowledges unclassified values: the
-        # publisher's own confirmation is the point of the ack, and value privacy
-        # depends on it. Stop safely with the ids recorded for a manual surface.
+    # BUNDLE CARRIER: the manifest is committed directly. The server's bundle
+    # publish path ignores preview tokens (§7: no verifyPreviewIfPresent), so the
+    # paid preview/pin handshake would refuse locally on a missing token and
+    # spend a generalization the bundle never uses. The attestation guard is
+    # checked BEFORE anything is sent: a server that never advertised
+    # ``skill_bundles:1`` would accept the manifest against no blob.
+    is_bundle = kind == "skill" and "bundle" in document
+    if is_bundle and not bundle_attested:
         return _settle_deterministic(
-            outbox, operation_id, generation, "generalization-needs-ack", state="needs-review"
+            outbox, operation_id, generation, "bundle-unsupported-server", state="needs-review"
         )
 
-    preview_document = preview.get("document")
-    pin = preview.get("pin")
-    token = str(pin.get("token") or "") if isinstance(pin, Mapping) else ""
-    if not isinstance(preview_document, Mapping) or not token:
-        return _settle_deterministic(outbox, operation_id, generation, "unsupported-precondition")
+    if is_bundle:
+        preview_document: Mapping[str, Any] | None = document
+        token = ""
+    else:
+        try:
+            preview = await transport.preview(
+                document=document, expected_revision=expected, budget=budget
+            )
+        except RemoteRevisionChanged:
+            return _settle_conflict(outbox, operation_id, generation)
+        except PushRefused as exc:
+            return _settle_refused(outbox, operation_id, generation, exc.code, outage=exc.outage)
+        except OperationDeadlineExceeded:
+            # A PREVIEW-stage deadline owes NOTHING: no commit was dispatched, so
+            # nothing can have been written. Retry with backoff -- an intent-less
+            # pending-reconciliation here used to wedge the record forever
+            # (round-2 R12c). Only a COMMIT-stage deadline is uncertain.
+            return _settle_deadline(outbox, operation_id, generation)
 
+        # POSITIVE CAS VERIFICATION before the commit spends anything further: the
+        # preview must name the SAME revision our merge derived from, and a preview
+        # that names none cannot be verified at all.
+        observed = str(preview.get("revision") or "")
+        if not observed:
+            return _settle_deterministic(
+                outbox, operation_id, generation, "unsupported-precondition"
+            )
+        if observed != expected:
+            return _settle_conflict(outbox, operation_id, generation)
+
+        status = str(preview.get("status") or "")
+        unresolved = list(preview.get("unresolved") or [])
+        if status == "needs_ack" and unresolved:
+            # An unattended push never auto-acknowledges unclassified values: the
+            # publisher's own confirmation is the point of the ack, and value
+            # privacy depends on it. Stop safely with the ids recorded for a
+            # manual surface.
+            return _settle_deterministic(
+                outbox, operation_id, generation, "generalization-needs-ack", state="needs-review"
+            )
+
+        preview_document = preview.get("document")
+        pin = preview.get("pin")
+        token = str(pin.get("token") or "") if isinstance(pin, Mapping) else ""
+        if not isinstance(preview_document, Mapping) or not token:
+            return _settle_deterministic(
+                outbox, operation_id, generation, "unsupported-precondition"
+            )
+
+    assert isinstance(preview_document, Mapping)
     # DURABLE INTENT BEFORE THE COMMIT LEAVES: a crash or deadline after this
     # write can replay exactly these bytes (same pin/body/expected revision).
     intent = {
@@ -466,6 +493,9 @@ async def push_item(
         "preview_token": token,
         "accept_unresolved": [],
         "expected_revision": expected,
+        # A bundle commit carries NO pin, so replay must not demand one; the flag
+        # is what distinguishes "no token needed" from "lost the token".
+        "bundle": is_bundle,
     }
     if not outbox.store_intent(operation_id, generation, intent):
         # Persisting the intent must succeed BEFORE a mutating dispatch: without
@@ -534,7 +564,8 @@ async def _replay_verbatim(
     token = str(intent.get("preview_token") or "")
     accepts = list(intent.get("accept_unresolved") or [])
     expected = str(intent.get("expected_revision") or "")
-    if not isinstance(document, Mapping) or not token or not expected:
+    is_bundle = bool(intent.get("bundle"))
+    if not isinstance(document, Mapping) or not expected or (not token and not is_bundle):
         return PushOutcome(
             "skipped", operation_id=operation_id, reason="reconciliation-intent-invalid"
         )
