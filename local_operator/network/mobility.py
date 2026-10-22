@@ -1808,20 +1808,27 @@ def _destination_move(
         # reading it cannot resolve). Other codes keep the producer's own sentence,
         # minus the same trailing clause.
         cause = str(refusal.message)
+        # ONE TRAILING PERIOD BELONGS TO THE COMPOSED SENTENCE (R4-4), not to the
+        # producer's fragment: strip it before the clause so a peer message ending
+        # in a period cannot produce ".." when the sentence appends its own.
+        if cause.endswith("."):
+            cause = cause[:-1]
         for clause in ("; nothing was changed", "; nothing has changed"):
             if cause.endswith(clause):
                 cause = cause[: -len(clause)]
                 break
-        if refusal.code == "unreachable":
-            cause = f"{holder} stopped answering during the copy (no answer on its link)."
-        else:
-            cause = f"{cause}."
+        # R4-2: the holder-named rewrite is for a LINK-LEVEL silence only. A peer
+        # that ANSWERED with code unreachable (a build that does not understand the
+        # op, a refusal it composed itself) did not stop answering, and claiming it
+        # did would be a false diagnosis of a working link.
+        if refusal.code == "unreachable" and "no answer on its link" in cause:
+            cause = f"{holder} stopped answering during the copy (no answer on its link)"
         if keep:
             # A COPY LEAVES THE SOURCE RUNNING AND JOURNALS NOTHING (U8), so
             # "paused" and "restart" would be false: there is no handoff to
             # unpick, and the source must not be told to stop its conversation.
             sentence = (
-                f"{cause} {dest} discarded its partial copy; {holder} "
+                f"{cause}. {dest} discarded its partial copy; {holder} "
                 "still has the conversation and was not paused (a copy leaves it "
                 "running). Run the copy again."
             )
@@ -1829,7 +1836,7 @@ def _destination_move(
             # U9: the restart is spelled with the DEVICE IT RUNS ON first, so a
             # reader does not run a local command expecting it to act remotely.
             sentence = (
-                f"{cause} {dest} discarded its partial copy; {holder} "
+                f"{cause}. {dest} discarded its partial copy; {holder} "
                 "still has the conversation, paused for this move. On "
                 f"{holder}, restart the relay (`lop network restart`), then run "
                 "the move again."
@@ -3586,8 +3593,8 @@ def _source_prepare(
                 "message": (
                     "a handoff of that conversation is already in progress on "
                     f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    f"changed. The move is stuck; restart the relay on {holder} "
-                    "(`lop network restart`), then try the move again."
+                    f"changed. If the move does not finish on its own, restart the "
+                    f"relay on {holder} (`lop network restart`), then try the move again."
                 ),
                 "session_id": session_id,
             }

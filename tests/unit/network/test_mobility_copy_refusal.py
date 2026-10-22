@@ -83,7 +83,12 @@ def _prepare_frame(to_device: str) -> dict[str, Any]:
     }
 
 
-def _lose_the_second_fetch(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, int], Any]:
+def _lose_the_second_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    code: str = "unreachable",
+    message: str | None = None,
+) -> tuple[dict[str, int], Any]:
     """Make the destination's copy lose its link on the SECOND file's first chunk.
 
     The plan and the transcript's chunks are real, so the staging directory holds
@@ -103,7 +108,7 @@ def _lose_the_second_fetch(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, i
                 # THE PRODUCTION CAUSE: the relay's own sentence for a peer that
                 # did not answer, so the composed notice is tested against what a
                 # real copy failure actually hands it (D1).
-                raise mobility.Moved("unreachable", mobility._unreachable(None))
+                raise mobility.Moved(code, message or mobility._unreachable(None))
         return real_ask(self, frame, timeout=timeout)
 
     monkeypatch.setattr(mobility.LinkTransport, "ask", losing_copy_ask)
@@ -277,6 +282,41 @@ def test_the_copy_failure_sentence_disambiguates_identical_names(
     assert "nothing has changed" not in message, message
 
 
+def test_a_peer_supplied_unreachable_cause_is_not_reworded_as_silence(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-2: only a LINK-LEVEL silence gets the holder-named cause.
+
+    A peer that answered with code ``unreachable`` and its own sentence (a build
+    that does not understand the op, or a refusal it composed) did not stop
+    answering. The clue is its message: only "no answer on its link" is the
+    transport's silence, so only that may be rewritten.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    fetches, _ = _lose_the_second_fetch(
+        monkeypatch,
+        message="answered something this build does not understand; nothing was changed",
+    )
+
+    failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert fetches["n"] == 2, fetches
+    assert failed["ok"] is False and failed["code"] == "unreachable", failed
+    dest = str(server_b._own_label())  # noqa: SLF001
+    holder = str(server_a._own_label())  # noqa: SLF001
+    message = str(failed["message"])
+    assert message == (
+        "answered something this build does not understand. "
+        f"{dest} discarded its partial copy; {holder} still has the conversation, "
+        "paused for this move. "
+        f"On {holder}, restart the relay (`lop network restart`), then run the move again."
+    ), message
+    assert "stopped answering" not in message, message
+    assert "nothing was changed" not in message, message
+
+
 # ---------------------------------------------------------------------------
 # 2 — the handler's last arm: no movement failure may kill the control connection
 # ---------------------------------------------------------------------------
@@ -359,8 +399,8 @@ def test_a_retry_after_a_failed_copy_is_refused_until_the_source_relay_restarts(
     message = str(retried["message"])
     assert f"already in progress on {holder}" in message, message
     assert (
-        f"so nothing was changed. The move is stuck; restart the relay on {holder} "
-        "(`lop network restart`), then try the move again."
+        f"so nothing was changed. If the move does not finish on its own, restart the "
+        f"relay on {holder} (`lop network restart`), then try the move again."
     ) in message, message
     assert "this device" not in message, message
     assert "other device" not in message, message
