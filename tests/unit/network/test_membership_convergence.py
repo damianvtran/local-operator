@@ -1969,10 +1969,30 @@ def test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pa
     assert live is not None
     live.member_pulled_at = 0.0
     seq_before = a.server._membership_seq  # noqa: SLF001
+    stamp_before = live.member_pulled_at
+    publisher = threading.current_thread().name
     reports = a.server.refresh_membership()
     assert a.server._membership_seq == seq_before + 1  # noqa: SLF001
     assert live.member_pulled_at > 0.0, "the stand-in pass did not pull"
     assert reports[record.network_id].not_due == [], "the stand-in pass answered from not-due"
+    # What the two asserts above established, kept in the artifact: this control's
+    # pass is a direct call from the test thread (a stand-in), not the admit-time
+    # publisher, so the receipts name the caller instead of implying a CI cause.
+    record_property(
+        "status_old_empty_receipts",
+        json.dumps(
+            {
+                "seq_before": seq_before,
+                "seq_after": a.server._membership_seq,  # noqa: SLF001
+                "stamp_before": stamp_before,
+                "stamp_after": live.member_pulled_at,
+                "not_due": reports[record.network_id].not_due,
+                "link_id": live.link_id,
+                "publisher": publisher,
+            },
+            sort_keys=True,
+        ),
+    )
 
     row = next(r for r in relay.status()["networks"] if r["network_id"] == record.network_id)
     stale = row["membership"]["table"]

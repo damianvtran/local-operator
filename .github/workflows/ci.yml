@@ -370,6 +370,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
+        id: lint_install
         run: |
           python -m pip install --upgrade pip
           pip install flake8==7.4.1 black==26.1.0 isort==5.13.2
@@ -377,11 +378,25 @@ jobs:
       - name: Run flake8
         run: flake8 .
 
+      # BOTH FORMATTERS RUN once the tools are installed, whatever an earlier check
+      # said. With the default `success()` a flake8 or Black failure skipped isort
+      # (PR #2783 head ed2dfa64: Black failed and isort never ran, so its result was
+      # unknown and a second push was needed to learn it). The gate is the install
+      # step's outcome, not `always()`: a failed install must still block them, and
+      # a cancelled run must not start them. Each step still fails the job on its
+      # own (no `continue-on-error`), and `--diff` puts the actual rewrite in the
+      # log, so one failed run reports every formatter's whole answer.
       - name: Run black
-        run: black --check .
+        if: >-
+          !cancelled() &&
+          steps.lint_install.outcome == 'success'
+        run: black --check --diff .
 
       - name: Run isort
-        run: isort --check .
+        if: >-
+          !cancelled() &&
+          steps.lint_install.outcome == 'success'
+        run: isort --check --diff .
 
   # The i18n gate: the committed `Intl` tables and per-key modules must match
   # their generator (blocking), and the string ratchet + catalogue parity run

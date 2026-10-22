@@ -1179,6 +1179,54 @@ def _audit_unit_serial_wiring(steps: list[dict[str, Any]], env: dict[str, Any]) 
     return problems
 
 
+def _lint_format_problems(steps: list[dict[str, Any]]) -> list[str]:
+    """How the lint job's formatter steps can fail to report the whole answer.
+
+    Pure data in, sentences out, so the cases below can corrupt a copy of the real
+    steps. Covers only what a failed first push taught: the formatters must print their
+    diff, and must run after a successful tool install even when an earlier check failed.
+    """
+    problems: list[str] = []
+    install = next((s for s in steps if "pip install" in (s.get("run") or "")), None)
+    install_id = (install or {}).get("id")
+    if not install_id:
+        problems.append("the lint tool-install step has no id to gate the formatters on")
+    for tool in ("black", "isort"):
+        step = next((s for s in steps if (s.get("run") or "").startswith(f"{tool} --check")), None)
+        if step is None:
+            problems.append(f"no {tool} --check step")
+            continue
+        if "--diff" not in step["run"]:
+            problems.append(f"{tool} --check does not print its diff")
+        gate = " ".join(str(step.get("if") or "").split())
+        if "!cancelled()" not in gate or f"steps.{install_id}.outcome == 'success'" not in gate:
+            problems.append(f"{tool} is not gated on !cancelled() and a successful install")
+        if step.get("continue-on-error"):
+            problems.append(f"{tool} masks its failure with continue-on-error")
+    return problems
+
+
+def test_the_lint_formatters_print_their_diff_and_run_after_a_successful_install() -> None:
+    """Black and isort both report in one failed run, and neither can mask a failure."""
+    import copy
+
+    steps = _steps("lint")
+    assert _lint_format_problems(steps) == []
+
+    def gated(mutate: Any) -> list[str]:
+        changed = copy.deepcopy(steps)
+        mutate(changed)
+        return _lint_format_problems(changed)
+
+    def black(changed: list[dict[str, Any]]) -> dict[str, Any]:
+        return next(s for s in changed if (s.get("run") or "").startswith("black --check"))
+
+    assert any("diff" in p for p in gated(lambda c: black(c).update(run="black --check .")))
+    assert any("gated" in p for p in gated(lambda c: black(c).pop("if")))
+    assert any("masks" in p for p in gated(lambda c: black(c).update({"continue-on-error": True})))
+    assert any("no id" in p for p in gated(lambda c: c[2].pop("id")))
+
+
 def test_the_unit_job_runs_exactly_its_two_audited_pytest_steps() -> None:
     """The ordinary run and the serial controls are the ONLY pytest invocations.
 
@@ -1370,9 +1418,9 @@ def test_every_wiring_defect_is_caught_by_the_audit() -> None:
         if not any(expected in problem for problem in problems)
     ]
     assert not missed, f"the audit did not report these corruptions as expected: {missed}"
-    assert _audit_unit_serial_wiring(
-        _ci_jobs()["test"]["steps"], _ci_jobs()["test"]["env"]
-    ) == [], "the real wiring must be clean"
+    assert (
+        _audit_unit_serial_wiring(_ci_jobs()["test"]["steps"], _ci_jobs()["test"]["env"]) == []
+    ), "the real wiring must be clean"
 
 
 def test_a_third_or_misnamed_pytest_step_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1435,8 +1483,11 @@ def _case(module: str, name: str, *, verdict: str = "", drop: str = "", oracle: 
             continue
         value = "x"
         if prop in ("walk_oracle", "status_oracle"):
-            value = oracle or ("passed" if name in check_serial_controls._POSITIVE
-                               else "precondition: the observer saw 60 of 60")
+            value = oracle or (
+                "passed"
+                if name in check_serial_controls._POSITIVE
+                else "precondition: the observer saw 60 of 60"
+            )
         props.append(f'<property name="{prop}" value="{value}"/>')
     inner = f"<properties>{''.join(props)}</properties>{verdict}"
     return f'<testcase classname="{module}" name="{name}" time="0.1">{inner}</testcase>'
@@ -1473,8 +1524,17 @@ def test_the_checker_proves_six_present_once_with_receipts(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     "label",
-    ["missing", "skipped", "failure", "error", "duplicate", "extra", "no_property",
-     "positive_failed", "control_passed"],
+    [
+        "missing",
+        "skipped",
+        "failure",
+        "error",
+        "duplicate",
+        "extra",
+        "no_property",
+        "positive_failed",
+        "control_passed",
+    ],
 )
 def test_the_checker_fails_every_violation_of_the_present_contract(
     tmp_path: Path, label: str
@@ -1525,6 +1585,22 @@ def test_the_checker_proves_absence_and_fails_when_a_control_ran_in_the_shard(
     code, out = _run_checker("absent", _xml(tmp_path, other, _all_cases()[0]), tmp_path)
     assert code == 1, out
     assert "ran in the ordinary shard run" in out
+
+
+def test_the_checker_help_survives_stripped_docstrings(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``python -OO`` strips docstrings, so ``__doc__`` is None and ``--help`` must still work.
+
+    The description used to be ``__doc__.split(...)``, which pyright rejects
+    (``reportOptionalMemberAccess``) and which would raise ``AttributeError`` here. The
+    module attribute is set to None in-process, so no child is started.
+    """
+    monkeypatch.setattr(check_serial_controls, "__doc__", None)
+    with pytest.raises(SystemExit) as stop:
+        check_serial_controls.main(["--help"])
+    assert stop.value.code == 0
+    assert "usage:" in capsys.readouterr().out
 
 
 def test_the_checker_blocks_an_id_it_has_no_receipt_contract_for(tmp_path: Path) -> None:

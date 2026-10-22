@@ -5891,9 +5891,11 @@ finally:
                 report = None
         record_property(
             "walk_report",
-            json.dumps(report, sort_keys=True)
-            if report is not None
-            else "unavailable: the child wrote no readable report",
+            (
+                json.dumps(report, sort_keys=True)
+                if report is not None
+                else "unavailable: the child wrote no readable report"
+            ),
         )
     assert child.returncode == 0, f"{stdout}\n{stderr}"
     assert report is not None, "the child exited cleanly but wrote no report"
