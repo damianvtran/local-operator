@@ -857,16 +857,19 @@ async def test_retry_with_no_local_receipt_trusts_only_the_hub_admission(
     out = await _deliver(owner, ref, tmp_path, hub)
     assert out["action"] == "delivered" and out["recovered"] == "images_admitted"
     assert [p for _, p in hub.fetches] == ["screen", "context"]
-    # A hub REJECT with no local receipt: nothing to trust -> hold, no card.
-    hub2 = Hub([_png()])
-    owner2, ref2, _s2, cards2 = _connector_rig(monkeypatch, tmp_path / "b", hub2, verdict="deliver")
-    hub2.admission = {"verdict": "reject"}
-    out2 = await _deliver(owner2, ref2, tmp_path / "b", hub2)
-    assert out2 == {
-        "action": "hold",
-        "message_id": MID,
-        "code": "attachments_admission_unknown",
-    }
+    # A hub REJECT or text-only admission with no local receipt (R2-04): the
+    # metadata-only card goes out — no body, no image, nothing re-screened —
+    # instead of a hold that only burns retries until the wake is dropped.
+    for admission in ({"verdict": "reject"}, {"verdict": "allow"}):
+        sub = tmp_path / admission["verdict"]
+        hub2 = Hub([_png()])
+        owner2, ref2, screened2, cards2 = _connector_rig(monkeypatch, sub, hub2, verdict="deliver")
+        hub2.admission = dict(admission)
+        out2 = await _deliver(owner2, ref2, sub, hub2)
+        assert out2["action"] == "delivered_unadmitted"
+        assert out2["code"] == "admission_unverified"
+        assert len(cards2) == 1 and screened2 == [] and hub2.admits == []
+        assert [p for _, p in hub2.fetches] == ["screen", "context"]
 
 
 @pytest.mark.asyncio
@@ -1106,3 +1109,32 @@ async def test_text_only_session_model_strips_announces_and_marks_bridge_images(
     notices = [e for e in events if isinstance(e, NoticeEvent)]
     assert len(notices) == 1 and "does not accept images" in notices[0].text
     await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vision", [True, False])
+async def test_screening_hold_on_an_image_message_admits_nothing(
+    monkeypatch, tmp_path, vision
+) -> None:
+    """R2-02: a hold (e.g. an unparseable verdict) fails CLOSED for images.
+
+    No admit, no card, and the screen route stays open for the next attempt
+    because the hub saw no terminal verdict.
+    """
+
+    hub = Hub([_png()])
+    owner, ref, screened, cards = _connector_rig(
+        monkeypatch, tmp_path, hub, verdict="deliver", vision=vision
+    )
+
+    async def held(owner_: Any, item: Any, **kwargs: Any) -> Any:
+        screened.append(item)
+        return ScreenResult("hold", hold_code="parse_failed")
+
+    monkeypatch.setattr(conversation_mod, "screen_item", held)
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert out == {"action": "hold", "message_id": MID, "code": "parse_failed"}
+    assert hub.admits == [] and cards == []
+    assert ("attachments" in screened[0]) is vision
+    data, _mime = hub.fetch(hub.descriptors[0]["id"], "screen")
+    assert data == hub.images[0]
