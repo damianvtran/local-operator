@@ -549,8 +549,10 @@ class FakeClient:
         tenant_id=None,
         agent_label=None,
         thread_root_id=None,
+        attachment_ids=None,
         access=None,
     ):
+        FakeClient.behavior["last_send_attachment_ids"] = attachment_ids
         FakeClient.behavior["last_send"] = {
             "conversation_id": conversation_id,
             "client_ref": client_ref,
