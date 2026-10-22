@@ -12066,6 +12066,17 @@ def _scope_label(visibility: str) -> str:
     return "organization" if visibility == "org" else "public"
 
 
+def _quoted_name(value: Any) -> str:
+    """A display name for a quoted segment: quotes and backslashes escaped.
+
+    ``_safe`` strips control/format characters but leaves quotes, so a name like
+    ``Minerva Labs (acct_real)")`` could CLOSE the segment and fabricate the
+    trusted id that follows it on the same line (round-3 r3-m3).
+    """
+
+    return _safe(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _print_pin(pin: Any, *, indent: str = "  ") -> None:
     """Show the confirmed publisher + archive hash when a link carries one."""
 
@@ -12074,7 +12085,7 @@ def _print_pin(pin: Any, *, indent: str = "  ") -> None:
     name = pin.get("publisher_name")
     label = _safe(pin.get("publisher_id"))
     if name:
-        label += f' ("{_safe(name)}")'
+        label += f' ("{_quoted_name(name)}")'
     print(
         f"{indent}publisher: {label}",
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -12126,7 +12137,7 @@ def _bundle_lines(
         if publisher.get("name"):
             # QUOTED (D14): a display name can otherwise mimic a trusted id
             # textually ("Minerva Labs (acct_real)") inside the same line.
-            label += f' ("{_safe(publisher.get("name"))}")'
+            label += f' ("{_quoted_name(publisher.get("name"))}")'
         lines.append(
             f"{indent}publisher: {label}",
             # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -12334,6 +12345,7 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
         )
     if (
         bundle
+        and visibility == "public"
         and getattr(args, "json", False)
         and not getattr(args, "yes", False)
         and not (confirm_publisher and confirm_hash)
@@ -12393,10 +12405,20 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
         print(_json.dumps(result, indent=2))
         return 0
     link = result.get("link") or {}
-    print(
-        f"installed {_safe(link.get('name') or args.hub_id)}",
-        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
-    )
+    reports = result.get("reports") or []
+    outcome = str((reports[0] if reports else {}).get("outcome") or "")
+    if outcome == "unchanged":
+        # A plain pull of an already-linked skill REPLAYS the existing link:
+        # saying "installed" would claim a write that never happened (D19).
+        print(
+            f"already installed; no change: {_safe(link.get('name') or args.hub_id)}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    else:
+        print(
+            f"installed {_safe(link.get('name') or args.hub_id)}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
     _print_pin(link.get("bundle_confirmation"), indent="  ")
     return 0
 
@@ -12450,11 +12472,13 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
         # the hub still holds exactly that tree, so the declared ancestor is a
         # fact rather than a guess.
         if record.lineage != "clean" or record.recorded_by == prov.UNKNOWN_BASELINE:
-            print(
-                "error: this link's lineage is not clean; resolve or pull again first",
-                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            return _skills_fail(
+                args,
+                LinkError(
+                    "lineage-not-clean",
+                    "this link's lineage is not clean; resolve or pull again first",
+                ),
             )
-            return 1
         try:
             # Both sides are already canonical (a baseline's fields verbatim, the
             # check's adapter projection), so the fingerprint IS the comparison;
@@ -12465,11 +12489,13 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
         except Exception:  # noqa: BLE001 - an unreadable side proves no agreement
             agreed = False
         if not agreed:
-            print(
-                "error: the hub moved since this link's baseline; run `lop skills sync` first",
-                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            return _skills_fail(
+                args,
+                LinkError(
+                    "hub-moved",
+                    "the hub moved since this link's baseline; run `lop skills sync` first",
+                ),
             )
-            return 1
         from dataclasses import replace as dc_replace
 
         from local_operator.hub_sync.push import receipt_for
@@ -12638,8 +12664,12 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
         print(_json.dumps(payload, indent=2))
         return 0
     for item in payload.get("reports") or []:
-        detail = item.get("error_class") or item.get("outcome") or ""
-        print(f"{item.get('name')}: {item.get('outcome')} {detail}".rstrip())
+        code = str(item.get("error_class") or "")
+        detail = _skills_refusal(_reason_error(code)) if code else str(item.get("outcome") or "")
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"{_safe(item.get('name'))}: {item.get('outcome')} {detail}".rstrip()
+        )
     return 0
 
 
@@ -12669,6 +12699,9 @@ def _skills_status(args: argparse.Namespace, base_dir: Path) -> int:
             f"{_scope_label(str(link.get('visibility') or 'public'))} "
             f"state={pull.get('state') or 'unknown'}"
         )
+        code = str(pull.get("error_class") or "")
+        if code and code in _SKILL_REFUSAL_TEXT:
+            print(f"  {_skills_refusal(_reason_error(code))}")
         _print_pin(link.get("bundle_confirmation"), indent="  ")
     return 0
 
