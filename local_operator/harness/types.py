@@ -547,6 +547,38 @@ def coerce_content_blocks(value: Any) -> Any:
 Content = TextContent | ImageContent | AudioContent | AttachmentContent
 
 
+def drop_blank_text_blocks(content: Sequence[Content]) -> list[Content]:
+    """``content`` without the text blocks that carry nothing a reader can use.
+
+    The ONE definition of a removable text block, shared by the constructor
+    (``Message.user``), the transcript encoder and the transcript reader so the
+    three cannot disagree about what is stored (#2460 follow-up):
+
+    - an EMPTY text block always goes. It persists as ``{}`` (the encoder dumps
+      with ``exclude_defaults``) and Anthropic refuses the whole request over it
+      on every later turn, because the row is in history.
+    - a WHITESPACE-ONLY text block goes only when the message carries media (an
+      image, audio, an artifact) AND no text block with anything to read. There
+      it is an artefact of the composer, not an utterance. On its own it is the
+      only thing the user sent, so it is kept and left to the wires, which drop
+      it and backfill the turn. Beside real text it may be a separator
+      (``line1``, ``\\n``, ``line2``) that ``Message.text`` joins, so it is kept
+      there too: dropping it would change the text a reader sees.
+
+    Order of the remaining blocks is preserved and nothing else is touched, so
+    ``Message.text`` loses only whitespace that has no readable text around it.
+    """
+    has_media = any(not isinstance(block, TextContent) for block in content)
+    has_words = any(isinstance(block, TextContent) and block.text.strip() for block in content)
+    drop_whitespace = has_media and not has_words
+    return [
+        block
+        for block in content
+        if not isinstance(block, TextContent)
+        or (block.text.strip() if drop_whitespace else block.text)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Tool calls and results
 # ---------------------------------------------------------------------------
@@ -692,6 +724,10 @@ class Message(BaseModel):
         turn, because the poisoned row is in history and therefore resent
         forever (#2460). Dropping it is what makes an image-only send store
         ``[{attachment, mime_type}]`` instead of ``[{}, {attachment, ...}]``.
+        Whitespace-only text BESIDE an attachment is dropped too (a composer
+        artefact, never an utterance); whitespace-only text on its own is kept,
+        because it is the whole of what the user sent — see
+        ``drop_blank_text_blocks`` for the one rule all writers share.
 
         A message with no text and no attachments is therefore empty, and every
         wire has to HANDLE that rather than receive a block it cannot use —
@@ -704,10 +740,8 @@ class Message(BaseModel):
         ``_is_empty_assistant``, ``EMPTY_TOOL_RESULT_TEXT`` and
         ``EMPTY_USER_TEXT``.
         """
-        content: list[Content] = [TextContent(text=text)] if text else []
-        content.extend(images or ())
-        content.extend(audio or ())
-        return Message(role="user", content=content, **extra)
+        content: list[Content] = [TextContent(text=text), *(images or ()), *(audio or ())]
+        return Message(role="user", content=drop_blank_text_blocks(content), **extra)
 
     @staticmethod
     def assistant(text: str = "", **extra: Any) -> "Message":
