@@ -14,10 +14,13 @@ import errno
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -433,7 +436,9 @@ async def test_refused_socket_recovers_without_replaying_input(
         )
         deliveries = []
 
-        def recover(delivery: str = "pre_action") -> guest_supervisor.ReceiptResult:
+        def recover(
+            delivery: str = "pre_action", *, budget_s: float | None = None
+        ) -> guest_supervisor.ReceiptResult:
             deliveries.append(delivery)
             return next(checks)
 
@@ -450,7 +455,11 @@ def test_recovery_record_contains_cause_and_stderr(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         record = {
             "restart": 123,
             "exit_code": "exited",
@@ -493,17 +502,310 @@ async def test_crash_loop_exhausts_wait_and_ends_cleanly(
             provider._credentials, provider._region
         ).http_post_json
         provider._clients.ec2 = _NoConsoleEc2()
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: False)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (False, {"answered": False}),
+        )
         with pytest.raises(
             aws_mod.GuestExecutionError, match="supervisor recovery budget exhausted"
         ):
             await provider.execute(["not_applied()"])
-        # One fixed wait, then a clean end without sending stale-frame input.
-        assert stubs.slept.count(0.5) == 6
+        # The whole pre-action wall-clock wait (probes at t=0, 0.5, 1, 2, 3, 5,
+        # 7, 9, 11, 13; no probe is started at t=15 with nothing left to answer
+        # inside), then a clean end without sending input: a patched probe
+        # reports no verdict, so the receipt is treated as genuinely
+        # unavailable and the action is never attempted.
+        assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["recovered"] is False
         assert evidence["final_guest_record"].startswith("not retrieved")
+        # Every probe is accounted for, even when the probe itself is stubbed:
+        # the list is index-aligned with the attempts, never padded.
+        assert [entry["probe"] for entry in evidence["probe_outcomes"]] == list(range(1, 11))
         assert not any("not_applied()" in str(body) for body in stubs.guest_posts)
+
+
+@pytest.mark.asyncio
+async def test_an_observation_wait_is_short_even_when_the_server_is_unreachable(
+    tmp_path: Path,
+) -> None:
+    """An observation read is not worth the pre-action wait.
+
+    It consumes a restart generation and then reads a frame; when the server
+    cannot be reached the frame read fails and is reported anyway, and the
+    harness re-observes once the guest is back. Paying 15 s here would delay
+    every retry for nothing.
+    """
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        provider._supervisor_unit = "action-server.service"
+        provider._clients.http_get = lambda url, timeout: 503
+        observed = await provider.observe()
+
+    assert observed["screenshot"] == b"png"
+    assert aws_mod._OBSERVATION_RECOVERY_BUDGET_S < aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+    assert sum(stubs.slept) == aws_mod._OBSERVATION_RECOVERY_BUDGET_S
+
+
+def test_exhaustion_evidence_names_which_path_element_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six silent probes used to collapse to ``read_failed: true``.
+
+    The decision is unchanged -- still ``read_failed``, still the full wall-clock
+    wait, still no input sent -- but the evidence now names the element that
+    failed. A refused port, a name that does not resolve and a connect timeout
+    are three different faults, and only one of them is the action server.
+    """
+
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        provider._supervisor_unit = "action-server.service"
+        # The REAL probe, over a real (closed) loopback port: the chain under
+        # test is the one a dying guest produces, not a stand-in.
+        provider._clients.http_get = aws_mod.build_clients(
+            provider._credentials, provider._region
+        ).http_get
+        result = provider._recover_guest_supervisor()
+        assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+
+    assert result.state == "read_failed"
+    assert result.recovery_exhausted is True
+    # Every probe failed on the CONNECT: the host never reached the guest, which
+    # is a different fact from a receipt that could not be read over a live
+    # server -- and the only one that lets a caller try the action.
+    assert result.path_unreachable is True
+    assert provider._cache_root is not None
+    evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+    assert evidence["read_failed"] is True
+    outcomes = evidence["probe_outcomes"]
+    assert len(outcomes) == 10, "one probe plus the backoff schedule"
+    assert evidence["path_unreachable"] is True
+    assert evidence["budget_s"] == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+    # A real-clock refused-port run ends before the budget (13.596 s measured):
+    # the last 2 s wait does not fit, so equality is an artefact of the stub
+    # clock. The invariant is that the wait never spends MORE than its budget.
+    assert 0.0 < evidence["waited_s"] <= aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+    assert {outcome["kind"] for outcome in outcomes} == {"refused"}
+    assert {outcome["errno"] for outcome in outcomes} == {errno.ECONNREFUSED}
+    assert all(outcome["answered"] is False for outcome in outcomes)
+    # The other side of the distinction: this branch MAY say unreachable, and it
+    # names the element. An answered 503 must never reach this wording.
+    assert "unreachable" in evidence["cause"]
+    assert "refused" in evidence["cause"]
+
+
+#: How long the loopback server below holds ``/terminal``. Longer than the OLD
+#: 0.5 s probe deadline, far shorter than the watchdog-parity 5 s one -- the
+#: window where a busy action server was mistaken for an ambiguous path.
+_BUSY_TERMINAL_DELAY_S = 1.5
+
+
+def _start_action_server(
+    *, terminal_delay_s: float
+) -> tuple[ThreadingHTTPServer, list[dict[str, Any]], threading.Thread]:
+    """A real loopback action server: delayed ``/terminal``, recording ``/execute``.
+
+    Real sockets rather than a stubbed client, because the defect lives in the
+    interaction between the probe's deadline and a server that is slow to
+    answer; a stub cannot reproduce a read timeout. The receipt command is
+    answered with a healthy baseline, so a probe that succeeds proceeds to a
+    normal ``verified_none`` rather than a restart.
+    """
+
+    action_posts: list[dict[str, Any]] = []
+    baseline = {
+        "schema_version": 1,
+        "records": [],
+        "captured_exits": 0,
+        "baseline_nrestarts": 0,
+        "baseline_active_enter": 100,
+        "systemd_nrestarts": 0,
+        "systemd_active_enter": 100,
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        # The stdlib's own signature: the parameter is literally ``format`` and
+        # keyword-capable, and pyright rejects a ``*args``-only override as an
+        # incompatible method override.
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def _respond(self, body: bytes) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            # Accepted immediately, answered only after the simulated screenshot
+            # or page load: exactly the shape a short probe calls ambiguous.
+            time.sleep(terminal_delay_s)
+            self._respond(b"")
+
+        def do_POST(self) -> None:
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            script = " ".join(payload["command"])
+            if "/var/lib/lop-action-supervisor" in script:
+                output = "escalation=agentless\n" + json.dumps(baseline)
+            else:
+                action_posts.append(payload)
+                output = ""
+            self._respond(json.dumps({"returncode": 0, "output": output, "error": ""}).encode())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, action_posts, thread
+
+
+def _stop_action_server(server: ThreadingHTTPServer, thread: threading.Thread) -> None:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+def _provider_with_real_transport(stubs: _Stubs, tmp_path: Path) -> aws_mod.AwsProvider:
+    """The provider wired to the REAL loopback transport, with a supervisor unit."""
+
+    provider = _provider_over(stubs, tmp_path)
+    assert provider._cache_root is not None
+    provider._supervisor_unit = "action-server.service"
+    transport = aws_mod.build_clients(provider._credentials, provider._region)
+    provider._clients.http_get = transport.http_get
+    provider._clients.http_post_json = transport.http_post_json
+    provider._clients.ec2 = _NoConsoleEc2()
+    return provider
+
+
+def test_recovery_probe_timeout_is_not_shorter_than_the_watchdogs() -> None:
+    """Probe-timeout parity, pinned at the source of the other constant.
+
+    The watchdog states its 5 s bound inside its guest source, derived from the
+    same fact: the probe classifies, it does not kill, so a mislabel costs
+    evidence fidelity and nothing else. The host probe had no such parity --
+    0.5 s against a server whose control endpoints answer in seconds -- and
+    that asymmetry refused a live episode. Parsed rather than duplicated so an
+    edit to either constant fails here instead of in production.
+    """
+
+    watchdog = re.search(
+        r"^PROBE_TIMEOUT_S = ([\d.]+)$", guest_supervisor.WATCHDOG_SOURCE, re.MULTILINE
+    )
+    assert watchdog is not None, "the watchdog's probe bound moved or was renamed"
+    assert aws_mod._RECOVERY_PROBE_TIMEOUT_S >= float(watchdog.group(1))
+
+
+@pytest.mark.asyncio
+async def test_a_busy_server_is_not_mistaken_for_a_dead_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Busy is not dead: one real busy server, one constant apart.
+
+    The action server is single-threaded around its control endpoints, so a
+    1280x720 screenshot or a page load blocks ``/terminal`` for seconds. At the
+    old 0.5 s probe deadline that reads as ``ambiguous`` -- connected, never
+    answered -- which leaves ``path_unreachable`` false and refuses an action
+    the SAME server serves once the probe is allowed the watchdog's 5 s. The
+    negative control runs the old constant against this server and must send
+    nothing; the positive control runs the new one and must attempt and deliver.
+    """
+
+    server, action_posts, thread = _start_action_server(terminal_delay_s=_BUSY_TERMINAL_DELAY_S)
+    real_probe_timeout = aws_mod._RECOVERY_PROBE_TIMEOUT_S
+    try:
+        monkeypatch.setattr(aws_mod, "GUEST_PORT", server.server_address[1])
+        with _Stubs() as stubs:
+            provider = _provider_with_real_transport(stubs, tmp_path)
+            assert provider._cache_root is not None
+
+            # Negative control: the OLD constant on the SAME server. The budget
+            # is shortened only because ten 0.5 s timeouts would spend 5 s of
+            # real test time; no budget makes a 0.5 s probe outlast a 1.5 s
+            # answer, which is the point.
+            monkeypatch.setattr(aws_mod, "_RECOVERY_PROBE_TIMEOUT_S", 0.5)
+            monkeypatch.setattr(aws_mod, "_PRE_ACTION_RECOVERY_BUDGET_S", 2.0)
+            with pytest.raises(aws_mod.GuestExecutionError, match="not attempted"):
+                await provider.execute(["busy()"], settle=False)
+            assert action_posts == [], "the old probe must refuse without sending input"
+            evidence = json.loads(
+                (provider._cache_root / "guest-supervisor-recovery.json").read_text()
+            )
+            assert evidence["path_unreachable"] is False
+            assert "unreachable" not in evidence["cause"]
+            assert {entry["error_class"] for entry in evidence["probe_outcomes"]} == {"ReadTimeout"}
+            assert evidence["probe_timeout_s"] == 0.5
+            assert evidence["budget_s"] == 2.0
+            assert evidence["waited_s"] == 2.0
+            assert all(entry["timeout_s"] == 0.5 for entry in evidence["probe_outcomes"])
+
+            # Positive control: the watchdog-parity constant, same server, same
+            # delay. The probe answers, the receipt reads, the action lands.
+            monkeypatch.setattr(aws_mod, "_RECOVERY_PROBE_TIMEOUT_S", real_probe_timeout)
+            monkeypatch.setattr(aws_mod, "_PRE_ACTION_RECOVERY_BUDGET_S", 15.0)
+            await provider.execute(["busy()"], settle=False)
+            assert len(action_posts) == 1, "the patient probe must attempt and deliver"
+    finally:
+        _stop_action_server(server, thread)
+
+
+@pytest.mark.asyncio
+async def test_a_zero_budget_refuses_instead_of_licensing_the_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``all([])`` is True, and that must never become permission to send.
+
+    ``path_unreachable`` is the one verdict that lets ``execute`` attempt an
+    action over an unread receipt. A non-positive budget makes ZERO probes; on
+    an empty list ``all(...)`` used to evaluate True, so the wait granted the
+    very licence it had learned nothing to support. The real server here would
+    accept and record the action, which is exactly what must not happen.
+    """
+
+    server, action_posts, thread = _start_action_server(terminal_delay_s=0.0)
+    try:
+        monkeypatch.setattr(aws_mod, "GUEST_PORT", server.server_address[1])
+        with _Stubs() as stubs:
+            provider = _provider_with_real_transport(stubs, tmp_path)
+            assert provider._cache_root is not None
+            monkeypatch.setattr(aws_mod, "_PRE_ACTION_RECOVERY_BUDGET_S", 0.0)
+            with pytest.raises(aws_mod.GuestExecutionError, match="not attempted"):
+                await provider.execute(["must_not_send()"], settle=False)
+            assert action_posts == [], "a wait that probed nothing must not authorize a send"
+            evidence = json.loads(
+                (provider._cache_root / "guest-supervisor-recovery.json").read_text()
+            )
+            assert evidence["probe_outcomes"] == []
+            assert evidence["path_unreachable"] is False
+            assert evidence["budget_s"] == 0.0
+            assert evidence["waited_s"] == 0.0
+            assert "unreachable" not in evidence["cause"]
+    finally:
+        _stop_action_server(server, thread)
+
+
+def test_a_budget_shorter_than_the_first_wait_does_not_index_an_empty_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sub-0.5 s budget still makes one probe, so the schedule cannot be empty.
+
+    The failed probe indexes the wait that follows it; when the derivation
+    returned ``()`` for a budget below the first 0.5 s wait, that lookup raised
+    ``IndexError`` instead of letting the deadline end the wait.
+    """
+
+    assert aws_mod._recovery_probe_delays(0.0) == (0.5,)
+    assert aws_mod._recovery_probe_delays(0.1) == (0.5,)
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
+    with _Stubs() as stubs:
+        provider = _provider_with_real_transport(stubs, tmp_path)
+        result = provider._recover_guest_supervisor(budget_s=0.1)
+    assert result.state == "read_failed"
+    assert result.recovery_exhausted is True
+    assert result.path_unreachable is True
 
 
 _LOOPBACK_SERVER = r"""
@@ -1118,7 +1420,11 @@ async def test_receipt_read_failure_retries_once_and_never_posts_stale_input(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         calls = []
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
@@ -1173,7 +1479,11 @@ async def test_a_receipt_behind_a_guest_warning_is_read_and_its_restart_is_not_i
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         calls = []
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
@@ -1215,7 +1525,11 @@ async def test_a_shadow_envelope_before_the_receipt_cannot_report_no_restart(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         calls = []
         shadow = json.dumps(_envelope([]))
 
@@ -1253,7 +1567,11 @@ async def test_unreadable_receipt_returns_a_fresh_adapter_binding_without_input(
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         calls = []
 
         def invalid(*args: Any, **kwargs: Any) -> guest_disk.CommandResult:
@@ -1277,7 +1595,11 @@ def test_transient_receipt_failure_retries_before_accepting_a_result(
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         replies = iter(
             [
                 guest_disk.CommandResult(1, "", ""),
@@ -1299,7 +1621,11 @@ def test_withheld_records_are_explicitly_marked(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
             if _is_restart_command(argv):
@@ -1333,9 +1659,13 @@ async def test_false_readiness_does_not_invent_recovery_budget_exhaustion(
         monkeypatch.setattr(
             provider,
             "_recover_guest_supervisor",
-            lambda *a: guest_supervisor.ReceiptResult("verified_none"),
+            lambda *a, **k: guest_supervisor.ReceiptResult("verified_none"),
         )
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: False)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (False, {"answered": False, "status": 503}),
+        )
         with pytest.raises(aws_mod.GuestExecutionError) as raised:
             await provider.execute(["not_sent()"])
         assert "guest down" in str(raised.value)
@@ -1349,7 +1679,11 @@ async def test_statement_three_restart_interrupts_batch_and_rebinds_before_next_
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         reads = 0
         input_posts = []
 
@@ -1430,7 +1764,11 @@ async def test_failed_first_capture_write_cannot_hide_generation_change(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
             nonlocal generation
@@ -3194,7 +3532,11 @@ def _recovering_provider(
     stubs = _Stubs()
     provider = _provider_over(stubs, tmp_path)
     provider._supervisor_unit = "action-server.service"
-    monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+    monkeypatch.setattr(
+        provider,
+        "_probe_control_server_outcome",
+        lambda timeout: (True, {"answered": True}),
+    )
     monkeypatch.setattr(aws_mod.time, "time_ns", lambda: 777)
     monkeypatch.setattr(aws_mod.time, "monotonic", stubs.monotonic)
     events: list[str] = []
@@ -3376,7 +3718,11 @@ async def test_restart_dispatch_failure_fails_closed_without_polling(
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         monkeypatch.setattr(aws_mod.time, "time_ns", lambda: 777)
         events: list[str] = []
         posts: list[str] = []
@@ -3559,13 +3905,16 @@ def _execute_watchdog(
     target_unit: str = "action-server.service",
     probe_log: list[tuple[str, int, float]] | None = None,
     probe_status: bytes = b"HTTP/1.0 200 OK\r\n",
+    probe_timeouts: bool = False,
 ) -> tuple[dict[str, Any], list[Any], float]:
     """Run the shipped WATCHDOG_SOURCE against a redirected /proc and fake manager.
 
     The fake clock advances one ``INTERVAL_S`` per cycle, so the rate limits are
     exercised as real elapsed time instead of patched thresholds. ``answering``
     drives the one-shot HTTP liveness probe (a wedged listener accepts at the
-    kernel level and then returns nothing). ``failures`` makes the named cycle's
+    kernel level and then returns nothing); ``probe_timeouts`` makes that probe
+    raise the ``TimeoutError`` a BUSY server produces, which is the shape that
+    must never be mistaken for death. ``failures`` makes the named cycle's
     ``systemctl`` raise; ``failures_on`` targets one verb.
 
     ``restart_effect`` chooses what the transient restart does on the fake
@@ -3602,13 +3951,20 @@ def _execute_watchdog(
             (net / "tcp6").write_text(header)
 
     class _Connection:
-        def __init__(self, ok: bool) -> None:
+        def __init__(self, ok: bool, slow: bool = False) -> None:
             self.ok = ok
+            self.slow = slow
 
         def sendall(self, payload: bytes) -> None:
             pass
 
         def recv(self, size: int) -> bytes:
+            if self.slow:
+                # A server busy with an action: the socket is connected and
+                # nothing arrives before the probe bound. ``socket.timeout`` is
+                # ``TimeoutError`` since 3.10 and is an ``OSError``, exactly
+                # what ``answers()`` catches.
+                raise TimeoutError("timed out")
             return probe_status if self.ok else b""
 
         def close(self) -> None:
@@ -3618,7 +3974,7 @@ def _execute_watchdog(
         probes.append((address[0], address[1], timeout))
         if address[0] != reachable_host:
             raise OSError("no route to host")
-        return _Connection(answers[min(clock["cycle"], len(answers) - 1)])
+        return _Connection(answers[min(clock["cycle"], len(answers) - 1)], probe_timeouts)
 
     def check_output(args: Any, **kwargs: Any) -> str:
         calls.append(args)
@@ -3898,30 +4254,66 @@ def test_one_unresponsive_observation_is_not_death(tmp_path: Path) -> None:
     assert record["last_observation"] == "unresponsive"
 
 
-def test_an_active_wedge_is_repaired_after_two_consecutive_observations(
-    tmp_path: Path,
-) -> None:
-    """The host cannot reach a wedged listener either, so the guest must act.
+def test_a_busy_but_active_server_is_never_touched(tmp_path: Path) -> None:
+    """A HEALTHY server too slow for any probe must never be killed.
 
-    ``_recover_guest_supervisor`` only probes before a restart, and its probe
-    fails against the wedge; two consecutive silences are the evidence that
-    this is a dead server rather than a slow one.
+    Production shape: a 1280x720 screenshot or a long page load outlives the
+    probe bound, and the retired two-consecutive-silence rule killed exactly
+    such a server mid-action -- the adapter's in-flight request then died with
+    a transport error at step 2 and the episode was lost. ``ActiveState=active``
+    is systemd's statement that the process is still there, so silence is an
+    OBSERVATION: over a sustained window no kill, start, reset, stop or
+    dispatch may be issued, and no attempt may be spent.
+
+    ACCEPTED COST (the reason this is a rule and not a heuristic): a listener
+    that accepts and never answers while the unit stays ``active`` -- main.py
+    alive, worker hung, socket held -- is now repaired by neither the guest nor
+    the host, so that episode is lost. The alternative kills the identical
+    shape a busy server presents, which is one episode against every episode.
+    Revisiting it needs a record of ``unresponsive`` with ``attempts: 0`` over
+    many cycles WHILE the host sees ``active`` for the same window -- and then
+    a discriminator stronger than silence (socket-owner identity), never a
+    shorter probe.
     """
-    record, calls, _ = _execute_watchdog(
-        tmp_path,
+    record, calls, elapsed = _execute_watchdog(
+        tmp_path / "busy",
         active_states=["active"],
         listening=[True],
         answering=[False],
-        cycles=3,
-        clock_start=1000.0,
+        probe_timeouts=True,
+        cycles=30,
     )
-    assert record["attempts"] == 1
-    assert record["last_trigger"] == "unresponsive"
-    assert record["last_action"] == "verified-restart"
-    # last_outcome reflects the most recent DECISION, and the cycle after a
-    # repair is legitimately throttled; the dispatch itself is the event.
-    assert record["events"][0]["outcome"] == "restarted"
+    assert _dispatches(calls) == []
+    assert not any(
+        len(args) > 1 and args[1] in {"kill", "start", "stop", "restart", "reset-failed"}
+        for args in calls
+    ), "the watchdog issued a destructive verb against a live unit"
+    assert record["attempts"] == 0
+    assert record["intervened"] is False
+    assert record["events"] == []
     assert record["last_observation"] == "unresponsive"
+    # SUSTAINED, and proved by ITERATION COUNT rather than the wall of a
+    # seeded clock: the fake clock starts at 0 (the harness returns it
+    # absolutely), and every silent cycle issues exactly one unit query, so a
+    # window that collapsed to a cycle or two cannot satisfy this.
+    shows = [args for args in calls if len(args) > 1 and args[1] == "show"]
+    assert len(shows) >= 25, f"only {len(shows)} cycles ran; the window is not sustained"
+    assert elapsed >= guest_supervisor.WATCHDOG_INTERVAL_S * 25
+
+    # NEGATIVE CONTROL: the SAME silence with the unit not running must
+    # still dispatch, so the test above cannot pass on a dead harness -- and
+    # the discriminating variable is the unit state, not the probe.
+    control, control_calls, _ = _execute_watchdog(
+        tmp_path / "control",
+        active_states=["failed"],
+        listening=[True],
+        answering=[False],
+        probe_timeouts=True,
+        cycles=1,
+    )
+    assert len(_dispatches(control_calls)) == 1
+    assert control["attempts"] == 1
+    assert control["last_trigger"] == "unresponsive"
 
 
 def test_an_active_unit_with_no_listener_is_observed_not_touched(
@@ -4529,7 +4921,11 @@ async def test_a_restart_that_needed_the_watchdog_is_visible_in_the_evidence(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
 
         envelope = _envelope([_restart_record()])
         envelope["watchdog"] = _watchdog_payload(attempts=2, capped=True)
@@ -4561,7 +4957,11 @@ async def test_a_changed_watchdog_summary_is_written_without_a_recovery(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         writes: list[str] = []
         real_write = provider._write_supervisor_evidence
 
@@ -4625,7 +5025,11 @@ async def test_a_latched_recovery_leaves_a_receipt_the_host_can_post_through(
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         posted: list[str] = []
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
@@ -4663,7 +5067,11 @@ async def test_a_watchdog_only_change_never_overwrites_a_verified_recovery(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         envelope = _envelope([_restart_record()])
         envelope["watchdog"] = _watchdog_payload(attempts=1)
 
@@ -4698,7 +5106,11 @@ async def test_a_corrupt_watchdog_record_never_changes_a_recovery_outcome(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
 
         envelope = _envelope([_restart_record()])
         envelope["watchdog"] = "not a record"

@@ -84,7 +84,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
-from local_operator.network import projection, store, wire
+from local_operator.network import projection, redial, store, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.credentials.repair import repair_checks
@@ -261,6 +261,15 @@ MEMBERSHIP_PULL_MIN_INTERVAL_S = 15.0
 #: action and no restart, which is what the round-3 watch demanded and what a
 #: cadence on a LISTING cannot provide (a device nobody lists is still a member).
 MEMBERSHIP_PULL_PASS_S = 5.0
+
+#: How often a link's liveness is written onto its member row (``last_seen_at``).
+#: Once per 30 s keeps a peer's "last seen" within a keepalive of the truth while
+#: costing one record write per link per half-minute, not one per frame.
+LAST_SEEN_PERSIST_S = 30.0
+
+#: How often the redial loop wakes to look for a lost link whose backoff expired.
+#: The schedule itself is ``redial.backoff_s``; this is only its resolution.
+REDIAL_TICK_S = 1.0
 
 
 #: How long ONE member-table read may wait before the refresh gives up on it.
@@ -906,6 +915,43 @@ def probe_candidates(
     )
 
 
+def _dial_candidates(member: MemberRecord) -> list[str]:
+    """The member's declared endpoints, then the observed inbound address if new.
+
+    The observed address is appended LAST and only when it is not already declared:
+    a declaration is the member's own answer and always leads; the observation is
+    the way out when every declaration has gone stale (``observed_endpoint``).
+    """
+    candidates = list(member.endpoints)
+    observed = str(getattr(member, "observed_endpoint", "") or "")
+    if observed and observed not in candidates:
+        candidates.append(observed)
+    return candidates
+
+
+def _host_only(address: str) -> str:
+    """``host`` of ``host:port`` (IPv6 brackets stripped); the input when unsplittable."""
+    text = str(address or "")
+    host, sep, _port = text.rpartition(":")
+    return host.strip("[]") if sep else text
+
+
+def _newest_seen(*stamps: Any) -> float | None:
+    """The newest of several optional epoch-second stamps, rounded, or ``None``."""
+    values = [
+        float(stamp)
+        for stamp in stamps
+        if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and stamp > 0
+    ]
+    return round(max(values), 3) if values else None
+
+
+def _is_loopback_endpoint(endpoint: str) -> bool:
+    """Whether ``host:port`` names this machine only (127/8, ::1, localhost)."""
+    host = str(endpoint or "").rsplit(":", 1)[0].strip("[]").lower()
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
 def peer_link_state(
     link: PeerLink | None, reason: str, attempts: Sequence[CandidateAttempt]
 ) -> str:
@@ -1381,6 +1427,9 @@ def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, lis
             if retired:
                 _retire_superseded_rows(record, retired, survivor=incoming)
                 _take_over_standing(retired[-1], incoming)
+            # An observation is THIS device's own (``observed_endpoint``); one
+            # relayed in a third party's table is where that party saw it from.
+            incoming.observed_endpoint = ""
             record.members.append(incoming)
             added.append(device_id)
             changed = True
@@ -3803,6 +3852,12 @@ class PeerLink:
         #: peer answering something nobody asked. Counted, never logged per frame (A7);
         #: see the drop path in ``_handle`` for why it must not be dispatched.
         self.stray_replies = 0
+        #: Stream pushes/closes that arrived for a stream this relay had already
+        #: ended (see ``_handle``). Counted, never audited or answered.
+        self.late_stream_frames = 0
+        #: When :meth:`RelayServer.note_link_activity` last PERSISTED this link's
+        #: liveness onto the member row (throttled; zero = never).
+        self.seen_persisted_at = 0.0
         self.frames_out = 0
         self.bytes_in = 0
         self.bytes_out = 0
@@ -3983,6 +4038,7 @@ class PeerLink:
                 self.frames_in += 1
                 self.last_frame_at = time.time()
                 self.server.identity_use.note_frame(self.device_id)
+                self.server.note_link_activity(self)
                 self._handle(frame)
         except TimeoutError:
             self.server.audit_idle(self)
@@ -4031,6 +4087,18 @@ class PeerLink:
             if action == "push" and self.server.route_stream_push(self, frame):
                 return
             if action == "closed" and self.server.route_stream_closed(self, frame):
+                return
+            if action in ("push", "closed"):
+                # A PUSH OR CLOSE FOR A STREAM THIS RELAY NO LONGER HOLDS IS DROPPED,
+                # never dispatched (2026-10-21). When a viewer leaves, this side ends
+                # its stream at once, but the owner's pump has already queued frames
+                # for it; dispatching each one reached ``_op_stream``, which refused
+                # it as "'push' is not a stream action" — an ``authorisation_refused``
+                # row AND an error reply per frame. Measured on the operator's mac:
+                # 26 rows in 50 ms after one viewer-gone close, 180 in total. A late
+                # push carries no request to answer, so the stray-reply rule above
+                # applies: count it, answer nothing.
+                self.late_stream_frames += 1
                 return
         reply = self.server.dispatch(self, frame)
         if reply is not None:
@@ -4429,6 +4497,13 @@ class RelayServer:
         self._relay_req = 0
         self.authorizer = Authorizer(self.store_view, self.audit)
         self.identity_use = IdentityUseTracker()
+        #: Per-peer redial schedule and the reconnecting/down verdict surfaces read
+        #: (``network.redial``). Fed by link admission and close; read by
+        #: ``_redial_loop`` and ``peer_status``.
+        self.redial = redial.RedialTracker()
+        #: Collapses repeats of one identical handshake refusal into one audit row
+        #: per window (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these.
+        self._refusal_rows = redial.RefusalCoalescer()
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
         self._listener: socket.socket | None = None
@@ -4615,6 +4690,12 @@ class RelayServer:
             # member, and a healthy pair holds its link open forever, so there is no
             # "next contact" to hang the refresh on (Q-R2-1, QA round 3).
             (self._membership_loop, "mesh-membership"),
+            # LOST LINKS ARE RETRIED ON THEIR OWN SCHEDULE (``network.redial``),
+            # not at the UI's poll rate, and each member is dialled once at start
+            # so a node whose public address moved re-announces itself by dialling
+            # OUT: the peer that accepts learns the new endpoints from the hello,
+            # which is the only way out of the stale-endpoint deadlock (2026-10-21).
+            (self._redial_loop, "mesh-redial"),
         ):
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
@@ -4623,6 +4704,7 @@ class RelayServer:
         self._flush_outboxes()
         self._run_start_hooks()
         self._sweep_approvals_once()
+        self._sweep_invites_once()
         self._warm_open_frame_strip()
 
     def begin_reload(self) -> None:
@@ -4738,6 +4820,25 @@ class RelayServer:
                 print(f"mesh relay: approvals sweep failed ({exc})", file=sys.stderr)
 
         thread = threading.Thread(target=_run, name="mesh-start-approvals", daemon=True)
+        thread.start()
+
+    def _sweep_invites_once(self) -> None:
+        """One best-effort sweep of dead invite entries, on the approvals sweep's terms.
+
+        Minting prunes as it appends, but a device that stops minting would keep
+        whatever it last held; the relay start is the non-timer event every device
+        reaches (``_sweep_approvals_once`` records why), so the backlog clears there
+        too. Only rows dead by their own expiry AND past retention go
+        (``store.prune_invites``), never a live token.
+        """
+
+        def _run() -> None:
+            try:
+                store.sweep_invites(self.root)
+            except Exception as exc:  # noqa: BLE001 — a sweep never fails a relay
+                print(f"mesh relay: invite sweep failed ({exc})", file=sys.stderr)
+
+        thread = threading.Thread(target=_run, name="mesh-start-invites", daemon=True)
         thread.start()
 
     def serve_forever(self) -> None:
@@ -4968,6 +5069,43 @@ class RelayServer:
                 member.endpoints = list(endpoints)
                 store.save(record, self.root)
         except FileNotFoundError:
+            return
+
+    def _note_observed_endpoint(
+        self, network_id: str, device_id: str, peer_addr: str, declared: Sequence[str]
+    ) -> None:
+        """Record where an INBOUND link really came from, as a fallback dial target.
+
+        THE STALE-ENDPOINT DEADLOCK (2026-10-21): ``_note_peer_endpoints`` only runs on
+        a completed handshake, and a handshake cannot complete while every stored
+        endpoint is stale — so after the node's public IP changed, this Mac dialled the
+        dead address forever. The source address of a link the member opened TO us is
+        proof of where it is reachable from here, except for its port (ephemeral). The
+        member's declared listen port is substituted; with no declared port the hint
+        is not written, because an ephemeral port is a closed door by the time anyone
+        dials it (the reason ``_note_peer_endpoints`` refuses to write it at all).
+
+        Loopback sources are skipped (a same-host rig is not an address). Never raises.
+        """
+        host = _host_only(peer_addr)
+        if not host or _is_loopback_endpoint(f"{host}:0"):
+            return
+        ports = []
+        for endpoint in declared or ():
+            _h, sep, port = str(endpoint).rpartition(":")
+            if sep and port.isdigit() and port not in ports:
+                ports.append(port)
+        if not ports:
+            return
+        observed = f"[{host}]:{ports[0]}" if ":" in host else f"{host}:{ports[0]}"
+        try:
+            with store.mutate(network_id, self.root) as record:
+                member = record.member(device_id)
+                if member is None or not member.active or member.observed_endpoint == observed:
+                    return
+                member.observed_endpoint = observed
+                store.save(record, self.root)
+        except Exception:  # noqa: BLE001 — a hint must never cost the link
             return
 
     # -- membership at rest, and the one read that keeps it current ---------
@@ -5244,6 +5382,84 @@ class RelayServer:
                     break
                 self._membership_cond.wait(remaining)
             return self._membership_reports, self._membership_seq < target
+
+    def _redial_loop(self) -> None:
+        """Re-establish lost links with bounded, jittered backoff; dial members at start.
+
+        WHY A LOOP (2026-10-21): before this nothing redialled a lost link — every
+        dial came from a surface (a listing poll, a stream open), so a peer nobody
+        was looking at stayed disconnected, and one somebody WAS looking at was
+        redialled at the poll rate. The schedule lives in :mod:`network.redial`;
+        this loop only asks it what is due and dials, one peer at a time, each
+        bounded by the listing probe budget so a black hole costs its own cap.
+
+        THE START-UP PASS seeds every active member once. A peer whose stored
+        endpoints went stale (an EC2 stop/start changed the node's public IP) can
+        never be dialled by THIS device, but the node's own start-up dial reaches
+        us at our still-valid address and its hello declares its new endpoints,
+        which ``_note_peer_endpoints`` records — healing the row on both sides.
+        """
+        for record in store.list_networks(self.root):
+            if record.trust != "active":
+                continue
+            for member in record.active_members():
+                if member.device_id == record.self_device_id:
+                    continue
+                if self._redial_candidates(member):
+                    self.redial.seed(member.device_id)
+        while not self._stop.wait(REDIAL_TICK_S):
+            for device_id in self.redial.due():
+                if self._stop.is_set():
+                    return
+                if self._link_for(device_id) is not None:
+                    # Admission already owns the connected transition under
+                    # _links_lock. This lookup is only a scheduling hint: the link
+                    # may close before we act on it, so resetting here would erase
+                    # that newer loss and strand the peer without a retry (C2).
+                    continue
+                if not any(self._redial_candidates(m) for m in self._members_named(device_id)):
+                    # NOTHING THIS DEVICE MAY DIAL: the peer is dial-only (it declared
+                    # loopback on our own port) and will come back by dialling us.
+                    # Counted as a failed redial WITHOUT a dial, so the grace window
+                    # still escalates to ``down`` on schedule.
+                    self.redial.failed(device_id, cause="waiting_for_peer")
+                    continue
+                try:
+                    link, reason = self._ensure_link_with_reason(
+                        device_id, probe_timeout_s=LISTING_PROBE_BUDGET_S
+                    )
+                except Exception as exc:  # noqa: BLE001 — the loop must survive any dial
+                    link, reason = None, f"error:{type(exc).__name__}"
+                if link is None:
+                    self.redial.failed(device_id, cause=reason or "unreachable")
+
+    def _members_named(self, device_id: str) -> list[MemberRecord]:
+        """Every active member row for ``device_id``, across this device's networks."""
+        rows: list[MemberRecord] = []
+        for record in store.list_networks(self.root):
+            if record.trust != "active":
+                continue
+            member = record.member(device_id)
+            if member is not None and member.active:
+                rows.append(member)
+        return rows
+
+    def _redial_candidates(self, member: MemberRecord) -> list[str]:
+        """The member's dial candidates minus any that would reach THIS relay.
+
+        A dial-only device declares loopback (``advertise_endpoints``: "do not try
+        to call me first"); on the default port that is OUR OWN listener, and a
+        redial there is a ``self_link`` row per attempt. Loopback on another port
+        stays (a same-host pair of relays, as every two-relay rig is).
+        """
+        own_port = int(self.settings.port or 0)
+        keep: list[str] = []
+        for endpoint in _dial_candidates(member):
+            _host, _sep, port = endpoint.rpartition(":")
+            if _is_loopback_endpoint(endpoint) and (not port.isdigit() or int(port) == own_port):
+                continue
+            keep.append(endpoint)
+        return keep
 
     def _membership_loop(self) -> None:
         """The scheduled half of membership convergence, with no surface involved.
@@ -5770,6 +5986,25 @@ class RelayServer:
                 )
             else:
                 unidentified = "refused before any device id was presented"
+        # Proof state and mode are part of the identity: a pre-proof claim must
+        # never suppress a later refusal naming a verified actor (review C3).
+        # COALESCED BY (code, network, claimed device, source HOST): the source port
+        # is ephemeral, so keying on it would make every repeat look new. 460
+        # ``unknown_network`` rows on the operator's mac were one LAN neighbour
+        # retrying networks this device is not in; one row per window says that.
+        write, repeats = self._refusal_rows.admit(
+            (
+                refusal.code,
+                network_id,
+                declared_device,
+                expected_device,
+                _host_only(peer_addr),
+                mode,
+                "verified" if verified else "unverified",
+            )
+        )
+        if not write:
+            return
         self.audit.record(
             AuditEvent(
                 event="handshake_refused",
@@ -5791,6 +6026,7 @@ class RelayServer:
                     "declared_device": declared_device,
                     "expected_device": expected_device,
                     "unidentified": unidentified,
+                    **({"repeats": repeats} if repeats else {}),
                 },
             )
         )
@@ -5846,6 +6082,11 @@ class RelayServer:
             refusal = self._refusal_reason(link.network_id)
             if not refusal:
                 self.links[link.link_id] = link
+                # Publish the connected transition BEFORE starting the reader and
+                # while holding the same lock link_closed uses for its loss. A
+                # reader may close immediately; admission must not erase that newer
+                # loss after dropping the lock (review C2).
+                self.redial.connected(link.device_id)
                 try:
                     link.start()
                 except BaseException:
@@ -5855,6 +6096,10 @@ class RelayServer:
                     raise
         if refusal:
             _close_quietly(link.sock)
+        else:
+            # A LINK IS UP: the redial schedule for this device resets, and its
+            # surfaces stop saying "reconnecting" (``redial.RedialTracker``).
+            self.note_link_activity(link, force=True)
         return refusal
 
     def register_link(
@@ -5959,6 +6204,9 @@ class RelayServer:
         self._note_peer_endpoints(
             result.network_id, result.peer_device_id, handshake.peer_endpoints
         )
+        self._note_observed_endpoint(
+            result.network_id, result.peer_device_id, peer_addr, handshake.peer_endpoints
+        )
         # The LISTENER's half of "a completed handshake clears the refusal mark":
         # this device did not dial, so nothing else here would notice that a peer
         # is talking to it again (see `_clear_refusal_mark`).
@@ -6020,9 +6268,64 @@ class RelayServer:
                 # no longer exists is not worth resurrecting the file for.
                 continue
 
+    def note_link_activity(self, link: PeerLink, *, force: bool = False) -> None:
+        """Persist ``link.last_frame_at`` as the member row's ``last_seen_at``, throttled.
+
+        WHY (2026-10-21): ``member.last_seen_at`` was written only on rotation
+        frames, so a peer that had carried frames for hours and then dropped showed
+        ``Link down · unknown`` in the sidebar — the row's only liveness stamp
+        was null although the link had been live until 14:45. Every surface that
+        renders "last seen" reads the member row (``peer_status``,
+        ``network_topology``), so the link's own evidence goes THERE.
+
+        THROTTLED to :data:`LAST_SEEN_PERSIST_S` per link: this runs on the reader
+        thread for every frame, and a ``store.mutate`` per frame is a file rewrite
+        per keepalive. ``force`` is the close path, which must record the final
+        frame time whatever the throttle says. Never raises — liveness is
+        evidence, and a failed write costs freshness, not the link.
+        """
+        moment = link.last_frame_at
+        if not force and moment - link.seen_persisted_at < LAST_SEEN_PERSIST_S:
+            return
+        link.seen_persisted_at = moment
+        try:
+            with store.mutate(link.network_id, self.root) as record:
+                member = record.member(link.device_id)
+                if member is None or not member.active:
+                    return
+                if member.last_seen_at is not None and member.last_seen_at >= moment:
+                    return
+                member.last_seen_at = round(moment, 3)
+                store.save(record, self.root)
+        except Exception:  # noqa: BLE001 — see the docstring
+            return
+
     def link_closed(self, link: PeerLink, reason: str) -> None:
         with self._links_lock:
             self.links.pop(link.link_id, None)
+            # Last-live-link selection and the transition are ONE ownership
+            # decision: admission of a replacement cannot interleave and then be
+            # overwritten by a delayed loss for the old link.
+            if not self._stop.is_set() and self._link_for(link.device_id) is None:
+                self.redial.lost(link.device_id, cause=reason, last_frame_at=link.last_frame_at)
+        # THE LAST FRAME TIME SURVIVES THE LINK (see ``note_link_activity``): the
+        # throttle may have skipped up to LAST_SEEN_PERSIST_S of it, and this is the
+        # moment a reader starts depending on the stamp.
+        self.note_link_activity(link, force=True)
+        # EVERY STREAM THAT RODE THIS LINK ENDS NOW, on both halves. A viewer whose
+        # link died was left holding an open control socket that would never carry
+        # another frame: it saw no EOF, so its own recovery (``AttachedSession``'s
+        # redial, which re-opens a stream over whatever link exists next) never
+        # started, and the remote session sat frozen until the user reopened it.
+        # Closing the viewer socket is what hands the viewer its reconnect; the
+        # owner side ends its dial to the runtime (never the runtime itself).
+        with self._streams_lock:
+            riding = [sid for sid, stream in self._streams.items() if stream.link is link]
+        for stream_id in riding:
+            self._close_stream(stream_id, notify_peer=False, cause="no-peer-link")
+        # ONLY A DEVICE WITH NO OTHER LIVE LINK IS "LOST": a duplicate or replaced
+        # link closing beside a healthy one must not start a reconnect story, and
+        # a relay that is stopping redials nothing.
         # BEFORE THE AUDIT ROW, because this is the answer a caller is blocked on: the
         # link is out of the table and nothing will route a reply to its waiters any
         # more, so they are resolved here rather than left to time out (``fail_replies``).
@@ -6797,6 +7100,10 @@ class RelayServer:
                     ),
                     "origin": dict(stamp.origin) if stamp is not None and stamp.origin else None,
                     "archived": None,
+                    # WHO ANSWERS THIS SESSION, from its own sidecar (see
+                    # ``_row_binding``): the origin's sidebar paints a team
+                    # badge from it exactly as it does for a local row.
+                    "binding": self._row_binding(record.session_id),
                 }
             )
         for row in self._stored_rows():
@@ -6819,6 +7126,32 @@ class RelayServer:
         for row in self._mesh_hosted_rows(seen):
             rows.append(row)
         return rows
+
+    def _row_binding(self, session_id: str) -> dict[str, str | None]:
+        """The agent/team this session is attached to, for its listing row.
+
+        WHY THE PEER STAMPS IT (operator report, 2026-10-21). The desktop sidebar
+        draws a team badge from ``binding.team``, and for a LOCAL row that value is
+        read from the session's ``attachment.json`` (``DesktopSessions.list``). A
+        REMOTE row's sidecar lives on THIS device, so the origin cannot read it —
+        and this listing did not carry it, so every remote row painted no badge
+        even when the session ran under a team. This device is the only one that
+        can answer, so it answers here, with the SAME reader and the same
+        ``"" -> None`` spelling the local projection uses.
+
+        One small JSON read per row, the cost the local listing already pays per
+        row. Never raises: ``read_session_attachment`` is tolerant by contract,
+        and an unreadable or absent sidecar is the honest ``None``/``None`` (no
+        claim). A peer on a build that predates this key omits it entirely, which
+        the origin reads the same way (``PeerRow.from_json``).
+        """
+        from local_operator.resume import read_session_attachment
+
+        stored = read_session_attachment(self.root / "sessions" / session_id)
+        return {
+            "agent": (stored.agent or None) if stored else None,
+            "team": (stored.team or None) if stored else None,
+        }
 
     def _mesh_hosted_rows(self, seen: set[str]) -> list[dict[str, Any]]:
         """Sessions this device hosts FOR the mesh that no other half lists yet.
@@ -6896,6 +7229,7 @@ class RelayServer:
                     "placement": stamp.placement.to_json(),
                     "origin": dict(stamp.origin) if stamp.origin else None,
                     "archived": None,
+                    "binding": self._row_binding(entry.name),
                 }
             )
         return rows
@@ -7004,6 +7338,7 @@ class RelayServer:
                     ),
                     "origin": (dict(stamp.origin) if stamp is not None and stamp.origin else None),
                     "archived": None,
+                    "binding": self._row_binding(session_id),
                 }
             )
         return rows
@@ -7757,6 +8092,47 @@ class RelayServer:
         # Applied loudly: a silent override of an explicit request is the shape this whole
         # change exists to remove.
         override = self._profile_overrides_flag(identity, wanted_model)
+        # WHAT THE SESSION ACTUALLY IS, built ONCE for BOTH replies below (operator
+        # report, 2026-10-21). Only the prompt-ful reply used to carry it, while the
+        # PROMPTLESS reply — the one every desktop ``/new`` gets, since it sends no
+        # first prompt — omitted it, so the origin's create route read the missing
+        # ``team`` as ``binding.team = null`` and the sidebar drew no team badge for a
+        # session that WAS attached to a team here (receipt for 6105807f6241: body
+        # ``target: team lopdev``, reply ``team: null``). The binding is a fact of the
+        # create, not of the turn, so it rides whichever reply the create answers with.
+        # It lets the requester show the binding it asked for instead of guessing it
+        # from its own registries — a claim about a store that does not hold this
+        # session (the desktop route already makes that argument for its local half).
+        identity_blocks: dict[str, Any] = {
+            "agent": (
+                {
+                    "name": identity.agent_name,
+                    "id": identity.agent_id,
+                    "kind": identity.agent_kind,
+                    "digest": identity.agent_digest,
+                    # The honest half: a legacy row that is not an attachable persona
+                    # contributes its ROUTING here, and its instructions do not travel
+                    # into the session. Said, never implied.
+                    "instructions_applied": bool(attachment_agent),
+                    "detail": (
+                        ""
+                        if attachment_agent
+                        else (
+                            "this agent's instructions are not attachable (it is not a role or "
+                            "a specialist), so the session runs its own instructions on that "
+                            "agent's model"
+                        )
+                    ),
+                }
+                if identity.agent_name
+                else None
+            ),
+            "team": (
+                {"name": identity.team_name, "id": identity.team_id, "digest": identity.team_digest}
+                if identity.team_name
+                else None
+            ),
+        }
         if not prompt:
             if frame.get("images"):
                 # Images with no text are not a turn. Refused rather than silently
@@ -7813,6 +8189,7 @@ class RelayServer:
                         else _model_choice_refusal(frame.get("model"))
                     ),
                 },
+                **identity_blocks,
                 "record": self._row_for(session_id),
             }
 
@@ -7853,34 +8230,7 @@ class RelayServer:
             # asked for instead of guessing it from its own registries — a claim
             # about a store that does not hold this session (the desktop route already
             # makes that argument for its local half).
-            "agent": (
-                {
-                    "name": identity.agent_name,
-                    "id": identity.agent_id,
-                    "kind": identity.agent_kind,
-                    "digest": identity.agent_digest,
-                    # The honest half: a legacy row that is not an attachable persona
-                    # contributes its ROUTING here, and its instructions do not travel
-                    # into the session. Said, never implied.
-                    "instructions_applied": bool(attachment_agent),
-                    "detail": (
-                        ""
-                        if attachment_agent
-                        else (
-                            "this agent's instructions are not attachable (it is not a role or "
-                            "a specialist), so the session runs its own instructions on that "
-                            "agent's model"
-                        )
-                    ),
-                }
-                if identity.agent_name
-                else None
-            ),
-            "team": (
-                {"name": identity.team_name, "id": identity.team_id, "digest": identity.team_digest}
-                if identity.team_name
-                else None
-            ),
+            **identity_blocks,
             "record": self._row_for(session_id),
         }
 
@@ -9163,6 +9513,16 @@ class RelayServer:
         different model than the caller asked for is the kind of quiet wrongness
         that costs a session.
         """
+        # THE LEVEL HAS TWO SPELLINGS ON THIS FRAME, and reading only one lost it
+        # (operator report, 2026-10-21: a remote session created at ``max`` ran its
+        # first turns at the model's seed). The desktop's create route forwards the
+        # pane's choice as ``reasoning_effort`` — the ``DraftModel``/``ModelSpec``
+        # field name — while this hop only ever read ``effort``, so every desktop
+        # birth level was dropped here and the runtime's ``set_model`` fell back to
+        # the model's own default (``high`` on a none/low/high/max ladder).
+        # ``reasoning_effort`` is preferred because it is what the producer of
+        # record sends; ``effort`` stays for any caller already spelling it so.
+        level = str(model.get("reasoning_effort") or model.get("effort") or "")
         try:
             dial = self._dial_owned(session_id, capabilities=())
         except session_dial.OwnerUnreachable as exc:
@@ -9174,7 +9534,7 @@ class RelayServer:
                     "req": 1,
                     "provider": str(model.get("provider")),
                     "model_id": str(model.get("model_id")),
-                    **({"effort": str(model["effort"])} if model.get("effort") else {}),
+                    **({"effort": level} if level else {}),
                 },
                 timeout_s=self.settings.op_wait_s,
             )
@@ -9515,10 +9875,11 @@ class RelayServer:
             member = record.member(device_id)
             if member is None or not member.active:
                 continue
-            if not member.endpoints:
+            candidates = _dial_candidates(member)
+            if not candidates:
                 reason = "no_endpoint"
                 continue
-            probe = probe_candidates(member.endpoints, deadline=deadline, connect_cap=cap)
+            probe = probe_candidates(candidates, deadline=deadline, connect_cap=cap)
             attempts.extend(probe.attempts)
             if probe.sock is None:
                 reason = probe.reason
@@ -9794,10 +10155,16 @@ class RelayServer:
         if stream.dial is not None:
             stream.dial.close()
         if stream.viewer_sock is not None:
+            # The control thread can be blocked in LineReader.recv for an hour.
+            # On Linux, close() in this thread drops the descriptor but does not
+            # end the socket while that read holds it: the viewer sees no EOF,
+            # never starts recovery, and stays frozen after its mesh link dies.
+            # shutdown() wakes the reader and sends EOF before releasing our fd.
             try:
-                _close_quietly(stream.viewer_sock)
+                stream.viewer_sock.shutdown(socket.SHUT_RDWR)
             except OSError:
-                pass
+                pass  # Already gone: still release the descriptor below.
+            _close_quietly(stream.viewer_sock)
         self._report_stream_closed(stream, cause)
         if notify_peer and stream.link is not None:
             stream.link.send({"op": "net_stream", "action": "close", "stream": stream_id})
@@ -10666,6 +11033,26 @@ class RelayServer:
         It is cleared on the next successful handshake (:meth:`dial`), so a peer that
         restarted mid-handshake does not leave a permanent mark.
         """
+        # COALESCED (``redial.RefusalCoalescer``): a peer that refuses silently is
+        # redialled on the backoff, and every attempt is the same fact. The first row
+        # in each window is written; the next one carries how many were folded in.
+        write, repeats = self._refusal_rows.admit(
+            ("peer_closed_silently", network_id, expected_device, _host_only(host), mode)
+        )
+        if write:
+            self._record_silent_refusal(network_id, host, mode, expected_device, repeats)
+        try:
+            with store.mutate(network_id, self.root) as record:
+                if record.stale != "refused_by_peers":
+                    record.stale = "refused_by_peers"
+                    store.save(record, self.root)
+        except FileNotFoundError:
+            return
+
+    def _record_silent_refusal(
+        self, network_id: str, host: str, mode: str, expected_device: str, repeats: int
+    ) -> None:
+        """The ``peer_closed_silently`` row itself (see :meth:`_note_refused_handshake`)."""
         self.audit.record(
             AuditEvent(
                 event="handshake_refused",
@@ -10689,16 +11076,10 @@ class RelayServer:
                         "is all this device observed"
                     ),
                     "mode": mode or "member",
+                    **({"repeats": repeats} if repeats else {}),
                 },
             )
         )
-        try:
-            with store.mutate(network_id, self.root) as record:
-                if record.stale != "refused_by_peers":
-                    record.stale = "refused_by_peers"
-                    store.save(record, self.root)
-        except FileNotFoundError:
-            return
 
     def _rehandshake_network(self, network_id: str, *, reason: str) -> None:
         """Close and redial every live link at the new epoch.
@@ -10972,9 +11353,15 @@ class RelayServer:
                 or None,
                 device_id=str(frame.get("device_id") or ""),
             )
+            # MINTING IS WHERE THE LIST GROWS, so it is where the dead entries go:
+            # the same locked write that adds a row drops the ones past their own
+            # expiry and the retention window (``store.prune_invites``), so repeated
+            # pairing attempts no longer accumulate ``minted`` rows forever.
+            expired = store.prune_invites(record)
             record.invites.append(minted.record)
             store.save(record, self.root)
             path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
+        store.forget_invite_tokens(expired, self.root)
         self.audit.record(
             AuditEvent(
                 event="invite_minted",
@@ -12266,7 +12653,11 @@ class RelayServer:
         base["invites"] = [
             {
                 "invite_id": invite.invite_id,
+                # ``state`` IS THE STORED LEDGER (minted/redeemed/consumed) and stays
+                # so on the wire; ``listed_state`` is the display word, which says
+                # ``expired`` for a minted row past its TTL (review round 1, R5).
                 "state": invite.state,
+                "listed_state": invite.listed_state(time.time()),
                 "role": invite.role,
                 "bound_device": invite.device_id,
                 "expires_at": invite.expires_at,
@@ -12300,6 +12691,21 @@ class RelayServer:
                     link, reason, attempts = self._ensure_link_with_probe(
                         member.device_id, probe_timeout_s=remaining, network_id=record.network_id
                     )
+                # ``getattr``: the tracker is built in ``__init__``, and a relay built
+                # without it (a bare ``object.__new__`` table in a test) has no
+                # redial story to tell — it reports ``connected``-shaped, as before.
+                tracker = getattr(self, "redial", None)
+                if tracker is not None and link is None and reason != NOT_ATTEMPTED_REASON:
+                    # A listing's failed probe IS a failed redial of a lost link: it
+                    # counts toward the grace window's attempt rule and pushes the
+                    # loop's next retry out, so a polled peer is not ALSO redialled
+                    # by the loop in between. A no-op for an untracked peer.
+                    tracker.failed(member.device_id, cause=reason)
+                redial_row: dict[str, Any] = (
+                    tracker.snapshot(member.device_id)
+                    if tracker is not None and link is None
+                    else {"state": redial.CONNECTED, "attempts": 0}
+                )
                 state = peer_link_state(link, reason, attempts)
                 peers.append(
                     {
@@ -12324,7 +12730,23 @@ class RelayServer:
                             for attempt in attempts
                         ],
                         "endpoints": list(member.endpoints),
-                        "last_seen_at": member.last_seen_at,
+                        # LAST SEEN IS THE NEWEST EVIDENCE WE HOLD: a live link's
+                        # own last frame, else the persisted row (written on link
+                        # activity and at close, ``note_link_activity``), else the
+                        # redial tracker's record of the lost link's last frame.
+                        # The row alone was null for a peer that had carried
+                        # frames all session, which is how the sidebar came to say
+                        # ``Link down · unknown`` (2026-10-21).
+                        "last_seen_at": _newest_seen(
+                            getattr(link, "last_frame_at", None),
+                            member.last_seen_at,
+                            redial_row.get("last_frame_at"),
+                        ),
+                        # WHILE A LOST LINK IS BEING REDIALLED: state
+                        # (connected/reconnecting/down), attempts, next_retry_at,
+                        # last_error, grace_until. The sidebar says "Reconnecting…"
+                        # inside the grace window and escalates on ``down`` only.
+                        "redial": redial_row,
                         "suspect": member.suspect,
                         # THE UI'S VERSION LINE (mesh-ui; slice 1 of the mesh
                         # remote-offload workstream). Both keys are present with
@@ -12522,7 +12944,7 @@ class RelayServer:
                 }
             ]
         probe = probe_candidates(
-            member.endpoints,
+            _dial_candidates(member),
             deadline=deadline,
             connect_cap=PROBE_CONNECT_TIMEOUT_S,
             wait_all=True,
@@ -12592,6 +13014,30 @@ class RelayServer:
         # another address. The flip touches reachability rows only; the
         # credential-repair rows beside them stay exactly as they are.
         readiness_mod.mark_informational(rows)
+        if probe.sock is None and probe.attempts and not any(a.connected for a in probe.attempts):
+            # EVERY ADDRESS WENT UNANSWERED (2026-10-21): the node's public IP had
+            # moved after an EC2 stop/start, this device kept dialling the stored
+            # one, and the row could only heal on a completed handshake — which the
+            # stale address made impossible. The one row a person needs here is
+            # the way out, so it is spelled with the commands that take it.
+            label = member.name or member.device_id
+            rows.append(
+                {
+                    "check": "reachability",
+                    "code": "all_endpoints_unanswered",
+                    "device_id": member.device_id,
+                    "endpoint": "",
+                    "ok": False,
+                    "detail": "unreachable",
+                    "remedies": [
+                        f"if {label}'s address changed (a cloud stop/start, a new network), "
+                        f"restart its relay there (`lop network restart`): it dials this "
+                        f"device on start and its hello updates the stored address",
+                        f"or check that {label} is up and its relay port is open to this "
+                        f"device ({', '.join(member.endpoints)})",
+                    ],
+                }
+            )
         return rows
 
     def _handshake_row(
@@ -13059,6 +13505,30 @@ SYSTEMD_UNIT = "local-operator-network.service"
 #: daemons from collapsing into one ``Local Operator`` row in Activity Monitor.
 LABEL_TEMPLATE = "{brand} [network relay] port={port}"
 
+#: The relay's ``OOMScoreAdjust``: make the kernel's OOM killer pick almost any
+#: other process first.
+#:
+#: WHY (2026-10-21, cloud-node-1): a 2 GB node running session runtimes, their
+#: subagents and a pnpm build thrashed into six kernel OOM kills, and one victim
+#: was the relay itself (anon-rss 266 MB at ``oom_score_adj`` 0) — the ONE process
+#: every remote surface depends on, so the node went dark to the whole mesh while
+#: the box itself stayed up. A session child dying costs one turn; the relay dying
+#: costs every session on the device its reachability.
+#:
+#: WHAT IT BUYS UNDER A USER MANAGER, measured from systemd's source rather than
+#: assumed: ``user@.service`` runs the user manager at ``OOMScoreAdjust=100`` and
+#: units default to the manager's value + 100 (``DefaultOOMScoreAdjust``). An
+#: unprivileged write below the manager's ``oom_score_adj_min`` is ``EACCES``,
+#: which systemd logs at debug and IGNORES (``exec-invoke.c``: "assuming
+#: containerized execution") — so under a user manager the relay lands on the
+#: manager's floor (typically 100) instead of the unit default (typically 200),
+#: and under a system unit or a root manager it gets the full -500. The session
+#: runtimes raise THEMSELVES to :data:`RUNTIME_OOM_SCORE_ADJ` (raising needs no
+#: privilege), so the relay stays the least-preferred victim either way. Not
+#: -1000: an unkillable relay that leaks would take the box with it, which is the
+#: failure this exists to stop.
+RELAY_OOM_SCORE_ADJUST = -500
+
 
 def log_path() -> Path:
     return log_dir() / "network.log"
@@ -13173,6 +13643,11 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         # this defect) and ``refresh_unit_if_stale`` below for the migration
         # that adds this line to units installed before it existed.
         kill_mode="process",
+        # See RELAY_OOM_SCORE_ADJUST for the value and what a user manager makes
+        # of it. ``refresh_unit_if_stale`` rewrites any installed unit whose text
+        # differs from this render, so existing installs gain the line on their
+        # next update without a reinstall.
+        oom_score_adjust=RELAY_OOM_SCORE_ADJUST,
         post_lines=[
             f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
             *supervisors.output_redirect_lines(log_path()),
@@ -13319,7 +13794,7 @@ def refresh_unit_if_stale() -> Any:
         if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
             return launchd.PlistRefresh(name=name, kind="not-addressable")
         image = _unit_image()
-        if image is None or not _names_the_shim(image):
+        if image is None or not (_names_the_shim(image) or _names_a_generation(image)):
             # NOT THIS RUN'S TO MOVE: the unit's image does not resolve the
             # generation pointer, so there is no proven move to make and a
             # rewrite could repoint a tree this refresh does not own. The F10
@@ -13502,6 +13977,14 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
     """
     steps: list[str] = []
     durability: dict[str, Any] = {"linger": False, "persistent": False}
+    # A SECOND SUPERVISOR IS NAMED BEFORE ANYTHING IS WRITTEN (2026-10-21): a
+    # hand-made system unit running the relay makes this install "succeed" while
+    # the two race for the port. Named with its remedy, never removed here —
+    # deleting a root-owned unit is the operator's decision, and needs sudo.
+    conflicts = [row for row in foreign_supervision(port) if row["code"] == "system_unit"]
+    if conflicts:
+        durability["conflicts"] = conflicts
+        steps.extend(f"warning: {row['detail']} — {row['remedies'][0]}" for row in conflicts)
     unit = systemd_path()
     unit.parent.mkdir(parents=True, exist_ok=True)
     if not dry_run:
@@ -13905,6 +14388,119 @@ def supervision_state() -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — diagnostics must survive unavailable supervisors
         pass
     return state
+
+
+#: Where a hand-made SYSTEM unit for the relay would live. Searched because one did
+#: (2026-10-21, cloud-node-1): ``/etc/systemd/system/lop-net-relay.service`` running
+#: ``lop network serve``, written by hand when the product shipped no Linux unit,
+#: fought the product's own user unit for :4097 and crash-looped 17 times on
+#: EADDRINUSE. Neither ``lop network install`` nor ``doctor`` could see it.
+SYSTEM_UNIT_DIRS: tuple[str, ...] = ("/etc/systemd/system", "/lib/systemd/system")
+
+
+def _foreign_system_units(dirs: Sequence[str] | None = None) -> list[str]:
+    """System unit files whose ``ExecStart`` runs THIS product's relay.
+
+    Read-only: lists ``*.service`` under ``dirs`` and matches ``ExecStart`` lines
+    with :func:`_is_own_relay_command`, the same narrow markers adoption uses. An
+    unreadable directory or file is skipped, never an error.
+    """
+    found: list[str] = []
+    for directory in SYSTEM_UNIT_DIRS if dirs is None else dirs:
+        try:
+            entries = sorted(Path(directory).glob("*.service"))
+        except OSError:
+            continue
+        for path in entries:
+            if path.name == SYSTEMD_UNIT:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                if line.strip().startswith("ExecStart=") and _is_own_relay_command(
+                    line.split("=", 1)[1]
+                ):
+                    found.append(str(path))
+                    break
+    return found
+
+
+def foreign_supervision(port: int | None = None) -> list[dict[str, Any]]:
+    """Every supervision conflict this device can see, each with its remedy.
+
+    THREE SHAPES, all measured on cloud-node-1 on 2026-10-21:
+
+    * ``system_unit`` — a hand-made system unit runs the relay beside the user unit;
+      the two race for the port and the loser crash-loops.
+    * ``port_holder`` — something that is NOT the supervised relay holds the relay
+      port (a second unit's relay, a hand-started ``serve``, an unrelated program),
+      so the managed relay cannot bind.
+    * ``pinned_generation`` — the user unit's ``ExecStart`` names a specific
+      ``generations/<build>`` interpreter instead of the stable shim, so every
+      restart re-runs that build however many updates have landed since.
+
+    Read-only and never raises: a diagnostic must not be the thing that fails.
+    """
+    findings: list[dict[str, Any]] = []
+    try:
+        for unit_path in _foreign_system_units():
+            name = Path(unit_path).name
+            findings.append(
+                {
+                    "code": "system_unit",
+                    "detail": (
+                        f"a system unit ({unit_path}) also runs the relay; it competes with "
+                        f"{SYSTEMD_UNIT} for the relay port"
+                    ),
+                    "remedies": [
+                        f"sudo systemctl disable --now {name} && sudo rm {unit_path} && "
+                        "sudo systemctl daemon-reload, then `lop network install`"
+                    ],
+                }
+            )
+        if sys.platform.startswith("linux") or sys.platform == "darwin":
+            resolved = _service_port() if port is None else port
+            managed = _managed_service_pid()
+            for pid in _port_holder_pids(resolved):
+                if managed is not None and pid == managed:
+                    continue
+                cmdline = _pid_cmdline(pid)
+                ours = _is_own_relay_command(cmdline)
+                findings.append(
+                    {
+                        "code": "port_holder",
+                        "detail": (
+                            f"pid {pid} ({cmdline or 'command line unavailable'!s}) holds "
+                            f":{resolved} but is not the supervised relay"
+                            + (" — a relay started outside the service" if ours else "")
+                        ),
+                        "remedies": [
+                            (
+                                "run `lop network restart` to hand the port to the service"
+                                if ours
+                                else f"stop pid {pid} or move it off :{resolved}, then "
+                                "`lop network restart`"
+                            )
+                        ],
+                    }
+                )
+        image = _unit_image() if sys.platform.startswith("linux") else None
+        if image is not None and not _names_the_shim(image) and _names_a_generation(image):
+            findings.append(
+                {
+                    "code": "pinned_generation",
+                    "detail": (
+                        f"the relay unit runs a fixed build ({image}) instead of the stable "
+                        "launcher, so updates do not reach the relay"
+                    ),
+                    "remedies": ["run `lop network install` (or `lop update`) to re-render it"],
+                }
+            )
+    except Exception:  # noqa: BLE001 — see the docstring
+        pass
+    return findings
 
 
 def _supervision_unit_present() -> bool:
@@ -14749,6 +15345,29 @@ def _names_the_shim(image: Path) -> bool:
         return image.resolve() == shim.resolve()
     except OSError:
         return False
+
+
+def _names_a_generation(image: Path) -> bool:
+    """Whether ``image`` is an interpreter INSIDE this install's generations tree.
+
+    THE GENERATION-PINNED UNIT (2026-10-21, cloud-node-1): the relay unit's
+    ``ExecStart`` named ``generations/<0.82.3>/…/python3`` while ``current`` was
+    0.84.4, because it was rendered before the stable shim existed. Such a unit is
+    THIS install's own — it lives under the same stable root the pointer does — so
+    :func:`refresh_unit_if_stale` may rewrite it to the shim render; declining it as
+    "not addressable" (the shim-only guard) left the node restarting into a build
+    two releases old on every update, and only a hand-run ``lop network install``
+    moved it. An image anywhere else (a source checkout's venv, a pipx tree) is
+    still not this run's to repoint.
+    """
+    from local_operator import update
+
+    try:
+        root = update.generations_dir().resolve()
+        resolved = image.resolve()
+    except OSError:
+        return False
+    return resolved != root and root in resolved.parents
 
 
 def _restart_target() -> tuple[Path | None, Path | None, bool]:

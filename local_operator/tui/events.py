@@ -979,6 +979,31 @@ class EventController:
                 or getattr(message_usage, "input_tokens", 0)
                 or context_tokens
             )
+        # ...AND THE RECEIPTS OF ROWS THE WIRE BOUND DROPPED. A REMOTE viewer
+        # only sees what ``harness.wire.bound_agent_end_for_wire`` emits, and
+        # that bound keeps the newest ``AGENT_END_MESSAGE_TAIL_MAX`` messages
+        # when a deep turn would otherwise cross the socket line. Its
+        # ``usage_aggregate`` folds every dropped row's receipt (see
+        # ``wire._usage_aggregate``), so adding it here is what keeps the band
+        # honest: without it a 3,000-message turn would report the spend of its
+        # last 24 messages. In-process events never carry the key, so the local
+        # TUI path is unchanged.
+        aggregate = getattr(event, "usage_aggregate", None)
+        if isinstance(aggregate, dict):
+            totals["input"] += int(aggregate.get("input_tokens") or 0)
+            totals["output"] += int(aggregate.get("output_tokens") or 0)
+            totals["cache_read"] += int(aggregate.get("cache_read_tokens") or 0)
+            totals["cache_write"] += int(aggregate.get("cache_write_tokens") or 0)
+            cost_components.extend(
+                Usage.model_validate(component)
+                for component in aggregate.get("cost_components") or []
+            )
+            # Only when no retained message reported one: the aggregate is the
+            # OLDER suffix, and the newest occupancy reading is the turn's.
+            if not context_tokens:
+                context_tokens = int(aggregate.get("context_tokens") or 0)
+            if usage is None:
+                usage = Usage.model_validate(aggregate)
         if usage is not None:
             usage = Usage(
                 input_tokens=totals["input"],

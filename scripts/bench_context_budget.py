@@ -1609,9 +1609,20 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # in the queued description. The child arm does not carry ``ask`` and does not
 # move (80,684 chars = ~29,023 vs the 29,053 ceiling), so
 # BUDGET_CHILD_BILLED_TOKENS stays where main put it.
-# Ceiling = measured head + the 55-token band, so the next field-size edit is a
-# deliberate raise rather than silent creep.
-BUDGET_BILLED_TOKENS = 32_104
+#
+# COMPOSED WITH LOH-9 S2 (rebased onto 4bad041283), measured by THIS script on
+# both trees in an isolated HOME — NOT by taking either branch's number:
+#   base (origin/main 4bad041283, #2520)  89,094 chars = ~32,048 billed
+#   head (this branch)                    89,290 chars = ~32,119 billed
+#   delta                                     +196 chars = ~+71
+# The delta is one ``scope`` enum on ``AgentParams`` and one on ``TeamParams``,
+# the ``delete`` op literal on the agent tool, and a one-line description on
+# each scope field (their descriptions were trimmed first). The ladder itself
+# stays OFF the wire in ``tool://agent``/``tool://team``, whose ledger entries
+# moved with this change.
+# Ceiling = measured head + the 55-token band (32,119 + 55), so the next
+# field-size edit is a deliberate raise rather than silent creep.
+BUDGET_BILLED_TOKENS = 32_174
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1723,7 +1734,15 @@ BUDGET_BILLED_TOKENS = 32_104
 #   = +919 chars of ``tool_schemas`` = ~+331 billed, the SAME delta as the top
 #     arm: the channel tool is in every session's surface, children included,
 #     and no child counter moved. Ceiling = measured head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 29_053
+# COMPOSED WITH LOH-9 S2 (rebased onto 4bad041283), measured on both trees with
+# THIS script's child arm, isolated HOME:
+#   base (origin/main 4bad041283, #2520)  80,684 chars = ~29,023 billed
+#   head (this branch)                    80,880 chars = ~29,094 billed
+#   delta                                     +196 chars = ~+71
+# The same +196 chars as the top arm, which is the check that the delta is the
+# two ``scope`` enums and their one-line descriptions and nothing else. Ceiling
+# = measured head + the 55-token band (29,094 + 55), so 29,149.
+BUDGET_CHILD_BILLED_TOKENS = 29_149
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

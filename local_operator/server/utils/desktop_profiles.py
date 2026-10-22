@@ -44,8 +44,18 @@ def profile_detail(
         metadata = profile
     assert metadata is not None
     origin = seed_origin(row) if row is not None else None
+    # WHERE THIS ROW LIVES, additively (LOH-9 S2). Derived from the registry when
+    # it can answer (the session composite), and "global" for a plain registry —
+    # this helper is also used by the account-only routes, where every row is the
+    # account's. A packaged seed has no row yet, so it reads global: installing it
+    # is still a write to one of the two stores.
+    scope = "global"
+    scope_of = getattr(registry, "scope_of", None)
+    if row is not None and callable(scope_of):
+        scope = scope_of(row)
     result: dict[str, Any] = {
         "name": resolved,
+        "scope": scope,
         # The RAW display label (never a composed form -- the desktop lane
         # computes that per surface, exactly as the TUI does); it rides the
         # same projection the catalogue and GET responses share.
@@ -116,8 +126,16 @@ def profile_catalogue(registry: Any) -> list[dict[str, Any]]:
 
 
 def team_catalogue(registry: Any) -> list[dict[str, Any]]:
+    """The account's teams, with the additive ``scope`` fact (LOH-9 S2).
+
+    This projection backs the ACCOUNT routes (``/v1/desktop/teams`` and its
+    detail), which stay global-only by design: they are handed the plain global
+    registry, and the session composite is only behind ``/command-entities``.
+    The field is still carried here because design §3.3 promises it on team
+    catalogue rows, and a client must not need two row shapes to render a badge.
+    """
     return [
-        row.model_dump(mode="json", exclude={"instructions", "project"})
+        row.model_dump(mode="json", exclude={"instructions", "project"}) | {"scope": "global"}
         for row in sorted(registry.list_teams(), key=lambda row: (row.name.casefold(), row.name))
     ]
 

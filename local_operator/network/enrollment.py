@@ -305,6 +305,7 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
         "mcp_servers",
         "mcp_credential",
         "tooling",
+        "resilience",
         "selected_model_credential",
     }
     required: set[str] = set()
@@ -398,6 +399,7 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
                 "mcp_servers",
                 "mcp_credential",
                 "tooling",
+                "resilience",
                 "selected_model_credential",
             }
             and row.get("code", "") in codes

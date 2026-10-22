@@ -1490,10 +1490,14 @@ def test_the_released_flag_never_rides_the_wire() -> None:
     ]
     update = store.mutate(jobs=changed)
     assert update is not None, "the roster change produced no delta to assert against"
-    delta_rows = {row["id"]: row for row in update.model_dump(mode="json")["changes"]["jobs"]}
-    assert (
-        "roster_released" not in delta_rows["child-live"]
-    ), "a member row carried the flag on the delta route"
+    delta_rows = {
+        row["id"]: row for row in update.model_dump(mode="json")["job_deltas"]["upserted"]
+    }
+    # The delta is PER-ROW now, so the unchanged row is absent rather than
+    # present-and-clean. Both facts are pinned: the changed row must ship, and a
+    # row nobody touched must not.
+    assert "child-done" in delta_rows, "the changed row must actually ship"
+    assert "child-live" not in delta_rows, "an unchanged row rode the delta"
     assert "roster_released" not in delta_rows["child-done"], (
         "a released row carried the flag on the DELTA route; `mutate` serializes job rows "
         "by its own path, so the snapshot elision does not reach `frontend_update` "

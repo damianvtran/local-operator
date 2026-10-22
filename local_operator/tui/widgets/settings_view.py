@@ -272,22 +272,66 @@ def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _P
     the ink has to carry them once they do). Whole-token matching only: a
     ``proactive`` inside another word would be a coincidence, not a class.
     """
+    from local_operator.i18n.keys import tui_authoring as author_keys
+    from local_operator.i18n.text import tr
+
+    scope_token = tr("tui.authoring")(author_keys.scope_conversation())
     text = truncate_cells(facts, room)
     parts = text.split(" · ")
-    if "proactive" not in parts:
+    # The scope token shares the class marker's ink: both answer "what is this and
+    # where does it live" and both must survive a narrow container. No new style,
+    # no colour of its own (S2 constraint).
+    bright = {"proactive", scope_token}
+    if not (bright & set(parts)):
         return [(f"    {text}", faint)]
     line: _PaneLine = []
     pending_indent = "    "
     for index, part in enumerate(parts):
         if index:
             line.append((" · ", faint))
-        line.append((f"{pending_indent}{part}", muted if part == "proactive" else faint))
+        line.append((f"{pending_indent}{part}", muted if part in bright else faint))
         # ONE indent, FIRST part only (review round 2, R10): without this reset
         # every part carries the 4 spaces, the line overruns its caller's
         # ``room - 4`` budget by 4*(parts-1) cells and the tail drops — measured
         # 28→36 cells with `high` clipped on a populated 4-part facts line.
         pending_indent = ""
     return line
+
+
+def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style") -> list[_PaneLine]:
+    """The facts line, plus a SECOND line for the scope token when it cannot fit.
+
+    Design round 1 (D1) requires the class marker to survive; round 2 (D1/U2)
+    measured that DROPPING the scope token to achieve that made the one fact
+    saying "this exists only here" vanish on exactly the rows that also carry
+    ``proactive`` — and left ``role · proactive · this co…`` on others. The
+    designer's bounded suggestion is taken: when the whole facts line exceeds
+    ``room``, line one keeps the class marker (and whatever else fits) and line
+    two carries the FULL token at the same indent, in the same ``muted`` ink.
+    A row with no scope token still costs exactly one line, so the layout is
+    unchanged for every account row.
+
+    ``room`` is the caller's ``room - 4``; the 4-cell indent rides inside each
+    line, as it does for the single-line painter.
+    """
+    from local_operator.i18n.keys import tui_authoring as author_keys
+    from local_operator.i18n.text import tr
+
+    scope_token = tr("tui.authoring")(author_keys.scope_conversation())
+    # THE TOKEN IS LIFTED FROM WHEREVER IT SITS (round 2, D1): a configured role
+    # renders `role · proactive · this conversation · <model> · effort high`, so
+    # the scope fact is NOT last and a suffix-only test left exactly the rows
+    # with model/effort pins clipped. Parts are ` · `-delimited by construction in
+    # ``agent_listing_rows``; removing the token's own part keeps the rest of the
+    # line byte-identical to what the caller assembled.
+    parts = facts.split(" · ")
+    if scope_token not in parts or cell_len(facts) <= room:
+        return [_paint_facts(facts, room, muted=muted, faint=faint)]
+    head = " · ".join(part for part in parts if part != scope_token)
+    return [
+        _paint_facts(head, room, muted=muted, faint=faint),
+        [(f"    {truncate_cells(scope_token, room)}", muted)],
+    ]
 
 
 def _wrap_cells(text: str, width: int, *, max_lines: int = 2) -> list[str] | None:
@@ -5149,7 +5193,7 @@ class SettingsView(Vertical):
             shown, hidden = self._budget_pane_rows(rows, used=used + 1)
             for name, facts, summary in shown:
                 entry: list[_PaneLine] = [[(f"  {truncate_cells(name, room - 2)}", muted)]]
-                entry.append(_paint_facts(facts, room - 4, muted=muted, faint=faint))
+                entry.extend(_paint_facts_lines(facts, room - 4, muted=muted, faint=faint))
                 if summary:
                     entry.append([(f"    {truncate_cells(summary, room - 4)}", faint)])
                 entries.append(entry)

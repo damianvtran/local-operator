@@ -577,8 +577,45 @@ async def status(
             else None
         ),
         "error": _refusal_detail(check.error) if check.error is not None else None,
+        #: Messages this machine is HOLDING for the owner (F8). Code + count
+        #: only, never ids or content; the renderer owns the sentence ("Send
+        #: your chief of staff a message once to receive them", #1325). ``None``
+        #: when nothing waits, so an older renderer that ignores the key loses
+        #: nothing.
+        "delivery_hold": _delivery_hold(config_manager),
     }
     return reply(result)
+
+
+def _delivery_hold(config_manager: ConfigManager) -> dict[str, Any] | None:
+    """The owner-visible F8 hold: cards waiting for the owner to message their chief of staff.
+
+    WHY: a member whose ACCEPTED consent is ``bridge_consent_v1`` never agreed
+    that a message may engage a session they have not used, so a card to a
+    never-opened designated session is held (``open_chief_of_staff``) rather
+    than engaging it. That hold must not be silent — the owner has to learn
+    that one action — sending the session a message — releases it (opening
+    it does not: release needs a user turn on disk). Read-only, local,
+    no network; any store failure reads as "nothing to show".
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    try:
+        store = Store(config_manager.config_dir)
+        owner = store.active_owner_readonly()
+        if owner is None:
+            return None
+        count = store.hold_count_readonly(owner, HOLD_OPEN_CHIEF_OF_STAFF)
+        session = store.designated_session_for_readonly(owner)
+    except (StoreRefused, sqlite3.Error):
+        return None
+    if count <= 0:
+        return None
+    return {"code": HOLD_OPEN_CHIEF_OF_STAFF, "count": count, "session": session}
 
 
 @router.get("/v1/desktop/team-bridge/settings", response_model=CRUDResponse[Any])
@@ -685,7 +722,17 @@ async def get_directory(
     from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 
     if tenant_id is None or re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
-        _raise_read("invalid_request")
+        # Name the field, not the version. A local grammar refusal used to carry
+        # the generic read sentence, which the renderer classified as an outdated
+        # server and told the user to update a current client.
+        raise HTTPException(
+            422,
+            {
+                "code": "invalid_request",
+                "message": "tenant_id was not in a shape this client accepts",
+                "field": "tenant_id",
+            },
+        )
     client = TeamBridgeClient(config_manager.config_dir)
     try:
         payload = await client.directory(tenant_id)

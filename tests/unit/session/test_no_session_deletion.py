@@ -134,6 +134,60 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes <venv>/bin/.'Local Operator'.<dead-pid>.tmp orphans only; glob is venv-scoped",
     ),
+    (
+        "local_operator/procname.py::_sweep_orphan_plants",
+        "shutil.rmtree",
+        # Every path this module writes is `<runtime root>/<build key>` or a
+        # staging entry beside it, and `<venv>/bin|lib`. The key is the
+        # interpreter's own (parent name, resolved path, size, mtime), the root
+        # is passwd-home-derived, and the basenames are the brand — no session
+        # id, config dir or caller input can reach any of them.
+        "Reclaims <runtime root>/<key>.tmp|dead.<pid>.<thread>, a staging or aside tree "
+        "this module made",
+    ),
+    (
+        "local_operator/procname.py::_plant_runtime",
+        "os.rename",
+        "Publishes this plant's staging dir as <runtime root>/<key>; both interpreter-derived",
+    ),
+    (
+        "local_operator/procname.py::_plant_runtime",
+        "shutil.rmtree",
+        # Two: the failed-build staging tree (a clone that died on ENOSPC must
+        # never be renamed onto the build key) and a staging tree whose rename
+        # lost to a healthy concurrent planter. Both are this plant's own entry.
+        "Removes this plant's own staging tree",
+        2,
+    ),
+    (
+        "local_operator/procname.py::_replace_corrupt",
+        "os.rename",
+        # Three: a CORRUPT <runtime root>/<key> moved aside to <key>.dead.<pid>.
+        # <thread>, that aside put back when it proved healthy after all, and
+        # this plant's staging tree published onto the key. Every path is the
+        # interpreter-derived key or a private name beside it.
+        "Swaps a CORRUPT <runtime root>/<key> aside and publishes staging; interpreter-derived",
+        3,
+    ),
+    (
+        "local_operator/procname.py::_replace_corrupt",
+        "shutil.rmtree",
+        # Three: this plant's staging tree when a concurrent planter repaired
+        # the key first, the moved-aside dead tree, and a staging tree whose
+        # final rename lost. None is ever the published key itself.
+        "Removes <runtime root>/<key>.dead.<pid>.<thread> or this plant's own staging tree",
+        3,
+    ),
+    (
+        "local_operator/procname.py::_link_to",
+        "os.replace",
+        "Atomic replace of <venv>/bin/'Local Operator' with a symlink to the runtime image",
+    ),
+    (
+        "local_operator/procname.py::_link_to",
+        "<path>.unlink",
+        "Clears this pid's own .tmp symlink in <venv>/bin after the replace",
+    ),
     # -- operator/device pairing store (stage D, issue #1310) ----------------
     # Every path in these FOUR is built from `config_dir()/operator/...` plus a
     # device id validated by `_safe_name` (alphanumerics, '-' and '_', at most 128
@@ -619,6 +673,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "`lop network rm`: the record FILE and its .secrets.json FILE under "
         "<config>/network/networks/ (design §12 — local record removal, audit kept)",
+    ),
+    (
+        "local_operator/network/store.py::forget_invite_tokens",
+        "<path>.unlink",
+        "Residue sweep of dead invites: the token FILE <config>/network/outbox/<id>.invite, "
+        "composed by invite_path from safe_component(invite_id) (no separators, so no "
+        "traversal) -- a regular file two levels below network/, never under sessions/",
     ),
     (
         "local_operator/network/store.py::clear_pending_pairing",
@@ -1631,6 +1692,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "boot records under <config>/run/host only; fixed dirname + one-level "
         "'*.json' glob, never a session path",
     ),
+    (
+        "local_operator/session/runtime/journal.py::clear_run_record",
+        "<path>.unlink",
+        "one run record FILE at <session_dir>/runtime-run.json, and only when its "
+        "own run key matches the caller's; never a directory and never the transcript",
+    ),
     # The viewer registry is the same staged-write shape as the session
     # registry above, one directory over (run/viewers rather than run/mobile)
     # and reaching sessions/ no more than that one does.
@@ -1792,6 +1859,33 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/fork.py::consume_fork_boundary",
         "<path>.unlink",
         "one-shot fork-boundary sidecar FILE",
+    ),
+    # The failed-fork discard (LOH-9 S3). ``fork_dir`` is the directory THIS
+    # call created and claimed one statement earlier, for a fork that does not
+    # exist yet; nothing under it is the user's work, and the parent directory
+    # is never named by this function. Removing it is how a refused roles copy
+    # (over the byte bound, a symlink, an I/O error) avoids leaving a fork whose
+    # inherited attachment points at no definitions.
+    (
+        "local_operator/fork.py::_discard_failed_fork",
+        "shutil.rmtree",
+        "the just-created, still-claimed destination fork dir only; parent never touched",
+    ),
+    # Publishing the roles copy: a staging directory inside the fork's OWN
+    # directory is renamed onto ``<fork>/roles`` with one atomic os.replace.
+    # Neither path can be an existing session: the fork dir was claimed above
+    # and the name is the fixed ``roles`` child of it.
+    (
+        "local_operator/fork.py::_copy_roles_tree",
+        "os.replace",
+        "staging dir -> <fork>/roles inside the just-created fork; never a session dir",
+    ),
+    (
+        "local_operator/fork.py::_copy_roles_tree",
+        "shutil.rmtree",
+        "only its own .roles-<hex> staging dir inside the fork dir on failure "
+        "(three branches: bound crossed mid-copy, OSError, cancelled copy)",
+        3,
     ),
     (
         "local_operator/mobile/install.py::uninstall",
@@ -2559,6 +2653,38 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Adopts a VERIFIED staging directory into sessions/ under a new id (never "
         "renames a session directory); the owner deleted the original through "
         "cleanup.remove_session_dir",
+    ),
+    (
+        "local_operator/network/mobility.py::_stash_session_roles",
+        "os.replace",
+        "LOH-9 S2's drop path: renames the session's `roles/` SUBTREE out to "
+        "<config>/dropped-session-roles/<id>, which is OUTSIDE sessions/; the "
+        "session directory itself is never this call's source or target — its "
+        "removal stays cleanup.remove_session_dir's",
+    ),
+    (
+        "local_operator/network/mobility.py::_unstash_session_roles",
+        "os.replace",
+        "Restores the SAME `roles/` subtree into the session when a move is refused "
+        "after stashing it: the reverse of the row above, same two paths, and it "
+        "runs only when the session directory is still present (a refusal must "
+        "change nothing)",
+    ),
+    (
+        "local_operator/session/cleanup.py::hand_off_session_dir",
+        "os.replace",
+        "THE MESH COMMIT: renames sessions/<id> into <config>/network/handed-away/ "
+        "once the destination holds a verified complete copy. The rename is what "
+        "makes 'exactly one copy' atomic — after it no scanner, listing or resume "
+        "can see the id here — and it happens before the tombstone tells the "
+        "destination anything, so a refusal leaves the conversation where it was",
+    ),
+    (
+        "local_operator/network/carry.py::_write_marker",
+        "os.replace",
+        "Atomic write of a session's own desktop.json cwd marker at the promote, "
+        "through a sibling pid-temp file. It rewrites ONE field of a bookkeeping "
+        "file the copy already carried; the transcript is never edited",
     ),
     (
         "local_operator/network/mobility.py::_promote",
@@ -3476,6 +3602,13 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
         # tmp -> .session-holds.json (the holds map, beside the log)
         "local_operator/session/cleanup.py::_write_holds",
+        # THE ONE PATH DISPLACER THAT MAY NAME A SESSION DIRECTORY, and it is this
+        # module's own function: the mesh commit renames sessions/<id> out to
+        # network/handed-away/ once the destination holds a verified copy. Every
+        # other rename in this neighbourhood is a temp-file swap; this one is
+        # argued for in the allow-list above ("the rename is what makes 'exactly
+        # one copy' atomic").
+        "local_operator/session/cleanup.py::hand_off_session_dir",
         # tmp -> .session-census.json (the census baseline, beside the log)
         "local_operator/session/census.py::_write_census",
         # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,
