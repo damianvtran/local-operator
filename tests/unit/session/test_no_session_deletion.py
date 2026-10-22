@@ -3213,6 +3213,67 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes validated skill-unpull markers under <config_dir>/hub/unpull/ (six branches)",
         6,
     ),
+    # -- the bundle carrier: <config_dir>/hub/downloads/<hex> and skills/.stage-* --
+    # Every path the carrier removes or renames is built from the config dir plus
+    # an OPAQUE operation id (``secrets.token_hex``/the storage's validated
+    # operation id) or from ``validate_name``'d alias. The download root is
+    # ``<config>/hub/downloads/`` (0700, sibling of sessions/); staging is
+    # ``<config>/skills/.stage-<op>/`` inside the managed root, and aliases can
+    # never collide with the dot-prefixed stage. No call accepts a session id, a
+    # caller-named directory or any path under sessions/.
+    (
+        "local_operator/hub_sync/service.py::_download_bundle_archive",
+        "shutil.rmtree",
+        "Removes ONLY this operation's <config_dir>/hub/downloads/<token_hex> on the refusal paths",
+        2,
+    ),
+    (
+        "local_operator/hub_sync/service.py::_discard_bundle_download",
+        "shutil.rmtree",
+        "Removes the resolved <config_dir>/hub/downloads/<op> parent of its own archive file",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_materialize_published_skill",
+        "shutil.rmtree",
+        "Removes this publish's own <config_dir>/hub/downloads/<token_hex> archive directory",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle.py::extract_archive",
+        "shutil.rmtree",
+        "Removes ONLY the caller's staging dir under <config_dir>/skills/.stage-<op> on failure",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle_storage.py::ManagedBundleStorage._stage",
+        "shutil.rmtree",
+        "Removes ONLY its own just-made .stage-<op> under <config_dir>/skills/",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle_storage.py::" "ManagedBundleStorage._cleanup_stages",
+        "shutil.rmtree",
+        "Removes this alias's own abandoned .stage-* siblings under <config_dir>/skills/",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle_storage.py::"
+        "ManagedBundleStorage._discard_settled_stage",
+        "shutil.rmtree",
+        "Removes the settled transaction's own .stage-<op> under <config_dir>/skills/",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle_storage.py::ManagedBundleStorage.apply",
+        "os.replace",
+        "Staged->destination swap and the concurrent-edit restore under <config_dir>/skills/",
+        2,
+    ),
+    (
+        ("local_operator/hub_sync/skill_bundle_storage.py::" "ManagedBundleStorage._recover_one"),
+        "os.replace",
+        "Crash-gap restore of this operation's own staged/backup tree under <config_dir>/skills/",
+    ),
+    (
+        ("local_operator/hub_sync/skill_bundle_storage.py::" "ManagedBundleStorage._recover_one"),
+        "shutil.rmtree",
+        "Removes ONLY the crashed transaction's own .stage-<op> under <config_dir>/skills/",
+    ),
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_unpull_locked",
         "shutil.rmtree",
