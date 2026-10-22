@@ -161,8 +161,7 @@ class TeamParams(BaseModel):
     # ``as`` is a Python keyword, so the design's ``[as=Y]`` is ``as_name`` here
     # too — one spelling on every surface rather than a translation per layer.
     as_name: str | None = Field(
-        default=None,
-        description="promote: copy it under this name; the default is its own name.",
+        default=None, description="promote: copy it under this name (default: its own)."
     )
     # The flag IS the confirmation, exactly as on the agent twin: one answer, one
     # field, so a caller cannot ask for the overwrite while dropping the part that
@@ -170,10 +169,8 @@ class TeamParams(BaseModel):
     confirm_replace: bool = Field(
         default=False,
         description=(
-            "promote: replace any account row this promotion would collide with "
-            "(the team or a member) instead of refusing. This IS the user's "
-            "confirmation — set it only after they asked for the overwrite, never "
-            "on your own initiative."
+            "promote: replace any account row this would collide with (the team or "
+            "a member). This IS the user's confirmation — set it only when they asked."
         ),
     )
     overrides: list[TeamOverride] | None = Field(

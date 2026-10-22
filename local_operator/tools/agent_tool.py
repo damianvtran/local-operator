@@ -280,8 +280,7 @@ class AgentParams(BaseModel):
     # spelled ``as_name`` on the wire too: one spelling everywhere beats a wire
     # name this module then has to translate.
     as_name: str | None = Field(
-        default=None,
-        description="promote: copy it under this name; the default is its own name.",
+        default=None, description="promote: copy it under this name (default: its own)."
     )
     # ONE field, not ``replace`` + ``confirm_replace``: on this op the flag IS the
     # confirmation (the desktop body and the TUI's typed ``yes`` carry the same
@@ -290,9 +289,8 @@ class AgentParams(BaseModel):
     confirm_replace: bool = Field(
         default=False,
         description=(
-            "promote: replace an account row of that name instead of refusing the "
-            "collision. This IS the user's confirmation — set it only after they "
-            "asked for the overwrite, never on your own initiative."
+            "promote: replace the account's row of that name instead of refusing. "
+            "This IS the user's confirmation — set it only when they asked."
         ),
     )
     # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not

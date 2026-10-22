@@ -253,7 +253,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``show`` messages now carry it. Measured through this test's own
     # printed table; the ``team`` entry below moves by the same 12 for its
     # twin sentence, and no other entry moved.
-    "agent": 1056,
+    # RE-MEASURED (LOH-9 S4): 1056 -> 1119. The delta is promotion: the ``op``
+    # enum gains one word and the payload gains ``as_name`` and
+    # ``confirm_replace`` (the second is the overwrite AND the user's answer, so
+    # its wording is the safety-critical part). Trimmed once already; the same
+    # printed table measured it.
+    "agent": 1119,
     "ask": 1063,
     "ask_withdraw": 314,
     "bash": 295,
@@ -438,7 +443,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # table, and the tier arm below still does not read config.
     # RE-MEASURED (LOH-9 S3): 1018 -> 1030, the fork-copy clause; only this
     # and the ``agent`` entry moved.
-    "team": 1030,
+    # RE-MEASURED (LOH-9 S4): 1030 -> 1109, the same promotion delta; the team
+    # doc also states that a replace may cover a member, which the agent twin
+    # does not need.
+    "team": 1109,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -470,7 +478,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: tier arm renders it identically, so `task` stays 764.
 #: 1073 -> 1085 (LOH-9 S3): the one-clause fork exception, the same +12 as
 #: the canonical arm; `task` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1085, "task": 764}
+#: RE-MEASURED (LOH-9 S4): agent 1085 -> 1148; ``task`` is unmoved because the
+#: promotion fields are on ``agent``/``team``, not on the launch tool.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1148, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
