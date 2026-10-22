@@ -354,6 +354,31 @@ def _access_record(path: str, method: str = "GET") -> logging.LogRecord:
             "/v1/desktop/team-bridge/conversations/:conversationid/attachments/:attachmentid"
             "?tenant_id=org-a",
         ),
+        # R4-01: the trailing-slash variants Starlette 307-redirects (and logs).
+        (
+            "GET",
+            f"/v1/desktop/team-bridge/conversations/{CID}/messages/{MID}/attachments/{AID}/",
+            "/v1/desktop/team-bridge/conversations/:conversationid/messages/:messageid"
+            "/attachments/:attachmentid/",
+        ),
+        (
+            "POST",
+            f"/v1/desktop/team-bridge/conversations/{CID}/attachments/?tenant_id=org-a",
+            "/v1/desktop/team-bridge/conversations/:conversationid/attachments/?tenant_id=org-a",
+        ),
+        (
+            "DELETE",
+            f"/v1/desktop/team-bridge/conversations/{CID}/attachments/{AID}/",
+            "/v1/desktop/team-bridge/conversations/:conversationid/attachments/:attachmentid/",
+        ),
+        # R4-01: a refused extra query parameter is logged as sent — minus ids.
+        (
+            "GET",
+            f"/v1/desktop/team-bridge/conversations/{CID}/messages/{MID}/attachments/{AID}"
+            f"?tenant_id=org-a&message_id={MID}&x={AID}",
+            "/v1/desktop/team-bridge/conversations/:conversationid/messages/:messageid"
+            "/attachments/:attachmentid?tenant_id=org-a&message_id=:id&x=:id",
+        ),
     ],
 )
 def test_access_log_line_carries_no_attachment_message_or_conversation_ids(
