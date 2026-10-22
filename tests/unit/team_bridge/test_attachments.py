@@ -73,6 +73,11 @@ def _descriptor(data: bytes, attachment_id: str = AID, **override: Any) -> dict[
     return out
 
 
+def _one(parsed: tuple[att.AttachmentDescriptor, ...] | None) -> att.AttachmentDescriptor:
+    assert parsed is not None and len(parsed) == 1
+    return parsed[0]
+
+
 @pytest.fixture(autouse=True)
 def _destination_open(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
@@ -262,7 +267,7 @@ async def test_fetch_attachment_stops_reading_past_the_ceiling(monkeypatch) -> N
 @pytest.mark.asyncio
 async def test_verify_checks_hash_size_and_sniffed_type() -> None:
     data = _png()
-    (descriptor,) = att.parse_descriptors([_descriptor(data)]) or ()
+    descriptor = _one(att.parse_descriptors([_descriptor(data)]))
     verified = await att.verify_and_bound(data, descriptor)
     assert verified.wire_mime == "image/png" and verified.private_payload()
     assert "private" not in repr(verified) and data not in repr(verified).encode()
@@ -272,11 +277,10 @@ async def test_verify_checks_hash_size_and_sniffed_type() -> None:
         await att.verify_and_bound(bytes(tampered), descriptor)
     assert sha.value.code == "attachment_sha256_mismatch"
     svg = b"<svg xmlns='http://www.w3.org/2000/svg'/>"
-    (svg_desc,) = (
+    svg_desc = _one(
         att.parse_descriptors(
             [_descriptor(data, sha256=hashlib.sha256(svg).hexdigest(), size=len(svg))]
         )
-        or ()
     )
     with pytest.raises(att.AttachmentRejected) as kind:
         await att.verify_and_bound(svg, svg_desc)
@@ -485,7 +489,11 @@ class Hub:
 
     def history(self) -> dict[str, Any]:
         admitted = self.admission is not None and self.admission["verdict"] == "allow"
-        with_images = admitted and self.admission.get("attachments_hash") == self.attachments_hash
+        with_images = (
+            self.admission is not None
+            and admitted
+            and self.admission.get("attachments_hash") == self.attachments_hash
+        )
         row: dict[str, Any] = {
             "id": MID,
             "seq": 1,
@@ -712,12 +720,12 @@ async def test_history_after_allow_returns_caption_then_fresh_context_images(
     result = await _history(hub, monkeypatch)
     kinds = [type(block).__name__ for block in result.content]
     assert kinds == ["TextContent", "TextContent", "ImageContent", "ImageContent"]
-    caption = result.content[1].text
+    caption = cast(TextContent, result.content[1]).text
     assert caption.startswith(BRIDGE_UNTRUSTED_CLAUSE)
     assert hub.descriptors[0]["id"] in caption and "40x30" in caption
     # Every image came from a NEW context-purpose fetch, not the screen bytes.
     assert hub.fetches == [(d["id"], "context") for d in hub.descriptors]
-    decoded = [base64.b64decode(block.data) for block in result.content[2:]]
+    decoded = [base64.b64decode(cast(ImageContent, b).data) for b in result.content[2:]]
     assert decoded == hub.images
     # Bytes never ride details (persisted with the transcript row).
     details = json.dumps(result.details, default=str)

@@ -709,11 +709,11 @@ async def handle_conversation_available(
             # S-20's rule, conversation half: never wake from bytes other than
             # the ones the screener saw.
             return {"action": "hold", "message_id": message_id, "code": "body_hash_mismatch"}
-        admitted_images = (
-            screened_images is not None
-            and getattr(result, "attachments_hash", None) == screened_images.attachments_hash
-        )
-        if screened_images is not None and not admitted_images:
+        admitted_hash: str | None = None
+        if screened_images is not None:
+            if getattr(result, "attachments_hash", None) == screened_images.attachments_hash:
+                admitted_hash = screened_images.attachments_hash
+        if screened_images is not None and admitted_hash is None:
             # The verdict does not carry the image set we sent: something
             # between dispatch and here lost the binding. Never admit pixels
             # on it — hold and re-screen.
@@ -727,8 +727,8 @@ async def handle_conversation_available(
             endpoint_id=owner.endpoint_id,
             # The hub requires the v3 hash with an image allow: it is the only
             # template whose wrapper presented these images to the screener.
-            attachments_hash=screened_images.attachments_hash if admitted_images else None,
-            template_sha256=SCREENING_TEMPLATE_V3_SHA256 if admitted_images else None,
+            attachments_hash=admitted_hash,
+            template_sha256=SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else None,
             access=access,
         )
         detail = await _deliver_card(
