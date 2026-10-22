@@ -1538,7 +1538,13 @@ def _apply_skill_bundle(
         # refuses instead of being overwritten. An absent link has no bytes, and
         # its "before" is exactly None.
         before = None if absent else c.local_fp
-        archive = _download_bundle_archive(ctx, client, c.hub_id, manifest)
+        archive = _download_bundle_archive(
+            ctx,
+            client,
+            c.hub_id,
+            manifest,
+            bearer=record.identity.visibility == "org",
+        )
         storage.apply(
             record.identity,
             alias,
@@ -2986,7 +2992,7 @@ def _bundle_download_root(config_dir: Path) -> Path:
 
 
 def _download_bundle_archive(
-    ctx: HubSyncContext, client: Any, hub_id: str, manifest: Any
+    ctx: HubSyncContext, client: Any, hub_id: str, manifest: Any, *, bearer: bool
 ) -> Path:
     """Stream one bundle archive into a PRIVATE temp dir and bind it to the manifest.
 
@@ -2995,6 +3001,11 @@ def _download_bundle_archive(
     ``bundle.hash`` BEFORE any parser sees them -- the core's extractor repeats
     that check on the same file, which is what catches a local writer touching it
     in between. The caller removes the whole directory on every exit.
+
+    ``bearer`` is EXPLICIT, never a client default: a public row is readable
+    anonymously, and the anonymous client raises the moment a call demands a key
+    -- the exact failure a public bundle pull hit on a real E2E. The caller
+    threads the link's scope (public -> False, org -> True).
     """
 
     root = _bundle_download_root(ctx.config_dir)
@@ -3013,7 +3024,10 @@ def _download_bundle_archive(
         try:
             with os.fdopen(fd, "wb") as handle:
                 result = client.download_skill_bundle(
-                    hub_id, dest=handle, max_bytes=manifest.bundle.size
+                    hub_id,
+                    dest=handle,
+                    max_bytes=manifest.bundle.size,
+                    bearer=bearer,
                 )
         except TypeError:
             # A test/fake client predating the keyword surface: the seam stays
@@ -3601,7 +3615,13 @@ def install_skill(
                     ManagedBundleStorage,
                 )
 
-                archive = _download_bundle_archive(ctx, resolved.client, hub_id, bundle)
+                archive = _download_bundle_archive(
+                    ctx,
+                    resolved.client,
+                    hub_id,
+                    bundle,
+                    bearer=resolved.identity.visibility == "org",
+                )
                 try:
                     transaction = ManagedBundleStorage(ctx.config_dir).apply(
                         identity,
