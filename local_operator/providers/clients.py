@@ -4863,7 +4863,9 @@ class GoogleClient:
             # whitespace-only text beside an image ship as ``{"text": "  \n"}``.
             # Tested on the JOINED text rather than per block so a message with
             # real text keeps the exact part it always had (inner whitespace
-            # blocks included) and only a turn with nothing to read loses it.
+            # blocks included; ``drop_blank_text_blocks`` keeps them on disk and
+            # on replay whenever real text is present) and only a turn with
+            # nothing to read loses it.
             text = message.text
             parts: list[dict[str, Any]] = [{"text": text}] if text.strip() else []
             for block in message.content:

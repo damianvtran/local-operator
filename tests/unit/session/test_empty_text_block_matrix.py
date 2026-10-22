@@ -46,7 +46,14 @@ from local_operator.providers.clients import (
 )
 from local_operator.session.aside import wrap_aside_turns
 from local_operator.session.session import Session
-from local_operator.session.transcript import Transcript, encode_message_payload
+from local_operator.session.transcript import (
+    Transcript,
+    TranscriptEntry,
+    _entry_to_message,
+    _without_blank_user_text,
+    encode_message_payload,
+    replay_entries,
+)
 
 from .test_session import MODEL, ScriptedStream
 
@@ -126,6 +133,61 @@ def test_encoder_keeps_a_whitespace_only_text_only_turn() -> None:
     assert "content" not in only_empty, "an empty block goes even when it is the only block"
 
 
+def test_encoder_keeps_a_whitespace_separator_between_real_text_beside_media() -> None:
+    """Review m1 / QA Q-1: whitespace beside media goes only when the turn has
+    nothing to read. Between two real text blocks it is a separator that
+    ``Message.text`` joins, and dropping it turned ``line1\\nline2`` into
+    ``line1line2`` on replay."""
+    message = Message(
+        role="user",
+        content=[
+            TextContent(text="line1"),
+            TextContent(text="\n"),
+            TextContent(text="line2"),
+            IMAGE_BLOCK,
+        ],
+    )
+    payload = encode_message_payload(message)
+    assert [block.get("text") for block in payload["content"][:3]] == ["line1", "\n", "line2"]
+
+    entry = TranscriptEntry(id="row-1", ts=1.0, type="message", payload=payload)
+    replayed = _entry_to_message(entry)
+    assert isinstance(replayed, Message)
+    assert replayed.text == "line1\nline2"
+
+    with_empty = Message(
+        role="user", content=[TextContent(text="line1"), TextContent(text=""), IMAGE_BLOCK]
+    )
+    # An EMPTY block still always goes, even beside real text.
+    kept = encode_message_payload(with_empty)["content"]
+    assert kept[0] == {"text": "line1"} and len(kept) == 2
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"text": "hello"}],
+        [{"text": "what is this"}, IMAGE],
+    ],
+    ids=["text-only", "text-and-image"],
+)
+def test_an_unaffected_user_row_round_trips_unchanged(content) -> None:
+    """Review m2: the heal returns the SAME object when it drops nothing, so an
+    unaffected row is byte-identical on encode and on decode and keeps its
+    compaction-cache identity."""
+    message = Message.model_validate({"role": "user", "content": content})
+    first = encode_message_payload(message)
+    entry = TranscriptEntry(id="row-1", ts=1.0, type="message", payload=dict(first))
+    decoded = _entry_to_message(entry)
+    assert isinstance(decoded, Message)
+    second = encode_message_payload(decoded)
+    assert json.dumps(second, sort_keys=True) == json.dumps(first, sort_keys=True)
+
+    # Identity, not only equality: neither direction copied the message.
+    assert _without_blank_user_text(message) is message
+    assert _without_blank_user_text(decoded) is decoded
+
+
 def test_encoder_leaves_assistant_rows_alone() -> None:
     """User rows only: an assistant row's emptiness is ``_is_empty_assistant``'s
     rule at the wire, and rewriting it here would change bytes nobody asked."""
@@ -183,6 +245,29 @@ def test_a_poisoned_row_already_on_disk_rehydrates_healed(tmp_path, name):
     (directory / "transcript.jsonl").write_text(json.dumps(row) + "\n")
 
     (message,) = Transcript(directory).build_llm_history()
+    assert isinstance(message, Message)
+    assert [type(block).__name__ for block in message.content] == ["ImageContent"]
+    assert message.id == "row-1"
+
+
+@pytest.mark.parametrize("mode", ["context", "audit"])
+@pytest.mark.parametrize("name", sorted(WITH_IMAGE))
+def test_a_poisoned_row_heals_through_replay_entries(tmp_path, name, mode):
+    """Review m3: ``replay_entries`` (``_replay_row``) is the path the suffix
+    readers, mobile, desktop and peer displays take, not only
+    ``build_llm_history``; the heal must hold there in both modes."""
+    line = json.dumps(
+        {
+            "id": "row-1",
+            "ts": 1.0,
+            "type": "message",
+            "payload": {"role": "user", "content": WITH_IMAGE[name]},
+        }
+    )
+    entry = TranscriptEntry.from_json(line)
+    assert entry is not None
+
+    (message,) = replay_entries([entry], None, mode=mode)
     assert isinstance(message, Message)
     assert [type(block).__name__ for block in message.content] == ["ImageContent"]
     assert message.id == "row-1"
@@ -266,6 +351,29 @@ def test_google_keeps_real_text_beside_an_image() -> None:
     )
     (turn,) = _google([message])
     assert turn["parts"][0] == {"text": "look "}
+
+
+@pytest.mark.parametrize("wire", sorted(WIRES))
+def test_a_replayed_separator_row_ships_no_blank_part(wire) -> None:
+    """The separator is kept on disk now (m1); no wire may turn that kept
+    whitespace block into a blank part of its own."""
+    stored = encode_message_payload(
+        Message(
+            role="user",
+            content=[
+                TextContent(text="line1"),
+                TextContent(text="\n"),
+                TextContent(text="line2"),
+                IMAGE_BLOCK,
+            ],
+        )
+    )
+    turns = WIRES[wire](_history(stored["content"]))
+    for turn in turns:
+        for text in _texts(wire, turn):
+            assert text.strip(), f"{wire} shipped a blank text part: {turn}"
+    if wire == "google":
+        assert turns[0]["parts"][0] == {"text": "line1\nline2"}
 
 
 # ---------------------------------------------------------------------------

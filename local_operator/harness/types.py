@@ -557,18 +557,25 @@ def drop_blank_text_blocks(content: Sequence[Content]) -> list[Content]:
     - an EMPTY text block always goes. It persists as ``{}`` (the encoder dumps
       with ``exclude_defaults``) and Anthropic refuses the whole request over it
       on every later turn, because the row is in history.
-    - a WHITESPACE-ONLY text block goes only when the message carries something
-      else (an image, audio, an artifact). Beside media it is an artefact of the
-      composer, not an utterance; on its own it is the only thing the user sent,
-      so it is kept and left to the wires, which drop it and backfill the turn.
+    - a WHITESPACE-ONLY text block goes only when the message carries media (an
+      image, audio, an artifact) AND no text block with anything to read. There
+      it is an artefact of the composer, not an utterance. On its own it is the
+      only thing the user sent, so it is kept and left to the wires, which drop
+      it and backfill the turn. Beside real text it may be a separator
+      (``line1``, ``\\n``, ``line2``) that ``Message.text`` joins, so it is kept
+      there too: dropping it would change the text a reader sees.
 
-    Order of the remaining blocks is preserved; nothing else is touched.
+    Order of the remaining blocks is preserved and nothing else is touched, so
+    ``Message.text`` loses only whitespace that has no readable text around it.
     """
-    has_other = any(not isinstance(block, TextContent) for block in content)
+    has_media = any(not isinstance(block, TextContent) for block in content)
+    has_words = any(isinstance(block, TextContent) and block.text.strip() for block in content)
+    drop_whitespace = has_media and not has_words
     return [
         block
         for block in content
-        if not isinstance(block, TextContent) or (block.text.strip() if has_other else block.text)
+        if not isinstance(block, TextContent)
+        or (block.text.strip() if drop_whitespace else block.text)
     ]
 
 
