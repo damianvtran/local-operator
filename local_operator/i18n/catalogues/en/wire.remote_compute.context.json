@@ -1,0 +1,217 @@
+{
+  "wire.remote_compute.alone": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "No placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.cancelled": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.conflict": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.detached": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Multi-line receipt printed to STDERR under --detach: the run id alone goes to stdout so a script can capture it. {network_id} is what the server returned, confirmed against the submitted request, never the client's expectation. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.disabled": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.failed": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_succeeded": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line. One key per OUTCOME rather than a shared sentence with a substituted word, so each locale owns the grammar of its own verb. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_failed": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line for a run whose task failed. One key per OUTCOME, so the locale owns its own verb phrase. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_expired": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line for a run that hit its deadline. 'expired' means the server's maximum run time ended the run, not that a credential expired. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_cancelled": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line for a run a user cancelled (outcome `cancelled`, which is not a status word). {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_unknown": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line when the run stopped but the server named no outcome this build can read (absent, or outside the four known ones). It must not claim success or failure. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_exit_code": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{exit_code} is the server's integer exit code, printed as text; it is a number and is never translated or localised. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_charged": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{amount} is the charged figure EXACTLY as the server reported it (for example 0.42, or a JSON cost breakdown). Never reformat, convert or recompute it: this client does not know the price. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.interrupted": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.invalid_request": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.local_only": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.needs_prompt": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.needs_repo": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.no_capacity": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.no_credit": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.only_with": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.retrying": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Printed once when the run's status is `error`. The server retries an errored run, so the sentence must read as 'still going', never as a failure or as the end of the watch. No placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.status_line": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.status_network_matched": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{network_id} is the run's network as the server returned it, and this device resolved the same one, so the sentence may state a match. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.status_network_mismatch": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{network_id} is the run's network as the server returned it and it is NOT this device's, so the sentence must be a warning, not a refusal. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.status_network_unconfirmed": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "No placeholder. The device could not resolve a network to compare, or the run named none; say the network is unconfirmed rather than implying either match or mismatch. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.unknown_run": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.unreachable": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.submitted": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Two-line receipt printed before a watch starts. {network_id} is what the server returned and this client confirmed, so the line states evidence rather than intent. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.network_mismatch": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Refusal raised when the run the server returned belongs to another network, or carries no network id at all (both are mismatches: the field is in the contract). No placeholders: never echo either network id. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.key_empty": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Refusal for an explicitly empty --idempotency-key, which is never replaced by a fresh key. No placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.key_too_long": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{max_bytes} is a bare integer (128) and appears twice; it must stay identical in both places. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.key_not_printable": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Refusal for a key outside 0x20-0x7e; no placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.bad_repo": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Refusal naming the three accepted URL shapes (https://, ssh://, git@host:path); the shell-looking examples are syntax and stay verbatim. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.bad_sha": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Refusal for anything but a full 40-hex commit SHA; no placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.status_unknown": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Printed once for a status outside this build's vocabulary, which stays NON-terminal; {status} is the server's raw word and is not translated. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.still_running": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{max_hours} is the limit the SERVER admitted the run with (it may cap what was asked for), so the sentence describes the server's bound. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.replayed": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Printed to STDERR when a submit answered 200 rather than 201, i.e. the --idempotency-key matched an earlier submission and Radient returned THAT run instead of creating one. It must say both that no new run was created and which run this is; {run_id} is the run the server returned. Stdout is unaffected (the run id alone under --detach), and the watch or detach continues normally afterwards."
+  },
+  "wire.remote_compute.run_identity_mismatch": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Both placeholders are run ids: {asked_for} is the id this command sent in the path, {answered} is the id in the body Radient returned. Both must be preserved and kept distinguishable, because the point of the sentence is that they differ. It reports a response this client refuses to attribute (a cached page, a proxy, or a server bug); nothing was retried or cancelled by it."
+  },
+  "wire.remote_compute.unreadable_envelope": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim; never alarmist",
+    "note": "No placeholders. The response body looked like Radient's envelope but carried keys outside the msg/result/error set, so this build cannot parse it: the format changed after this build was cut. It says so and names `lop-update` as the remedy; a retry cannot help."
+  },
+  "wire.remote_compute.api_override": {
+    "role": "CLI warning printed to STDERR when the remote-compute API base is overridden",
+    "tone": "plain, two sentences; the variable name and the host stay verbatim; it states the consequence rather than only the fact",
+    "note": "{host} is the exact host and port the bearer is being sent to, WITHOUT any credential and without a path — it is the whole point of the line and must be preserved exactly once. Printed once per invocation, to stderr, before the first request, so stdout stays the run id alone, and on --remote-status and --remote-cancel as well. The second sentence is the operative fact: the Radient LOGIN leaves for that host, and the variable should be unset unless the reader controls it. A login going to a staging server must never look like one going to production, and the reader must be able to act on the sentence without knowing what a bearer is."
+  },
+  "wire.remote_compute.api_override_invalid": {
+    "role": "CLI refusal for an unusable LOP_REMOTE_COMPUTE_API_URL",
+    "tone": "plain, ONE sentence; the variable, the schemes and the literal loopback hosts stay verbatim",
+    "note": "No placeholders. The value itself is never echoed. It states the whole rule (https, or http only on 127.0.0.1, ::1 or localhost; no userinfo, query or fragment; no whitespace, control or non-ASCII characters; no percent-encoding) because the command exits rather than falling back to production; the last clause says that the remote-compute command did not start. The character rules are one of them refused by the parser before it splits the value, so they belong in the same sentence rather than a second one."
+  },
+  "wire.remote_compute.preview_not_enabled": {
+    "role": "CLI error for HTTP 403 from the remote-compute API",
+    "tone": "plain, one sentence; not a bug report",
+    "note": "No placeholders. 403 means the server-side preview allowlist does not carry this Radient account yet, so the remedy is to wait for the preview rather than to retry or re-login. `preview` stays in parentheses as the feature's own label."
+  }
+}
