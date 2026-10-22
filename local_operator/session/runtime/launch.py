@@ -1241,6 +1241,20 @@ async def engage_runtime(
                 # loop looks at the lease at all.
                 logger.debug("engage: %s is starting under pid %s; waiting", session_id, holder)
             elif not spawned:
+                # ADMISSION BEFORE THE FORK (memory_guard.admission_check): only a
+                # NEW runtime is gated — attaching to one that already runs costs
+                # nothing — and the refusal is a RuntimeStartupError with the
+                # sentence as its actionable text, because "retrying changes nothing
+                # until memory is freed" is exactly that class's contract. A 2 GB
+                # node OOM-killed its own relay by adding runtimes one at a time.
+                from local_operator import memory_guard
+
+                admission = await asyncio.to_thread(
+                    memory_guard.admission_check, "a session runtime"
+                )
+                if not admission.admitted:
+                    logger.warning("engage: %s refused: %s", session_id, admission.reason)
+                    raise RuntimeStartupError(admission.reason, actionable=admission.reason)
                 logger.debug("engage: spawning a runtime for %s", session_id)
                 candidate = await asyncio.to_thread(
                     _spawn_runtime,

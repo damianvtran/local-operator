@@ -60,6 +60,10 @@ _AMBIENT_VARS = (
     # subprocess only sees an environment variable, not a monkeypatched
     # function).
     "LOCAL_OPERATOR_RUNTIME_ROOT",
+    # The memory admission floor's escape hatch (``memory_guard.admission_check``):
+    # an operator's inherited ``=0`` would waive the refusal the admission cells
+    # assert, so it is scrubbed; a cell that needs a floor sets its own.
+    "LOCAL_OPERATOR_ADMISSION_FLOOR_MB",
     # The open-frame trace names a real output file, read once at import.
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
