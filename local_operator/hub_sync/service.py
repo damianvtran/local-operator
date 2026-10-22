@@ -2388,6 +2388,50 @@ def record_server_capabilities(
     ctx.store().mutate(fold)
 
 
+def observe_skill_capabilities(
+    ctx: HubSyncContext, *, tenant_id: str | None, source: str
+) -> Mapping[str, Any]:
+    """Observe the deployed hub's skill contract ONCE, from a real response.
+
+    WHY THIS EXISTS. ``skill_bundles`` is attested from response contracts, and
+    the preview is deliberately network-free -- so a fresh machine that has never
+    run a check could never publish its first bundle (observed on a real E2E: the
+    preview refused ``bundle-unsupported-server`` while the server DID advertise
+    the carrier). This is the one-shot observation that breaks that cycle.
+
+    The observation is honest in the same way the check's is: the client is the
+    one the publication itself would spend, its answered base is verified against
+    the link's source BEFORE the contract is credited, and only a response that
+    actually carried a contract is persisted. A failed probe writes NOTHING and
+    returns ``{}`` -- the caller's existing refusal then stands. No request field
+    can name a capability: the value comes only from the server's answer.
+    """
+
+    from local_operator.hub_sync.check import REQUEST_TIMEOUT_S, _served_by
+
+    try:
+        client = ctx.client_for_tenant(tenant_id if tenant_id else "")
+    except Exception:  # noqa: BLE001 - an unselectable client is simply no observation
+        return {}
+    if client is None:
+        return {}
+    if _served_by(client) != source:
+        # Only the base that actually answered may be credited.
+        return {}
+    probe = getattr(client, "probe_skill_capabilities", None)
+    if not callable(probe):
+        return {}
+    try:
+        contract = probe(params={"per_page": 1}, timeout=REQUEST_TIMEOUT_S)
+    except Exception:  # noqa: BLE001 - a probe failure leaves the store untouched
+        logger.debug("hub skill capability probe failed", exc_info=True)
+        return {}
+    if not isinstance(contract, Mapping) or not contract:
+        return {}
+    record_server_capabilities(ctx, contract, source=source)
+    return dict(contract)
+
+
 def _eligibility(
     ctx: HubSyncContext,
     identity: LinkIdentity,
@@ -4157,7 +4201,13 @@ def preview_skill_publication(
     confirm_public_egress: bool,
     form: str = "document",
 ) -> dict[str, Any]:
-    """Project a local skill into the exact initial-publication preview (no network).
+    """Project a local skill into the exact initial-publication preview.
+
+    No network, with ONE deliberate exception: a bundle publication whose source
+    has no ``skill_bundles`` attestation yet (a fresh machine) observes the
+    server's contract once, because otherwise the first bundle could never be
+    published. A document preview never probes, and a failed probe leaves the
+    refusal in place.
 
     ``form`` selects the carrier explicitly: ``document`` is the existing
     single-file manifest; ``bundle`` builds the deterministic archive manifest
@@ -4184,6 +4234,13 @@ def preview_skill_publication(
     alias = draft.name
     fields = draft.to_json()
     blocker = _publication_blocker(ctx, skill, source_document, alias)
+    if form == "bundle":
+        # A FRESH MACHINE has never checked, so no contract was ever observed.
+        # The preview is network-free except for this one observation; when the
+        # store already attests the carrier, nothing is sent.
+        probe = LinkIdentity("skill", "preview", source, visibility, tenant_id, "preview")
+        if not _capability_bundle(ctx.store().load(), probe):
+            observe_skill_capabilities(ctx, tenant_id=tenant_id, source=source)
     reason = _publication_preview_reason(
         ctx,
         hub_source=source,

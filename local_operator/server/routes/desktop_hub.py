@@ -865,9 +865,12 @@ async def skill_publish(
     """Publish one locally authored skill as a NEW hub row (``hub.skillPublish``).
 
     Dry run projects the exact bytes a confirm would send and returns the
-    preview receipt (no network); confirm re-reads the authored files, refuses
-    drift, publishes through the credentialed client, then materializes the
-    managed baseline/policy and answers the REAL ``links_snapshot`` row. The
+    preview receipt. It is network-free EXCEPT for one observation a fresh
+    machine needs: a bundle preview with no ``skill_bundles`` attestation yet
+    reads the deployed server's contract once, because otherwise the first
+    bundle publication could never be made. Confirm re-reads the authored files,
+    refuses drift, publishes through the credentialed client, then materializes
+    the managed baseline/policy and answers the REAL ``links_snapshot`` row. The
     refused-publication path writes nothing local except the review receipt.
     """
 

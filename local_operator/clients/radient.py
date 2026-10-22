@@ -1536,6 +1536,81 @@ class RadientClient:
             ) from e
         return self._publication_result(response, action="pull the skill")
 
+    def probe_skill_capabilities(
+        self,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Observe the hub's advertised skill contract (``GET /skills?per_page=1``).
+
+        WHY A LIST PROBE. The bundle publication refuses without a per-source
+        ``skill_bundles`` attestation, and that attestation is normally recorded
+        by a check. A FRESH machine has never checked, so its first bundle
+        publication would otherwise be impossible; the smallest honest read is
+        the skills list -- same route family, carries the response's
+        ``sync_contract``, one row of it costs nothing.
+
+        OBSERVATION, NEVER ASSERTION: the returned mapping is the server's own
+        answer, ready for ``record_server_capabilities``. An older server that
+        carries no contract answers ``{}`` (a normal answer, not an error), and a
+        refusal/timeout raises so the caller can leave the store unchanged.
+
+        Args:
+            params: Query parameters; defaults to ``{"per_page": 1}``.
+            timeout: Request timeout in seconds; the caller's budget bounds it.
+
+        Returns:
+            The observed ``sync_contract`` mapping, or ``{}`` when none was sent.
+
+        Raises:
+            APIError: When the hub refuses or the response is not the hub's JSON.
+        """
+
+        query: Dict[str, Any] = dict(params) if params is not None else {"per_page": 1}
+        url = f"{self.base_url}/skills"
+        # Same posture as ``get_skill``: the bearer rides when the client has
+        # one (a public list is readable without it), and a missing key is never
+        # an error for a read. No redirect may be followed -- a 3xx is refused
+        # rather than re-sending the caller's bearer elsewhere.
+        headers = self._get_headers(content_type="application/json", require_api_key=False)
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key.get_secret_value()}"
+        try:
+            extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            response = requests.get(
+                url, headers=headers, params=query, allow_redirects=False, **extra
+            )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message=(
+                    "Could not read the skill capability contract from the Radient Agent Hub"
+                ),
+                secrets=self._credential_values(),
+            ) from e
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            # Same rule as ``_publication_result``: an unrecognised shape is
+            # reported without echoing a body that may be someone else's HTML.
+            raise APIError(
+                "The Radient Agent Hub returned an unrecognised response while "
+                f"reading its skill contract (HTTP {response.status_code}).",
+                status_code=response.status_code,
+            )
+        result = body.get("result")
+        contract = result.get("sync_contract") if isinstance(result, Mapping) else None
+        if not isinstance(contract, Mapping):
+            # Tolerate a top-level placement too: the contract is additive and
+            # older/newer envelopes may put it beside ``result``.
+            contract = body.get("sync_contract")
+        return dict(contract) if isinstance(contract, Mapping) else {}
+
     def publish_skill_document(
         self,
         document: Mapping[str, Any],
