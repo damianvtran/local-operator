@@ -26,7 +26,8 @@ from dataclasses import asdict, dataclass, field
 from types import TracebackType
 from unittest.mock import patch
 
-from textual.timer import Timer
+from textual._types import MessageTarget
+from textual.timer import Timer, TimerCallback
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,7 @@ def _timer_site() -> str:
         # MessagePump.set_interval/set_timer is the plumbing every timer goes
         # through; naming it says nothing. The frame that ARMED the timer is
         # the next one out (textual/screen.py:354 for the screen repaint).
-        if not path.endswith("/textual/message_pump.py"):
+        if not path.endswith("/textual/message_pump.py") and not library:
             library = f"{path}:{frame.lineno}"
     return library or (f"{candidates[0].filename}:{candidates[0].lineno}" if candidates else "")
 
@@ -155,8 +156,27 @@ class CallbackSpans:
     def _timer_init_wrapper(self) -> Callable[..., None]:
         original = Timer.__init__
 
-        def init(timer: Timer, *args: object, **kwargs: object) -> None:
-            original(timer, *args, **kwargs)
+        def init(
+            timer: Timer,
+            event_target: MessageTarget,
+            interval: float,
+            *,
+            name: str | None = None,
+            callback: TimerCallback | None = None,
+            repeat: int | None = None,
+            skip: bool = True,
+            pause: bool = False,
+        ) -> None:
+            original(
+                timer,
+                event_target,
+                interval,
+                name=name,
+                callback=callback,
+                repeat=repeat,
+                skip=skip,
+                pause=pause,
+            )
             callback = getattr(timer, "_callback", None)
             # Set on the instance rather than in a module global: timers are
             # long-lived and concurrently scheduled, so the label must travel
@@ -178,7 +198,10 @@ class CallbackSpans:
             # Another thread's app ticking concurrently would otherwise stamp
             # its label on a step that never entered its callback (review
             # round 1, R1-1).
-            if threading.get_ident() != self.thread_id:
+            owner_task = getattr(timer, "_task", None)
+            if threading.get_ident() != self.thread_id or (
+                owner_task is not None and owner_task.get_loop() is not self.loop
+            ):
                 return await original(timer, next_timer=next_timer, count=count)
             # Recorded before the await: the callback runs inside this very
             # step, and a later step of the same timer must not inherit it.
@@ -192,7 +215,7 @@ class CallbackSpans:
 
         return tick
 
-    def _gc_started(self, phase: str, info: dict[str, object]) -> None:
+    def _gc_started(self, phase: str, info: dict[str, int]) -> None:
         # gc.callbacks is PROCESS-global, while a span is thread-local: a
         # worker thread collecting while the loop is inside a callback must not
         # be charged to that callback (QA round 1, Q1). The loop's own
