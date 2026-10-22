@@ -807,6 +807,30 @@ async def test_ctrl_c_twice_exits_and_offers_the_resume_command(
         assert any("the session can be resumed" in row for row in rows(app))
         assert not any("--resume" in row for row in rows(app))
 
+        # RE-ARM THE LADDER IMMEDIATELY BEFORE THE SECOND PRESS, so the press
+        # lands INSIDE the window rather than wherever the runner got to.
+        #
+        # The ladder compares two real ``time.monotonic()`` readings against
+        # :data:`DOUBLE_INTERRUPT_WINDOW_S` (1.5 s), and everything above is
+        # unbounded on a loaded machine: ``pilot.pause()`` waits for the app to
+        # go idle, then three separate ``rows(app)`` calls each re-render the
+        # frame. Measured on this host, the quiet gap is 0.216 s — but 1.6 s of
+        # a stalled event loop turns the second press into a FIRST press and
+        # leaves the app running, which is exactly the failure CI caught
+        # (run 39838493282, 3.12 shard 3: ``assert not app.is_running`` got
+        # ``True``, the cell taking 2.48 s against ~1.2 s for its siblings).
+        #
+        # Re-stamping keeps what the cell is actually about — two presses inside
+        # the window leave — instead of betting on the runner's speed. Nothing
+        # about the window is weakened: the assertion below pins that the FIRST
+        # press armed it, and the other two halves stay pinned elsewhere —
+        # ``test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit`` ages
+        # this same stamp past the window rather than sleeping for it, and
+        # ``test_the_double_interrupt_window_is_a_deliberate_double_tap`` pins
+        # the constant's value, which neither pilot cell can (agent review
+        # round 1, R1-1).
+        assert app._last_interrupt_at, "the first press did not arm the exit ladder"
+        app._last_interrupt_at = time.monotonic()
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert not app.is_running
@@ -837,6 +861,31 @@ async def test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit() -> None:
         assert session.aborts == ["interrupted", "interrupted"]
         # One hint, not one per press: it is replaced rather than repeated.
         assert len([row for row in rows(app) if "ctrl+c again to exit" in row]) == 1
+
+
+def test_the_double_interrupt_window_is_a_deliberate_double_tap() -> None:
+    """Pin the window's VALUE, which both pilot cells above are relative to.
+
+    A unit test rather than a pilot one because it asserts a fact about the
+    constant, needs no app, and cannot itself flake.
+
+    Both cells drive the constant instead of a literal — the fast one re-stamps
+    the ladder, the slow one ages it by ``DOUBLE_INTERRUPT_WINDOW_S + 1`` — so
+    both would pass with the window set to 20 ms or to a minute. Without this
+    the number itself is pinned nowhere (agent review round 1, R1-1).
+
+    The bounds are the two real failures. Too SHORT and two presses of the same
+    key stop being one gesture: an impatient second tap becomes a fresh
+    interrupt and never an exit, so a user who wants out cannot get out by
+    pressing twice. Too LONG and an ordinary "interrupt two turns in a row"
+    quits the app, which is the hazard the slow cell above exists for. 1.5 s is
+    one deliberate double-tap; half a second is the floor for "one gesture" and
+    a few seconds the ceiling for "not two turns".
+    """
+    assert 0.5 <= DOUBLE_INTERRUPT_WINDOW_S <= 3.0, (
+        f"DOUBLE_INTERRUPT_WINDOW_S is {DOUBLE_INTERRUPT_WINDOW_S}s: outside the range where "
+        "two presses are one deliberate double-tap"
+    )
 
 
 @pytest.mark.asyncio
