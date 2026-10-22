@@ -2192,3 +2192,105 @@ async def test_an_account_update_refusal_offers_no_retry_that_cannot_work(regist
     assert "needs the user's confirmation" in body
     assert "retry without scope" not in body
     assert "TUI `/agent` form" in body
+
+
+# ---------------------------------------------------------------------------
+# LOH-9 S4 — promotion: refused without the user's grant, never a bypass
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_tool_promote_is_refused_without_a_host_grant(context, registry) -> None:
+    """The model may PROPOSE the copy; it may never make it.
+
+    With no consent producer installed (today's state) the refusal has to carry
+    both real ways forward, and the account store must be untouched — this is the
+    S2 account-write rule applied to the one verb that copies into it.
+    """
+
+    await call(context, op="create", name="release-check", instructions="Check releases.")
+    result = await execute_agent(
+        "tc", {"op": "promote", "name": "release-check"}, None, None, context
+    )
+
+    assert "this run has no way to ask" in result.text
+    assert "desktop's Use-in-all-conversations action" in result.text
+    assert "/agent promote release-check" in result.text
+    assert registry.global_registry.get_agent_by_name("release-check") is None
+    assert registry.store_for("session").get_agent_by_name("release-check") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_granted_tool_promote_copies_and_reports_the_scope(registry, tmp_path) -> None:
+    context, seen = _consenting(registry)
+    await call(context, op="create", name="release-check", instructions="Check releases.")
+
+    result = await execute_agent(
+        "tc", {"op": "promote", "name": "release-check"}, None, None, context
+    )
+
+    assert "copied 'release-check' to your account" in result.text
+    assert "this one keeps its own copy" in result.text
+    assert result.details is not None
+    assert result.details["scope"] == "global"
+    assert result.details["authorized_by"] == "test-consent"
+    assert result.details["created"][0]["name"] == "release-check"
+    # The intent the host was asked about names the act, not a scope hop.
+    assert [(intent.kind, intent.operation) for intent in seen] == [("agent", "promote")]
+    assert registry.global_registry.get_agent_by_name("release-check") is not None
+    # Provenance landed beside the config root, not inside either store.
+    assert (tmp_path / "role-provenance.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_promote_can_copy_under_another_name(registry) -> None:
+    context, _seen = _consenting(registry)
+    await call(context, op="create", name="one", instructions="Do one thing.")
+
+    result = await execute_agent(
+        "tc", {"op": "promote", "name": "one", "as_name": "two"}, None, None, context
+    )
+
+    assert "copied 'two' to your account" in result.text
+    assert registry.global_registry.get_agent_by_name("two") is not None
+    assert registry.global_registry.get_agent_by_name("one") is None
+
+
+@pytest.mark.asyncio
+async def test_a_collision_is_refused_without_confirm_replace(registry) -> None:
+    """``confirm_replace`` is the overwrite AND the user's answer, in one field.
+
+    Without it the collision refuses and names the question to put to the user;
+    with it the same call replaces the row in place. One flag on every surface —
+    the desktop body, the TUI's typed ``yes``, this tool — so a caller cannot ask
+    for the overwrite while dropping the part that made it the user's decision.
+    """
+
+    context, _seen = _consenting(registry)
+    await call(context, op="create", name="one", instructions="Do one thing.")
+    account = registry.global_registry.create_agent(_edit_fields(name="one", tags=["role"]))
+
+    refused = await execute_agent("tc", {"op": "promote", "name": "one"}, None, None, context)
+    assert "would overwrite it" in refused.text
+    assert "nothing was copied" in refused.text
+
+    replaced = await execute_agent(
+        "tc", {"op": "promote", "name": "one", "confirm_replace": True}, None, None, context
+    )
+    assert "overwrote the account's existing one" in replaced.text
+    assert replaced.details is not None
+    assert replaced.details["replaced"] == ["one"]
+    assert registry.global_registry.get_agent_by_name("one").id == account.id
+
+
+@pytest.mark.asyncio
+async def test_a_tool_promote_needs_a_conversation_store(tmp_path) -> None:
+    """A plain registry has nothing conversation-scoped to copy."""
+
+    plain = AgentRegistry(tmp_path)
+    context = _context(agent_registry=plain)
+
+    result = await execute_agent("tc", {"op": "promote", "name": "one"}, None, None, context)
+
+    assert "no conversation store" in result.text
+    assert plain.get_agent_by_name("one") is None

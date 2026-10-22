@@ -283,11 +283,16 @@ class AgentParams(BaseModel):
         default=None,
         description="promote: copy it under this name; the default is its own name.",
     )
+    # ONE field, not ``replace`` + ``confirm_replace``: on this op the flag IS the
+    # confirmation (the desktop body and the TUI's typed ``yes`` carry the same
+    # answer), so a model cannot ask to overwrite and then omit the part that made
+    # it the user's decision.
     confirm_replace: bool = Field(
         default=False,
         description=(
-            "promote: the user's confirmation to OVERWRITE the account's row of that "
-            "name. Only after they said so — never on your own initiative."
+            "promote: replace an account row of that name instead of refusing the "
+            "collision. This IS the user's confirmation — set it only after they "
+            "asked for the overwrite, never on your own initiative."
         ),
     )
     # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not
@@ -2028,10 +2033,10 @@ async def _op_promote(
     with no host producer installed (today's state), REFUSES with a remedy that
     names those surfaces — it never falls back to writing the account itself.
 
-    ``replace`` needs the user's explicit answer too, and ``confirm_replace`` is
-    how the caller says they have it. A model cannot manufacture that answer: it
-    is checked HERE as well as at the seam, because a refusal that costs one
-    sentence is cheaper than an overwritten definition.
+    ``confirm_replace`` is the replace switch as well as the user's answer: an
+    overwrite is legal only when the caller claims the user asked for it, and the
+    description says so where the model reads it. A model cannot manufacture the
+    answer, and the collision refusal names the question to put to the user.
     """
 
     from local_operator.profile_scope import (
@@ -2050,14 +2055,6 @@ async def _op_promote(
             "to promote. The user can author one on their own surface instead.",
         )
     name = str(params.name or "").strip()
-    if params.replace and not params.confirm_replace:
-        return _error(
-            tool_call_id,
-            "agent",
-            f"replacing the account's role {identifier_text(context, repr(name))} overwrites "
-            "a definition the user owns. Ask them to confirm, then call again with "
-            "confirm_replace=true; nothing was promoted.",
-        )
     intent = DurableWriteIntent(kind="agent", operation="promote", name=name)
     authorized_by, reason = await durable_write_decision(context, intent)
     if authorized_by is None:
@@ -2067,7 +2064,7 @@ async def _op_promote(
             lambda: registry.promote(
                 name,
                 as_name=params.as_name,
-                replace=params.replace,
+                replace=params.confirm_replace,
                 authorized_by=authorized_by,
             )
         )

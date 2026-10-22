@@ -21761,7 +21761,7 @@ class OperatorApp(App[None]):
 
         from local_operator.i18n.keys import tui_authoring as keys
         from local_operator.i18n.text import tr
-        from local_operator.profile_scope import PromotionIncomplete, promote_missing
+        from local_operator.profile_scope import promote_missing
 
         translate = tr("tui.authoring")
 
@@ -21799,15 +21799,11 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
-        except (PromotionIncomplete, ValueError) as error:
-            self._system_notice(
-                translate(keys.promote_failed(reason=str(error))), "warning"
-            )
-            return
-        except Exception as error:  # noqa: BLE001 — a registry failure is a refusal here
-            self._system_notice(
-                translate(keys.promote_failed(reason=str(error))), "warning"
-            )
+        except Exception as error:  # noqa: BLE001 — every failure here is a refusal
+            # ``PromotionIncomplete`` and the composite's preflight ValueErrors are
+            # English sentences meant to be read verbatim; a registry I/O failure is
+            # reported the same way rather than crashing the app mid-keystroke.
+            self._system_notice(translate(keys.promote_failed(reason=str(error))), "warning")
             return
         names = [row["name"] for row in result.created] + list(result.replaced)
         notice(translate(keys.promote_receipt(names=", ".join(names))))

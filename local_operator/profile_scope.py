@@ -1396,6 +1396,9 @@ def _agent_edit_fields(row: Any, *, name: str | None = None) -> Any:
         description=row.description,
         tags=list(row.tags or []),
         categories=list(row.categories or []),
+        # Conversation state, not definition: a `replace` overwrites what the
+        # definition IS and leaves the row's own chat state alone.
+        last_message=None,
         temperature=row.temperature,
         top_p=row.top_p,
         top_k=row.top_k,

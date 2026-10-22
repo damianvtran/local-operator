@@ -164,12 +164,16 @@ class TeamParams(BaseModel):
         default=None,
         description="promote: copy it under this name; the default is its own name.",
     )
+    # The flag IS the confirmation, exactly as on the agent twin: one answer, one
+    # field, so a caller cannot ask for the overwrite while dropping the part that
+    # made it the user's decision.
     confirm_replace: bool = Field(
         default=False,
         description=(
-            "promote: the user's confirmation to OVERWRITE any account row this "
-            "promotion would replace (the team or a member). Only after they said "
-            "so — never on your own initiative."
+            "promote: replace any account row this promotion would collide with "
+            "(the team or a member) instead of refusing. This IS the user's "
+            "confirmation — set it only after they asked for the overwrite, never "
+            "on your own initiative."
         ),
     )
     overrides: list[TeamOverride] | None = Field(
@@ -750,14 +754,6 @@ async def _op_promote(
             "resolve, and conversation-scoped ones are copied with it.",
         )
     name = str(params.name or "").strip()
-    if params.replace and not params.confirm_replace:
-        return _error(
-            tool_call_id,
-            "team",
-            f"replacing an account team or member named {identifier_text(context, repr(name))} "
-            "overwrites a definition the user owns. Ask them to confirm, then call again "
-            "with confirm_replace=true; nothing was promoted.",
-        )
     intent = DurableWriteIntent(kind="team", operation="promote", name=name)
     authorized_by, reason = await durable_write_decision(context, intent)
     if authorized_by is None:
@@ -767,7 +763,7 @@ async def _op_promote(
             lambda: registry.promote(
                 name,
                 as_name=params.as_name,
-                replace=params.replace,
+                replace=params.confirm_replace,
                 authorized_by=authorized_by,
                 agents=agents,
             )

@@ -337,3 +337,73 @@ async def test_list_groups_by_scope_and_show_names_it(context, registry) -> None
     assert "teams saved everywhere (your account):" in listed
     shown = await call(context, op="show", name="here-team")
     assert "scope: this conversation" in shown
+
+
+# ---------------------------------------------------------------------------
+# LOH-9 S4 — promotion: the refusal, the grant, and the member receipt
+# ---------------------------------------------------------------------------
+
+
+def _promote_context(registry, **kwargs):
+    """A context carrying BOTH registries, as a real session's tool context does."""
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import scope_agent_registry
+
+    agents = scope_agent_registry(AgentRegistry(registry.config_dir), registry.scope_dir.parent)
+    return ToolContext(cwd=".", team_registry=registry, agent_registry=agents, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_team_promote_is_refused_without_a_host_grant(registry) -> None:
+    context = _promote_context(registry)
+    await call(context, op="create", name="pod", manager="manager", members=[])
+
+    result = await execute_team("tc", {"op": "promote", "name": "pod"}, None, None, context)
+
+    assert "this run has no way to ask" in result.text
+    assert "/team promote pod" in result.text
+    assert registry.global_registry.get_team_by_name("pod") is None
+
+
+@pytest.mark.asyncio
+async def test_a_granted_team_promote_lists_the_members_it_copied(registry) -> None:
+    seen: list[Any] = []
+
+    async def approve(intent):
+        seen.append(intent)
+        return "test-consent"
+
+    from local_operator.agents import AgentEditFields
+
+    context = _promote_context(registry, authorize_durable_write=approve)
+    # A conversation role the roster needs, plus the team that names it.
+    role = context.agent_registry.create_agent(
+        AgentEditFields(name="helper", tags=["role"]), scope="session"
+    )
+    context.agent_registry.set_agent_system_prompt(role.id, "Help.\n")
+    await call(context, op="create", name="pod", manager="helper", members=["helper"])
+
+    result = await execute_team("tc", {"op": "promote", "name": "pod"}, None, None, context)
+
+    assert "copied team 'pod' to your account" in result.text
+    assert "It also copied what the roster needs: helper." in result.text
+    assert result.details is not None
+    assert result.details["expanded"] == ["helper"]
+    assert result.details["authorized_by"] == "test-consent"
+    assert [(intent.kind, intent.operation) for intent in seen] == [("team", "promote")]
+    assert registry.global_registry.get_team_by_name("pod") is not None
+    assert context.agent_registry.global_registry.get_agent_by_name("helper") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_tool_team_promote_needs_the_agent_registry(registry) -> None:
+    """Without the agent composite the roster cannot be resolved, so it refuses."""
+
+    context = ToolContext(cwd=".", team_registry=registry)
+    await call(context, op="create", name="pod", manager="manager", members=[])
+
+    result = await execute_team("tc", {"op": "promote", "name": "pod"}, None, None, context)
+
+    assert "agent registry" in result.text
+    assert registry.global_registry.get_team_by_name("pod") is None
