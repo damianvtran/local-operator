@@ -1625,6 +1625,52 @@ class Store:
                 return None
             return {"consent_version": version, "consent_ref": ref}
 
+    def hold_count_readonly(self, owner: OwnerSnapshot, hold_code: str) -> int:
+        """How many messages for this live owner wait under ``hold_code`` (read-only).
+
+        A COUNT, never ids or content: the desktop status read uses it to tell
+        the owner that Team Bridge messages are waiting for them to open their
+        chief of staff (F8). Only the loop's encoded-ref rows are counted —
+        the screener's bare-id duplicates are retired by the loop — so one
+        message counts once. Fenced, absent or damaged reads answer 0.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return 0
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return 0
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM screening_holds "
+                "WHERE owner_key = ? AND hold_code = ? AND message_id LIKE 'message_available:%'",
+                (_owner_key(owner), hold_code),
+            ).fetchone()
+            return int(row["n"]) if row is not None else 0
+
+    def designated_session_for_readonly(self, owner: OwnerSnapshot) -> str | None:
+        """The designated CoS session id, read-only, under the same live fence.
+
+        The read-only twin of :meth:`designated_session_for`, for a caller that
+        must never create or migrate the store: the session runtime's peer gate
+        asks it (``team_bridge.engagement``) from inside a refusal branch, and a
+        session on a machine with no bridge store must leave none behind.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT designated_session FROM enrollments "
+                "WHERE owner_key = ? AND enrollment_generation = ?",
+                (_owner_key(owner), owner.enrollment_generation),
+            ).fetchone()
+            if row is None:
+                return None
+            value = row["designated_session"]
+            return value if isinstance(value, str) and value else None
+
     def screening_hold_readonly(
         self, owner: OwnerSnapshot, message_id: str
     ) -> dict[str, Any] | None:
