@@ -300,6 +300,42 @@ class TestWhatTheForkRefuses:
         assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
         assert not list((config / "sessions").glob("*/.roles-*"))
 
+    def test_a_link_that_appears_after_the_walk_is_counted_by_its_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A link's lstat size is its path length, not the bytes it copies.
+
+        Review and QA both reproduced a link counted at ~90 bytes whose target
+        copied 2 MiB against a 1 MiB bound. The copy counts with ``os.stat``
+        (follow) and then counts the stream, so the target's bytes are what the
+        bound sees.
+        """
+        config = tmp_path / "config"
+        parent = _seed_parent(config)
+        agents, _ = _registries(config, PARENT_ID)
+        row = _role(agents, "release-check", "You check releases.")
+        target = tmp_path / "elsewhere.bin"
+        target.write_bytes(b"y" * (2 * 1024 * 1024))
+        os.symlink(target, parent / SESSION_ROLES_DIRNAME / "agents" / row.id / "late.bin")
+        monkeypatch.setattr(fork_module, "MAX_ROLES_COPY_BYTES", 1024 * 1024)
+        monkeypatch.setattr(fork_module, "_roles_tree_bytes", lambda source: (1, None, 1))
+
+        with pytest.raises(fork_module.ForkError) as raised:
+            fork_module.fork_session(config, PARENT_ID)
+
+        message = str(raised.value)
+        assert f"agents/{row.id}/late.bin" in message
+        assert "over the 1 MiB a fork copies" in message
+        assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
+        assert not list((config / "sessions").glob("*/.roles-*"))
+
+    def test_the_excess_never_rounds_into_the_next_unit(self) -> None:
+        """UX U9: 1048575 bytes must not print as ``1024 KiB``."""
+        assert fork_module._excess_words(1024 * 1024 - 1) == "1023.9 KiB"
+        assert fork_module._excess_words(1024) == "1.0 KiB"
+        assert fork_module._excess_words(1) == "1 byte"
+        assert fork_module._excess_words(2 * 1024 * 1024) == "2.0 MiB"
+
     @pytest.mark.parametrize("kind", ["file", "directory", "broken"])
     def test_a_symlink_anywhere_in_the_roles_tree_is_refused(
         self, tmp_path: Path, kind: str
@@ -331,8 +367,12 @@ class TestWhatTheForkRefuses:
 
         message = str(raised.value)
         assert f"agents/{row.id}/linked" in message
+        assert "in this conversation's roles folder" in message
         assert "a fork does not copy links" in message
-        assert "replace the link at" in message
+        assert message.startswith(f"replace the link at agents/{row.id}/linked ")
+        # Design D2: the refusal already leaves the user where they were, so the
+        # second "keep working" sentence is gone.
+        assert "keep working" not in message
         assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
         # The link is still a LINK in the parent (the fork never rewrote it) and
         # no copy of it exists: the only entry named linked is the parent's.
@@ -378,7 +418,12 @@ class TestWhatTheForkRefuses:
         finally:
             os.chmod(locked, 0o600)
 
-        assert "cannot copy this conversation's roles into the fork" in str(raised.value)
+        message = str(raised.value)
+        assert message.startswith(f"make agents/{row.id}/system_prompt.md readable")
+        assert "(permission denied)" in message
+        # The shutil.Error list-of-tuples and the staging name never surface.
+        assert ".roles-" not in message and "shutil" not in message
+        assert "['" not in message and '("' not in message
         assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
         assert not list((config / "sessions").glob("*/.roles-*"))
 
