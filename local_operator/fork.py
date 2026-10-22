@@ -23,14 +23,22 @@ a different window minutes later, about the worst diagnostic distance a bug can
 have. The boundary that guarantees this is in ``Session`` (see ``request_fork``);
 this module is only correct when called from one.
 
-THE COPY IS AN EXPLICIT ALLOW-LIST, NEVER A DIRECTORY COPY
-----------------------------------------------------------
-:data:`COPIED_SIDECARS` names every file a fork inherits. A ``shutil.copytree``
-would be one line shorter and would copy ``.session.pid`` — the liveness marker
-— which makes ``live_runtime_pid`` report the fork as owned by the PARENT's
-pid, so the fork's own boot takes the *attach* path instead of opening its
-conversation. That failure is spectacular and silent, so the allow-list is
-pinned by a set-equality test rather than by review attention.
+THE COPY IS AN EXPLICIT ALLOW-LIST, PLUS ONE NAMED DIRECTORY
+------------------------------------------------------------
+:data:`COPIED_SIDECARS` names every FILE in the session root a fork inherits. A
+``shutil.copytree`` of the session directory would be one line shorter and would
+copy ``.session.pid`` — the liveness marker — which makes ``live_runtime_pid``
+report the fork as owned by the PARENT's pid, so the fork's own boot takes the
+*attach* path instead of opening its conversation. That failure is spectacular
+and silent, so the allow-list is pinned by a set-equality test rather than by
+review attention.
+
+The one directory copied is ``roles/`` — the conversation-scoped agent and team
+definitions (``profile_scope``). It is copied by :func:`_copy_roles_tree`, by
+name, into the FORK's own directory: a fork is a new conversation, so it must
+be able to resolve the persona its inherited ``attachment.json`` names without
+reaching back into the parent. Nothing else is copied wholesale, and no global
+root is ever a source — the parent's ``roles/`` is the entire input.
 
 ATTACHMENTS NEED NO WORK, WHICH IS NOT OBVIOUS
 ----------------------------------------------
@@ -44,6 +52,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -170,6 +179,22 @@ EXCLUDED_SIDECARS: tuple[str, ...] = (
     "auto-tag.json",
 )
 
+#: Ceiling on the conversation-scoped definitions a fork will copy.
+#:
+#: ``roles/`` is a definitions tree, not a data directory: a role is an
+#: ``agent.yml`` of a few KiB plus a ``system_prompt.md``, and a team is a
+#: ``team.yml`` plus two briefs that ``teams`` caps at a few KiB each. A
+#: conversation carrying hundreds of definitions therefore stays well under a
+#: megabyte, so 64 MiB is deliberately far past any tree the feature produces.
+#: A tree that reaches it is something else that landed in ``roles/`` (a
+#: dataset, a model blob, a mis-typed copy), and the copy would run on the
+#: PARENT's process, between two turns of a conversation the user is still
+#: using — the cost is paid by the session being forked, not by a background
+#: job. Refusing with the path and the two ways forward is the cheaper, honest
+#: failure. The bound is on FILE BYTES summed before the copy starts, so it
+#: refuses before any disk is spent rather than half way through.
+MAX_ROLES_COPY_BYTES = 64 * 1024 * 1024
+
 
 class ForkError(RuntimeError):
     """The clone itself failed, so no fork exists.
@@ -294,6 +319,20 @@ def fork_session(
     except OSError as exc:
         raise ForkError(f"cannot copy the conversation into the fork: {exc}") from exc
 
+    # While the claim is still held, and BEFORE the goal judge is rewritten or
+    # the boot prompt is written: the roles tree is part of the fork's identity,
+    # so a failure here discards the whole directory rather than leaving a fork
+    # whose inherited ``attachment.json`` names a persona it cannot resolve.
+    try:
+        _copy_roles_tree(parent_dir, fork_dir)
+    except BaseException:
+        # BaseException, not Exception: a cancelled or interrupted copy leaves
+        # the same half-fork an I/O error does, and the discard cannot raise
+        # (``rmtree(ignore_errors=True)``, a claim release that swallows OSError),
+        # so the original exception is the one the caller sees.
+        _discard_failed_fork(fork_dir)
+        raise
+
     # A fork's goal is the same work, so the record above is inherited — but its
     # LIVE judge is not, and this is the one place that can be said once for
     # every fork (bare, boot-prompted or spawned).
@@ -343,6 +382,149 @@ def fork_session(
     # would silently wear its parent's name.
     mark_session_origin(fork_dir, ORIGIN_FORK, parent=parent_id, forked_at=time.time())
     return new_id
+
+
+def _discard_failed_fork(fork_dir: Path) -> None:
+    """Leave no fork behind after a failed clone.
+
+    The claim is released BEFORE the removal: the marker names the PARENT's pid
+    (see the release note in :func:`fork_session`), so a removal that only
+    partially succeeds must still leave a directory no scanner reads as a live
+    session. Both steps are best-effort on purpose — this runs inside the
+    ``except`` of the real failure, and a second failure must never replace the
+    message the user needs.
+    """
+    from local_operator.session.retention import release_session
+
+    release_session(fork_dir)
+    shutil.rmtree(fork_dir, ignore_errors=True)
+
+
+def _roles_tree_bytes(source: Path) -> tuple[int, Path | None, int]:
+    """Sum the regular-file bytes under ``source``; refuse any symlink.
+
+    Returns ``(total, largest_path, largest_bytes)`` — the largest file is what
+    makes a refusal actionable. "64 MiB somewhere in this tree" leaves the user
+    to find it; naming the file tells them what to move.
+
+    Two passes over the tree are deliberate (this one, then the copy): the
+    bound has to be decided BEFORE the first byte lands in the fork, or a tree
+    past the bound would already have spent the disk and the copy time it was
+    meant to prevent. ``os.walk(followlinks=False)`` does not descend INTO a
+    symlinked directory, but it still lists the link in ``dirnames``, and
+    ``Path.stat`` follows links — a link to a device or a sparse file would
+    report a size the copy never occupies. So every entry is lstat-checked
+    first and only then measured, and a link is a refusal rather than a skipped
+    entry: a fork that silently dropped part of the parent's definitions would
+    open wearing a persona with missing members, which is a harder failure to
+    diagnose than "this tree cannot be forked".
+    """
+    total = 0
+    largest: Path | None = None
+    largest_bytes = 0
+
+    def _refuse_link(entry: Path) -> None:
+        if entry.is_symlink():
+            raise ForkError(
+                "the parent's conversation-scoped roles contain a symlink "
+                f"({entry}), and a fork does not copy links because the copy "
+                "would point outside the fork's own roles/ tree. Replace the "
+                "link with the file it points at, then fork again — or keep "
+                "working in the parent conversation."
+            )
+
+    for root_name, dirnames, filenames in os.walk(source, followlinks=False):
+        root = Path(root_name)
+        # A symlinked directory is listed here but never descended into; it is
+        # still refused, because its CONTENTS are part of the tree the parent
+        # sees and a fork that skipped it would open with definitions missing.
+        for name in dirnames:
+            _refuse_link(root / name)
+        for name in filenames:
+            entry = root / name
+            _refuse_link(entry)
+            size = entry.stat().st_size
+            total += size
+            if size > largest_bytes:
+                largest, largest_bytes = entry, size
+    return total, largest, largest_bytes
+
+
+def _copy_roles_tree(parent_dir: Path, fork_dir: Path) -> None:
+    """Copy ``<parent>/roles`` into the fork as ONE published directory.
+
+    A fork is a new conversation, so it must NOT resolve its inherited persona
+    out of the parent's definitions: an edit or delete in the fork would then
+    change the session it was branched from, and vice versa. On-disk identity
+    is what the scope readers walk (``<session>/roles``), so independence is
+    achieved by the copy itself — separate directories, nothing shared, no
+    hardlinks.
+
+    Lazy creation is an S1 invariant: a session that never authored a scoped
+    definition has no ``roles/``, and a fork must not manufacture an empty one
+    (an empty tree would make every downstream "does this session have a
+    scope?" question answer yes where the honest answer is no). Absent is
+    therefore a no-op, not an error.
+
+    Written to a temp sibling INSIDE the fork directory and published with one
+    ``os.replace``, because the two failure modes that matter are both about
+    what a reader can observe mid-copy: an interrupted copy would otherwise
+    leave ``roles/`` holding a partial tree, and the inherited attachment would
+    then restore a persona whose definitions are half present. The staging name
+    is unique per attempt and lives on the fork's own filesystem, which is what
+    makes the rename atomic.
+
+    Only ``<parent>/roles`` is read. The device-level stash
+    (``<config>/dropped-session-roles``) and every global root
+    (``<config>/agents``, ``<config>/teams``) are out of reach by construction:
+    the source path is derived from ``parent_dir`` and nowhere else.
+    """
+    # Imported here, not at module scope: this module's import graph is pinned
+    # stdlib-only for the CLI's ``--resume`` path (see the module docstring), and
+    # the dirname is shared with the scope readers rather than duplicated.
+    from local_operator.profile_scope import SESSION_ROLES_DIRNAME
+
+    source = parent_dir / SESSION_ROLES_DIRNAME
+    if not os.path.lexists(source):
+        return
+    if source.is_symlink() or not source.is_dir():
+        raise ForkError(
+            f"{source} is not a directory, so the fork cannot copy the parent's "
+            "conversation-scoped roles. Replace it with a directory of definitions, "
+            "then fork again — or keep working in the parent conversation."
+        )
+
+    total, largest, largest_bytes = _roles_tree_bytes(source)
+    if total > MAX_ROLES_COPY_BYTES:
+        # The largest file is named because "over the bound" alone leaves the
+        # user to find it; the path is what they can move, and the two ways on
+        # are the only two that exist in S3 (there is no "fork without roles").
+        biggest = (
+            f" (the largest file is {largest}, {largest_bytes / (1024 * 1024):.1f} MiB)"
+            if largest is not None
+            else ""
+        )
+        raise ForkError(
+            "the parent's conversation-scoped roles hold "
+            f"{total / (1024 * 1024):.1f} MiB in {source}{biggest}, over the "
+            f"{MAX_ROLES_COPY_BYTES // (1024 * 1024)} MiB a fork will copy. "
+            "Move those files out of the roles tree and fork again, or keep "
+            "working in the parent conversation."
+        )
+
+    staging = fork_dir / f".roles-{uuid.uuid4().hex[:8]}"
+    try:
+        # ``symlinks=False`` keeps the second pass honest in the safe direction:
+        # the walk above refuses every link it sees, and if one appeared between
+        # the two passes the copy takes the TARGET's bytes rather than writing a
+        # pointer out of the fork. Nothing inside a session writes links here.
+        shutil.copytree(source, staging, symlinks=False)
+        os.replace(staging, fork_dir / SESSION_ROLES_DIRNAME)
+    except BaseException:
+        # A stray staging directory would be a directory retention could read as
+        # a session's content; remove it before the caller discards the fork.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 def _rewrite_fork_goal_judge(fork_dir: Path) -> None:
