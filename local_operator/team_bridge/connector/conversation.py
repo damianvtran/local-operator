@@ -714,22 +714,31 @@ async def handle_conversation_available(
                     except BridgeRefusal as failure:
                         if not _is_not_found(failure):
                             raise
-                        # Screen closed: the hub holds a terminal verdict we
-                        # could not prove an image admit for (above).
+                        # Screen closed. That USUALLY means a terminal verdict
+                        # for this endpoint (D1), but the hub answers the same
+                        # uniform not-found when no verdict exists at all — an
+                        # unbound row, missing blob, or a message before this
+                        # member joined (review R3-02). So it is not proof of
+                        # a verdict, only that these pixels cannot be screened.
                         if prior is None:
-                            # Nothing local to trust — e.g. the store was
-                            # reset after the verdict. The hub's own context
-                            # predicate is the authority for the images; when
-                            # it is closed too (a hub reject or a text-only
-                            # admission), the safe outcome is the METADATA
-                            # card (R2-04): it carries no body and no image,
-                            # the hub still gates both, and holding here
-                            # would only spend the retry budget until the
-                            # wake is dropped.
+                            # Nothing local to trust (e.g. the store was reset
+                            # after a verdict, or the hub cannot serve the
+                            # bytes). The hub's context predicate is the only
+                            # authority for the images. When it is closed too,
+                            # the card goes out METADATA-ONLY with an explicit
+                            # withheld line (R2-04, R3-01): no body and no
+                            # image, the hub still gates both. The text is
+                            # deliberately NOT screened alone here: if the hub
+                            # already holds a reject or an image allow, a fresh
+                            # text-only admit is a verdict conflict and would
+                            # bring back the hold-until-dropped R2-04 removed;
+                            # and with no verdict at all, a body-less wake is
+                            # the fail-closed outcome (R3-02).
                             if await _images_admitted(client, ref, owner, access, descriptors):
                                 recovery = "images_admitted"
                             else:
                                 recovery = "unadmitted"
+                                withheld_reason = "unverified"
                         elif prior.get("verdict") == "reject":
                             recovery = "rejected"
                         else:
