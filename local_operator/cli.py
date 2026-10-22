@@ -763,6 +763,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # the publisher confirmation on public pulls). It drives the SAME service
     # functions the desktop routes use -- there is no second sync engine.
     skills_parser = subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "skills",
         help="Publish, pull and synchronize hub skills (documents and bundles)",
         description=(
@@ -773,116 +774,203 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
     skills_publish = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "publish",
         help="Publish a local skill to the hub (documents; --bundle for binary/asset trees)",
         parents=[parent_parser],
     )
-    skills_publish.add_argument("name", help="The local skill's name")
     skills_publish.add_argument(
-        "--public", action="store_true", help="Publish to the public catalogue"
+        "name",
+        help="The local skill's name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
     )
     skills_publish.add_argument(
-        "--org", default=None, metavar="TENANT", help="Publish to this organization"
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--public",
+        action="store_true",
+        help="Publish to the public catalogue",
     )
     skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--org",
+        default=None,
+        metavar="TENANT",
+        help="Publish to this organization",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--bundle",
         action="store_true",
         help="Publish as a bundle: a directory whose SKILL.md needs relative binary "
         "or asset files (plain text skills stay documents)",
     )
-    skills_publish.add_argument("--alias", default=None, help="The published name")
     skills_publish.add_argument(
-        "--no-subscribe", action="store_true", help="Publish without subscribing this machine"
+        "--alias",
+        default=None,
+        help="The published name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
     )
     skills_publish.add_argument(
-        "--yes", action="store_true", help="Confirm the publication without prompting"
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--no-subscribe",
+        action="store_true",
+        help="Publish without subscribing this machine",
     )
     skills_publish.add_argument(
-        "--json", action="store_true", help="Print the machine-readable JSON result"
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Confirm the publication without prompting",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
     )
 
     skills_pull = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "pull",
         help="Install a hub skill (a bundle needs the publisher/hash confirmation)",
         parents=[parent_parser],
     )
-    skills_pull.add_argument("hub_id", help="The hub skill id")
-    skills_pull.add_argument("--public", action="store_true", help="Pull from the public catalogue")
     skills_pull.add_argument(
-        "--org", default=None, metavar="TENANT", help="Pull from this organization"
+        "hub_id",
+        help="The hub skill id",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
     )
     skills_pull.add_argument(
-        "--alias", default=None, help="The local name (defaults to the published name)"
+        "--public",
+        action="store_true",
+        help="Pull from the public catalogue",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
     )
     skills_pull.add_argument(
-        "--no-subscribe", action="store_true", help="Install without subscribing"
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--org",
+        default=None,
+        metavar="TENANT",
+        help="Pull from this organization",
     )
     skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--alias",
+        default=None,
+        help="The local name (defaults to the published name)",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--no-subscribe",
+        action="store_true",
+        help="Install without subscribing",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--confirm-publisher",
         default=None,
         metavar="ID",
         help="The publisher account id the bundle prompt named",
     )
     skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--confirm-hash",
         default=None,
         metavar="HASH",
         help="The bundle archive sha256 the prompt named",
     )
     skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--yes",
         action="store_true",
         help="Confirm the bundle publisher and hash shown by this command",
     )
     skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--reinstall",
         action="store_true",
         help="Bundle links only: discard local changes, re-fetch and re-pin the hub's "
         "current archive (accepts a changed publisher after the confirmation)",
     )
     skills_pull.add_argument(
-        "--json", action="store_true", help="Print the machine-readable JSON result"
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
     )
 
     skills_push = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "push",
         help="Republish one linked skill's local changes (documents and bundles)",
         parents=[parent_parser],
     )
-    skills_push.add_argument("name", help="The linked skill's name")
     skills_push.add_argument(
-        "--yes", action="store_true", help="Push without prompting (required off a terminal)"
+        "name",
+        help="The linked skill's name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
     )
     skills_push.add_argument(
-        "--json", action="store_true", help="Print the machine-readable JSON result"
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Push without prompting (required off a terminal)",
+    )
+    skills_push.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
     )
 
     skills_sync = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "sync",
         help="Check hub skills and fast-forward the ones that are safe to update",
         parents=[parent_parser],
     )
-    skills_sync.add_argument("--name", default=None, help="Only this linked skill")
-    skills_sync.add_argument("--all", action="store_true", help="Every linked skill (the default)")
     skills_sync.add_argument(
-        "--check", action="store_true", help="Report what would change, writing nothing"
+        "--name",
+        default=None,
+        help="Only this linked skill",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
     )
     skills_sync.add_argument(
+        "--all",
+        action="store_true",
+        help="Every linked skill (the default)",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--check",
+        action="store_true",
+        help="Report what would change, writing nothing",
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--yes",
         action="store_true",
         help="Accepted for script symmetry; sync never prompts (use --check to preview)",
     )
     skills_sync.add_argument(
-        "--json", action="store_true", help="Print the machine-readable JSON result"
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
     )
 
     skills_status = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "status",
         help="Show every linked skill's local/hub state (no network)",
         parents=[parent_parser],
     )
     skills_status.add_argument(
-        "--json", action="store_true", help="Print the machine-readable JSON snapshot"
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON snapshot",
     )
 
     # Serve command to start the API server
@@ -11821,7 +11909,10 @@ def skills_command(args: argparse.Namespace, base_dir: Path) -> int:
         return _skills_sync(args, base_dir)
     if command == "status":
         return _skills_status(args, base_dir)
-    print(f"error: unknown skills command: {command}")
+    print(
+        f"error: unknown skills command: {command}",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
     return 2
 
 
@@ -11927,7 +12018,10 @@ def _skills_fail(args: argparse.Namespace, error: Any) -> int:
     if getattr(args, "json", False):
         print(_json.dumps({"error": sentence, "code": code}))
     else:
-        print(f"error: {sentence}")
+        print(
+            f"error: {sentence}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
     return 1
 
 
@@ -11981,9 +12075,15 @@ def _print_pin(pin: Any, *, indent: str = "  ") -> None:
     label = _safe(pin.get("publisher_id"))
     if name:
         label += f' ("{_safe(name)}")'
-    print(f"{indent}publisher: {label}")
+    print(
+        f"{indent}publisher: {label}",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
     if pin.get("archive_hash"):
-        print(f"{indent}confirmed archive sha256: {_safe(pin.get('archive_hash'))}")
+        print(
+            f"{indent}confirmed archive sha256: {_safe(pin.get('archive_hash'))}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
 
 
 def _bytes_label(value: Any) -> str:
@@ -12027,7 +12127,10 @@ def _bundle_lines(
             # QUOTED (D14): a display name can otherwise mimic a trusted id
             # textually ("Minerva Labs (acct_real)") inside the same line.
             label += f' ("{_safe(publisher.get("name"))}")'
-        lines.append(f"{indent}publisher: {label}")
+        lines.append(
+            f"{indent}publisher: {label}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
     return lines
 
 
@@ -12052,7 +12155,10 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
     try:
         visibility, tenant_id = _skills_scope(args)
     except ValueError as error:
-        print(f"error: {error}")
+        print(
+            f"error: {error}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
         return 2
     form = "bundle" if bool(getattr(args, "bundle", False)) else "document"
     alias = getattr(args, "alias", None) or args.name
@@ -12074,6 +12180,7 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
         return _skills_fail(args, _publish_refusal(error))
     if not getattr(args, "json", False):
         print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
             f"{form} publication of {_safe(args.name)!r} as {_safe(alias)!r} "
             f"({_scope_label(visibility)})"
         )
@@ -12084,9 +12191,15 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
                 )
             )
             for note in preview.get("notes") or []:
-                print(f"  note: {_safe(note, limit=400)}")
+                print(
+                    f"  note: {_safe(note, limit=400)}",
+                    # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                )
         if preview.get("reason"):
-            print("  cannot publish: " f"{_skills_refusal(_reason_error(str(preview['reason'])))}")
+            print(
+                "  cannot publish: " f"{_skills_refusal(_reason_error(str(preview['reason'])))}",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
     if preview.get("reason"):
         # The CODE stays machine-readable; the sentence rides beside it so a
         # JSON consumer is not left with a bare token (round-2 D6).
@@ -12105,7 +12218,10 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
             )
         answer = input("Publish this skill to the hub? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
-            print("cancelled")
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
             return 1
     try:
         result = svc.publish_skill(
@@ -12127,6 +12243,7 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
         return 0
     link = result.get("link") or {}
     print(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         f"published {_safe(link.get('name') or alias)} ({form}) as "
         f"{_safe(link.get('hub_id') or '?')}"
     )
@@ -12143,7 +12260,10 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     try:
         visibility, tenant_id = _skills_scope(args)
     except ValueError as error:
-        print(f"error: {error}")
+        print(
+            f"error: {error}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
         return 2
     subscribe = not bool(getattr(args, "no_subscribe", False))
     reinstall = bool(getattr(args, "reinstall", False))
@@ -12171,13 +12291,17 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     if not getattr(args, "json", False):
         name = (bundle or {}).get("name") or args.hub_id
         print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
             f"install {_safe(name)!r} ({'bundle' if bundle else 'document'}) from "
             f"{_scope_label(visibility)}"
         )
         if bundle:
             print("\n".join(_bundle_lines(bundle.get("bundle") or {}, publisher=publisher)))
             for note in bundle.get("notes") or []:
-                print(f"  note: {_safe(note, limit=400)}")
+                print(
+                    f"  note: {_safe(note, limit=400)}",
+                    # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                )
     if bundle is None and reinstall:
         return _skills_fail(
             args,
@@ -12192,6 +12316,7 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
         # must not pretend it did. Say it plainly and ignore the flags.
         if not getattr(args, "json", False):
             print(
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
                 "  note: an organization install is authorized by membership; "
                 "--confirm-publisher/--confirm-hash do not apply"
             )
@@ -12233,7 +12358,10 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     elif sys.stdin.isatty() and not getattr(args, "json", False):
         answer = input("Install this bundle? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
-            print("cancelled")
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
             return 1
         confirmed = True
     else:
@@ -12265,7 +12393,10 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
         print(_json.dumps(result, indent=2))
         return 0
     link = result.get("link") or {}
-    print(f"installed {_safe(link.get('name') or args.hub_id)}")
+    print(
+        f"installed {_safe(link.get('name') or args.hub_id)}",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
     _print_pin(link.get("bundle_confirmation"), indent="  ")
     return 0
 
@@ -12319,7 +12450,10 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
         # the hub still holds exactly that tree, so the declared ancestor is a
         # fact rather than a guess.
         if record.lineage != "clean" or record.recorded_by == prov.UNKNOWN_BASELINE:
-            print("error: this link's lineage is not clean; resolve or pull again first")
+            print(
+                "error: this link's lineage is not clean; resolve or pull again first",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
             return 1
         try:
             # Both sides are already canonical (a baseline's fields verbatim, the
@@ -12331,7 +12465,10 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
         except Exception:  # noqa: BLE001 - an unreadable side proves no agreement
             agreed = False
         if not agreed:
-            print("error: the hub moved since this link's baseline; run `lop skills sync` first")
+            print(
+                "error: the hub moved since this link's baseline; run `lop skills sync` first",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
             return 1
         from dataclasses import replace as dc_replace
 
@@ -12399,7 +12536,10 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
             .lower()
         )
         if answer not in ("y", "yes"):
-            print("cancelled")
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
             return 1
     transport, refused = svc.push_transport(ctx, record)
     if transport is None:
@@ -12470,6 +12610,7 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
             print(_json.dumps({"checks": [], "reports": []}, indent=2))
             return 0
         print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
             f"No linked skill named {_safe(args.name)!r}."
             if getattr(args, "name", None)
             else "No linked skills."
@@ -12514,12 +12655,16 @@ def _skills_status(args: argparse.Namespace, base_dir: Path) -> int:
         return 0
     links = snapshot.get("links") or []
     if not links:
-        print("No linked skills.")
+        print(
+            "No linked skills.",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
         return 0
     for link in links:
         form = "bundle" if str(link.get("form") or "") == "bundle" else "document"
         pull = (link.get("pull") or {}) if isinstance(link.get("pull"), dict) else {}
         print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
             f"{_safe(link.get('name'))} [{form}] "
             f"{_scope_label(str(link.get('visibility') or 'public'))} "
             f"state={pull.get('state') or 'unknown'}"
