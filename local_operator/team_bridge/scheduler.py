@@ -449,8 +449,10 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     The frozen Go DTO is ``{api_version:"1", available, tenants:[{tenant_id,
     tenant_name, eligible, endpoint:null|{id,label,state}, counts}],
     guidance:{version,text}, screening:{version,template}, consent:{version,
-    text}}``. The endpoint lives ONLY on the caller's OWN tenant row and must
-    be ``owner.endpoint_id`` with state exactly ``active``; ``available``
+    text, accepted_versions?}}``; ``accepted_versions`` (agent-server #156) is
+    the hub's accepted consent set, read by ``_consent_accepted_versions``.
+    The endpoint lives ONLY on the caller's OWN tenant row and must be
+    ``owner.endpoint_id`` with state exactly ``active``; ``available``
     means SOME organization. Served guidance/consent texts pass the DURABLE
     contentless floors; the screening selector passes the local-template
     comparison; consent CURRENCY checks the committed receipt. Every miss is
@@ -780,7 +782,13 @@ async def run_screening_cycle(
             floors_ok = True
             for kind, ver, sha in (
                 ("guidance", capture.guidance_version, capture.guidance_sha),
-                ("consent", capture.consent_version, capture.consent_sha),
+                # The consent FLOOR holds the SERVED text's (version, sha) -- the
+                # same pair the mint advanced it to. The receipt version is a
+                # separate fact (currency, checked below), and differs from the
+                # served one on the accepted-set path (v1 receipt, v2 served);
+                # pairing it with the served sha could never match, so every
+                # cycle would re-fetch status.
+                ("consent", capture.consent_served_version, capture.consent_sha),
             ):
                 if not isinstance(ver, str) or not isinstance(sha, str):
                     floors_ok = False
