@@ -689,6 +689,14 @@ def test_the_migration_has_exactly_one_caller_and_marking_has_two():
     refusal and LEFT THE COPY — one id on two devices, which is INV-1. This list
     is the inventory of every place that may write the marker, so a new one is a
     reviewed act; ``local_operator/network/mobility.py`` is that act.
+
+    THE FOURTH SITE is ``session/cleanup.hand_off_session_dir``: the mesh move's
+    commit point renames a session directory OUT of ``sessions/``, and it marks
+    the store first for the same authority ``_remove_handed_away`` already used —
+    a device that only ever ADOPTED a session over the mesh may never have created
+    one, so its store carries no marker and the handoff's own guards would refuse
+    the very directory the move just decided to retire. It is the product path
+    that decided where the conversation lives, not a reader guessing.
     """
     import ast
 
@@ -715,6 +723,7 @@ def test_the_migration_has_exactly_one_caller_and_marking_has_two():
         "local_operator/session_factory.py",
         "local_operator/config_migrations.py",
         "local_operator/network/mobility.py",
+        "local_operator/session/cleanup.py",
     }, mark_callers
 
 

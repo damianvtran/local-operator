@@ -390,6 +390,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "state bound to one install, exactly as untransportable as the lock and "
         "the attempt file beside it.",
     ),
+    "local_operator/procname.py": (
+        1,
+        "``_SOURCE_MARKER`` ('source'): the sidecar a published runtime image "
+        "carries inside ``<stable root>/runtime/<build key>/``, naming the "
+        "interpreter it was cloned from. It is install-level state about ONE "
+        "interpreter build, beside the published image under the lop install root "
+        "and outside any session directory; a session travelling between devices "
+        "carries neither the image nor its marker",
+    ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
         1,
@@ -574,10 +583,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        4,
+        5,
         "the cleanup log, the value-hold index and the last-cleanup record (all at the "
-        "sessions root) and the store marker that gates removal: none of them is a file "
-        "a session directory holds",
+        "sessions root), the store marker that gates removal, and ``HANDED_AWAY_DIRNAME`` "
+        "— the ``<config>/network/handed-away/`` quarantine a committed mesh move renames "
+        "its directory into. That last one is a CONFIG-LEVEL directory: it is where a "
+        "session tree goes to stop being one, so it can never be an entry of a session "
+        "directory, and none of the five is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
         5,

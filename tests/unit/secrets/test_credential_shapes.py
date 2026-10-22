@@ -8219,9 +8219,21 @@ def test_the_hyphen_release_is_confined_to_weak_and_ambiguous_names(line: str) -
     a strong assignment name, ``?token=``/``?password=``/``?secret=`` — is
     a leak, and these rows are what would catch it.
     """
-    assert _promotes(line, KEBAB_IDENTIFIER), f"{line!r} stopped masking"
     scrubbed, _ = scrub_shapes_with_hits(line)
     assert KEBAB_IDENTIFIER not in scrubbed
+    # PROMOTION moved in agent review round 1 (R1-1): a readable hyphen phrase is
+    # a NAME — the judgement the snake_case clause already makes — so no name-driven
+    # rule may make one session-wide, even under a strong name. The incident's
+    # ``secret: <name>`` is this same spelling in this same context; pinning the
+    # promotion here while closing it there would leave the amplifier open for every
+    # strong-named spelling. The mask in place is what stays, and the cost is stated
+    # in :func:`_is_dns_name`: a real password spelled as a kebab phrase under a
+    # strong name is no longer contained session-wide, though every spelling-evidence
+    # rule still masks it.
+    assert not _promotes(line, KEBAB_IDENTIFIER), (
+        f"{line!r} promoted a readable hyphen phrase; a name-driven rule must never "
+        "become the session's word for a NAME (R1-1)"
+    )
 
 
 @pytest.mark.parametrize("spelling", ["key", "apikey", "api_key", "api-key"])
@@ -8275,16 +8287,6 @@ def test_a_trailing_query_segment_is_not_swallowed_or_registered() -> None:
             {"credential-assignment"},
         ),
         (
-            "https://h/v1/flags?key=glpat-" + KEBAB_IDENTIFIER,
-            "glpat-" + KEBAB_IDENTIFIER,
-            {"credential-query-param"},
-        ),
-        (
-            "https://h/v1/flags?key=sk-" + KEBAB_IDENTIFIER,
-            "sk-" + KEBAB_IDENTIFIER,
-            {"credential-query-param"},
-        ),
-        (
             "key=sk-" + "abcdefghijklmnopqrstuvwxyz",
             "sk-" + "abcdefghijklmnopqrstuvwxyz",
             {"credential-assignment"},
@@ -8311,6 +8313,37 @@ def test_an_issuer_prefixed_value_keeps_its_mask_and_its_label(
     scrubbed, _ = scrub_shapes_with_hits(line)
     assert value not in scrubbed
     assert set(match_shape_names(line)) == labels, f"{line!r} label moved"
+
+
+@pytest.mark.parametrize(
+    "line, value",
+    [
+        (
+            "https://h/v1/flags?key=glpat-" + KEBAB_IDENTIFIER,
+            "glpat-" + KEBAB_IDENTIFIER,
+        ),
+        (
+            "https://h/v1/flags?key=sk-" + KEBAB_IDENTIFIER,
+            "sk-" + KEBAB_IDENTIFIER,
+        ),
+    ],
+)
+def test_a_query_carrier_masks_a_vendor_shaped_value_without_containing_it(
+    line: str, value: str
+) -> None:
+    """R3-2: a query parameter's ``=`` is not an assignment operator.
+
+    These two rows used to sit in the parametrization above and assert promotion,
+    because the containment gate answered ``assigned`` by scanning the match text
+    for an ``=`` — and a query parameter always carries one inside its NAME group.
+    A query parameter is a REFERENCE: the value is still masked in place and still
+    carries the query rule's label, but it is not promoted to a session redaction,
+    which is R2-1's "a name is never contained" for this carrier.
+    """
+    assert not _promotes(line, value), f"{line!r} promoted a query-carried NAME"
+    scrubbed, _ = scrub_shapes_with_hits(line)
+    assert value not in scrubbed
+    assert set(match_shape_names(line)) == {"credential-query-param"}
 
 
 #: The corpus the released class is MEASURED over — values already exercised through

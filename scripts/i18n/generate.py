@@ -73,10 +73,14 @@ SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
 #: ``relay.account_policy`` is the LOH-12 account-routing slice: the settings
 #: screen the SPA paints, with its wire.* counterpart served per §2.1 rather
 #: than bundled. Both were added independently on either side of the rebase;
-#: the tuple is one reviewed line per slice and carries all three.
+#: the tuple is one reviewed line per slice and carries all four.
+#: ``relay.session.tags`` is the tag slice (LOH-11 C1): the tag line, the
+#: assignment sheet and the list's long-press copy, split out of ``relay.session``
+#: because the catalogues are one small owned namespace per surface.
 OWNED_SPA_NAMESPACES = (
     "relay.shell",
     "relay.session",
+    "relay.session.tags",
     "relay.account_policy",
     "relay.library",
 )

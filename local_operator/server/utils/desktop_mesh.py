@@ -241,12 +241,18 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
                 "rtt_ms": RTT_MS,
                 "build": dict(build) if isinstance(build, dict) else {},
                 "capabilities": list(capabilities) if isinstance(capabilities, list) else [],
+                # FORWARDED VERBATIM (``network.redial``): the relay's own verdict on
+                # a lost link, so the sidebar says "Reconnecting…" inside the grace
+                # window and "Link down" only once the relay escalated. Absent from an
+                # older relay; ``_redial_block`` turns that into ``None``.
+                "redial": _redial_block(entry.get("redial")),
             }
             continue
         if reachable and not current["reachable"]:
             current["reachable"] = True
             current["unreachable_reason"] = ""
             current["session_count"] = counts.get(device_id, 0)
+            current["redial"] = _redial_block(entry.get("redial"))
         elif not reachable and not current["reachable"] and not current["unreachable_reason"]:
             # The FIRST non-empty reason wins: every entry for one device describes
             # the same condition, and a device unreachable in one network and never
@@ -274,6 +280,36 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
         "self_device_id": self_device_id or None,
         "degraded": [],
     }
+
+
+#: The redial keys the renderer may read; anything else a relay adds stays in
+#: ``lop network peers --json`` rather than widening this route's contract.
+_REDIAL_KEYS = (
+    "state",
+    "attempts",
+    "lost_at",
+    "last_frame_at",
+    "next_retry_at",
+    "last_error",
+    "grace_until",
+)
+
+
+def _redial_block(raw: Any) -> dict[str, Any] | None:
+    """The relay's ``redial`` block, filtered to the published keys, or ``None``.
+
+    ``None`` means "this relay does not report redial state" (an older build), which
+    the renderer must read as "no claim" and keep its previous behaviour — never as
+    ``connected``.
+    """
+    if not isinstance(raw, dict) or not isinstance(raw.get("state"), str):
+        return None
+    block = {key: raw[key] for key in _REDIAL_KEYS if key in raw}
+    if isinstance(block.get("last_error"), str):
+        # The relay's cause token (``timeout``, ``peer_closed_silently``,
+        # ``connect_failed:TimeoutError``) in words, like ``unreachable_reason``.
+        block["last_error"] = peer_reason_words(block["last_error"]) if block["last_error"] else ""
+    return block
 
 
 def _networks(root: Path | None) -> list[Any]:
@@ -580,7 +616,16 @@ def remote_session_rows(
                 "code": _remote_status_code(row),
                 "label": _remote_status_label(row),
             },
-            "binding": {"agent": None, "team": None},
+            # THE OWNER'S ANSWER (operator report, 2026-10-21): this used to be a
+            # constant ``None``/``None``, so a remote session running under a team
+            # painted no team badge while the identical local session painted one.
+            # The peer stamps its own sidecar onto the row (``relay._row_binding``);
+            # a peer too old to send it is the same ``None`` as before — no claim,
+            # never a guess about a store this device does not hold.
+            "binding": {
+                "agent": str(getattr(row, "agent", "") or "") or None,
+                "team": str(getattr(row, "team", "") or "") or None,
+            },
         }
         if last_user_at > 0:
             emitted["last_user_at"] = last_user_at
@@ -670,7 +715,18 @@ def create_on_peer(
     # the caller named one, and the pick in the vocabulary the picker itself uses.
     fields: dict[str, Any] = {"peer": peer, "cwd": cwd}
     if model is not None:
-        fields["model"] = model
+        fields["model"] = dict(model)
+        # THE LEVEL IN BOTH SPELLINGS, for a peer on an OLDER build (operator
+        # report, 2026-10-21). The owner's ``set_model`` hop read only
+        # ``model["effort"]`` before this release while the route hands this
+        # function ``reasoning_effort``, so a peer that has not upgraded dropped
+        # every chosen level and ran the model's seed. The owner now reads
+        # ``reasoning_effort`` first (``relay._set_model_on``); the legacy key is
+        # what makes the choice survive against a peer that has not. Never
+        # overrides an ``effort`` a caller already set.
+        level = model.get("reasoning_effort")
+        if isinstance(level, str) and level and not fields["model"].get("effort"):
+            fields["model"]["effort"] = level
     if target is not None:
         name = str(target.get("name") or "")
         if str(target.get("kind") or "") == "team":
@@ -910,9 +966,11 @@ def transfer_receipt(
     being moved is about — which device it is moving to or from — and it is why the
     receipt's own ``owner_device`` is the destination rather than a per-phase tally.
 
-    ``source_retired`` is ``mode == "move"``: a ``keep`` copy is minted at the
-    destination and the source is untouched by design, which is the difference the
-    two verbs exist to express.
+    ``source_retired`` is true only for a COMPLETED move: a ``keep`` copy is minted at
+    the destination and the source is untouched by design, and an ``in_progress``
+    receipt (a queued move, or a committed handoff not yet adopted) must never tell a
+    surface "the copy here is gone" — the move that reported exactly that changed
+    nothing (``docs/design/mesh-move-outcome.md``, Surfaces).
     """
     phases = [
         {
@@ -926,12 +984,19 @@ def transfer_receipt(
         if isinstance(stamp, dict)
     ]
     mode = str(result.get("mode") or ("keep" if keep else "move"))
+    # ONE derivation, shared with the CLI: a receipt that predates ``state`` is
+    # completed only when its last phase is openable and it carries no queue block —
+    # never because it was merely ok.
+    from local_operator.network import mobility
+
+    state = mobility.move_receipt_state(result)
     return {
         "phases": phases,
         "locality": "local" if to == "local" else "remote",
         "owner_device": str((result.get("to_device") or {}).get("device_id") or ""),
-        "source_retired": mode == "move",
+        "source_retired": state == "completed" and mode == "move",
         "session_id": session_id,
         "new_session_id": str(result.get("new_session_id") or session_id),
         "mode": "keep" if mode == "keep" else "move",
+        "state": state,
     }

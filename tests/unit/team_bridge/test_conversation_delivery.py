@@ -316,6 +316,8 @@ def _wire_rig(
     monkeypatch.setattr(conversation_mod, "_wire_for", fake_wire_for)
     monkeypatch.setattr(conversation_mod, "screen_item", fake_screen)
     monkeypatch.setattr(conversation_mod, "deliver_wake", fake_deliver)
+    # The rig's sessions are ENGAGED; F8's unused-session gate is tested apart.
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
     monkeypatch.setattr(loop_mod, "handle_message_available", pair_spy)
     monkeypatch.setattr(
         "local_operator.tui.notify.detached_notify",
