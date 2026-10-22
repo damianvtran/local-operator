@@ -181,7 +181,12 @@ class CallbackSpans:
     def _gc_started(
         self, phase: str, info: dict[str, object]
     ) -> None:  # pragma: no cover - exercised through the context below
-        if not self._in_callback:
+        # gc.callbacks is PROCESS-global, while a span is thread-local: a
+        # worker thread collecting while the loop is inside a callback must not
+        # be charged to that callback (QA round 1, Q1). The loop's own
+        # ``thread_time`` never contained the worker's work; recording it here
+        # would have attributed a concurrent pause to the loop step.
+        if not self._in_callback or threading.get_ident() != self.thread_id:
             return
         if phase == "start":
             self._gc_cpu = self._cpu_clock()
