@@ -82,8 +82,12 @@ probe failed on the connect instead, the wait is what decides: the action is
 attempted under the transport classifier rather than refused unseen. That
 exhaustion record lists every probe's verdict (`probe_outcomes`), each entry
 carrying `answered` plus either the transport `delivery`/`kind`/`errno`/
-`error_class` or the `status` the server answered with, so a future loss says
-WHICH element of the host-to-guest path failed rather than only that it did. The last retrieved records are retained; the final
+`error_class` or the `status` the server answered with, and its own `at_s` /
+`timeout_s` -- so a future loss says WHICH element of the host-to-guest path
+failed rather than only that it did. The record also states `budget_s`,
+`probe_timeout_s` and `waited_s`, which is what distinguishes "gave up while
+busy" from "wedged".
+The last retrieved records are retained; the final
 crash-loop record may exist only on the guest when the sole HTTP transport stays
 down, and the evidence explicitly marks it **not retrieved**, not as a known
 exit cause. A genuinely stopped EC2 instance is still reported as such by the
@@ -845,7 +849,13 @@ retries exhausted (N)`), console evidence, and the guest-down cause of death.
 
 **The pre-action receipt check gets the same treatment.** Before an action it
 waits for the control server with bounded backoff for up to 15 s of wall clock
-(~7x the observed time for a blipped path to come back). If every probe in that
+(~7x the observed time for a blipped path to come back). Each probe gets the
+watchdog's own 5 s bound: the action server is single-threaded around its
+control endpoints, so a screenshot or a page load blocks `/terminal` for
+seconds, and a probe that gives up sooner calls a BUSY server ambiguous -- the
+path connected, the HTTP never answered -- then refuses an episode the same
+server would serve. The probe is classification, not a kill, so patience costs
+only time inside the fixed budget. If every probe in that
 wait failed on the CONNECT -- `probe_outcomes` all `not_sent`, recorded as
 `path_unreachable` -- nothing was learned about the server's generation, so the
 action is compiled and attempted anyway and the transport classifier decides
