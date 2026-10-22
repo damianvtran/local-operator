@@ -1867,7 +1867,9 @@ def _consent_status(owner: OwnerSnapshot, consent: dict[str, Any]) -> dict[str, 
     }
 
 
-def test_v1_receipt_screens_while_the_hub_serves_v2_with_an_accepted_set(tmp_path) -> None:
+def test_v1_receipt_screens_while_the_hub_serves_v2_with_an_accepted_set(
+    tmp_path, monkeypatch
+) -> None:
     """agent-server PR #156: the hub serves bridge_consent_v2 for NEW consents and
     keeps v1 valid, advertising both in ``consent.accepted_versions``. A member
     whose committed receipt is v1 must keep screening (not ``policy_stale``)
@@ -1875,6 +1877,7 @@ def test_v1_receipt_screens_while_the_hub_serves_v2_with_an_accepted_set(tmp_pat
     reusable under the same law."""
 
     import asyncio as _asyncio
+    import time as _time
 
     from local_operator.team_bridge import scheduler as _scheduler
 
@@ -1895,18 +1898,66 @@ def test_v1_receipt_screens_while_the_hub_serves_v2_with_an_accepted_set(tmp_pat
 
     verified = _scheduler.VerifiedStatus(_scheduler._VERIFIED_TOKEN, raw)
 
+    fetches: list[int] = []
+
+    async def fetch():
+        fetches.append(1)
+        return verified
+
     async def drive():
         return await _scheduler.run_screening_cycle(
             config_dir=tmp_path,
             owner=owner,
             items=[],
             auth_store=None,
-            status_fetcher=lambda: _asyncio.sleep(0, result=verified),
+            status_fetcher=fetch,
         )
 
     _asyncio.run(drive())  # no policy_stale: the v1 receipt is current
     floor = store.text_floor(owner, "consent")
     assert floor is not None and floor[0] == "bridge_consent_v2", "the served text was accepted"
+    assert fetches == [1]
+
+    # REUSE (review round 1, MINOR): the capture minted on this path is judged
+    # against the floor it advanced (served v2 + its sha), so the reuse check
+    # passes and no second status read happens. Live identity is the only
+    # external check left on reuse; it is stubbed to the owner it was minted for.
+    capture = _scheduler.AcceptedCapture(
+        _scheduler._CAPTURE_TOKEN,
+        version=law.version,
+        template_hash=law.template_hash,
+        owner_frame=_scheduler._full_owner_frame(owner),
+        captured_at=_time.time(),
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        hub=owner.canonical_base_url,
+        owner_generation=owner.enrollment_generation,
+        consent_version="bridge_consent_v1",
+        consent_ref="ref-1",
+        consent_served_version=law.consent_served_version,
+        consent_accepted_versions=law.consent_accepted_versions,
+        guidance_version=law.guidance_version,
+        guidance_sha=law.guidance_sha,
+        consent_sha=law.consent_sha,
+        source="sdk-verified",
+    )
+
+    async def live_ok(*_args, **_kwargs):
+        return None
+
+    async def reuse():
+        return await _scheduler.run_screening_cycle(
+            config_dir=tmp_path,
+            owner=owner,
+            items=[],
+            auth_store=None,
+            accepted_capture=capture,
+            status_fetcher=fetch,
+        )
+
+    monkeypatch.setattr(_scheduler, "_verify_live_identity", live_ok)
+    _asyncio.run(reuse())
+    assert fetches == [1], "a lawful v1-receipt capture is reused, not re-fetched"
 
 
 def test_consent_currency_fails_closed_outside_the_accepted_set(tmp_path) -> None:
