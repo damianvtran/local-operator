@@ -241,7 +241,12 @@ class TestTheForkIsIndependent:
 
 class TestWhatTheForkRefuses:
     def test_a_fork_refuses_a_tree_over_the_bound(self, tmp_path: Path) -> None:
-        """The bound is decided BEFORE the copy: nothing is written, no fork."""
+        """The bound is decided BEFORE the copy: nothing is written, no fork.
+
+        The message names the largest file RELATIVE to the roles folder, states
+        the excess rather than a total that rounds back to the bound (UX U1),
+        and leads with the way forward.
+        """
         config = tmp_path / "config"
         parent = _seed_parent(config)
         agents, _ = _registries(config, PARENT_ID)
@@ -256,34 +261,126 @@ class TestWhatTheForkRefuses:
             fork_module.fork_session(config, PARENT_ID)
 
         message = str(raised.value)
-        assert "MiB" in message
-        assert str(oversized) in message
-        assert "Move those files out" in message and "fork again" in message
+        assert f"agents/{row.id}/blob.bin" in message
+        # The excess, never a total that rounds back to the bound.
+        assert "bytes over the 64 MiB a fork copies" in message
+        assert "64.0 MiB" not in message
+        assert str(parent / SESSION_ROLES_DIRNAME) not in message
+        assert message.startswith("move ")
+        assert "keep working in this conversation" in message
         # No fork, and no staging directory left behind.
         assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
         assert oversized.is_file()
 
-    def test_a_symlink_in_the_roles_tree_is_not_copied_out_of_the_tree(
-        self, tmp_path: Path
+    def test_the_bound_holds_when_the_tree_grows_after_the_walk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The walk is a snapshot; the copy enforces the budget for real.
+
+        Review measured this: a tree the walk reported as small copied 72 MiB
+        once a file grew between the passes. The running total in the copy
+        function is what stops it, and it stops BEFORE writing the file that
+        crosses the limit.
+        """
         config = tmp_path / "config"
         parent = _seed_parent(config)
         agents, _ = _registries(config, PARENT_ID)
         row = _role(agents, "release-check", "You check releases.")
-        outside = tmp_path / "outside.md"
-        outside.write_text("not a definition", encoding="utf-8")
-        link = parent / SESSION_ROLES_DIRNAME / "agents" / row.id / "linked.md"
-        os.symlink(outside, link)
+        grow = parent / SESSION_ROLES_DIRNAME / "agents" / row.id / "grow.bin"
+        grow.write_bytes(b"x" * (2 * 1024 * 1024))
+        monkeypatch.setattr(fork_module, "MAX_ROLES_COPY_BYTES", 1024 * 1024)
+        monkeypatch.setattr(fork_module, "_roles_tree_bytes", lambda source: (1, None, 1))
 
         with pytest.raises(fork_module.ForkError) as raised:
             fork_module.fork_session(config, PARENT_ID)
 
-        assert "symlink" in str(raised.value)
+        message = str(raised.value)
+        assert f"agents/{row.id}/grow.bin" in message
+        assert "over the 1 MiB a fork copies" in message
+        assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
+        assert not list((config / "sessions").glob("*/.roles-*"))
+
+    @pytest.mark.parametrize("kind", ["file", "directory", "broken"])
+    def test_a_symlink_anywhere_in_the_roles_tree_is_refused(
+        self, tmp_path: Path, kind: str
+    ) -> None:
+        """A link, a linked directory and a dangling link take different branches.
+
+        A linked directory is listed in ``dirnames`` and never descended; a
+        dangling link only fails when followed. All three are refusals, not
+        skips: the fork would otherwise open with part of this conversation's
+        roles missing, and ``copytree(symlinks=False)`` would copy a target the
+        conversation never owned.
+        """
+        config = tmp_path / "config"
+        parent = _seed_parent(config)
+        agents, _ = _registries(config, PARENT_ID)
+        row = _role(agents, "release-check", "You check releases.")
+        outside = tmp_path / "outside"
+        if kind == "directory":
+            outside.mkdir()
+            (outside / "payload.md").write_text("not a definition", encoding="utf-8")
+        else:
+            outside.write_text("not a definition", encoding="utf-8")
+        target = outside if kind != "broken" else tmp_path / "missing.md"
+        link = parent / SESSION_ROLES_DIRNAME / "agents" / row.id / "linked"
+        os.symlink(target, link)
+
+        with pytest.raises(fork_module.ForkError) as raised:
+            fork_module.fork_session(config, PARENT_ID)
+
+        message = str(raised.value)
+        assert f"agents/{row.id}/linked" in message
+        assert "a fork does not copy links" in message
+        assert "replace the link at" in message
         assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
         # The link is still a LINK in the parent (the fork never rewrote it) and
-        # no copy of it exists: the only file named linked.md is the parent's.
+        # no copy of it exists: the only entry named linked is the parent's.
         assert link.is_symlink()
-        assert [p for p in (config / "sessions").rglob("linked.md")] == [link]
+        assert [p for p in (config / "sessions").rglob("linked")] == [link]
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes on this platform")
+    def test_a_named_pipe_in_the_roles_tree_is_refused_before_the_copy(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-regular entry has no bytes; refusing it beats a hang mid-copy."""
+        config = tmp_path / "config"
+        parent = _seed_parent(config)
+        agents, _ = _registries(config, PARENT_ID)
+        row = _role(agents, "release-check", "You check releases.")
+        pipe = parent / SESSION_ROLES_DIRNAME / "agents" / row.id / "pipe"
+        os.mkfifo(pipe)
+
+        with pytest.raises(fork_module.ForkError) as raised:
+            fork_module.fork_session(config, PARENT_ID)
+
+        assert "regular file" in str(raised.value)
+        assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
+
+    def test_a_permission_error_during_the_copy_surfaces_as_a_forkerror(
+        self, tmp_path: Path
+    ) -> None:
+        """The caller's contract is ``ForkError`` — never a raw ``shutil.Error``.
+
+        ``copytree`` collects per-file failures and raises its own ``Error`` at
+        the end (an OSError subclass), which review caught escaping. The state
+        was already right; the type and message were not.
+        """
+        config = tmp_path / "config"
+        parent = _seed_parent(config)
+        agents, _ = _registries(config, PARENT_ID)
+        row = _role(agents, "release-check", "You check releases.")
+        locked = parent / SESSION_ROLES_DIRNAME / "agents" / row.id / "system_prompt.md"
+        os.chmod(locked, 0o000)
+        try:
+            with pytest.raises(fork_module.ForkError) as raised:
+                fork_module.fork_session(config, PARENT_ID)
+        finally:
+            os.chmod(locked, 0o600)
+
+        assert "cannot copy this conversation's roles into the fork" in str(raised.value)
+        assert [p.name for p in (config / "sessions").iterdir()] == [PARENT_ID]
+        assert not list((config / "sessions").glob("*/.roles-*"))
 
     def test_the_stash_is_never_copied_into_a_fork(self, tmp_path: Path) -> None:
         """The device-level stash is another root; the fork reads ONE directory."""
@@ -306,19 +403,26 @@ class TestWhatTheForkRefuses:
 
 class TestTheForkCopyDoesNotLeakIntoTheStore:
     def test_a_fork_never_writes_a_global_row(self, tmp_path: Path) -> None:
-        """The copy target is the fork's own directory and nothing else."""
+        """The copy target is the fork's own directory and nothing else.
+
+        Both the named lookup AND the raw trees are compared: a write that was
+        later renamed would pass a name lookup while still having touched the
+        account's store (review NIT-2).
+        """
         config = tmp_path / "config"
         _seed_parent(config)
         agents, teams = _registries(config, PARENT_ID)
         _role(agents, "release-check", "You check releases.")
         _team(teams, "audit", "Review in order.")
+        agents_before = _tree(config / "agents")
+        teams_before = _tree(config / "teams")
 
         fork_module.fork_session(config, PARENT_ID)
 
-        global_agents = AgentRegistry(config)
-        global_teams = TeamRegistry(config)
-        assert global_agents.get_agent_by_name("release-check") is None
-        assert global_teams.get_team_by_name("audit") is None
+        assert _tree(config / "agents") == agents_before
+        assert _tree(config / "teams") == teams_before
+        assert AgentRegistry(config).get_agent_by_name("release-check") is None
+        assert TeamRegistry(config).get_team_by_name("audit") is None
 
     def test_the_parent_directory_is_not_touched_by_the_roles_copy(self, tmp_path: Path) -> None:
         """mtime and bytes of the parent's tree survive, as the file copy's do."""

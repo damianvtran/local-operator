@@ -707,7 +707,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             f"no role or specialist named {identifier_text(context, repr(name))} in this "
             "conversation or your account (try op='list'). A definition can be "
             "conversation-local, so one created in another conversation is not visible "
-            "here.",
+            "here; a fork of this conversation starts with a copy of its roles.",
         )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
     scope_line = ""

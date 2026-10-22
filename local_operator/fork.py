@@ -400,49 +400,86 @@ def _discard_failed_fork(fork_dir: Path) -> None:
     shutil.rmtree(fork_dir, ignore_errors=True)
 
 
-def _roles_tree_bytes(source: Path) -> tuple[int, Path | None, int]:
-    """Sum the regular-file bytes under ``source``; refuse any symlink.
+def _excess_words(excess: int) -> str:
+    """A size a refusal can print without rounding itself back to the bound.
 
-    Returns ``(total, largest_path, largest_bytes)`` — the largest file is what
-    makes a refusal actionable. "64 MiB somewhere in this tree" leaves the user
-    to find it; naming the file tells them what to move.
+    ``:.1f`` printed "64 MiB + 1 byte" as "64.0 MiB … over the 64 MiB", which
+    reads as "64 is over 64" (UX U1). The EXCESS is what actually crossed the
+    limit, so printing it is both shorter than printing the total and never
+    ambiguous at the boundary.
+    """
+    if excess < 1024:
+        return f"{excess} byte" if excess == 1 else f"{excess} bytes"
+    if excess < 1024 * 1024:
+        return f"{excess / 1024:.0f} KiB"
+    return f"{excess / (1024 * 1024):.1f} MiB"
+
+
+def _refuse_entry(entry: Path, source: Path) -> None:
+    """Refuse a symlink or a non-regular entry, naming it RELATIVE to the tree.
+
+    A link is refused because ``copytree(symlinks=False)`` copies the TARGET's
+    bytes: whatever it points at may belong to neither this conversation nor
+    the fork, so neither copying nor skipping it is honest — skipping would
+    open the fork with some of this conversation's roles missing, and copying
+    would carry a file the conversation never owned. A named pipe, socket or
+    device has no bytes to copy at all; without this check the walk would
+    measure it as 0 and the failure would surface mid-copy as an opaque
+    ``shutil.Error`` (after a FIFO could hang it). The path is relative
+    because the message already names the roles folder, and a second absolute
+    path is the half of the old sentences users had to read past (UX D1).
+    """
+    if entry.is_symlink():
+        raise ForkError(
+            f"replace the link at {entry.relative_to(source)} with a real copy of what "
+            "it points at, then fork again — a fork does not copy links, and skipping "
+            "one would open it with some of this conversation's roles missing. Or keep "
+            "working in this conversation."
+        )
+    if entry.is_dir():
+        return
+    if not entry.is_file():
+        raise ForkError(
+            f"replace {entry.relative_to(source)} with a regular file and fork again — "
+            "a fork copies files, and skipping this entry would open it with some of "
+            "this conversation's roles missing. Or keep working in this conversation."
+        )
+
+
+def _roles_tree_bytes(source: Path) -> tuple[int, Path | None, int]:
+    """Sum the FILE bytes under ``source``, refusing anything uncopyable.
+
+    Returns ``(total, largest_path, largest_bytes)``. The largest file is what
+    makes a refusal actionable; the caller names it relative to ``source``.
 
     Two passes over the tree are deliberate (this one, then the copy): the
     bound has to be decided BEFORE the first byte lands in the fork, or a tree
     past the bound would already have spent the disk and the copy time it was
-    meant to prevent. ``os.walk(followlinks=False)`` does not descend INTO a
-    symlinked directory, but it still lists the link in ``dirnames``, and
-    ``Path.stat`` follows links — a link to a device or a sparse file would
-    report a size the copy never occupies. So every entry is lstat-checked
-    first and only then measured, and a link is a refusal rather than a skipped
-    entry: a fork that silently dropped part of the parent's definitions would
-    open wearing a persona with missing members, which is a harder failure to
-    diagnose than "this tree cannot be forked".
+    meant to prevent. This pass is only a SNAPSHOT, though: a file can grow
+    between the walk and the copy, so :func:`_copy_roles_tree` enforces the
+    same bound again while the bytes move — that second check is what actually
+    holds the budget (review MINOR-1).
+
+    ``os.walk(followlinks=False)`` does not descend INTO a symlinked directory,
+    but it still lists the link in ``dirnames``, and ``Path.stat`` follows
+    links, so every entry is checked before it is measured. See
+    :func:`_refuse_entry` for why a link and a non-regular entry are refusals
+    rather than skips.
     """
     total = 0
     largest: Path | None = None
     largest_bytes = 0
-
-    def _refuse_link(entry: Path) -> None:
-        if entry.is_symlink():
-            raise ForkError(
-                "the parent's conversation-scoped roles contain a symlink "
-                f"({entry}), and a fork does not copy links because the copy "
-                "would point outside the fork's own roles/ tree. Replace the "
-                "link with the file it points at, then fork again — or keep "
-                "working in the parent conversation."
-            )
-
     for root_name, dirnames, filenames in os.walk(source, followlinks=False):
         root = Path(root_name)
         # A symlinked directory is listed here but never descended into; it is
-        # still refused, because its CONTENTS are part of the tree the parent
-        # sees and a fork that skipped it would open with definitions missing.
+        # still refused, because its CONTENTS are part of the tree this
+        # conversation sees and a fork that skipped it would open with
+        # definitions missing.
         for name in dirnames:
-            _refuse_link(root / name)
+            _refuse_entry(root / name, source)
         for name in filenames:
             entry = root / name
-            _refuse_link(entry)
+            _refuse_entry(entry, source)
             size = entry.stat().st_size
             total += size
             if size > largest_bytes:
@@ -454,11 +491,11 @@ def _copy_roles_tree(parent_dir: Path, fork_dir: Path) -> None:
     """Copy ``<parent>/roles`` into the fork as ONE published directory.
 
     A fork is a new conversation, so it must NOT resolve its inherited persona
-    out of the parent's definitions: an edit or delete in the fork would then
-    change the session it was branched from, and vice versa. On-disk identity
-    is what the scope readers walk (``<session>/roles``), so independence is
-    achieved by the copy itself — separate directories, nothing shared, no
-    hardlinks.
+    out of the original conversation's definitions: an edit or delete in the
+    fork would then change the conversation it was branched from, and vice
+    versa. On-disk identity is what the scope readers walk (``<session>/roles``),
+    so independence is achieved by the copy itself — separate directories,
+    nothing shared, no hardlinks.
 
     Lazy creation is an S1 invariant: a session that never authored a scoped
     definition has no ``roles/``, and a fork must not manufacture an empty one
@@ -473,6 +510,11 @@ def _copy_roles_tree(parent_dir: Path, fork_dir: Path) -> None:
     then restore a persona whose definitions are half present. The staging name
     is unique per attempt and lives on the fork's own filesystem, which is what
     makes the rename atomic.
+
+    Raises :class:`ForkError` for every failure — the bound, an uncopyable
+    entry, an unreadable tree, a per-file copy error (``shutil.Error``
+    subclasses OSError). A caller must never see a raw OSError from here: the
+    fork failed, and that is the type the host reports to the user.
 
     Only ``<parent>/roles`` is read. The device-level stash
     (``<config>/dropped-session-roles``) and every global root
@@ -489,40 +531,69 @@ def _copy_roles_tree(parent_dir: Path, fork_dir: Path) -> None:
         return
     if source.is_symlink() or not source.is_dir():
         raise ForkError(
-            f"{source} is not a directory, so the fork cannot copy the parent's "
-            "conversation-scoped roles. Replace it with a directory of definitions, "
-            "then fork again — or keep working in the parent conversation."
+            f"{source} is not a folder, so this conversation's roles cannot be copied "
+            "into a fork. Replace it with a folder of definitions and fork again, or "
+            "keep working in this conversation."
         )
 
-    total, largest, largest_bytes = _roles_tree_bytes(source)
+    try:
+        total, largest, _largest_bytes = _roles_tree_bytes(source)
+    except OSError as exc:
+        raise ForkError(f"cannot read this conversation's roles: {exc}") from exc
     if total > MAX_ROLES_COPY_BYTES:
-        # The largest file is named because "over the bound" alone leaves the
-        # user to find it; the path is what they can move, and the two ways on
-        # are the only two that exist in S3 (there is no "fork without roles").
-        biggest = (
-            f" (the largest file is {largest}, {largest_bytes / (1024 * 1024):.1f} MiB)"
-            if largest is not None
-            else ""
-        )
+        rel = largest.relative_to(source) if largest is not None else "the largest file"
         raise ForkError(
-            "the parent's conversation-scoped roles hold "
-            f"{total / (1024 * 1024):.1f} MiB in {source}{biggest}, over the "
-            f"{MAX_ROLES_COPY_BYTES // (1024 * 1024)} MiB a fork will copy. "
-            "Move those files out of the roles tree and fork again, or keep "
-            "working in the parent conversation."
+            f"move {rel} out of the roles folder and fork again "
+            f"({_excess_words(total - MAX_ROLES_COPY_BYTES)} over the "
+            f"{MAX_ROLES_COPY_BYTES // (1024 * 1024)} MiB a fork copies), or keep "
+            "working in this conversation."
         )
 
     staging = fork_dir / f".roles-{uuid.uuid4().hex[:8]}"
+    copied = 0
+
+    def _bounded_copy(src: str, dst: str, *, follow_symlinks: bool = True) -> str:
+        """``copy_function`` that enforces the bound while the bytes move.
+
+        The pre-walk can only refuse what it SAW: a file that grows, or an
+        entry that appears, after the walk would otherwise be copied without a
+        limit — measured by review as a 72 MiB copy the walk reported as
+        small. The running total is the budget the feature promises; the
+        pre-walk stays because it fails before any disk is spent.
+        """
+        nonlocal copied
+        size = os.stat(src, follow_symlinks=False).st_size
+        copied += size
+        if copied > MAX_ROLES_COPY_BYTES:
+            rel = Path(dst).relative_to(staging).as_posix()
+            raise ForkError(
+                f"move {rel} out of the roles folder and fork again "
+                f"({_excess_words(copied - MAX_ROLES_COPY_BYTES)} over the "
+                f"{MAX_ROLES_COPY_BYTES // (1024 * 1024)} MiB a fork copies), or keep "
+                "working in this conversation."
+            )
+        return shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+
     try:
         # ``symlinks=False`` keeps the second pass honest in the safe direction:
-        # the walk above refuses every link it sees, and if one appeared between
-        # the two passes the copy takes the TARGET's bytes rather than writing a
-        # pointer out of the fork. Nothing inside a session writes links here.
-        shutil.copytree(source, staging, symlinks=False)
+        # the walk refuses every link, and if one appeared between the two passes
+        # the copy takes the TARGET's bytes rather than writing a pointer out of
+        # the fork. The copy function is where the bound is enforced for real.
+        shutil.copytree(source, staging, symlinks=False, copy_function=_bounded_copy)
         os.replace(staging, fork_dir / SESSION_ROLES_DIRNAME)
+    except ForkError:
+        # The bound crossed mid-copy: the message is already the user-facing one.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    except OSError as exc:
+        # ``shutil.Error`` subclasses OSError, so a per-file failure that
+        # ``copytree`` collected arrives here too. The caller's contract is
+        # ``ForkError`` (review MAJOR-1 / QA Q1), never a raw OSError.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise ForkError(f"cannot copy this conversation's roles into the fork: {exc}") from exc
     except BaseException:
-        # A stray staging directory would be a directory retention could read as
-        # a session's content; remove it before the caller discards the fork.
+        # A cancelled or interrupted copy: discard the staging directory, but
+        # keep the original exception type and message.
         shutil.rmtree(staging, ignore_errors=True)
         raise
 

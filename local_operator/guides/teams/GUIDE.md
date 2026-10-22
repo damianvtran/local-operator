@@ -46,7 +46,9 @@ for one job.
 
 `team(op='create')` with no `scope` authors a CONVERSATION-SCOPED team: the roster
 and its briefs live in this conversation, usable until it ends, invisible in every
-other one, and removed with it. Prefer it for a grouping this task needs once. A
+other one, and removed with it. A fork starts with a COPY of this conversation's
+teams, after which the two sets are independent: editing or deleting one never
+touches the other. Prefer it for a grouping this task needs once. A
 team saved for every conversation is the user's decision — `scope='global'`
 requires their confirmation, and this host may not be able to ask: the refusal
 names the desktop Teams editor, the TUI `/team` form and `lop teams`, plus the

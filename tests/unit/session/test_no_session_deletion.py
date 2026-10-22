@@ -1829,7 +1829,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/fork.py::_copy_roles_tree",
         "shutil.rmtree",
-        "only its own .roles-<hex> staging dir inside the fork dir on failure",
+        "only its own .roles-<hex> staging dir inside the fork dir on failure "
+        "(three branches: bound crossed mid-copy, OSError, cancelled copy)",
+        3,
     ),
     (
         "local_operator/mobile/install.py::uninstall",
