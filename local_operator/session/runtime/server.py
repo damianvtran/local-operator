@@ -5073,6 +5073,36 @@ class RuntimeServer:
         except Exception:  # noqa: BLE001 — a failure notice never breaks the runtime
             logger.warning("could not journal the failed update", exc_info=True)
 
+    def _bridge_card_may_engage(self, frame: Mapping[str, Any]) -> bool:
+        """The ONE exception to the unengaged peer gate: a Team Bridge card to
+        the member's designated chief of staff, when their ACCEPTED consent
+        discloses that a message may engage it (live E2E F8).
+
+        Only a frame stamped ``custom_type=team_bridge_message`` is considered;
+        the type is validated against the allowlist further down this op, so a
+        forged value is still refused there. The decision itself is
+        ``team_bridge.engagement.designated_session_may_be_engaged``, read from
+        this runtime's own config root: enabled, a live enrollment naming THIS
+        session, and an accepted consent version in the explicit engaging set.
+        Anything else keeps the ordinary refusal. Imported in-function, inside
+        the refusal branch, so the happy path pays nothing.
+        """
+
+        if frame.get("custom_type") != "team_bridge_message":
+            return False
+        try:
+            from local_operator.team_bridge.engagement import (
+                designated_session_may_be_engaged,
+            )
+
+            root = getattr(self, "_config_root", None) or config_dir()
+            return designated_session_may_be_engaged(
+                str(self._record.session_id or ""), config_dir=root
+            )
+        except Exception:  # noqa: BLE001 — a gate that cannot answer refuses
+            logger.warning("bridge engagement check failed; refusing", exc_info=True)
+            return False
+
     def set_record_started(self, started: bool) -> None:
         """Record that this session has run at least one real turn.
 
@@ -7679,7 +7709,7 @@ class RuntimeServer:
             # typed (or what ``lop sessions`` showed it), not the session id it
             # never named; both come from ``unengaged_label`` so all four
             # refusal sites share one grammar.
-            if not self._started:
+            if not self._started and not self._bridge_card_may_engage(frame):
                 from local_operator.mobile.peer_send import (
                     unengaged_label,
                     unengaged_refusal,
