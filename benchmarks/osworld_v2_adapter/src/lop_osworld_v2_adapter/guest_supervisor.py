@@ -169,10 +169,28 @@ class SupervisorOutputUnparseable(ValueError):
 
 @dataclass(frozen=True)
 class ReceiptResult:
-    """Only a complete verified read may authorize input on an existing binding."""
+    """Only a complete verified read may authorize input on an existing binding.
+
+    ``path_unreachable`` is set ONLY on an exhausted recovery whose every probe
+    failed with a connect-class transport verdict -- ``not_sent`` kind
+    ``connect_failed`` (no route), ``timeout`` (SYN never answered), ``dns``, or
+    ``refused`` (an RST: the host DID reach the guest and nothing was listening
+    on the action port). No probe established a connection, so no receipt could
+    be read and nothing was learned about the server's generation; ``refused``
+    is precisely the crash-restart window, which is why the flag is about the
+    ABSENCE OF A RECEIPT rather than about reachability in the abstract. It is a
+    separate axis from ``state`` because
+    it answers a different question -- ``read_failed`` says the receipt is
+    unknown, this says WHY -- and a caller may treat the two differently: a
+    receipt that could not be read over a live server keeps input blocked, while
+    a path that never connected is the transient case a bounded action attempt
+    under the transport classifier can resolve. It never weakens the rule below
+    on its own: the action attempt is still refused for any non-connect reason.
+    """
 
     state: Literal["new_restart", "verified_none", "read_failed"]
     recovery_exhausted: bool = False
+    path_unreachable: bool = False
 
 
 # ExecStopPost gets the old process's wait status BEFORE Restart replaces it.

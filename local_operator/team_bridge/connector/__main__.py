@@ -13,6 +13,10 @@ START-UP ORDER (each step exists because getting it wrong is a real failure):
 4. Run the loop. The access provider is the H1 client's own ``current_access``
    (the owner-pinned OAuth row — the ordinary sign-in path; never a
    model-key cascade).
+5. Hand the loop the config-rooted credential store. Screening runs a model,
+   and the model runner resolves its provider key from this store (rows,
+   then process env). Starting with none held every message as
+   ``provider_error`` before any screen (live E2E F4).
 
 This entry point does NOT install services and does NOT touch the operator's
 launchd/systemd/schtasks (see connector/install.py's contract).
@@ -37,15 +41,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _main_async(args: argparse.Namespace) -> int:
+    from local_operator.providers.auth_store import AuthStore
     from local_operator.team_bridge.client import (
         DEFAULT_RADIENT_API_BASE_URL,
         TeamBridgeClient,
     )
+    from local_operator.team_bridge.connector import loop as _loop
     from local_operator.team_bridge.connector.lock import (
         ConnectorLock,
         ConnectorLockBusy,
     )
-    from local_operator.team_bridge.connector.loop import run_forever
     from local_operator.team_bridge.store import Store
 
     config_dir = Path(args.config_dir)
@@ -74,6 +79,15 @@ async def _main_async(args: argparse.Namespace) -> int:
         print(str(busy))
         return 0
 
+    # F4 (live E2E): the store the screener reads its provider key from. The
+    # explicit ``db_path`` is load-bearing — ``config_dir`` alone feeds only
+    # the env-override tier and would leave the DATABASE at the ambient home,
+    # so a desktop login under this config root would be invisible. A PLAIN
+    # store, not the mesh-aware ``build_auth_store``: the same instance backs
+    # the screening cycle's live-identity check, and the bridge client is
+    # deliberately never served a bearer lent by a paired device (see
+    # ``TeamBridgeClient._auth_store``). Values are never read or logged here.
+    auth_store = AuthStore(db_path=config_dir / "auth.db", config_dir=config_dir)
     try:
         client = TeamBridgeClient(
             config_dir,
@@ -85,13 +99,14 @@ async def _main_async(args: argparse.Namespace) -> int:
         async def access_provider():
             return await client.current_access()
 
-        await run_forever(
+        await _loop.run_forever(
             owner,
             config_dir=config_dir,
-            auth_store=None,
+            auth_store=auth_store,
             access_provider=access_provider,
         )
     finally:
+        auth_store.close()
         lock.release()
     return 0
 

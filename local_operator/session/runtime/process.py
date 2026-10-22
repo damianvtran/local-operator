@@ -5990,6 +5990,16 @@ def main() -> int:
     # runtime child, so a reader has to be able to attribute a line to the
     # process that wrote it.
     logger.info("session runtime started: pid %d", os.getpid())
+    # OOM ORDERING (Linux): mark this runtime — and, by inheritance, every tool
+    # command and subagent it spawns — as a preferred OOM victim over the mesh
+    # relay, whose unit asks for the opposite (``network.relay.RELAY_OOM_SCORE_ADJUST``).
+    # A 2 GB node lost its relay to the OOM killer while session work survived,
+    # which took every session on the device off the mesh. Raising one's own score
+    # needs no privilege; a failure is logged and the runtime boots regardless.
+    from local_operator import memory_guard
+
+    if sys.platform.startswith("linux") and not memory_guard.raise_own_oom_score():
+        logger.info("session runtime could not raise its oom_score_adj; continuing")
     # THE TEARDOWN IS EXPLICIT so that its executor join can be bounded and, when
     # the bound expires, DIAGNOSED (:func:`_teardown_loop`, reached from the
     # ``finally`` below). ``asyncio.run`` is the implicit form of the same four

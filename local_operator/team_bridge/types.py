@@ -38,6 +38,7 @@ __all__ = [
     "TeamBridgeTypeError",
     "feed_seq",
     "inbox_cursor",
+    "is_conversation_message_id",
     "parse_conversation_ref_value",
     "project_events_batch",
     "project_inbox_page",
@@ -412,6 +413,18 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
         ).validated()
     except TeamBridgeTypeError:
         return None
+
+
+def is_conversation_message_id(value: str) -> bool:
+    """Whether ``value`` is a BARE conversation-message id (``bcmsg_…``).
+
+    The connector's hold retry needs this distinction: a bare ``bcmsg_`` id
+    cannot name its conversation, so it must never be re-driven through the
+    pair spine (which would ask the hub for a pair message that does not
+    exist). Shares the ONE id grammar the ref validator uses.
+    """
+
+    return isinstance(value, str) and _CONVERSATION_MESSAGE_ID.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)
