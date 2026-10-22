@@ -298,3 +298,19 @@ def test_scheduled_create_and_patch_carry_attachment_ids(proxy):
     )
     assert cleared.status_code == 422
     assert len(calls) == before
+
+
+def test_scheduled_create_never_forwards_an_explicit_null_attachment_ids(proxy):
+    """R1-04: an old hub refuses the unknown key even with a null value."""
+
+    client, calls, _ = proxy
+    create = {
+        "tenant_id": "org-a",
+        "conversation_id": CID,
+        "client_ref": "s-null",
+        "body": "hi",
+        "send_at": "2030-04-05T12:30:00Z",
+        "attachment_ids": None,
+    }
+    assert client.post("/v1/desktop/team-bridge/scheduled", json=create).status_code == 200
+    assert "attachment_ids" not in calls[-1][2]
