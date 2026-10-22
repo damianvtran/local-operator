@@ -608,10 +608,23 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error(f"could not read the thread: {failure}", code="thread_failed")
         # Same untrusted wrap as channel_history: a reply body is external
         # content, and an unadmitted one is already null from the server.
+        # Images too (R1-02): the channel timeline excludes replies, so this
+        # is the ONLY read through which a reply's admitted images can reach
+        # the agent — same caption, same fresh context fetch, same budget.
+        thread_rows: list[Any] = []
+        if isinstance(result, dict):
+            root = result.get("root")
+            if isinstance(root, dict):
+                thread_rows.append(root)
+            replies = result.get("replies")
+            if isinstance(replies, list):
+                thread_rows.extend(replies)
+        images = await _history_images(runtime, channel_id, {"messages": thread_rows}, endpoint_id)
         return {
             "ok": True,
             "state": "ok",
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            _IMAGES_KEY: images,
         }
 
     # The decide/unknown refusals above run before the gates; this later return
