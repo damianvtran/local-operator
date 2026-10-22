@@ -6818,3 +6818,83 @@ async def test_frontend_cutover_retires_old_delivery_but_keeps_active_suffix(
     assert handle.active_unbinds == 1
     assert not handle.old_store._subscribers
     assert not handle._frontend._subscribers
+
+
+def _bridge_root(tmp_path, consent_version: str, session_id: str = "s1"):
+    """A config root whose committed bridge enrollment designates ``session_id``."""
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    owner = OwnerSnapshot(
+        credential_id=1,
+        account_id="acc_1",
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        canonical_base_url="https://api.radienthq.com/v1",
+        enrollment_generation=1,
+    )
+    Store(tmp_path).commit_enrollment(
+        owner, OwnerReceipt(consent_version, "ref-1"), cos_session_id=session_id
+    )
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
+    )
+    return tmp_path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "consent_version,custom_type,delivered",
+    [
+        # F8: the member ACCEPTED the disclosure → the card engages the session.
+        ("bridge_consent_v2", "team_bridge_message", True),
+        # v1 never disclosed engagement → the ordinary refusal stands.
+        ("bridge_consent_v1", "team_bridge_message", False),
+        # Unknown version → refused (the accepted set is explicit).
+        ("bridge_consent_v9", "team_bridge_message", False),
+        # A plain `lop send` to the same session is still refused under v2.
+        ("bridge_consent_v2", None, False),
+    ],
+)
+async def test_unengaged_designated_cos_accepts_a_bridge_card_only_under_v2(
+    consent_version, custom_type, delivered
+) -> None:
+    """Live E2E F8: a designated chief of staff nobody has opened could never
+    receive a Team Bridge card. The exception is gated on the consent the
+    member accepted, read from this runtime's own config root."""
+
+    from pathlib import Path
+
+    from local_operator.paths import config_dir
+
+    # Seed the bridge store into the runtime's OWN (per-test isolated) config
+    # root BEFORE start: the record publisher reads ``_config_root`` too, so
+    # repointing it after start raced the publish under load.
+    root = Path(config_dir())
+    root.mkdir(parents=True, exist_ok=True)
+    _bridge_root(root, consent_version)
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        assert record.started is False
+        reader, writer = await _dial(record)
+        frame: dict[str, Any] = {"op": "peer_message", "req": 21, "text": "card", "mode": "mailbox"}
+        if custom_type is not None:
+            frame["custom_type"] = custom_type
+        writer.write(json.dumps(frame).encode() + b"\n")
+        await writer.drain()
+        if delivered:
+            await _until(reader, "ack", 21)
+            assert handle.calls[-1][0] == "receive_peer_message"
+        else:
+            err = await _until(reader, "error", 21)
+            assert "has not been engaged yet" in err["message"]
+            assert handle.calls == []
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()

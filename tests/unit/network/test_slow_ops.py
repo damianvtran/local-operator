@@ -528,11 +528,16 @@ def test_the_session_move_contract_is_frozen() -> None:
     which the desktop never sets); ``queue`` is the second (``--queue``, the queued
     move of §5.4); ``carry`` is the third (the carried-wake drill's remedy: what the
     promote carried and whether the supervisor that must fire it is running — made
-    visible on the receipt). ALL are
+    visible on the receipt). ALL THREE are
     ``NotRequired`` — so the document a reader parses is byte-identical for every
     move that did not ask for them, and each addition is additive in the strict
     sense: no existing key changed spelling, type or meaning, and a move that was
-    refused is unaffected. Widening the phase list would NOT have been additive —
+    refused is unaffected. ``state`` is the FOURTH and the first REQUIRED one: a
+    success document could say ``queued`` (nothing copied) and ``done`` (the copy is
+    the only one) in the same shape, and every surface rendered both as "Moved".
+    Making it required is the point — a caller cannot forget to read whether the move
+    happened, because the type system makes it ask (``docs/design/mesh-move-
+    outcome.md``, Surfaces). Widening the phase list would NOT have been additive —
     arriving live is not a phase of the transfer, and a queued move's phases are
     words about the QUEUE — which is why ``MOVE_RESULT_PHASES`` and
     ``MOVE_OPENABLE_PHASES`` are asserted unchanged right here, and the queue's own
@@ -551,6 +556,9 @@ def test_the_session_move_contract_is_frozen() -> None:
         "to_device",
         "phase",
         "phases",
+        # ``state``: the required outcome (completed | in_progress), added so a
+        # queued success and a verified move can never be rendered alike.
+        "state",
         "engagement",
         "queue",
         "carry",
@@ -590,6 +598,9 @@ def test_the_session_move_contract_is_frozen() -> None:
         # exactly when the move carried no session roles.
         "session_roles",
         "session_roles_notice",
+        # Clause 4: the cwd the destination mapped onto this host, when the
+        # recorded one did not exist here. Additive inside the optional block.
+        "cwd",
     }
     # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
     # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every

@@ -3668,10 +3668,12 @@ class AttachedSession:
             lambda: self._ask_client_method("ask_decline", ask_id, None, by=by)
         )
 
-    async def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
-        """Take a TIMED-OUT ask out of the view. Injects nothing, ever."""
+    async def dismiss_ask(
+        self, ask_id: str, *, by: str = "unknown", reason: str | None = None
+    ) -> dict[str, Any]:
+        """Take an ask out of the view. Injects nothing, ever."""
         return await self._ask_verdict(
-            lambda: self._ask_client_method("ask_dismiss", ask_id, None, by=by)
+            lambda: self._ask_client_method("ask_dismiss", ask_id, None, by=by, reason=reason)
         )
 
     async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
@@ -3728,6 +3730,7 @@ class AttachedSession:
         by: str,
         images: Sequence[Mapping[str, Any]] | None = None,
         tail: tuple[str, ...] = (),
+        reason: str | None = None,
     ) -> str:
         """Bind an owner if needed, then send ONE ask op on the wire.
 
@@ -3757,6 +3760,8 @@ class AttachedSession:
             if images:
                 return await method(ask_id, body, by=by, images=[dict(i) for i in images])
             return await method(ask_id, body, by=by)
+        if name == "ask_dismiss" and reason:
+            return await method(ask_id, by=by, reason=reason)
         return await method(ask_id, by=by)
 
     def move_will_wait(self) -> bool:
@@ -6837,7 +6842,16 @@ class AttachedSession:
         if self._frontend_store is None:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
-        self._apply_frontend_facades(state, changed_fields=set(update.changes))
+        # A per-ROW roster delta moves the roster just as surely as a full
+        # replacement does, and the facades are keyed by FIELD name: without
+        # this, ``apply_update`` merged the rows into canonical state and the
+        # viewer's job list never refreshed — the roster would appear frozen
+        # until some unrelated full frame arrived. ``changed_fields`` is the
+        # facade contract, not the wire's, so the name stays "jobs".
+        changed_fields = set(update.changes)
+        if update.job_deltas.get("upserted") or update.job_deltas.get("removed"):
+            changed_fields.add("jobs")
+        self._apply_frontend_facades(state, changed_fields=changed_fields)
         if update.degraded:
             # The owner shed this delta's body to keep the line under the socket
             # limit. The sequence was consumed on both sides, so the gap check
@@ -8508,9 +8522,19 @@ class AttachedSession:
                     self._runtime_ready.set()  # prompts route to the stopped notice
                     self._notify_stopped()
                     return
-                record, _ = await asyncio.to_thread(
-                    find_runtime_record, self._config_dir, self._session_id
-                )
+                # A PEER-HELD SESSION ASKS THE OWNER SEAM, as the read attach already
+                # does (``locate`` above): a scan of THIS machine's run directory
+                # answers "no runtime" for a session a peer holds, so a remote viewer
+                # whose link dropped went cold after COLD_FALLBACK_S even when the
+                # link came back inside it (2026-10-21). A LOCAL session keeps the
+                # direct registry read — the module-level name is the seam this
+                # loop's recovery contract is pinned through.
+                if self._owner.placement.is_local:
+                    record, _ = await asyncio.to_thread(
+                        find_runtime_record, self._config_dir, self._session_id
+                    )
+                else:
+                    record, _ = await asyncio.to_thread(self._owner.locate)
                 if (
                     record is not None
                     and record.protocol >= 5
