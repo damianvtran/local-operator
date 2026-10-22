@@ -945,3 +945,96 @@ def test_a_legacy_record_without_the_streak_reads_zero(tmp_path: Path) -> None:
     path.write_text(json.dumps(legacy), encoding="utf-8")
     record = out.read("op-legacy")
     assert record is not None and record.outage_streak == 0
+
+
+# -- bundle republish ------------------------------------------------------------------
+
+
+def _bundle_fields(*, seed: str = "a", size: int = 100) -> dict[str, Any]:
+    import hashlib
+
+    from local_operator.hub_sync.skill_bundle import SkillBundleRef
+
+    payload = hashlib.sha256(seed.encode()).hexdigest()
+    return {
+        "document_version": 1,
+        "name": "pdf-forms",
+        "description": "Fill and validate PDF forms.",
+        "bundle": SkillBundleRef(
+            format="zip",
+            hash=payload,
+            size=size,
+            uncompressed_size=size * 2,
+            file_count=3,
+            entrypoint="SKILL.md",
+            tree_hash=hashlib.sha256((seed + "tree").encode()).hexdigest(),
+        ).to_json(),
+    }
+
+
+def test_a_bundle_commit_skips_the_preview_and_carries_no_pin(tmp_path: Path) -> None:
+    accepted = _bundle_fields()
+    current = _bundle_fields(seed="b")
+    outcome, out, server = asyncio.run(
+        _run(
+            tmp_path,
+            kind="skill",
+            captured_local=accepted,
+            accepted=accepted,
+            current_local=current,
+            remote_latest=accepted,
+            bundle_attested=True,
+        )
+    )
+
+    assert outcome.state == "pushed"
+    # No paid preview, no pin: the server's bundle path reads the manifest.
+    assert server.preview_calls == []
+    assert len(server.commit_calls) == 1
+    assert server.commit_calls[0]["preview_token"] == ""
+    assert server.commit_calls[0]["document"] == current
+
+
+def test_a_bundle_push_without_the_capability_refuses_before_sending(tmp_path: Path) -> None:
+    accepted = _bundle_fields()
+    current = _bundle_fields(seed="b")
+    outcome, out, server = asyncio.run(
+        _run(
+            tmp_path,
+            kind="skill",
+            captured_local=accepted,
+            accepted=accepted,
+            current_local=current,
+            remote_latest=accepted,
+            bundle_attested=False,
+        )
+    )
+
+    # A missing capability is a reviewed STOP, not a transport failure: the
+    # record keeps the named class and waits for a manual decision.
+    assert outcome.state == "needs-review"
+    assert outcome.reason == "bundle-unsupported-server"
+    assert server.preview_calls == [] and server.commit_calls == []
+    record = _stored(out, "op1")
+    assert record.error_class == "bundle-unsupported-server"
+
+
+def test_a_bundle_push_against_a_moved_remote_is_a_bundle_conflict(tmp_path: Path) -> None:
+    accepted = _bundle_fields()
+    current = _bundle_fields(seed="b")
+    moved = _bundle_fields(seed="c")
+    outcome, out, server = asyncio.run(
+        _run(
+            tmp_path,
+            kind="skill",
+            captured_local=accepted,
+            accepted=accepted,
+            current_local=current,
+            remote_latest=moved,
+            bundle_attested=True,
+        )
+    )
+
+    assert outcome.state == "needs-review"
+    assert outcome.reason == "bundle-conflict"
+    assert server.preview_calls == [] and server.commit_calls == []
