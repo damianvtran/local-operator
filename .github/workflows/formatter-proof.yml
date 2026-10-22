@@ -1,0 +1,123 @@
+# ONE-SHOT FORMATTER PROOF for PR #2783 (head ed2dfa64). Not part of the product CI.
+#
+# WHY THIS FILE EXISTS ON AN ORPHAN BRANCH: the PR's real `lint` job failed at
+# ed2dfa64 and the host that authored the change cannot run Black (no formatter
+# outside the venv, and the resource gate forbids a new one). This job reproduces
+# the lint job's Black and isort with the SAME pinned versions on the SAME Python,
+# against the EXACT head, and reports the real diff instead of a hand prediction.
+#
+# CONSTRAINTS: read-only token, no credentials persisted, no tests, no build, one
+# job with a 3-minute ceiling, push-triggered on this one branch only (a root commit
+# holding only this file means no other workflow exists on the branch to cascade).
+# The branch is never opened as a PR, never merged, never force-pushed.
+name: formatter-proof
+on:
+  push:
+    branches:
+      - diag/formatter-ed2dfa64-20261022
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      HEAD_SHA: ed2dfa645167d22696f74dec8255362da3743bf3
+      # The PYTHON files the PR changes (diff against its base f70c4c41; ci.yml is
+      # left out because an explicit non-Python path would be parsed as Python), so
+      # the patch below can never touch anything else.
+      TOUCHED: >-
+        scripts/check_serial_controls.py
+        tests/unit/network/test_membership_convergence.py
+        tests/unit/test_ci_hygiene.py
+        tests/unit/test_session_factory.py
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ed2dfa645167d22696f74dec8255362da3743bf3
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Assert the checkout is the exact PR head
+        run: |
+          got="$(git rev-parse HEAD)"
+          echo "HEAD=$got"
+          test "$got" = "$HEAD_SHA"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.15"
+
+      - name: Install the lint job's exact tool versions
+        run: |
+          python -m pip install pip==26.2.2
+          pip install black==26.1.0 isort==5.13.2 click==8.5.0 pathspec==1.1.1 \
+            pytokens==0.4.1 packaging==26.3 platformdirs==4.13.5 mypy-extensions==1.1.0
+          mkdir -p proof
+          { python --version; pip --version; black --version; isort --version; \
+            pip freeze | grep -iE '^(black|isort|click|pathspec|pytokens|packaging|platformdirs|mypy-extensions)=='; \
+            echo "HEAD=$(git rev-parse HEAD)"; } 2>&1 | tee proof/versions.txt
+
+      - name: Black and isort on the touched files (the answer that matters)
+        run: |
+          set +e
+          cap() { name="$1"; shift; "$@" > "proof/$name.out" 2> "proof/$name.err"; rc=$?; echo "$rc" > "proof/$name.status"; echo "[$name] status=$rc"; }
+          # Exit 1 is an OBSERVED "needs formatting", not a failure of this job.
+          cap black_touched   black --check --diff --workers 1 $TOUCHED
+          cap isort_touched   isort --check --diff --jobs 1 $TOUCHED
+          exit 0
+
+      - name: Produce the combined format patch on an ephemeral tree
+        run: |
+          set +e
+          black --workers 1 $TOUCHED > proof/patch_black.log 2>&1; echo "$?" > proof/patch_black.status
+          isort --jobs 1 $TOUCHED > proof/patch_isort.log 2>&1; echo "$?" > proof/patch_isort.status
+          black --workers 1 $TOUCHED > proof/patch_black2.log 2>&1; echo "$?" > proof/patch_black2.status
+          # The same two checks the lint job runs, now on the formatted tree.
+          black --check --workers 1 $TOUCHED > proof/post_black.log 2>&1; echo "$?" > proof/post_black.status
+          isort --check --workers 1 $TOUCHED > proof/post_isort.log 2>&1; echo "$?" > proof/post_isort.status
+          git diff -- $TOUCHED > proof/combined-format.patch
+          git diff --stat -- $TOUCHED > proof/combined-format.stat
+          # Back to the exact head before the whole-repo passes below.
+          git checkout -q -- . && test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          exit 0
+
+      - name: Black and isort on the whole repository (the lint job's own commands)
+        # Last, with tight bounds, so a slow whole-repo Black cannot cost the answers
+        # above. A timeout (124) is judged below as UNEXPECTED, never as clean.
+        run: |
+          set +e
+          cap() { name="$1"; shift; "$@" > "proof/$name.out" 2> "proof/$name.err"; rc=$?; echo "$rc" > "proof/$name.status"; echo "[$name] status=$rc"; }
+          cap black_repo      timeout 55 black --check --diff --workers 1 .
+          cap isort_repo      timeout 25 isort --check --diff --jobs 1 .
+          exit 0
+
+      - name: Print the summary
+        if: always()
+        run: |
+          for f in proof/*.status; do echo "$(basename "$f" .status)=$(cat "$f")"; done
+          echo "----- touched-file Black diff (first 400 lines)"; head -n 400 proof/black_touched.out || true
+          echo "----- touched-file isort diff (first 120 lines)"; head -n 120 proof/isort_touched.out || true
+          echo "----- stderr (black touched)"; head -n 40 proof/black_touched.err || true
+          echo "----- combined patch stat"; cat proof/combined-format.stat || true
+
+      - name: Upload the proof
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: formatter-proof-ed2dfa64
+          path: proof/
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Judge the run
+        if: always()
+        run: |
+          bad=0
+          for n in black_touched isort_touched black_repo isort_repo; do
+            s="$(cat "proof/$n.status" 2>/dev/null || echo missing)"
+            case "$s" in 0|1) ;; *) echo "UNEXPECTED status for $n: $s"; bad=1 ;; esac
+          done
+          exit "$bad"
