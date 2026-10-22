@@ -1511,7 +1511,7 @@ def _apply_skill_bundle(
             return fail(
                 "bundle-publisher-changed",
                 "the hub row now names a different publisher than the one this link was "
-                "installed from; pull it again explicitly to accept the change",
+                "installed from; run `lop skills pull <id> --reinstall` to accept it",
                 "needs-review",
             )
 
@@ -1551,12 +1551,22 @@ def _apply_skill_bundle(
     )
     from dataclasses import replace as dc_replace
 
+    # CARRY THE PIN FORWARD (round-2 M3): the advanced baseline used to be
+    # rebuilt without ``bundle_confirmation``, so the first legitimate update
+    # erased the consent binding and the NEXT changed-publisher update applied
+    # silently. ``publisher_id``/``publisher_name`` are the binding and never
+    # move here; ``archive_hash`` records the bytes now installed under it.
+    advanced_pin = record.bundle_confirmation
+    if advanced_pin:
+        advanced_pin = dict(advanced_pin)
+        advanced_pin["archive_hash"] = manifest.bundle.hash
     baseline = dc_replace(
         baseline,
         identity=record.identity,
         local_alias=alias,
         remote_revision=c.remote_revision or record.remote_revision,
         content_state="present",
+        bundle_confirmation=advanced_pin,
     )
     storage = ManagedBundleStorage(ctx.config_dir)
     archive: Path | None = None
@@ -2223,6 +2233,9 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
         content_present = record.content_state != "absent"
         links.append(
             {
+                "bundle_confirmation": (
+                    dict(record.bundle_confirmation) if record.bundle_confirmation else None
+                ),
                 "link_id": identity.link_id,
                 "kind": identity.kind,
                 "local_id": record.local_id,
@@ -2936,6 +2949,38 @@ def _bundle_file_list(root: Path) -> list[dict[str, Any]]:
     return [{"path": name, "size": size} for name, size in rows]
 
 
+def _skipped_hidden_entries(root: Path, *, limit: int = 50) -> list[str]:
+    """The dot-prefixed entries the builder omits, named for the preview.
+
+    ``build_bundle`` SKIPS hidden names by design (``.git`` and ``.env`` are
+    never published), which is safe but silent: a preview reporting "2 files"
+    without naming the omitted 40 reads as though they were included. Bounded,
+    link-free walk over the same source; the count is exact up to ``limit``.
+    """
+
+    found: list[str] = []
+    budget = 5000
+    root = Path(root)
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        budget -= len(dirnames) + len(filenames) + 1
+        if budget < 0:
+            break
+        base = Path(directory)
+        kept: list[str] = []
+        for name in sorted(dirnames):
+            if name.startswith("."):
+                found.append((base / name).relative_to(root).as_posix() + "/")
+            else:
+                kept.append(name)
+        dirnames[:] = kept
+        for name in sorted(filenames):
+            if name.startswith("."):
+                found.append((base / name).relative_to(root).as_posix())
+        if len(found) >= limit:
+            break
+    return found[:limit]
+
+
 def _bundle_publisher(document: Mapping[str, Any]) -> dict[str, str] | None:
     """The publisher a bundle read response NAMES (one parser with the check's)."""
 
@@ -3036,11 +3081,14 @@ def _download_bundle_archive(
                     bearer=bearer,
                 )
         except TypeError:
-            # A client predating the ``bearer`` keyword takes no decision at
-            # all, so it is called bare and its own default applies: anonymous
-            # headers for a PUBLIC row (works), a required key for an org row
-            # (fails closed with a named refusal). Passing the keyword here
-            # would just raise the same TypeError again.
+            # A client predating the ``bearer`` keyword takes no decision, so it
+            # is called bare and its own default applies -- which for
+            # ``RadianClient`` is ``bearer=True``, i.e. a required key. So this
+            # branch is a COMPATIBILITY path for fakes/older clients only: a
+            # real client always accepts the keyword, and if this ever fires on
+            # one it fails CLOSED (a named no-credential refusal), never by
+            # sending no bearer for an org row. Passing the keyword again would
+            # just raise the same TypeError.
             result = client.download_skill_bundle(hub_id)
             if getattr(result, "data", None) is not None:
                 archive.write_bytes(result.data)
@@ -3223,6 +3271,7 @@ def install_skill(
     confirm: bool = False,
     dry_run: bool = False,
     form: str | None = None,
+    reinstall: bool = False,
 ) -> dict[str, Any]:
     """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
 
@@ -3344,7 +3393,11 @@ def install_skill(
                     f"this skill is already linked as {record.local_alias!r}; one remote skill is "
                     "one local link here -- remove that link first",
                 )
-            if record.content_state == "absent":
+            if record.content_state == "absent" or reinstall:
+                # ``reinstall`` is the ONE explicit accepting action for a
+                # changed publisher: it skips the unchanged replay, re-fetches,
+                # re-confirms (public) and re-pins. Every other request keeps
+                # the replay's idempotent answer.
                 resuming_absent = record
                 break
             snapshot = links_snapshot(ctx)
@@ -3391,6 +3444,12 @@ def install_skill(
                 "links": links_snapshot(ctx),
                 "dry_run": True,
             }
+        if reinstall and bundle is None:
+            raise LinkError(
+                "reinstall-unsupported",
+                "--reinstall applies to bundle links: a document has no archive to "
+                "reinstall from",
+            )
         publisher: dict[str, str] | None = None
         pinned: dict[str, str] | None = None
         if bundle is not None:
@@ -3630,6 +3689,7 @@ def install_skill(
                 # The archive is downloaded and hash-bound HERE, after every
                 # local refusal had its chance; the storage re-hashes it under
                 # its own lock and stages the decoded tree.
+                from local_operator.hub_sync.skill_bundle import tree_hash_of
                 from local_operator.hub_sync.skill_bundle_storage import (
                     ManagedBundleStorage,
                 )
@@ -3641,6 +3701,15 @@ def install_skill(
                     bundle,
                     bearer=resolved.identity.visibility == "org",
                 )
+                # A reinstall replaces content the operator explicitly asked to
+                # replace; its precondition is the tree on disk NOW (read under
+                # the storage's own lock a moment later), never None -- which
+                # only a genuinely absent destination can satisfy.
+                install_before: str | None = None
+                if reinstall:
+                    destination = ManagedBundleStorage(ctx.config_dir).path(alias)
+                    if destination.is_dir():
+                        install_before = tree_hash_of(destination)
                 try:
                     transaction = ManagedBundleStorage(ctx.config_dir).apply(
                         identity,
@@ -3648,10 +3717,10 @@ def install_skill(
                         archive,
                         bundle,
                         baseline,
-                        expected_fingerprint=None,
+                        expected_fingerprint=install_before,
                         expected_policy_revision=current.revision,
                         automatic=False,
-                        basis="initial-install",
+                        basis="reinstall" if reinstall else "initial-install",
                     )
                 finally:
                     _discard_bundle_download(archive)
@@ -4338,11 +4407,13 @@ def preview_skill_publication(
         # ``publisher`` is the signed-in caller, which only the server's answer
         # can name, so the preview carries None instead of inventing one.
         inventory = _bundle_file_list(Path(skill.base_dir))
+        hidden = _skipped_hidden_entries(Path(skill.base_dir))
         preview["form"] = "bundle"
         preview["bundle"] = {
             **_bundle_summary(draft)["bundle"],
             "files": inventory[:_BUNDLE_PREVIEW_FILES],
             "files_more": max(0, len(inventory) - _BUNDLE_PREVIEW_FILES),
+            "skipped_hidden": hidden,
         }
         preview["publisher"] = None
         preview["notes"] = [
@@ -4351,6 +4422,16 @@ def preview_skill_publication(
             "Bundles may not contain executables (any execute bit is refused), and "
             "installing a bundle never runs code.",
         ]
+        if hidden:
+            preview["notes"].append(
+                f"{len(hidden)} hidden entr{'y' if len(hidden) == 1 else 'ies'} will be "
+                "skipped: " + ", ".join(hidden) + " (bundles never include dot-paths)."
+            )
+        if visibility == "public":
+            preview["notes"].append(
+                "For a public publication, names, paths and hostnames inside files are "
+                "published as-is."
+            )
     else:
         preview["form"] = "document"
     record = dict(preview)

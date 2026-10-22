@@ -1059,3 +1059,282 @@ def test_a_document_baseline_facing_a_bundle_row_refuses_as_a_form_change(
 
     assert report.outcome == "needs-review"
     assert report.error_class == "bundle-form-changed"
+
+
+# -- round 2: the pin must bind ACROSS updates -----------------------------------------
+
+
+def test_the_publisher_pin_survives_the_first_update_and_still_refuses_a_swap(
+    tmp_path: Path,
+) -> None:
+    """A pin that only protects the first update protects nothing (round-2 M3)."""
+
+    root, base, _built, remote, _record = _install_then_republish(tmp_path)
+    ctx = _ctx(root, remote)
+
+    newer = build_bundle(_authored(tmp_path, body="# Second version\n"))
+    remote.document = _manifest_document(newer)
+    remote.data = newer.data
+    first = svc.apply_one(ctx, _check(root, remote)[0], auto=False)
+    assert first.outcome == "merged"
+    record = prov.read_baseline(root, "skill", first.local_id)
+    assert record is not None
+    assert record.bundle_confirmation is not None
+    assert record.bundle_confirmation["publisher_id"] == PUBLISHER["account_id"]
+    assert record.bundle_confirmation["archive_hash"] == newer.bundle.hash
+
+    third = build_bundle(_authored(tmp_path, body="# Third version\n"))
+    swapped = _manifest_document(third)
+    swapped["published_by"] = {"account_id": "acct-other", "name": "Mallory"}
+    remote.document = swapped
+    remote.data = third.data
+    second = svc.apply_one(ctx, _check(root, remote)[0], auto=False)
+
+    assert second.outcome == "needs-review"
+    assert second.error_class == "bundle-publisher-changed"
+    assert tree_hash_of(root / "skills" / NAME) == newer.tree_hash
+
+
+def test_a_reinstall_accepts_a_named_publisher_change_and_repins(tmp_path: Path) -> None:
+    root, base, _built, remote, _record = _install_then_republish(tmp_path)
+    newer = build_bundle(_authored(tmp_path, body="# New owner\n"))
+    document = _manifest_document(newer)
+    document["published_by"] = {"account_id": "acct-other", "name": "Mallory"}
+    remote.document = document
+    remote.data = newer.data
+    ctx = _ctx(root, remote)
+
+    refused = svc.apply_one(ctx, _check(root, remote)[0], auto=False)
+    assert refused.error_class == "bundle-publisher-changed"
+
+    result = svc.install_skill(
+        ctx,
+        hub_source=base,
+        hub_id=HUB_ID,
+        visibility="public",
+        tenant_id=None,
+        alias=NAME,
+        confirm_publisher_id="acct-other",
+        confirm_bundle_hash=newer.bundle.hash,
+        reinstall=True,
+    )
+
+    assert result["reports"][0]["outcome"] == "merged"
+    record = prov.read_baseline(root, "skill", result["link"]["local_id"])
+    assert record is not None
+    assert record.bundle_confirmation == {
+        "publisher_id": "acct-other",
+        "publisher_name": "Mallory",
+        "archive_hash": newer.bundle.hash,
+    }
+    assert tree_hash_of(root / "skills" / NAME) == newer.tree_hash
+
+
+def test_a_malformed_pin_does_not_erase_the_link(tmp_path: Path) -> None:
+    root, base, _built, remote = _rig(tmp_path)
+    ctx = _ctx(root, remote)
+    result = _install(ctx, base, confirm=True)
+    local_id = result["link"]["local_id"]
+    path = prov.baseline_path(root, "skill", local_id)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["bundle_confirmation"]["archive_hash"] = "short"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    record = prov.read_baseline(root, "skill", local_id)
+
+    assert record is not None
+    assert record.bundle_confirmation is None
+
+
+def test_a_preview_names_the_hidden_entries_it_skips(tmp_path: Path) -> None:
+    root, base, _built, client = _published_rig(tmp_path)
+    source = root / "skills" / NAME
+    (source / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (source / ".git").mkdir(exist_ok=True)
+    built = build_bundle(source)
+    client.document = _manifest_document(built)
+    ctx = _ctx(root, client)
+    svc.record_server_capabilities(
+        ctx, {"revision_cas": 1, "skills": 1, "skill_bundles": 1}, source=base
+    )
+
+    preview = _preview(ctx)
+
+    assert ".env" in preview["bundle"]["skipped_hidden"]
+    assert any("hidden" in note for note in preview["notes"])
+
+
+# -- round 2: CLI refusals happen in the right place and the right format ------------
+
+
+def test_an_unnamed_publisher_is_refused_before_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, _base, _built, remote = _rig(tmp_path)
+    remote.document.pop("published_by")
+    prompts: list[Any] = []
+    monkeypatch.setattr("builtins.input", lambda *args: prompts.append(args) or "y")
+
+    code = _cli_pull(monkeypatch, root, remote, json=False)
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert prompts == []
+    assert "bundle-publisher-unnamed" in out
+    assert "republish" in out
+
+
+def test_a_json_refusal_is_one_parseable_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, _base, built, remote = _rig(tmp_path)
+
+    code = _cli_pull(
+        monkeypatch,
+        root,
+        remote,
+        confirm_publisher="someone-else",
+        confirm_hash=built.bundle.hash,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["code"] == "bundle-confirmation-mismatch"
+    assert payload["error"]
+    assert not (root / "skills" / NAME).exists()
+
+
+def test_sync_with_no_links_says_so(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from argparse import Namespace
+
+    from local_operator import cli
+
+    code = cli.skills_command(
+        Namespace(skills_command="sync", name=None, check=False, json=False, yes=False),
+        tmp_path,
+    )
+
+    assert code == 0
+    assert "No linked skills." in capsys.readouterr().out
+
+
+def test_status_shows_the_publisher_the_install_was_confirmed_against(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from argparse import Namespace
+
+    from local_operator import cli
+
+    root, base, _built, remote = _rig(tmp_path)
+    _install(_ctx(root, remote), base, confirm=True)
+    monkeypatch.setattr(
+        "local_operator.hub_sync.service.build_clients_sync",
+        lambda _cm: (lambda _t: remote, "ok"),
+    )
+
+    code = cli.skills_command(Namespace(skills_command="status", json=False), root)
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "publisher:" in out
+    assert PUBLISHER["account_id"] in out
+    assert "confirmed archive sha256:" in out
+
+
+def test_publish_refusal_names_the_executable_entry_and_the_verb(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from argparse import Namespace
+
+    from local_operator import cli
+
+    root = tmp_path / ".local-operator"
+    source = _authored(root)
+    (source / "scripts").mkdir(exist_ok=True)
+    script = source / "scripts" / "run.sh"
+    script.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    code = cli.skills_command(
+        Namespace(
+            skills_command="publish",
+            name=NAME,
+            public=True,
+            org=None,
+            bundle=True,
+            alias=None,
+            no_subscribe=False,
+            yes=False,
+            json=True,
+        ),
+        root,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["code"] == "bundle-executable"
+    assert "chmod -x scripts/run.sh" in payload["error"]
+    assert "publish again" in payload["error"]
+
+
+def test_an_org_bundle_install_needs_no_publisher_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D9: the CLI must not demand a check the service does not perform."""
+
+    root, _base, built, client = _rig(tmp_path, visibility="org", tenant_id="t1")
+
+    code = _cli_pull(
+        monkeypatch,
+        root,
+        client,
+        public=False,
+        org="t1",
+        json=False,
+        yes=False,
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "installed" in out
+    record = [r for r in prov.iter_baselines(root) if r.kind == "skill"][0]
+    assert record.bundle_confirmation is None
+    assert tree_hash_of(root / "skills" / NAME) == built.tree_hash
+
+
+def test_a_publish_preview_reason_is_a_sentence_not_a_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D6 residual: the preview answer is mapped like every other refusal."""
+
+    from argparse import Namespace
+
+    from local_operator import cli
+
+    root, base, _built, client = _published_rig(tmp_path)
+    svc.record_server_capabilities(
+        _ctx(root, client),
+        {"revision_cas": 1, "skills": 1, "skill_bundles": 1},
+        source=base,
+    )
+
+    code = cli.skills_command(
+        Namespace(
+            skills_command="publish",
+            name=NAME,
+            public=True,
+            org=None,
+            bundle=True,
+            alias=None,
+            no_subscribe=False,
+            yes=False,
+            json=False,
+        ),
+        root,
+    )
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "cannot publish: no-credential" not in out
+    assert "this machine has no hub credential" in out
+    assert "lop login radient" in out
