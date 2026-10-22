@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -520,6 +520,71 @@ def test_detach_prints_the_run_and_the_key_and_sends_the_contract(
     assert (body["hosting"], body["model"]) == ("openai", "gpt-5")
     assert body["prompt"] == "do it"
     assert sent.headers["idempotency-key"]
+
+
+def test_a_bare_remote_run_is_named_after_its_prompt(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``--name``: the run still carries one, because the server requires it.
+
+    The server trims the name and refuses an empty one or one over 100 UTF-8
+    bytes, so a body without it was a 400 on every bare ``--remote``.
+    """
+    origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
+    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 0
+    body = json.loads(origin.requests[0].content)
+    assert body["name"] == "do it"
+    assert 0 < len(body["name"].encode("utf-8")) <= 100
+
+
+def test_a_given_name_reaches_the_body_unchanged(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
+    given = "  audit pass · 日本  "
+    assert _run(BASE + HOSTING + ["--detach", "--name", given, "do it"], monkeypatch) == 0
+    assert json.loads(origin.requests[0].content)["name"] == given
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        # Blank once trimmed, and over the bound in BYTES: 120 one-byte
+        # characters, then 60 two-byte ones, which is one character over.
+        "   ",
+        "x" * 120,
+        "é" * 51,
+    ],
+)
+def test_a_name_the_server_would_refuse_is_refused_before_the_request(
+    given: str,
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refused on this side, so the operator never pays a 400 for it.
+
+    The sentence is the spec's own rule inside the ordinary
+    ``remote compute failed:`` frame — the same frame ``--size`` and
+    ``--max-hours`` already use — because a dedicated key would be new English
+    copy in a namespace the five carried locales audit.
+    """
+    assert _run(BASE + HOSTING + ["--name", given, "do it"], monkeypatch) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("remote compute failed: a run name must be non-blank")
+    assert "at most 100 bytes of UTF-8" in err
+    assert origin.requests == []
 
 
 def test_an_oversize_idempotency_key_is_refused_before_the_request(
@@ -1216,6 +1281,117 @@ def test_a_real_lop_process_refuses_an_undecodable_alabel_and_says_only_why(
     assert result.stderr.splitlines() == [_t(_wr.api_override_invalid())]
     assert "remote compute failed" not in result.stderr
     assert "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# A bare `--remote` across a real process boundary (Q-3)
+# ---------------------------------------------------------------------------
+
+
+class _NameEnforcingRadient(BaseHTTPRequestHandler):
+    """A real socket that applies the server's name rule and nothing else.
+
+    ``400`` when ``name`` is absent, blank once trimmed, or over 100 UTF-8
+    bytes; ``201`` for a body the contract accepts. That is the rule a bare
+    ``--remote`` failed on, so a client that sends no name fails here exactly as
+    it failed against Radient.
+    """
+
+    @property
+    def _origin(self) -> _NameRadient:
+        """This handler's server; ``BaseRequestHandler.server`` is typed ``BaseServer``."""
+        return cast(_NameRadient, self.server)
+
+    def do_POST(self) -> None:  # noqa: N802 — the base class's spelling
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        payload = json.loads(raw or b"{}")
+        name = payload.get("name")
+        self._origin.names.append(name)
+        if not isinstance(name, str) or not name.strip() or len(name.strip().encode("utf-8")) > 100:
+            self._answer(400, {"error": "invalid_name"})
+            return
+        self._answer(
+            201,
+            {
+                "msg": "Run created",
+                "result": {
+                    "run": {
+                        "id": RUN_ID,
+                        "status": "pending",
+                        "network_id": self._origin.network_id,
+                    }
+                },
+            },
+        )
+
+    def _answer(self, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 — base signature
+        """Silence the request log: it would land in the parent's stderr."""
+
+
+class _NameRadient(ThreadingHTTPServer):
+    """The loopback server, carrying the tenant it answers as and the names sent."""
+
+    network_id: str
+    names: list[Any]
+
+
+@pytest.fixture()
+def name_origin(network: NetworkRecord) -> Iterator[_NameRadient]:
+    """A loopback origin for the child process, on a port the OS picks."""
+    server = _NameRadient(("127.0.0.1", 0), _NameEnforcingRadient)
+    server.network_id = network.network_id
+    server.names = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_a_real_lop_process_runs_with_no_name_and_the_server_takes_it(
+    enabled: None, network: NetworkRecord, signed_in: int, name_origin: _NameRadient
+) -> None:
+    """Q-3 END TO END: a bare ``--remote``, a real socket, the real entry point.
+
+    The child is isolated exactly like the parent and every ``CMUX_*``/``LOP_*``
+    variable is stripped, so it cannot read or move the operator's environment;
+    the one override it gets is the loopback origin, whose rule is the
+    contract's. The run is submitted WITHOUT ``--name``, which is the case that
+    used to 400.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
+    env["LOP_REMOTE_COMPUTE_API_URL"] = f"http://127.0.0.1:{name_origin.server_address[1]}"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _LOP_ENTRY,
+            *BASE,
+            *HOSTING,
+            "--detach",
+            "Run the acceptance checks",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+        cwd=Path(__file__).resolve().parents[3],
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == RUN_ID
+    (sent,) = name_origin.names
+    assert sent == "Run the acceptance checks"
 
 
 # ---------------------------------------------------------------------------
