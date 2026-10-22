@@ -6535,21 +6535,45 @@ def _sessions_move_words(
         # The caller's own `to` (what they typed) beats an opaque device id, and
         # a product phrase beats both: a raw id means nothing to a person (D9).
         target = str(to_block_q.get("name") or to or "another device")
+        # THE SENTENCE MUST NOT READ AS A COMPLETED MOVE (docs/design/
+        # mesh-move-outcome.md, "Why this exists" item 1): a queued receipt is a
+        # durable INTENT, and several surfaces rendered "queued" as "Moved" — the
+        # reported failure was a move that announced itself and changed nothing. The
+        # raw phase token stays on the record (`--json`); the sentence says where the
+        # move really is, and only ``resumed`` speaks about arrival.
         notes = {
-            "queued": ("waiting for a safe point", "queued"),
+            "queued": "It is waiting for a safe point before it starts.",
             "finishing": (
-                "waiting for the current step to finish (a pending approval holds this up)",
-                "queued",
+                "It is waiting for the current step to finish (a pending approval "
+                "holds this up)."
             ),
-            "paused": ("the move has started", "running"),
-            "copying": ("the move has started", "running"),
-            "resumed": (f"it has arrived on {target}", "arrived"),
+            "paused": "",
+            "copying": "",
+            "resumed": "",
         }
-        note, shape = notes.get(phase, ("", "queued"))
+        note = notes.get(phase, "")
+        if phase in ("resumed",):
+            shape = "arrived"
+        elif phase in ("paused", "copying"):
+            shape = "running"
+        else:
+            shape = "queued"
         head = f"Queued a move of {session_id} to {target}"
-        head += f" — {note}." if note else "."
+        if shape == "running":
+            # THE COPY STARTED, so the cancel hint would be a lie: from ``paused``
+            # on, ``move_queue.cancel`` answers ``too_late``.
+            head += f" — the copy has started (phase: {phase})."
+        elif shape == "queued":
+            head += f" — nothing has moved yet (phase: {phase})."
+        else:
+            head += "."
         if shape == "arrived":
-            return [head, "It is no longer running on this device.", *stay_lines]
+            return [
+                head,
+                f"It has arrived on {target}.",
+                "It is no longer running on this device.",
+                *stay_lines,
+            ]
         if shape == "running":
             return [
                 head,
@@ -6558,6 +6582,7 @@ def _sessions_move_words(
             ]
         return [
             head,
+            *([note] if note else []),
             "Windows open on it are told first and get a moment to follow; any that "
             f"can't will be disconnected, and the conversation continues on {target}.",
             f"Cancel the queued move before it starts with "
@@ -6598,6 +6623,20 @@ def _sessions_move_words(
         engage_lines = [
             f"{target} was asked to start it as soon as it lands; that device's own "
             "listing is where it shows."
+        ]
+    from local_operator.network import mobility as mobility_mod
+
+    if mobility_mod.move_receipt_state(result) != "completed":
+        # THE SAME RULE, WITHOUT A QUEUE BLOCK: an in-progress receipt is a handoff
+        # whose commit has not landed yet, and no surface may call that "Moved".
+        # NOT "QUEUED" EITHER (QA round 1, Q-3): no producer reaches here through the
+        # queue (that receipt carries a ``queue`` block and is worded above), so the
+        # mechanism word would name the wrong thing — this is a handoff that started
+        # and has not finished.
+        return [
+            f"The move of {session_id} to {target} is still in progress "
+            f"(phase: {result.get('phase') or 'in_progress'}); nothing has landed yet.",
+            "Run this verb again to finish it.",
         ]
     if result.get("mode") == "keep":
         return [

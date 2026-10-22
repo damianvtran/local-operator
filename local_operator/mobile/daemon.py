@@ -5916,7 +5916,7 @@ def build_app(daemon: MobileDaemon):
         relay's half of ``POST /v1/desktop/sessions/{session_id}/transfer``:
         same body (``{to, keep?, wait_s?, request_id?}``, ``to`` a device id or
         ``"local"``), same receipt (``phases``, ``locality``, ``owner_device``,
-        ``source_retired``, ``session_id``, ``new_session_id``, ``mode``,
+        ``state``, ``source_retired``, ``session_id``, ``new_session_id``, ``mode``,
         ``replayed``), and — where the two planes differ — this plane's
         vocabulary: refusals carry the move's own sentence in ``error`` and its
         machine ``code`` beside it, which is what ``web/src/api.ts`` reads, and
@@ -6723,6 +6723,7 @@ def build_app(daemon: MobileDaemon):
                         # remote door, which is what ``dismiss_cold`` records for it
                         # (the same word the live op's own door defaults to).
                         by=str(body.get("by") or ""),
+                        reason=str(body.get("reason") or "") or None,
                     )
                     if outcome.get("ok"):
                         # THE SCREEN IS REPAINTED HERE BECAUSE NOTHING ELSE WILL (UX
@@ -6794,6 +6795,9 @@ def build_app(daemon: MobileDaemon):
                             return await client.ask_revise(ask_id, answers, by=by)
                         if op == "ask_decline":
                             return await client.ask_decline(ask_id, by=by)
+                        dismiss_reason = str(body.get("reason") or "")
+                        if dismiss_reason:
+                            return await client.ask_dismiss(ask_id, by=by, reason=dismiss_reason)
                         return await client.ask_dismiss(ask_id, by=by)
                     finally:
                         client.close()
