@@ -1642,7 +1642,15 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # descriptions are the discovery surface for a capability whose point is that
 # the agent names the asset; the sanitising and collision rules ride the three
 # generation guides, read on demand. Ceiling = measured head + the 55 band.
-BUDGET_BILLED_TOKENS = 32_755
+#
+# COMPOSED WITH LOH-9 S4 promotion on this moved base: promotion adds one
+# `promote` enum value plus `as_name`/`confirm_replace` on BOTH authoring tools.
+# Measured by THIS script on the rebased head with an isolated HOME:
+#   base  32,755 ceiling (media naming already counted on this arm)
+#   head  91,231 chars = ~32,817 billed  +62
+# Ceiling = measured head + the 55 band. Do not pick either side of a budget
+# conflict: re-measure the composed tree.
+BUDGET_BILLED_TOKENS = 32_872
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1772,7 +1780,11 @@ BUDGET_BILLED_TOKENS = 32_755
 # the SAME +997 chars:
 #   base  81,498 chars = ~29,316 billed
 #   head  82,495 chars = ~29,674 billed  -> ceiling = head + 55.
-BUDGET_CHILD_BILLED_TOKENS = 29_729
+#
+# COMPOSED WITH LOH-9 S4 promotion on the same moved base: the SAME +63 billed
+# tokens as the top arm (both authoring tools ride every surface, children
+# included), measured 82,821 chars = ~29,792. Ceiling = 29,792 + the 55 band.
+BUDGET_CHILD_BILLED_TOKENS = 29_847
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
