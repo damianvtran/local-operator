@@ -4272,6 +4272,34 @@
     },
     {
       "locale": "zh-CN",
+      "namespace": "relay.session.tags",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "relay.session.tags.action",
+        "relay.session.tags.cancel",
+        "relay.session.tags.done",
+        "relay.session.tags.empty",
+        "relay.session.tags.empty_hint",
+        "relay.session.tags.limit_hint",
+        "relay.session.tags.load_error",
+        "relay.session.tags.loading",
+        "relay.session.tags.make_primary",
+        "relay.session.tags.missing",
+        "relay.session.tags.more",
+        "relay.session.tags.pin_and_tags_hint",
+        "relay.session.tags.primary",
+        "relay.session.tags.remove_all",
+        "relay.session.tags.remove_all_confirm",
+        "relay.session.tags.retry",
+        "relay.session.tags.save_error",
+        "relay.session.tags.saving",
+        "relay.session.tags.sheet_title"
+      ]
+    },
+    {
+      "locale": "zh-CN",
       "namespace": "relay.shell",
       "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
       "owner": "i18n-translator lane",
@@ -11738,6 +11766,34 @@
         "relay.session.view.back",
         "relay.session.view.empty_hint",
         "relay.session.view.empty_title"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.session.tags",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-03-31",
+      "missing": [
+        "relay.session.tags.action",
+        "relay.session.tags.cancel",
+        "relay.session.tags.done",
+        "relay.session.tags.empty",
+        "relay.session.tags.empty_hint",
+        "relay.session.tags.limit_hint",
+        "relay.session.tags.load_error",
+        "relay.session.tags.loading",
+        "relay.session.tags.make_primary",
+        "relay.session.tags.missing",
+        "relay.session.tags.more",
+        "relay.session.tags.pin_and_tags_hint",
+        "relay.session.tags.primary",
+        "relay.session.tags.remove_all",
+        "relay.session.tags.remove_all_confirm",
+        "relay.session.tags.retry",
+        "relay.session.tags.save_error",
+        "relay.session.tags.saving",
+        "relay.session.tags.sheet_title"
       ]
     },
     {
