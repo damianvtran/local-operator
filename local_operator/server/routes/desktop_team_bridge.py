@@ -663,8 +663,15 @@ async def put_settings(
         TeamBridgeClient,
         get_status_discipline,
     )
+    from local_operator.team_bridge.cos_name import cos_display_name
 
     client = TeamBridgeClient(config_manager.config_dir)
+    # The chief of staff's current name rides every ACTIVE write (enable,
+    # resume, rename) so teammates see "Aida (Ben)" from the first moment the
+    # endpoint exists. It is resolved HERE, not taken from the body: the name
+    # is runtime state (aida.name + team_bridge.session), not a desktop input,
+    # and a pause/opt-out must be sent alone (§5.2 rule 2) so it never carries it.
+    agent_name = cos_display_name(config_manager.config_dir) if body.state == "active" else None
     try:
         payload = await client.put_settings(
             state=body.state,
@@ -672,6 +679,7 @@ async def put_settings(
             consent_version=body.consent_version,
             consented_via=body.consented_via,
             label=body.label,
+            agent_name=agent_name,
             expected_account_id=body.expected_account_id,
         )
     except BridgeSignInRequired as exc:
