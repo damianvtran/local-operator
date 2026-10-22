@@ -102,7 +102,7 @@ lop exec --remote-cancel RUN_ID
 | `--size s\|m\|l` | Compute size (default `m`). |
 | `--max-hours H` | Hours the run may execute before the server stops it (default 2; the server may cap it). |
 | `--budget-usd N` | Spending cap for this run; the server's admission default applies when omitted. |
-| `--name TEXT` | Label carried on the run. |
+| `--name TEXT` | Label carried on the run. Optional: when it is absent or blank, one is derived from the prompt (see below). A name you give is sent unchanged, never trimmed or shortened, and one that is blank or over 100 bytes of UTF-8 is refused before any request. |
 | `--idempotency-key KEY` | Reuse a key instead of minting one, so retrying a submitted run returns that run rather than starting a second. A submission answered with a replay prints one line on stderr saying the key matched an earlier submission and no new run was created, then continues normally. |
 | `--detach` | Print the run id (stdout) and the receipt (stderr), then exit instead of watching. |
 | `--remote-status RUN_ID` | Print one run as JSON on stdout and exit; the network verdict goes to stderr. |
@@ -111,6 +111,17 @@ lop exec --remote-cancel RUN_ID
 Flags that only mean something to a local run (`--tools`, `--background`,
 `--goal`, `--resume` and the rest) are refused by name beside `--remote`
 rather than silently ignored.
+
+**The run's name.** The server requires a name: it trims the field, then refuses
+an empty one or one over 100 bytes of UTF-8 with a 400. So `--remote` never
+sends a run without one. When `--name` is absent or blank, the name is derived
+from the prompt — its first line, whitespace collapsed and control characters
+removed, shortened on a character boundary to at most 100 bytes of UTF-8 with a
+trailing `…` marking the cut. A prompt whose first line has nothing printable in
+it falls back to `lop exec <repo>@<sha[:7]>`. A name given with `--name` is
+carried exactly as typed; this client will not shorten a name you chose, so an
+empty one (after trimming) or one over the bound is refused in one sentence and
+exit 1 before any request is sent.
 
 **Network binding.** A remote run is bound to one mesh network that this device
 is an active member of. The network the receipt reports is the one Radient's

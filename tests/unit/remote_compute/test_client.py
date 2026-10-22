@@ -63,7 +63,11 @@ from local_operator.remote_compute.errors import (
     Unreachable,
     UnreadableEnvelope,
 )
-from local_operator.remote_compute.request import is_commit_sha, is_repo_url
+from local_operator.remote_compute.request import (
+    MAX_RUN_NAME_BYTES,
+    is_commit_sha,
+    is_repo_url,
+)
 from local_operator.tunnels.config import DEFAULT_API_URL
 from local_operator.tunnels.errors import LoginRequired
 
@@ -221,8 +225,11 @@ async def test_create_sends_the_contract_fields_and_the_tenant(
     assert body["repo_sha"] == SHA
     assert (body["hosting"], body["model"]) == ("openai", "gpt-5")
     assert (body["size"], body["max_hours"]) == ("m", 2.0)
-    # Optional fields are OMITTED, not sent as null.
-    assert "budget_usd" not in body and "name" not in body
+    # ``budget_usd`` is OMITTED, not sent as null. ``name`` is no longer one
+    # of the optional fields: the server refuses a run without one, so the
+    # spec always carries one.
+    assert "budget_usd" not in body
+    assert body["name"] == "fix the flaky test"
 
 
 @pytest.mark.asyncio
@@ -913,7 +920,13 @@ def _fields(**overrides: Any) -> dict[str, Any]:
     return values
 
 
-def test_a_spec_carries_the_contract_fields_and_omits_unset_optionals() -> None:
+def test_a_spec_carries_the_contract_fields_and_derives_the_name() -> None:
+    """Every field the contract names, and a name that is never absent.
+
+    ``name`` used to be omitted here — it is now DERIVED when the caller gives
+    none, because the server refuses a run whose name is missing or blank and a
+    spec is the last place before the body exists.
+    """
     body = RunSpec(**_fields()).to_body()
     assert body == {
         "prompt": "fix the flaky test",
@@ -923,8 +936,65 @@ def test_a_spec_carries_the_contract_fields_and_omits_unset_optionals() -> None:
         "model": "gpt-5",
         "size": "m",
         "max_hours": 2.0,
+        "name": "fix the flaky test",
     }
     assert "budget_usd" not in body and "network_id" not in body
+
+
+def test_a_multiline_prompt_names_the_run_after_its_first_line() -> None:
+    body = RunSpec(**_fields(prompt="Run the checks\nthen the report\n\nand stop")).to_body()
+    assert body["name"] == "Run the checks"
+
+
+def test_whitespace_and_control_characters_are_collapsed_out_of_the_name() -> None:
+    body = RunSpec(**_fields(prompt="  run\tthe\u00a0\x07 checks  \nnext")).to_body()
+    assert body["name"] == "run the checks"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # 60 CJK characters are 180 UTF-8 bytes: over the bound, and every one
+        # of them is three bytes, so a byte slice would cut a character in half.
+        "修复流水线" * 10,
+        # A single astral emoji is already four bytes per character.
+        "🧪" * 40,
+        "é" * 60,
+    ],
+)
+def test_a_long_prompt_is_cut_on_a_character_boundary(prompt: str) -> None:
+    name = RunSpec(**_fields(prompt=prompt)).to_body()["name"]
+    encoded = name.encode("utf-8")
+    assert 0 < len(encoded) <= MAX_RUN_NAME_BYTES
+    # Round-tripping is what "a character boundary" means: a slice inside a
+    # multibyte character decodes to U+FFFD, which is not what the prompt said.
+    assert encoded.decode("utf-8") == name
+    assert "\ufffd" not in name
+    assert name.endswith("…")
+
+
+def test_a_first_line_with_nothing_printable_falls_back_to_the_checkout() -> None:
+    # ``strip`` does not remove a NUL, so this prompt is accepted as non-empty
+    # and still has no printable first line to name the run after.
+    body = RunSpec(**_fields(prompt="\x00")).to_body()
+    assert body["name"] == f"lop exec repo@{SHA[:7]}"
+
+
+def test_a_given_name_is_carried_exactly_as_typed() -> None:
+    given = "  audit · 日本  "
+    assert RunSpec(**_fields(name=given)).to_body()["name"] == given
+
+
+@pytest.mark.parametrize("given", ["", "   ", "é" * 51, "a" * MAX_RUN_NAME_BYTES + "b"])
+def test_a_blank_or_oversize_given_name_is_refused(given: str) -> None:
+    """The server's own rule, checked here so the refusal costs no request.
+
+    ``é`` is two UTF-8 bytes, so 51 of them are 102 bytes: the bound is bytes,
+    not characters. A spec refuses by ``ValueError``, like every other field
+    rule here, and the CLI maps that through ``remote compute failed:``.
+    """
+    with pytest.raises(ValueError, match="at most 100 bytes of UTF-8"):
+        RunSpec(**_fields(name=given))
 
 
 def test_a_spec_with_optionals_sends_them() -> None:
