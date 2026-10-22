@@ -85,10 +85,18 @@ def _handed_over(server_a: Any, server_b: Any, monkeypatch: pytest.MonkeyPatch) 
 
     A genuinely broken transport still fails this cell: the second ask returns
     ``unreachable`` too, and the caller asserts on it.
+
+    AND A NOTE ON ``_pair_settled`` (QA round 1, Q2): the helper that resolves
+    this cell's red also waits out the dying pairing link, so a regression that
+    let ``_pair_settled`` return early would be healed here by the second ask.
+    That is deliberate — this file is about the store MARKER, and the transport
+    guarantee has its own cells in ``test_mobility.py``, which move without this
+    retry and would go red on their own.
     """
     result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     if result.get("ok") is True or result.get("code") != "unreachable":
         return result
+    closed = 0
     # SAID OUT LOUD, not absorbed. The retry is what a user does with a
     # no-change refusal, but a cell that silently retries turns a rising rate
     # of alive-silent links into a slower shard and nothing else — and that is
@@ -96,7 +104,7 @@ def _handed_over(server_a: Any, server_b: Any, monkeypatch: pytest.MonkeyPatch) 
     # keeps it visible without changing a single assertion.
     warnings.warn(
         "the hand-away answered unreachable and was re-asked once on a fresh link "
-        f"({result.get('message')}) — the mesh link went silent, see CI 39838493282",
+        f"({result.get('message')}) — see CI 39838493282 for the cell this answers",
         RuntimeWarning,
         stacklevel=2,
     )
@@ -116,6 +124,22 @@ def _handed_over(server_a: Any, server_b: Any, monkeypatch: pytest.MonkeyPatch) 
     for link in list(server_a.links.values()):
         if link.device_id == server_b.identity.device_id:
             link.close()
+            closed += 1
+    if not closed:
+        # A REFUSAL WITH NO LINK IS NOT THE EVENT THIS HELPER EXPLAINS. The CI red
+        # was a link that was alive and answered nothing; if there is nothing to
+        # close, the second ask may still succeed, but the reason is not the one
+        # written above — say so in the log instead of letting a future
+        # spurious-refusal bug be retried into a silent pass (QA round 1, Q1).
+        # A warning rather than an assertion on purpose: a link that was already
+        # evicted is a legitimate state, and an assertion here would rebuild the
+        # timing dependence this file just removed.
+        warnings.warn(
+            "the hand-away answered unreachable with no link to the destination to close, "
+            "so a silent link does not explain it — re-asking anyway",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
 
 
