@@ -635,6 +635,12 @@ class HubSyncRunner:
         assert outbound is not None  # narrowed once; the calls below re-widen the attribute
         expected = c.remote_revision or outbound.remote_revision
         budget = OperationBudget.start("automatic", self._operation_id(c), 1)
+        # A bundle push is gated on the SAME per-source attestation the inventory
+        # reports: no advertised ``skill_bundles`` means the manifest would land
+        # with no blob behind it, so the refusal happens before the commit.
+        bundle_attested = record.identity is not None and svc._capability_bundle(
+            ctx.store().load(), record.identity
+        )
         outcome = await push_item(
             kind=c.kind,
             local_id=c.local_id,
@@ -648,6 +654,7 @@ class HubSyncRunner:
             operation_id=self._operation_id(c),
             budget=budget,
             document_builder=self._document_builder(ctx, c),
+            bundle_attested=bundle_attested,
         )
         report.skipped = None
         await self._offload(self._record_push, ctx, c, outcome)

@@ -37,11 +37,13 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import secrets
+import shutil
 import tempfile
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -1218,6 +1220,25 @@ def _apply_skill(
     from local_operator.hub_sync.skill_storage import ManagedSkillStorage
     from local_operator.hub_sync.transactions import TransactionError
 
+    # FORM DISPATCH, BEFORE any document parsing: a bundle link is never a
+    # text merge. Its content identity is a tree hash and the only valid write
+    # is the whole-directory fast-forward below, so a record OR a remote row
+    # that says ``bundle`` routes there (and a flipped form is refused by name
+    # rather than parsed as the other shape).
+    record_probe = prov.read_baseline(ctx.config_dir, "skill", c.local_id)
+    remote_is_bundle = isinstance(c.remote, Mapping) and "bundle" in c.remote
+    local_is_bundle = record_probe is not None and "bundle" in (record_probe.fields or {})
+    if remote_is_bundle or local_is_bundle:
+        return _apply_skill_bundle(
+            ctx,
+            c,
+            record=record_probe,
+            replace=replace,
+            dry_run=dry_run,
+            auto=auto,
+            remote_is_bundle=remote_is_bundle,
+        )
+
     key = st.item_key(c.kind, c.local_id)
 
     def fold(fn: Callable[[dict[str, Any]], None]) -> None:
@@ -1387,6 +1408,170 @@ def _apply_skill(
         "merged",
         applied=True,
         fields=tuple(results),
+    )
+
+
+def _apply_skill_bundle(
+    ctx: HubSyncContext,
+    c: chk.ItemCheck,
+    *,
+    record: prov.BaselineRecord | None,
+    remote_is_bundle: bool,
+    replace: Literal[None, "remote", "local"] = None,
+    dry_run: bool = False,
+    auto: bool = False,
+) -> ItemMergeReport:
+    """Fast-forward ONE bundle link, never a text merge (design §8.2).
+
+    States: L==R (or L==B,R==B) is unchanged; L==B and R!=B installs the remote
+    archive; L!=B with R!=B is ``bundle-conflict`` and writes NOTHING -- a bundle
+    is a whole directory tree, so a per-file merge would have to invent an
+    archive the publisher never uploaded. ``replace="remote"`` is the operator's
+    explicit override; ``replace="local"`` has nothing to apply and is a no-op.
+
+    The parse order is the same as an install: the remote manifest is validated,
+    the archive is streamed into a private temp dir and hash-bound to
+    ``bundle.hash`` BEFORE a zip parser sees it, and the storage re-verifies the
+    destination's tree hash under its writer lock (so a local edit between the
+    check and this apply refuses with ``local-concurrent-edit``).
+    """
+
+    from local_operator.hub_sync.skill_bundle import SkillBundleManifest, SkillValidationError
+    from local_operator.hub_sync.skill_bundle_storage import ManagedBundleStorage
+    from local_operator.hub_sync.transactions import TransactionError
+
+    key = st.item_key(c.kind, c.local_id)
+
+    def fold(fn: Callable[[dict[str, Any]], None]) -> None:
+        def inner(doc: dict[str, Any]) -> None:
+            item = doc.setdefault("items", {}).get(key)
+            if item is not None:
+                fn(item)
+
+        ctx.store().mutate(inner)
+
+    def fail(cls: str, message: str, outcome: ItemOutcome = "failed") -> ItemMergeReport:
+        fold(lambda item: st.record_failure(item, cls, message))
+        return ItemMergeReport(
+            c.kind,
+            c.local_id,
+            c.name,
+            c.hub_id,
+            outcome,
+            error_class=cls,
+            message=message,
+        )
+
+    def unchanged() -> ItemMergeReport:
+        fold(st.settle_unchanged)
+        return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "unchanged")
+
+    if record is None or record.identity is None or record.local_alias is None:
+        return fail("baseline-unknown", "this skill link has no writer identity yet", "refused")
+    if not remote_is_bundle:
+        # A bundle record whose remote row no longer carries a bundle: the form
+        # changed under the link. The server refuses that too (409); refusing
+        # here keeps a hand-edited or rolled-back row from being parsed as text.
+        return fail(
+            "bundle-form-changed",
+            "the remote skill is no longer a bundle; unpull the link and pull it again",
+            "needs-review",
+        )
+    alias = record.local_alias
+    try:
+        manifest = SkillBundleManifest.from_remote(dict(c.remote or {}))
+    except SkillValidationError as exc:
+        return fail(
+            "invalid-remote-manifest",
+            f"the remote bundle manifest is invalid: {exc}",
+            "refused",
+        )
+
+    if replace == "local":
+        # "Keep my side" is already true: nothing to fetch and nothing to write.
+        return unchanged()
+
+    absent = c.content_state == "absent" or record.content_state == "absent"
+    state = c.classification.state if c.classification is not None else None
+    if not absent and replace != "remote":
+        if state in ("up-to-date", "local-only"):
+            # L==R (nothing to do) or L!=B with R==B (the push side owns it).
+            return unchanged()
+        if state == "both-changed":
+            return fail(
+                "bundle-conflict",
+                "the local bundle and the hub both changed; nothing was written "
+                "(keep a copy, then pull again with replace=remote, or reconcile and push)",
+                "needs-review",
+            )
+        if state == "baseline-unknown":
+            return fail(
+                "baseline-unknown",
+                "this bundle link has no known baseline, so an update cannot be proven safe",
+                "refused",
+            )
+
+    if dry_run:
+        return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "would-merge")
+
+    client = ctx.client_for_tenant(c.tenant_id)
+    if client is None:
+        return fail("no-credential", "skills need `lop login radient` (organization sign-in)")
+
+    baseline = prov.make_record(
+        "skill", c.local_id, c.hub_id, c.tenant_id, manifest.to_json(), "merge-pull"
+    )
+    from dataclasses import replace as dc_replace
+
+    baseline = dc_replace(
+        baseline,
+        identity=record.identity,
+        local_alias=alias,
+        remote_revision=c.remote_revision or record.remote_revision,
+        content_state="present",
+    )
+    storage = ManagedBundleStorage(ctx.config_dir)
+    archive: Path | None = None
+    try:
+        # The before-fingerprint is the CHECK's reading of this link's tree; the
+        # storage re-reads it under its writer lock, so a change since the check
+        # refuses instead of being overwritten. An absent link has no bytes, and
+        # its "before" is exactly None.
+        before = None if absent else c.local_fp
+        archive = _download_bundle_archive(ctx, client, c.hub_id, manifest)
+        storage.apply(
+            record.identity,
+            alias,
+            archive,
+            manifest,
+            baseline,
+            expected_fingerprint=before,
+            automatic=auto,
+            basis="bundle-fast-forward",
+        )
+    except (LinkError, TransactionError) as exc:
+        code = getattr(exc, "code", "hub-error")
+        return fail(str(code), str(exc))
+    except (ValueError, KeyError) as exc:
+        return fail("merge-refused", f"the result was refused: {exc}", "refused")
+    except Exception as exc:  # noqa: BLE001 - one item's failure never ends the run
+        logger.warning("hub bundle apply failed for %s", c.name, exc_info=True)
+        return fail("hub-error", f"could not write the update: {exc}")
+    finally:
+        if archive is not None:
+            _discard_bundle_download(archive)
+
+    _mark_integrated(ctx, c, integrated=True)
+    _seed_receipt_if_agreed(ctx, c, manifest.to_json())
+    summary = {"files": manifest.bundle.file_count}
+    fold(lambda item: st.settle_applied(item, summary, None))
+    return ItemMergeReport(
+        c.kind,
+        c.local_id,
+        c.name,
+        c.hub_id,
+        "merged",
+        applied=True,
     )
 
 
@@ -2024,6 +2209,15 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                     else None
                 ),
                 "content_state": record.content_state,
+                # The CARRIER: additive and skill-only. A bundle link's content
+                # identity is its tree hash and its updates are whole-directory
+                # fast-forwards, so a client that shows or drives the link needs
+                # to know which form it is without re-reading the baseline.
+                "form": (
+                    "bundle"
+                    if identity.kind == "skill" and "bundle" in (record.fields or {})
+                    else ("document" if identity.kind == "skill" else None)
+                ),
                 "auto_will_apply": _auto_will_apply(
                     item, policy, ctx, now, content_present=content_present
                 ),
@@ -2091,6 +2285,24 @@ def _attested(value: Any) -> int:
     return 0
 
 
+def _capability_bundle(doc: Mapping[str, Any], identity: LinkIdentity) -> bool:
+    """Whether THIS source advertised the ``skill_bundles:1`` carrier.
+
+    A probe-only fact, exactly like :func:`_capability_auto_push`: a response
+    from the deployed server carried ``sync_contract.skill_bundles`` and
+    :func:`record_server_capabilities` persisted it per SOURCE. Absent the
+    attestation the answer is honestly False, and the caller refuses
+    ``bundle-unsupported-server`` BEFORE any archive is uploaded.
+    """
+
+    server = doc.get("server", {}) if isinstance(doc, Mapping) else {}
+    sources = server.get("sources", {}) if isinstance(server, Mapping) else {}
+    attest = sources.get(identity.hub_source) if isinstance(sources, Mapping) else None
+    if not isinstance(attest, Mapping):
+        return False
+    return bool(_attested(attest.get("skill_bundles")))
+
+
 def _capability_auto_push(doc: Mapping[str, Any], identity: LinkIdentity) -> bool:
     """Whether THIS source's atomic revision-CAS is POSITIVELY attested.
 
@@ -2131,6 +2343,10 @@ def _fold_capability(doc: dict[str, Any], capabilities: Mapping[str, Any], sourc
 
     revision_cas = _attested(capabilities.get("revision_cas"))
     skills = _attested(capabilities.get("skills"))
+    # Additive carrier attestation: a server that predates the bundle routes
+    # simply omits the key, which records 0 and refuses bundle uploads/pushes by
+    # name instead of failing mid-publish (design §9.3).
+    skill_bundles = _attested(capabilities.get("skill_bundles"))
     server = doc.setdefault("server", {})
     server["revision_cas"] = bool(revision_cas)
     server["attested_at"] = prov.now_iso()
@@ -2138,6 +2354,7 @@ def _fold_capability(doc: dict[str, Any], capabilities: Mapping[str, Any], sourc
     entry = entries.setdefault(str(source), {})
     entry["revision_cas"] = revision_cas
     entry["skills"] = skills
+    entry["skill_bundles"] = skill_bundles
     entry["attested_at"] = prov.now_iso()
 
 
@@ -2197,6 +2414,12 @@ def _eligibility(
         return {"can_auto_push": False, "reason": "content-absent"}
     if not _capability_auto_push(doc, identity):
         return {"can_auto_push": False, "reason": "unsupported-precondition"}
+    if "bundle" in (getattr(record, "fields", None) or {}) and not _capability_bundle(
+        doc, identity
+    ):
+        # A bundle cannot be published through a server that has no bundle
+        # carrier: the manifest would arrive with no blob behind it.
+        return {"can_auto_push": False, "reason": "bundle-unsupported-server"}
     # SOURCE-SCOPED CAS ATTESTATION: eligibility is bound to this origin's
     # recorded revision, so a link re-pointed at another origin cannot inherit a
     # stale attestation. The recorded revision IS the source-scoped fact.
@@ -2401,6 +2624,223 @@ def skill_link_local_id(
     return f"skl-{digest[:32]}"
 
 
+@dataclass(frozen=True)
+class _ResolvedRemoteSkill:
+    """One answered skill detail that passed every identity proof.
+
+    The RAW document travels beside the canonical manifest because the bundle
+    form needs facts the manifest does not carry: the publisher named by
+    ``published_by`` for the install confirmation, and the archive route's
+    credentials. The CLIENT travels too, so a download addresses the exact base
+    whose answer was verified -- never a second selection that could differ.
+    """
+
+    source: str
+    alias: str
+    identity: LinkIdentity
+    canonical: dict[str, Any]
+    revision: str
+    document: Mapping[str, Any]
+    client: Any
+
+    @property
+    def bundle(self) -> "Any | None":
+        """The parsed bundle manifest when this row is a bundle, else None."""
+
+        return _bundle_of(self.canonical)
+
+
+def _bundle_of(canonical: Mapping[str, Any]) -> Any | None:
+    """Parse the canonical manifest as a BUNDLE when its form says so.
+
+    ``skill_manifest_from_remote`` already dispatches on the ``bundle`` key, so
+    the form is a documented union rather than a guess: a document manifest can
+    never carry ``bundle`` (its key set is closed), which is what makes this
+    discriminator safe.
+    """
+
+    from local_operator.hub_sync.skill_bundle import SkillBundleManifest
+
+    if not isinstance(canonical, Mapping) or "bundle" not in canonical:
+        return None
+    return SkillBundleManifest.from_json(dict(canonical))
+
+
+def _bundle_summary(manifest: Any) -> dict[str, Any]:
+    """The wire-shaped bundle facts a preview/install answer reports."""
+
+    return {
+        "name": manifest.name,
+        "description": manifest.description,
+        "bundle": manifest.bundle.to_json(),
+    }
+
+
+def _bundle_file_list(root: Path) -> list[dict[str, Any]]:
+    """The archive's path inventory (names + sizes, never bytes) for a preview.
+
+    Walks through the BUILDER's own source iterator so the reviewed list cannot
+    diverge from what ``build_bundle`` would publish -- including its refusal of
+    symlinks, hardlinks, executables and hidden segments.
+    """
+
+    from local_operator.hub_sync.skill_bundle import _iter_source_files
+
+    rows = [(name, int(info.st_size)) for name, _path, info in _iter_source_files(Path(root))]
+    rows.sort(key=lambda row: row[0].encode("utf-8"))
+    return [{"path": name, "size": size} for name, size in rows]
+
+
+def _bundle_publisher(document: Mapping[str, Any]) -> dict[str, str] | None:
+    """The publisher a bundle read response NAMES, or None when it names none.
+
+    ``published_by`` is the field the install confirmation binds to (design
+    §6.2/§12): the account id is the binding value because a display name is
+    user-controlled. A missing object is reported as None and the CALLER refuses
+    -- this never falls back to a top-level ``account_id``, because that id is
+    the requester's/serving account's in some envelopes and guessing would bind
+    a confirmation to the wrong person.
+    """
+
+    raw = document.get("published_by")
+    if not isinstance(raw, Mapping):
+        return None
+    account_id = raw.get("account_id")
+    if not isinstance(account_id, str) or not account_id.strip():
+        return None
+    publisher = {"id": account_id.strip()}
+    name = raw.get("name")
+    if not isinstance(name, str) or not name.strip():
+        # Display metadata lives beside the id on read responses; it is optional
+        # everywhere and never part of the confirmation's binding value.
+        metadata = document.get("account_metadata")
+        candidate = metadata.get("name") if isinstance(metadata, Mapping) else None
+        name = candidate if isinstance(candidate, str) else ""
+    if name.strip():
+        publisher["name"] = name.strip()
+    return publisher
+
+
+def _confirm_bundle_publisher(
+    document: Mapping[str, Any],
+    manifest: Any,
+    *,
+    confirm: bool,
+    confirm_publisher_id: str | None,
+    confirm_bundle_hash: str | None,
+) -> dict[str, str]:
+    """Enforce the explicit, byte-bound publisher confirmation a public bundle install needs.
+
+    The confirmation names ``published_by.account_id`` AND the archive hash, so a
+    swapped publisher or a substituted archive between the prompt and the install
+    is refused (``bundle-confirmation-mismatch``) instead of installed. ``confirm``
+    (``--yes``) records the same named facts after they were shown, and is the
+    only way to confirm without spelling them; it never weakens what is recorded.
+    """
+
+    publisher = _bundle_publisher(document)
+    facts = (
+        f"publisher {publisher['id'] if publisher else '(unnamed)'}"
+        + (f" ({publisher['name']})" if publisher and publisher.get("name") else "")
+        + f", archive sha256 {manifest.bundle.hash}, {manifest.bundle.file_count} files, "
+        f"{manifest.bundle.size} bytes"
+    )
+    if publisher is None:
+        raise LinkError(
+            "bundle-confirmation-required",
+            "the hub's bundle response names no publisher; refusing to install "
+            f"unconfirmed bytes ({facts})",
+        )
+    if confirm:
+        return publisher
+    if not confirm_publisher_id or not confirm_bundle_hash:
+        raise LinkError(
+            "bundle-confirmation-required",
+            f"confirm the bundle publisher before installing ({facts}); pass "
+            "confirm_publisher_id and confirm_bundle_hash, or confirm",
+        )
+    if (
+        str(confirm_publisher_id).strip() != publisher["id"]
+        or not hmac.compare_digest(str(confirm_bundle_hash), manifest.bundle.hash)
+    ):
+        raise LinkError(
+            "bundle-confirmation-mismatch",
+            f"the confirmed publisher or archive hash does not match the hub's row ({facts})",
+        )
+    return publisher
+
+
+def _bundle_download_root(config_dir: Path) -> Path:
+    return prov.hub_root(config_dir) / "downloads"
+
+
+def _download_bundle_archive(
+    ctx: HubSyncContext, client: Any, hub_id: str, manifest: Any
+) -> Path:
+    """Stream one bundle archive into a PRIVATE temp dir and bind it to the manifest.
+
+    The bytes are counted against the manifest's own declared size while they
+    stream (the client refuses past its ceiling), then hashed and compared with
+    ``bundle.hash`` BEFORE any parser sees them -- the core's extractor repeats
+    that check on the same file, which is what catches a local writer touching it
+    in between. The caller removes the whole directory on every exit.
+    """
+
+    root = _bundle_download_root(ctx.config_dir)
+    if root.is_symlink():
+        raise LinkError("skill-validation", "the hub download directory is unsafe")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = root / secrets.token_hex(16)
+    try:
+        os.mkdir(directory, 0o700)
+    except OSError as error:
+        raise LinkError("local-concurrent-edit", f"could not stage the download: {error}")
+    archive = directory / "bundle.zip"
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(archive, flags, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                result = client.download_skill_bundle(
+                    hub_id, dest=handle, max_bytes=manifest.bundle.size
+                )
+        except TypeError:
+            # A test/fake client predating the keyword surface: the seam stays
+            # one call shape in production, so the fallback is bytes-in-memory.
+            result = client.download_skill_bundle(hub_id)
+            if getattr(result, "data", None) is not None:
+                archive.write_bytes(result.data)
+        if getattr(result, "not_modified", False):
+            raise LinkError("hub-upstream", "the hub answered the bundle download with 304")
+        data = archive.read_bytes()
+        if not data:
+            raise LinkError("bundle-invalid", "the hub served an empty bundle archive")
+        if len(data) != manifest.bundle.size:
+            raise LinkError(
+                "bundle-invalid",
+                "the hub served an archive whose size differs from its manifest",
+            )
+        digest = hashlib.sha256(data).hexdigest()
+        if not hmac.compare_digest(digest, manifest.bundle.hash):
+            # Nothing is parsed and nothing reaches the skills root.
+            raise LinkError(
+                "bundle-hash-mismatch", "the downloaded archive does not match its manifest hash"
+            )
+        return archive
+    except LinkError:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    except Exception as error:  # noqa: BLE001 - one refusal class for the download
+        shutil.rmtree(directory, ignore_errors=True)
+        status = getattr(error, "status_code", None)
+        code = "skill-not-found" if status == 404 else "hub-upstream"
+        raise LinkError(code, "the hub could not serve this skill bundle") from error
+
+
+def _discard_bundle_download(archive: Path) -> None:
+    shutil.rmtree(Path(archive).parent, ignore_errors=True)
+
+
 def _resolve_remote_skill(
     ctx: HubSyncContext,
     *,
@@ -2408,16 +2848,15 @@ def _resolve_remote_skill(
     hub_id: str,
     visibility: Visibility,
     tenant_id: str | None,
-    alias: str,
-) -> tuple[str, str, LinkIdentity, dict[str, Any], str]:
+    alias: str | None,
+) -> _ResolvedRemoteSkill:
     """The ONE remote-identity path a skill PULL or SUBSCRIBE runs before local state.
 
     Source approval, scope pairing, alias validation, the credentialed fetch and
     the answered-row proof live here so the two writers cannot diverge about
     which row they are allowed to trust: a subscribe records the same identity a
     pull does, and a row a pull would refuse is refused identically before any
-    link exists. Returns ``(source, alias, identity, canonical, revision)`` and
-    writes nothing.
+    link exists. Returns the verified read and writes nothing.
 
     Every refusal keeps the pull route's vocabulary: ``skill-not-found`` for a
     missing OR foreign row (one flat 404, never distinguishable), ``no-credential``
@@ -2455,10 +2894,14 @@ def _resolve_remote_skill(
         raise LinkError("origin-conflict", "an organization skill link requires a tenant")
 
     # 3. The alias must be a valid skill name BEFORE any comparison or write.
-    try:
-        alias = validate_name(alias)
-    except SkillValidationError as error:
-        raise LinkError("skill-validation", str(error)) from None
+    #    ``None`` means "use the published name" -- resolved only after the row
+    #    answers, which is what lets a caller pull a bundle without knowing its
+    #    name in advance (a bundle is installed under exactly that name).
+    if alias is not None:
+        try:
+            alias = validate_name(alias)
+        except SkillValidationError as error:
+            raise LinkError("skill-validation", str(error)) from None
 
     # 4. The credentialed client for this scope, and positive proof of which
     #    base answered: a client whose base is not the requested source is
@@ -2511,6 +2954,11 @@ def _resolve_remote_skill(
         raise LinkError(
             "invalid-remote-manifest", f"the remote skill manifest is invalid: {error}"
         ) from None
+    if alias is None:
+        try:
+            alias = validate_name(str(canonical.get("name") or ""))
+        except SkillValidationError as error:
+            raise LinkError("invalid-remote-manifest", str(error)) from None
     revision, _contract = _remote_meta(document)
     if not revision:
         # A link records the ancestry fact; without a revision it could never
@@ -2522,7 +2970,9 @@ def _resolve_remote_skill(
         source=source, visibility=visibility, tenant_id=tenant_id, hub_id=hub_id
     )
     identity = LinkIdentity("skill", local_id, source, visibility, tenant_id, hub_id)
-    return source, alias, identity, canonical, revision
+    return _ResolvedRemoteSkill(
+        source, alias, identity, canonical, revision, document, client
+    )
 
 
 def install_skill(
@@ -2532,10 +2982,15 @@ def install_skill(
     hub_id: str,
     visibility: Visibility,
     tenant_id: str | None,
-    alias: str,
+    alias: str | None,
     subscribe: bool | None = None,
     auto_push: bool | None = None,
     confirm_public_egress: bool = False,
+    confirm_publisher_id: str | None = None,
+    confirm_bundle_hash: str | None = None,
+    confirm: bool = False,
+    dry_run: bool = False,
+    form: str | None = None,
 ) -> dict[str, Any]:
     """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
 
@@ -2563,6 +3018,15 @@ def install_skill(
     ours. Every local-state step runs under the cross-process update lease
     (Q3), and a crashed attempt is recovered before fresh-vs-completed is
     decided, so its retry resumes the SAME link (Q4).
+
+    A BUNDLE row takes the same identity path and the same lease, but its
+    content is an archive: ``bundle.hash`` is verified before parsing and the
+    whole tree is committed by ``ManagedBundleStorage``. A public first install
+    additionally needs the explicit, byte-bound publisher confirmation design
+    §6.2 requires (``confirm_publisher_id`` + ``confirm_bundle_hash``, or
+    ``confirm`` after the facts were shown); a link that already exists keeps
+    its consent. ``dry_run`` returns the bundle summary and the named publisher
+    without downloading or writing anything.
     """
 
     from local_operator.config import read_config_values
@@ -2574,7 +3038,7 @@ def install_skill(
     from local_operator.hub_sync.skill_storage import ManagedSkillStorage
     from local_operator.hub_sync.transactions import TransactionError
 
-    _source, alias, identity, canonical, revision = _resolve_remote_skill(
+    resolved = _resolve_remote_skill(
         ctx,
         hub_source=hub_source,
         hub_id=hub_id,
@@ -2582,10 +3046,23 @@ def install_skill(
         tenant_id=tenant_id,
         alias=alias,
     )
+    alias = resolved.alias
+    identity = resolved.identity
+    canonical = resolved.canonical
+    revision = resolved.revision
     local_id = identity.local_id
+    bundle = resolved.bundle
+    if form is not None:
+        # A caller that NAMES the carrier is asserting what it is installing; a
+        # mismatch is refused rather than silently installing the other form.
+        remote_form = "bundle" if bundle is not None else "document"
+        if form != remote_form:
+            raise LinkError(
+                "bundle-form-changed",
+                f"the hub row is a {remote_form}, not a {form}",
+            )
 
     storage = ManagedSkillStorage(ctx.config_dir)
-
     # 7. Every local-state step -- recovery, the linked scan, policy staging and
     #    the content transaction -- runs under the SAME cross-process update
     #    lease the apply path takes (Q3): a runner tick or another process
@@ -2657,6 +3134,70 @@ def install_skill(
             )
             return {"reports": [payload], "link": row, "links": snapshot}
 
+        # 7b-bundle. The bundle preflight runs BEFORE any policy staging or
+        #     download: a public first install must name the publisher and the
+        #     archive hash (the prompt already showed them), and the alias is
+        #     the published name because a rename would rewrite SKILL.md and
+        #     break tree-hash equality (§6.2). A dry run answers the facts and
+        #     stops here -- nothing is fetched, staged or written.
+        if dry_run and bundle is None:
+            # The document form has no bundle facts to report; a dry run is
+            # still a write-free preview of the link this pull would create.
+            return {
+                "reports": [
+                    {
+                        "kind": "skill",
+                        "local_id": local_id,
+                        "name": alias,
+                        "hub_id": hub_id,
+                        "outcome": "would-install",
+                        "applied": False,
+                    }
+                ],
+                "form": "document",
+                "link": None,
+                "links": links_snapshot(ctx),
+                "dry_run": True,
+            }
+        publisher: dict[str, str] | None = None
+        if bundle is not None:
+            if alias != bundle.name:
+                raise LinkError(
+                    "bundle-alias-rename-unsupported",
+                    "a bundle is installed under its published name; "
+                    f"the hub row is {bundle.name!r}",
+                )
+            if dry_run:
+                # A dry run IS the prompt: it reports the facts the confirmation
+                # would name, and requires no confirmation of its own.
+                return {
+                    "reports": [
+                        {
+                            "kind": "skill",
+                            "local_id": local_id,
+                            "name": alias,
+                            "hub_id": hub_id,
+                            "outcome": "would-install",
+                            "applied": False,
+                        }
+                    ],
+                    "bundle": _bundle_summary(bundle),
+                    "publisher": _bundle_publisher(resolved.document),
+                    "link": None,
+                    "links": links_snapshot(ctx),
+                    "dry_run": True,
+                }
+            if visibility == "public" and resuming_absent is None:
+                publisher = _confirm_bundle_publisher(
+                    resolved.document,
+                    bundle,
+                    confirm=confirm,
+                    confirm_publisher_id=confirm_publisher_id,
+                    confirm_bundle_hash=confirm_bundle_hash,
+                )
+            else:
+                publisher = _bundle_publisher(resolved.document)
+
         # 7c. The initial policy, committed WITH the content transaction
         #     (R2/Q1). A fresh link's creation default already is subscribe=true/
         #     auto_push=false, and an explicit ``subscribe`` rides the baseline's
@@ -2677,10 +3218,17 @@ def install_skill(
         #     before the staging below; the only operations after it are the
         #     content transaction (whose refusal paths revert the staged entry)
         #     and the success response.
-        try:
-            local_write = SkillDocument.from_json(canonical).with_name(alias)
-        except SkillValidationError as error:
-            raise LinkError("skill-validation", str(error)) from None
+        local_write: SkillDocument | None = None
+        if bundle is None:
+            try:
+                local_write = SkillDocument.from_json(canonical).with_name(alias)
+            except SkillValidationError as error:
+                raise LinkError("skill-validation", str(error)) from None
+        if bundle is not None:
+            local_fingerprint = bundle.fingerprint
+        else:
+            assert local_write is not None
+            local_fingerprint = local_write.fingerprint
         baseline = prov.make_record("skill", local_id, hub_id, tenant_id, canonical, "pull")
         if resuming_absent is not None:
             # The prior link's identity/scope/policy/alias must survive an
@@ -2812,14 +3360,14 @@ def install_skill(
                 if (
                     payload.get("local_alias") == alias
                     and payload.get("policy_revision") == staged_revision
-                    and record.after_fingerprint == local_write.fingerprint
+                    and record.after_fingerprint == local_fingerprint
                 ):
                     owned = True
                     break
             if owned:
                 try:
                     landed = (
-                        storage._fingerprint_path(storage.path(alias)) == local_write.fingerprint
+                        storage._fingerprint_path(storage.path(alias)) == local_fingerprint
                     )
                 except Exception:  # noqa: BLE001 - an unreadable destination is not a landing
                     landed = False
@@ -2834,16 +3382,41 @@ def install_skill(
 
         installed = False
         try:
-            transaction = storage.apply(
-                identity,
-                alias,
-                local_write,
-                baseline,
-                expected_fingerprint=None,
-                expected_policy_revision=current.revision,
-                automatic=False,
-                basis="initial-install",
-            )
+            if bundle is not None:
+                # The archive is downloaded and hash-bound HERE, after every
+                # local refusal had its chance; the storage re-hashes it under
+                # its own lock and stages the decoded tree.
+                from local_operator.hub_sync.skill_bundle_storage import (
+                    ManagedBundleStorage,
+                )
+
+                archive = _download_bundle_archive(ctx, resolved.client, hub_id, bundle)
+                try:
+                    transaction = ManagedBundleStorage(ctx.config_dir).apply(
+                        identity,
+                        alias,
+                        archive,
+                        bundle,
+                        baseline,
+                        expected_fingerprint=None,
+                        expected_policy_revision=current.revision,
+                        automatic=False,
+                        basis="initial-install",
+                    )
+                finally:
+                    _discard_bundle_download(archive)
+            else:
+                assert local_write is not None
+                transaction = storage.apply(
+                    identity,
+                    alias,
+                    local_write,
+                    baseline,
+                    expected_fingerprint=None,
+                    expected_policy_revision=current.revision,
+                    automatic=False,
+                    basis="initial-install",
+                )
             installed = True
         except LinkError:
             # The refusal itself is the response; the guard below decides
@@ -2911,6 +3484,9 @@ def install_skill(
                 "model_used": None,
             }
         )
+        if bundle is not None:
+            payload["bundle"] = _bundle_summary(bundle)["bundle"]
+            payload["publisher"] = publisher
         return {"reports": [payload], "link": row, "links": snapshot}
 
 
@@ -2941,7 +3517,7 @@ def subscribe_skill(
     from local_operator.config import read_config_values
     from local_operator.hub_sync import policies as pol
 
-    _source, alias, identity, canonical, revision = _resolve_remote_skill(
+    _resolved = _resolve_remote_skill(
         ctx,
         hub_source=hub_source,
         hub_id=hub_id,
@@ -2949,6 +3525,10 @@ def subscribe_skill(
         tenant_id=tenant_id,
         alias=alias,
     )
+    identity = _resolved.identity
+    canonical = _resolved.canonical
+    revision = _resolved.revision
+    alias = _resolved.alias
     local_id = identity.local_id
 
     # Same lease the install/apply paths take: creating the baseline is local
@@ -3247,15 +3827,22 @@ def _resolve_authored_skill(config_dir: Path, name: str) -> Any:
 
 
 def _project_publication(
-    config_dir: Path, *, source_skill: str, local_alias: str
+    config_dir: Path, *, source_skill: str, local_alias: str, form: str = "document"
 ) -> tuple[Any, Any, Any]:
     """Read + validate the authored source and render the exact publication draft.
 
-    Returns ``(skill, source_document, draft_document)``. The source is read with
-    :meth:`SkillDocument.from_directory` -- the SAME bounded, all-file validation
-    the pull path applies to a remote manifest -- and the draft is its local-alias
-    rendering (name/description are stored twice, so ``with_name`` rewrites the
-    frontmatter scalar too). Every refusal is the adapter's own named code.
+    Returns ``(skill, source_document, draft_document)``. The DOCUMENT form reads
+    the source with :meth:`SkillDocument.from_directory` -- the SAME bounded,
+    all-file validation the pull path applies to a remote manifest -- and the
+    draft is its local-alias rendering (name/description are stored twice, so
+    ``with_name`` rewrites the frontmatter scalar too).
+
+    The BUNDLE form is EXPLICIT (``form="bundle"``) and never a fallback: the
+    draft is the archive's ``SkillBundleManifest``, built by the deterministic
+    builder, and the alias must equal the published name because a rename would
+    rewrite ``SKILL.md`` and break tree-hash equality (§6.2). ``from_directory``
+    is deliberately NOT called on a bundle source -- it refuses every non-text
+    byte, which is exactly what a bundle exists to carry.
     """
 
     from local_operator.hub_sync.adapters import SkillAdapter
@@ -3266,13 +3853,40 @@ def _project_publication(
     )
 
     skill = _resolve_authored_skill(config_dir, source_skill)
+    if form == "bundle":
+        from local_operator.hub_sync.skill_bundle import build_bundle
+
+        try:
+            alias = validate_name(local_alias)
+            built = build_bundle(Path(skill.base_dir))
+        except SkillValidationError as error:
+            raise LinkError(getattr(error, "code", "") or "skill-validation", str(error)) from None
+        manifest = built.manifest
+        if manifest.name != alias:
+            raise LinkError(
+                "bundle-alias-rename-unsupported",
+                "a bundle is published under its own name; "
+                f"the source is {manifest.name!r} and the alias {alias!r}",
+            )
+        return skill, manifest, manifest
+    if form != "document":
+        raise LinkError("skill-validation", f"unknown skill publication form {form!r}")
     try:
         source_document = SkillDocument.from_directory(skill.base_dir)
         alias = validate_name(local_alias)
         draft = source_document.with_name(alias)
         SkillAdapter().validate(draft.to_json())
     except SkillValidationError as error:
-        raise LinkError(getattr(error, "code", "") or "skill-validation", str(error)) from None
+        # The form rule is explicit (design §6.3): a source the document carrier
+        # cannot represent names the alternative rather than silently routing
+        # around the generalizer. Auto-fallback is refused on purpose.
+        message = str(error)
+        if "--bundle" not in message:
+            message = (
+                f"{message} (if this skill needs binary files or exceeds the document "
+                "bounds, publish it with --bundle)"
+            )
+        raise LinkError(getattr(error, "code", "") or "skill-validation", message) from None
     return skill, source_document, draft
 
 
@@ -3339,17 +3953,23 @@ def _publication_preview_reason(
     auto_push: bool,
     confirm_public_egress: bool,
     blocker: str | None,
+    form: str = "document",
 ) -> str | None:
     if blocker is not None:
         return blocker
     if ctx.client_for_tenant(tenant_id or "") is None:
         return "no-credential"
+    probe = LinkIdentity("skill", "preview", hub_source, visibility, tenant_id, "preview")
+    doc = ctx.store().load()
+    if form == "bundle" and not _capability_bundle(doc, probe):
+        # A server without the bundle carrier cannot store the archive, so the
+        # manifest would be published against no blob. Refused BEFORE any upload.
+        return "bundle-unsupported-server"
     if auto_push:
         # The same capability attestation the policy PATCH and install paths
         # demand. It is a persisted fact about the DEPLOYED server, never a
         # boolean this request can supply.
-        probe = LinkIdentity("skill", "preview", hub_source, visibility, tenant_id, "preview")
-        if not _capability_auto_push(ctx.store().load(), probe):
+        if not _capability_auto_push(doc, probe):
             return "unsupported-precondition"
         if visibility == "public" and not confirm_public_egress:
             # The egress grant is minted by the confirmed policy write; the
@@ -3368,8 +3988,15 @@ def preview_skill_publication(
     subscribe: bool,
     auto_push: bool,
     confirm_public_egress: bool,
+    form: str = "document",
 ) -> dict[str, Any]:
-    """Project a local skill into the exact initial-publication preview (no network)."""
+    """Project a local skill into the exact initial-publication preview (no network).
+
+    ``form`` selects the carrier explicitly: ``document`` is the existing
+    single-file manifest; ``bundle`` builds the deterministic archive manifest
+    and reports its summary, file list and byte sizes so the confirm step can
+    require TREE-HASH equality with exactly what was reviewed (design §2.2).
+    """
 
     from local_operator.hub_sync.identity import approve_source
     from local_operator.providers.radient_credentials import configured_radient_base_url
@@ -3385,7 +4012,7 @@ def preview_skill_publication(
         (configured_radient_base_url(ctx.config_manager),),
     )
     skill, source_document, draft = _project_publication(
-        ctx.config_dir, source_skill=source_skill, local_alias=local_alias
+        ctx.config_dir, source_skill=source_skill, local_alias=local_alias, form=form
     )
     alias = draft.name
     fields = draft.to_json()
@@ -3398,9 +4025,10 @@ def preview_skill_publication(
         auto_push=auto_push,
         confirm_public_egress=confirm_public_egress,
         blocker=blocker,
+        form=form,
     )
     warnings: list[str] = []
-    if alias != source_document.name:
+    if form == "document" and alias != source_document.name:
         warnings.append(
             f"This publication renames the skill from {source_document.name!r} to {alias!r}."
         )
@@ -3430,9 +4058,23 @@ def preview_skill_publication(
         "can_confirm": reason is None,
         "reason": reason,
     }
+    if form == "bundle":
+        # The reviewed facts. ``files`` is the archive's path inventory (names and
+        # sizes only, never bytes); ``publisher`` is the signed-in caller, which
+        # only the server's answer can name, so the preview carries None instead
+        # of inventing one.
+        preview["form"] = "bundle"
+        preview["bundle"] = {
+            **_bundle_summary(draft)["bundle"],
+            "files": _bundle_file_list(Path(skill.base_dir)),
+        }
+        preview["publisher"] = None
+    else:
+        preview["form"] = "document"
     record = dict(preview)
     # Private fields: never part of the wire contract, only the local receipt.
     record["source_dir"] = str(Path(skill.base_dir).resolve())
+    record["form"] = form
     _write_publication_preview(ctx.config_dir, record)
     return preview
 
@@ -3544,6 +4186,7 @@ def _materialize_published_skill(
     subscribe: bool,
     auto_push: bool,
     confirm_public_egress: bool,
+    form: str = "document",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Turn an ACCEPTED publication into a real local link.
 
@@ -3565,6 +4208,16 @@ def _materialize_published_skill(
 
     storage = ManagedSkillStorage(ctx.config_dir)
     destination = storage.path(alias)
+
+    def authored_fingerprint(path: Path) -> str:
+        """This form's content identity for a directory (document text hash / tree hash)."""
+
+        if form == "bundle":
+            from local_operator.hub_sync.skill_bundle import tree_hash_of
+
+            return tree_hash_of(path)
+        return SkillDocument.from_directory(path).fingerprint
+
     with exclusive(ctx, wait_s=0.0):
         values = read_config_values(ctx.config_dir)
         if values is None and (ctx.config_dir / "config.yml").exists():
@@ -3634,7 +4287,7 @@ def _materialize_published_skill(
                         f"a file named {alias!r} is already in the skills folder; "
                         "move it somewhere else, then try again",
                     )
-                if SkillDocument.from_directory(destination).fingerprint != draft.fingerprint:
+                if authored_fingerprint(destination) != draft.fingerprint:
                     raise LinkError(
                         "local-concurrent-edit", "managed skill changed before publication"
                     )
@@ -3662,16 +4315,51 @@ def _materialize_published_skill(
                     )
                     operation_id = f"link-{identity.local_id}"
                 else:
-                    transaction = storage.apply(
-                        identity,
-                        alias,
-                        draft,
-                        baseline,
-                        expected_fingerprint=None,
-                        expected_policy_revision=current.revision,
-                        automatic=False,
-                        basis="initial-publish",
-                    )
+                    if form == "bundle":
+                        # Materialize the SAME archive the publication uploaded:
+                        # it is rebuilt from the authored source under this lease
+                        # and the storage re-verifies the tree hash it commits.
+                        from local_operator.hub_sync.skill_bundle import build_bundle
+                        from local_operator.hub_sync.skill_bundle_storage import (
+                            ManagedBundleStorage,
+                        )
+
+                        built = build_bundle(Path(source_dir))
+                        if built.manifest.fingerprint != draft.fingerprint:
+                            raise LinkError(
+                                "local-concurrent-edit",
+                                "the authored bundle changed before publication",
+                            )
+                        archive_dir = _bundle_download_root(ctx.config_dir) / secrets.token_hex(16)
+                        archive_dir.mkdir(mode=0o700, parents=True)
+                        archive = archive_dir / "bundle.zip"
+                        try:
+                            archive.write_bytes(built.data)
+                            os.chmod(archive, 0o600)
+                            transaction = ManagedBundleStorage(ctx.config_dir).apply(
+                                identity,
+                                alias,
+                                archive,
+                                built.manifest,
+                                baseline,
+                                expected_fingerprint=None,
+                                expected_policy_revision=current.revision,
+                                automatic=False,
+                                basis="initial-publish",
+                            )
+                        finally:
+                            shutil.rmtree(archive_dir, ignore_errors=True)
+                    else:
+                        transaction = storage.apply(
+                            identity,
+                            alias,
+                            draft,
+                            baseline,
+                            expected_fingerprint=None,
+                            expected_policy_revision=current.revision,
+                            automatic=False,
+                            basis="initial-publish",
+                        )
                     operation_id = transaction.operation_id
             except Exception as error:
                 # A staged auto-push entry must not orphan a link that never
@@ -3685,10 +4373,8 @@ def _materialize_published_skill(
                     )
                     if not landed and not adopt:
                         try:
-                            landed = (
-                                destination.exists()
-                                and SkillDocument.from_directory(destination).fingerprint
-                                == draft.fingerprint
+                            landed = destination.exists() and (
+                                authored_fingerprint(destination) == draft.fingerprint
                             )
                         except Exception:  # noqa: BLE001 - cannot prove it did not land
                             landed = True
@@ -3770,8 +4456,8 @@ def _recorded_draft(record: Mapping[str, Any]) -> Any:
     """
 
     from local_operator.hub_sync.skill_document import (
-        SkillDocument,
         SkillValidationError,
+        skill_manifest_from_json,
     )
 
     proposal = record.get("proposal")
@@ -3779,7 +4465,9 @@ def _recorded_draft(record: Mapping[str, Any]) -> Any:
     if not isinstance(fields, Mapping):
         raise LinkError("preview_stale", "the publication receipt carries no reviewed draft")
     try:
-        return SkillDocument.from_json(dict(fields))
+        # FORM DISPATCH: a bundle receipt's proposal IS its manifest; parsing it
+        # as a document would refuse the closed ``bundle`` key (and vice versa).
+        return skill_manifest_from_json(dict(fields))
     except SkillValidationError as error:
         raise LinkError("preview_stale", f"the recorded publication draft is invalid: {error}")
 
@@ -3796,6 +4484,7 @@ def publish_skill(
     confirm_public_egress: bool,
     dry_run: bool = False,
     preview_receipt: str | None = None,
+    form: str = "document",
 ) -> dict[str, Any]:
     """Initial skill publication: preview (dry run) or confirm a reviewed draft.
 
@@ -3839,6 +4528,7 @@ def publish_skill(
                 subscribe=subscribe,
                 auto_push=auto_push,
                 confirm_public_egress=confirm_public_egress,
+                form=form,
             ),
             "link": None,
             "local_link_receipt": None,
@@ -3867,6 +4557,10 @@ def publish_skill(
             "auto_push": bool(auto_push),
             "confirm_public_egress": bool(confirm_public_egress),
         },
+        # The FORM is part of what was reviewed: a "document" receipt can never
+        # be confirmed as a bundle, which is how a source that grew past document
+        # bounds cannot slip onto the bundle carrier without a new preview.
+        "form": form,
     }
     for key, value in expected.items():
         if record.get(key) != value:
@@ -3909,7 +4603,7 @@ def publish_skill(
             logger.warning("could not promote the publication outcome", exc_info=True)
     else:
         skill, source_document, draft = _project_publication(
-            ctx.config_dir, source_skill=source_skill, local_alias=local_alias
+            ctx.config_dir, source_skill=source_skill, local_alias=local_alias, form=form
         )
         try:
             recorded_dir = Path(str(record.get("source_dir") or "")).resolve()
@@ -3949,6 +4643,7 @@ def publish_skill(
             auto_push=auto_push,
             confirm_public_egress=confirm_public_egress,
             blocker=_publication_blocker(ctx, skill, source_document, draft.name),
+            form=form,
         )
         if preflight is not None:
             raise LinkError(preflight, "the publication preview is not confirmable")
@@ -3959,6 +4654,59 @@ def publish_skill(
             raise LinkError(
                 "origin-conflict", "the answering client's base is not the requested source"
             )
+        if form == "bundle":
+            # UPLOAD FIRST, THEN PUBLISH, and persist the raw upload answer in
+            # between: the blob is idempotent by hash on the server, so a retry
+            # that already uploaded re-uses the durable record instead of sending
+            # the archive again (a retry after ACCEPTANCE never reaches here at
+            # all -- its outcome is durable).
+            from local_operator.hub_sync.skill_bundle import (
+                SkillValidationError as _BundleError,
+                build_bundle,
+            )
+
+            try:
+                built = build_bundle(Path(skill.base_dir))
+            except _BundleError as error:
+                raise LinkError(
+                    getattr(error, "code", "") or "skill-validation", str(error)
+                ) from None
+            if built.manifest.fingerprint != draft.fingerprint:
+                raise LinkError("preview_stale", "the authored bundle changed since its preview")
+            recorded_upload = record.get("bundle_upload")
+            if (
+                isinstance(recorded_upload, Mapping)
+                and recorded_upload.get("hash") == built.manifest.bundle.hash
+            ):
+                upload: dict[str, Any] = dict(recorded_upload)
+            else:
+                try:
+                    raw_upload = client.upload_skill_bundle(
+                        built.data, visibility=visibility, tenant_id=tenant_id
+                    )
+                except APIError as error:
+                    raise LinkError(
+                        getattr(error, "code", None) or "hub-error", str(error)
+                    ) from None
+                if not isinstance(raw_upload, Mapping):
+                    raise LinkError("hub-upstream", "the hub's bundle upload answer was unreadable")
+                upload = dict(raw_upload)
+                if str(upload.get("hash") or "") != built.manifest.bundle.hash:
+                    # The server's inventory must describe OUR bytes; a different
+                    # hash means the uploaded artifact is not what was reviewed.
+                    raise LinkError(
+                        "hub-upstream", "the hub's bundle inventory does not match the archive"
+                    )
+                record["bundle_upload"] = upload
+                try:
+                    _write_publication_preview(ctx.config_dir, record)
+                except Exception:  # noqa: BLE001 - no publish without a durable upload record
+                    logger.warning("could not record the bundle upload", exc_info=True)
+                    return _pending_publication(
+                        None,
+                        None,
+                        "the archive was uploaded but its receipt could not be recorded",
+                    )
         try:
             result = client.publish_skill_document(
                 dict(fields), visibility=visibility, tenant_id=tenant_id
@@ -4031,6 +4779,7 @@ def publish_skill(
             subscribe=subscribe,
             auto_push=auto_push,
             confirm_public_egress=confirm_public_egress,
+            form=form,
         )
     except Exception as error:
         # The hub row EXISTS. Reporting the failure as an error would read as

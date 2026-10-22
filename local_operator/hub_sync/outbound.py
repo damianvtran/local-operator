@@ -215,6 +215,50 @@ def merge_skill_document(
     return merged.to_json(), results
 
 
+def _project_skill_bundle(
+    *,
+    captured_local: Mapping[str, Any],
+    accepted: Mapping[str, Any],
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+) -> ProjectionResult:
+    """Project a BUNDLE republish: whole-tree identity, never a field merge.
+
+    A bundle's identity is its ``tree_hash``; there are no per-file fields to
+    three-way merge, and inventing a merged archive would publish bytes nobody
+    authored. So the only honest projection is "my current tree", and only when
+    the hub still holds what this link last accepted (R==B). If the remote moved
+    too (L!=B and R!=B), the refusal is ``bundle-conflict`` -- the operator has
+    to reconcile outside the merge engine (design §8.2).
+    """
+
+    from local_operator.hub_sync.provenance import fingerprint_snapshot
+
+    try:
+        remote_fp = fingerprint_snapshot("skill", dict(remote_latest))
+        accepted_fp = fingerprint_snapshot("skill", dict(accepted))
+        local_fp = fingerprint_snapshot("skill", dict(current_local))
+    except Exception:  # noqa: BLE001 - an unreadable side cannot prove ancestry
+        return ProjectionResult(
+            fields={}, no_op=False, results=(), warnings=(), unresolved=("bundle",)
+        )
+    if remote_fp != accepted_fp:
+        return ProjectionResult(
+            fields={},
+            no_op=False,
+            results=(),
+            warnings=(),
+            unresolved=("bundle",),
+        )
+    return ProjectionResult(
+        fields=dict(current_local),
+        no_op=local_fp == remote_fp,
+        results=(),
+        warnings=(),
+        unresolved=(),
+    )
+
+
 def _project_skill(
     *,
     captured_local: Mapping[str, Any],
@@ -224,6 +268,20 @@ def _project_skill(
     opts: MergeOptions,
 ) -> ProjectionResult:
     """The two outbound stages over a skill manifest (C then M), no-op compared on M."""
+
+    if any(
+        "bundle" in side
+        for side in (captured_local, accepted, current_local, remote_latest)
+    ):
+        # FORM DISPATCH before any document merge: a bundle refuses the text
+        # engine by construction, so routing it there would report
+        # ``merge-refused`` for every legitimate republish.
+        return _project_skill_bundle(
+            captured_local=captured_local,
+            accepted=accepted,
+            current_local=current_local,
+            remote_latest=remote_latest,
+        )
 
     from local_operator.hub_sync.skill_document import (
         SkillDocument,
@@ -402,6 +460,9 @@ def refuses(projection: ProjectionResult) -> str | None:
         # A stage that could not even build its documents (an invalid remote
         # latest, say) returns NO per-file results; the sentinel field names
         # keeps that from reading as "nothing to merge" and publishing empty
-        # (round-2 R15).
+        # (round-2 R15). A BUNDLE sentinel is its own conflict name: there is no
+        # field merge to review, only a tree the operator must reconcile.
+        if "bundle" in projection.unresolved:
+            return "bundle-conflict"
         return "merge-refused"
     return None
