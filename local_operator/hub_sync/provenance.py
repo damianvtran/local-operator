@@ -598,28 +598,28 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
     bundle_confirmation = None
     raw_confirmation = raw.get("bundle_confirmation")
     if raw_confirmation is not None:
-        # A persisted pin is a SECURITY input: only a well-formed one is trusted,
-        # and an unreadable one is ignored (the update then has no pin to check,
-        # which is the older-record behaviour rather than a forged match).
-        if not isinstance(raw_confirmation, dict):
-            return None
-        publisher_id = raw_confirmation.get("publisher_id")
-        archive_hash = raw_confirmation.get("archive_hash")
-        publisher_name = raw_confirmation.get("publisher_name", "")
-        if (
-            not isinstance(publisher_id, str)
-            or not publisher_id.strip()
-            or not isinstance(publisher_name, str)
-            or not isinstance(archive_hash, str)
-            or len(archive_hash) != 64
-            or any(c not in "0123456789abcdef" for c in archive_hash)
-        ):
-            return None
-        bundle_confirmation = {
-            "publisher_id": publisher_id.strip(),
-            "publisher_name": publisher_name,
-            "archive_hash": archive_hash,
-        }
+        # A persisted pin is a SECURITY input: only a well-formed one is
+        # trusted. An unreadable one is DROPPED, not the record: a hand-edited
+        # pin must not erase the link (round-2 M3b). With no pin the update
+        # behaves like an older record and the public consent gate still
+        # applies to any install.
+        if isinstance(raw_confirmation, dict):
+            publisher_id = raw_confirmation.get("publisher_id")
+            archive_hash = raw_confirmation.get("archive_hash")
+            publisher_name = raw_confirmation.get("publisher_name", "")
+            if (
+                isinstance(publisher_id, str)
+                and publisher_id.strip()
+                and isinstance(publisher_name, str)
+                and isinstance(archive_hash, str)
+                and len(archive_hash) == 64
+                and all(c in "0123456789abcdef" for c in archive_hash)
+            ):
+                bundle_confirmation = {
+                    "publisher_id": publisher_id.strip(),
+                    "publisher_name": publisher_name,
+                    "archive_hash": archive_hash,
+                }
     return BaselineRecord(
         kind=kind,
         local_id=local_id,

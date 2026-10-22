@@ -774,7 +774,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
     skills_publish = skills_subparsers.add_parser(
         "publish",
-        help="Publish a local skill to the hub (use --bundle for the multi-file form)",
+        help="Publish a local skill to the hub (documents; --bundle for binary/asset trees)",
         parents=[parent_parser],
     )
     skills_publish.add_argument("name", help="The local skill's name")
@@ -797,7 +797,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
     skills_publish.add_argument(
         "--yes", action="store_true", help="Confirm the publication without prompting"
     )
-    skills_publish.add_argument("--json", action="store_true")
+    skills_publish.add_argument(
+        "--json", action="store_true", help="Print the machine-readable JSON result"
+    )
 
     skills_pull = skills_subparsers.add_parser(
         "pull",
@@ -832,7 +834,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Confirm the bundle publisher and hash shown by this command",
     )
-    skills_pull.add_argument("--json", action="store_true")
+    skills_pull.add_argument(
+        "--reinstall",
+        action="store_true",
+        help="Bundle links only: discard local changes, re-fetch and re-pin the hub's "
+        "current archive (accepts a changed publisher after the confirmation)",
+    )
+    skills_pull.add_argument(
+        "--json", action="store_true", help="Print the machine-readable JSON result"
+    )
 
     skills_push = skills_subparsers.add_parser(
         "push",
@@ -843,7 +853,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
     skills_push.add_argument(
         "--yes", action="store_true", help="Push without prompting (required off a terminal)"
     )
-    skills_push.add_argument("--json", action="store_true")
+    skills_push.add_argument(
+        "--json", action="store_true", help="Print the machine-readable JSON result"
+    )
 
     skills_sync = skills_subparsers.add_parser(
         "sync",
@@ -860,14 +872,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Accepted for script symmetry; sync never prompts (use --check to preview)",
     )
-    skills_sync.add_argument("--json", action="store_true")
+    skills_sync.add_argument(
+        "--json", action="store_true", help="Print the machine-readable JSON result"
+    )
 
     skills_status = skills_subparsers.add_parser(
         "status",
         help="Show every linked skill's local/hub state (no network)",
         parents=[parent_parser],
     )
-    skills_status.add_argument("--json", action="store_true")
+    skills_status.add_argument(
+        "--json", action="store_true", help="Print the machine-readable JSON snapshot"
+    )
 
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
@@ -11835,7 +11851,7 @@ _SKILL_REFUSAL_TEXT: dict[str, tuple[str, str]] = {
     ),
     "bundle-publisher-changed": (
         "the hub row now names a different publisher",
-        "pull again explicitly to accept the change",
+        "run `lop skills pull <id> --reinstall` to accept the change",
     ),
     "bundle-publisher-unnamed": (
         "the hub did not name the publisher of this bundle",
@@ -11861,21 +11877,82 @@ _SKILL_REFUSAL_TEXT: dict[str, tuple[str, str]] = {
         "the hub does not support bundles yet",
         "update the hub, or pull a document skill",
     ),
+    "no-credential": (
+        "this machine has no hub credential for that scope",
+        "run `lop login radient` and try again",
+    ),
+    "reinstall-unsupported": (
+        "--reinstall applies to bundle links only",
+        "pull a document without --reinstall",
+    ),
 }
+
+
+_CONTROL_OR_FORMAT = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
 
 
 def _safe(value: Any, *, limit: int = 200) -> str:
     """Untrusted (remote-derived) text made safe for ONE terminal line.
 
     Publisher names, ids and file paths come from the hub: a ``"\x1b[2K\r"``
-    there would overwrite the very line the operator is approving (D1). The
-    shared ANSI sanitizer strips the whole control sequence, visible-escapes
-    Cf/bidi characters, collapses whitespace and bounds the length.
+    there would overwrite the very line the operator is approving (D1). Control
+    and format characters are VISIBLE-ESCAPED (``\x1b``, ``\u202e``) rather
+    than stripped, so a hostile id stays printable and can still be pasted into
+    a confirmation (D15); whitespace collapses to single spaces and the result
+    is bounded. Ordinary Unicode (accents, CJK, emoji) is returned unchanged.
     """
 
-    from local_operator.ansi import sanitize_prompt_line
+    text = str(value)
 
-    return sanitize_prompt_line(str(value), limit=limit)
+    def escaped(match: re.Match[str]) -> str:
+        return match.group(0).encode("unicode_escape").decode("ascii")
+
+    visible = _CONTROL_OR_FORMAT.sub(escaped, text)
+    return " ".join(visible.split())[:limit]
+
+
+def _skills_fail(args: argparse.Namespace, error: Any) -> int:
+    """A refusal in the MODE the caller asked for (round-2 D11).
+
+    ``--json`` consumers parse this stream: a plain ``error:`` line breaks
+    them, so the same sentence and code are emitted as one JSON object.
+    """
+
+    import json as _json
+
+    code = str(getattr(error, "code", "") or "")
+    sentence = _skills_refusal(error)
+    if getattr(args, "json", False):
+        print(_json.dumps({"error": sentence, "code": code}))
+    else:
+        print(f"error: {sentence}")
+    return 1
+
+
+def _publish_refusal(error: Any) -> Any:
+    """A publish-side refusal with the right verb and the offending path (D10).
+
+    The pull-side wording ("not safe to install") is wrong while publishing and
+    drops the entry name, which on a large skill turns a fix into a search. Only
+    the executable/special-mode refusal is rewritten; everything else passes
+    through to the shared sentence table.
+    """
+
+    from local_operator.hub_sync.identity import LinkError
+
+    match = re.search(r"source entry '([^']+)' is executable", str(error))
+    if match:
+        # A DISTINCT code: the shared table answers ``bundle-invalid`` with the
+        # pull-side sentence, which would drop the path this refusal exists to
+        # name. Not in the table -> the message below is the answer.
+        return LinkError(
+            "bundle-executable",
+            "bundles cannot contain executables: chmod -x "
+            f"{_safe(match.group(1))} and publish again",
+        )
+    return error
 
 
 def _skills_refusal(error: Any) -> str:
@@ -11895,6 +11972,29 @@ def _scope_label(visibility: str) -> str:
     return "organization" if visibility == "org" else "public"
 
 
+def _print_pin(pin: Any, *, indent: str = "  ") -> None:
+    """Show the confirmed publisher + archive hash when a link carries one."""
+
+    if not isinstance(pin, Mapping):
+        return
+    name = pin.get("publisher_name")
+    label = _safe(pin.get("publisher_id"))
+    if name:
+        label += f' ("{_safe(name)}")'
+    print(f"{indent}publisher: {label}")
+    if pin.get("archive_hash"):
+        print(f"{indent}confirmed archive sha256: {_safe(pin.get('archive_hash'))}")
+
+
+def _bytes_label(value: Any) -> str:
+    """Bytes, or MiB past one MiB, so a 25 MB skill reads as a size (D13)."""
+
+    size = int(value or 0)
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MiB"
+    return f"{size} bytes"
+
+
 def _bundle_lines(
     bundle: Mapping[str, Any],
     *,
@@ -11903,10 +12003,11 @@ def _bundle_lines(
 ) -> list[str]:
     """The human facts of one bundle (D3/D7): sizes, both hashes, file summary."""
 
+    count = int(bundle.get("file_count") or 0)
     lines = [
-        f"{indent}{int(bundle.get('file_count') or 0)} files, "
-        f"{int(bundle.get('size') or 0)} bytes packed / "
-        f"{int(bundle.get('uncompressed_size') or 0)} bytes unpacked",
+        f"{indent}{count} file{'' if count == 1 else 's'}, "
+        f"{_bytes_label(bundle.get('size'))} packed / "
+        f"{_bytes_label(bundle.get('uncompressed_size'))} unpacked",
         f"{indent}archive sha256: {_safe(bundle.get('hash'))}",
         f"{indent}tree hash: {_safe(bundle.get('tree_hash'))}",
     ]
@@ -11923,7 +12024,9 @@ def _bundle_lines(
     if publisher:
         label = _safe(publisher.get("id"))
         if publisher.get("name"):
-            label += f" ({_safe(publisher.get('name'))})"
+            # QUOTED (D14): a display name can otherwise mimic a trusted id
+            # textually ("Minerva Labs (acct_real)") inside the same line.
+            label += f' ("{_safe(publisher.get("name"))}")'
         lines.append(f"{indent}publisher: {label}")
     return lines
 
@@ -11968,8 +12071,7 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
             form=form,
         )
     except LinkError as error:
-        print(f"error: {_skills_refusal(error)}")
-        return 1
+        return _skills_fail(args, _publish_refusal(error))
     if not getattr(args, "json", False):
         print(
             f"{form} publication of {_safe(args.name)!r} as {_safe(alias)!r} "
@@ -11984,15 +12086,23 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
             for note in preview.get("notes") or []:
                 print(f"  note: {_safe(note, limit=400)}")
         if preview.get("reason"):
-            print(f"  cannot publish: {preview['reason']}")
+            print("  cannot publish: " f"{_skills_refusal(_reason_error(str(preview['reason'])))}")
     if preview.get("reason"):
+        # The CODE stays machine-readable; the sentence rides beside it so a
+        # JSON consumer is not left with a bare token (round-2 D6).
+        preview["reason_message"] = _skills_refusal(_reason_error(str(preview["reason"])))
         if getattr(args, "json", False):
             print(_json.dumps(preview, indent=2))
         return 1
     if not getattr(args, "yes", False):
         if not sys.stdin.isatty():
-            print("error: pass --yes to publish (no terminal to confirm on)")
-            return 1
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required",
+                    "pass --yes to publish (no terminal to confirm on)",
+                ),
+            )
         answer = input("Publish this skill to the hub? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print("cancelled")
@@ -12011,8 +12121,7 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
             form=form,
         )
     except LinkError as error:
-        print(f"error: {_skills_refusal(error)}")
-        return 1
+        return _skills_fail(args, _publish_refusal(error))
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2))
         return 0
@@ -12037,6 +12146,7 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
         print(f"error: {error}")
         return 2
     subscribe = not bool(getattr(args, "no_subscribe", False))
+    reinstall = bool(getattr(args, "reinstall", False))
     ctx = svc.sync_context(ConfigManager(base_dir))
     alias = getattr(args, "alias", None)
     hub_source = canonical_hub_source(ctx.config_manager) or ""
@@ -12050,10 +12160,10 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             alias=alias,
             subscribe=subscribe,
             dry_run=True,
+            reinstall=reinstall,
         )
     except LinkError as error:
-        print(f"error: {_skills_refusal(error)}")
-        return 1
+        return _skills_fail(args, error)
     bundle = preview.get("bundle")
     publisher = preview.get("publisher")
     confirm_publisher = getattr(args, "confirm_publisher", None)
@@ -12068,6 +12178,35 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             print("\n".join(_bundle_lines(bundle.get("bundle") or {}, publisher=publisher)))
             for note in bundle.get("notes") or []:
                 print(f"  note: {_safe(note, limit=400)}")
+    if bundle is None and reinstall:
+        return _skills_fail(
+            args,
+            LinkError(
+                "reinstall-unsupported",
+                "--reinstall applies to bundle links: a document has no archive "
+                "to reinstall from",
+            ),
+        )
+    if bundle is not None and visibility == "org" and (confirm_publisher or confirm_hash):
+        # D9: the service does not verify a publisher for org rows, so the CLI
+        # must not pretend it did. Say it plainly and ignore the flags.
+        if not getattr(args, "json", False):
+            print(
+                "  note: an organization install is authorized by membership; "
+                "--confirm-publisher/--confirm-hash do not apply"
+            )
+        confirm_publisher = confirm_hash = None
+    if bundle is not None and visibility == "public" and publisher is None:
+        # BEFORE the prompt and before the flag instruction (D5): no account is
+        # named, so there is no id to confirm and --yes cannot satisfy it.
+        return _skills_fail(
+            args,
+            LinkError(
+                "bundle-publisher-unnamed",
+                "the hub's response names no publisher account for this bundle; ask the "
+                "publisher to republish it so the revision names an account, then pull again",
+            ),
+        )
     if (
         bundle
         and getattr(args, "json", False)
@@ -12081,9 +12220,9 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
         print(_json.dumps(payload, indent=2))
         return 0
     confirmed = False
-    if bundle is None:
-        # A DOCUMENT pull carries no bundle confirmation; its link consent is the
-        # ordinary subscribe policy.
+    if bundle is None or visibility == "org":
+        # A DOCUMENT pull carries no bundle confirmation, and an ORG bundle is
+        # authorized by membership (the service verifies/pins only public rows).
         pass
     elif bool(getattr(args, "yes", False)):
         confirmed = True
@@ -12098,11 +12237,14 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             return 1
         confirmed = True
     else:
-        print(
-            f"error: a {_scope_label(visibility)} bundle install needs the publisher "
-            "confirmation: pass --confirm-publisher ID --confirm-hash HASH, or --yes"
+        return _skills_fail(
+            args,
+            LinkError(
+                "bundle-confirmation-required",
+                f"this {_scope_label(visibility)} bundle install needs the publisher "
+                "confirmation: pass --confirm-publisher ID --confirm-hash HASH, or --yes",
+            ),
         )
-        return 1
     try:
         result = svc.install_skill(
             ctx,
@@ -12115,15 +12257,16 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             confirm=confirmed,
             confirm_publisher_id=confirm_publisher,
             confirm_bundle_hash=confirm_hash,
+            reinstall=reinstall,
         )
     except LinkError as error:
-        print(f"error: {_skills_refusal(error)}")
-        return 1
+        return _skills_fail(args, error)
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2))
         return 0
     link = result.get("link") or {}
     print(f"installed {_safe(link.get('name') or args.hub_id)}")
+    _print_pin(link.get("bundle_confirmation"), indent="  ")
     return 0
 
 
@@ -12145,6 +12288,7 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     from local_operator.hub_sync import service as svc
     from local_operator.hub_sync.adapters import publish_document
     from local_operator.hub_sync.budget import OperationBudget
+    from local_operator.hub_sync.identity import LinkError
     from local_operator.hub_sync.outbox import Outbox
     from local_operator.hub_sync.push import push_item
 
@@ -12152,12 +12296,22 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     checks = svc.check_items(ctx, kinds=("skill",), names=[args.name])
     check = svc.find_check(checks, "skill", args.name)
     if check is None:
-        print(f"error: no linked skill named {args.name!r} (see `lop skills status`)")
-        return 1
+        return _skills_fail(
+            args,
+            LinkError(
+                "link-not-found",
+                f"no linked skill named {args.name!r} (see `lop skills status`)",
+            ),
+        )
     record = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
     if record is None or record.identity is None:
-        print("error: this skill link has no confirmed origin; resolve it first")
-        return 1
+        return _skills_fail(
+            args,
+            LinkError(
+                "unresolved-link",
+                "this skill link has no confirmed origin; resolve it first",
+            ),
+        )
     if record.outbound is None:
         # THE MANUAL FIRST PUBLICATION. An unattended push refuses to invent an
         # ancestor, but an explicit push IS that deliberate act: seed (A, P) from
@@ -12197,30 +12351,61 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     assert outbound is not None
     identity = record.identity
     if identity is None:
-        print("error: this skill link has no confirmed origin; resolve it first")
-        return 1
+        return _skills_fail(
+            args,
+            LinkError(
+                "unresolved-link",
+                "this skill link has no confirmed origin; resolve it first",
+            ),
+        )
     is_bundle = "bundle" in (record.fields or {})
     if is_bundle and not svc._capability_bundle(ctx.store().load(), identity):
-        print("error: the hub does not advertise the skill-bundles carrier")
-        print("  (bundle-unsupported-server): update the hub before pushing a bundle")
-        return 1
+        return _skills_fail(
+            args, LinkError("bundle-unsupported-server", "the hub does not support bundles yet")
+        )
     expected = check.remote_revision or outbound.remote_revision
     if not expected:
-        print("error: this link has no remote revision to condition the write on; run a check")
-        return 1
+        return _skills_fail(
+            args,
+            LinkError(
+                "no-remote-revision",
+                "this link has no remote revision to condition the write on; run a check",
+            ),
+        )
     if not getattr(args, "yes", False):
         if not sys.stdin.isatty():
-            print("error: pass --yes to push (no terminal to confirm on)")
-            return 1
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required",
+                    "pass --yes to push (no terminal to confirm on)",
+                ),
+            )
         form = "bundle" if is_bundle else "document"
-        answer = input(f"Republish {check.name!r} ({form}) at {expected}? [y/N] ").strip().lower()
+        sent = ""
+        if is_bundle:
+            facts = (check.local or {}).get("bundle") or {}
+            count = int(facts.get("file_count") or 0)
+            sent = (
+                f", {count} file{'' if count == 1 else 's'} / " f"{_bytes_label(facts.get('size'))}"
+            )
+        scope = _scope_label(str(identity.visibility))
+        answer = (
+            input(
+                f"Republish {check.name!r} ({form}{sent}) to the {scope} hub "
+                f"at {expected}? [y/N] "
+            )
+            .strip()
+            .lower()
+        )
         if answer not in ("y", "yes"):
             print("cancelled")
             return 1
     transport, refused = svc.push_transport(ctx, record)
     if transport is None:
-        print(f"error: cannot publish this link: {refused or 'no-credential'}")
-        return 1
+        return _skills_fail(
+            args, LinkError(str(refused or "no-credential"), "cannot publish this link")
+        )
     # Manual intent outranks the schedule: a backoff window left by an earlier
     # outage must not turn an explicit push into a silent skip.
     svc.clear_retry(ctx, "skill", args.name)
@@ -12280,6 +12465,16 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
     names = [args.name] if getattr(args, "name", None) else None
     ctx = svc.sync_context(ConfigManager(base_dir))
     checks = svc.check_items(ctx, kinds=("skill",), names=names)
+    if not checks:
+        if getattr(args, "json", False):
+            print(_json.dumps({"checks": [], "reports": []}, indent=2))
+            return 0
+        print(
+            f"No linked skill named {_safe(args.name)!r}."
+            if getattr(args, "name", None)
+            else "No linked skills."
+        )
+        return 0
     if getattr(args, "check", False):
         rows = [svc.check_report(c).to_json() for c in checks]
         if getattr(args, "json", False):
@@ -12329,6 +12524,7 @@ def _skills_status(args: argparse.Namespace, base_dir: Path) -> int:
             f"{_scope_label(str(link.get('visibility') or 'public'))} "
             f"state={pull.get('state') or 'unknown'}"
         )
+        _print_pin(link.get("bundle_confirmation"), indent="  ")
     return 0
 
 
