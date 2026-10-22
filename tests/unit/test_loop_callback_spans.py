@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import threading
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from textual._types import MessageTarget
+from textual.timer import Timer
 
 from tests.loop_callback_spans import CallbackSpans
 from tests.unit.test_tui_responsiveness import StallRecorder
@@ -241,5 +246,158 @@ def test_passing_measurement_evidence_is_junit_serializable(
         assert result["noise_floor_ms"] == 7
         assert result["wall_cpu_descheduling_ratio"] == 1.06
         assert result["callbacks"]["worst_cpu_windows"][0]["callbacks"]["count"] == 1
+    finally:
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_textual_timer_step_names_the_timer_callback_and_creation_site() -> None:
+    """A ``Timer._run_timer`` step must say WHICH timer ran.
+
+    The S2 witness could only report ``Timer._run_timer`` for a 667 ms step,
+    which is a task-step name shared by every Textual timer: it cannot
+    distinguish a repaint from a poll or a one-shot. The timer's own identity
+    (its interval name, the bound callback and the product frame that armed it)
+    is captured by the two timer patches, so the next occurrence is actionable
+    without another profiling round.
+    """
+    from textual.app import App
+
+    class TimerApp(App[None]):
+        def on_mount(self) -> None:
+            self.set_interval(0.01, self.tick)
+
+        def tick(self) -> None:
+            # Force a collection INSIDE the callback: its attribution must name
+            # this timer, not the anonymous ``Timer._run_timer`` step (R1-2).
+            gc.collect(0)
+
+    loop = asyncio.get_running_loop()
+    details: list[str] = []
+    gc_details: list[str] = []
+    with CallbackSpans(loop) as spans:
+        async with TimerApp().run_test() as pilot:
+            for _ in range(30):
+                await pilot.pause(0.01)
+                window = spans.take_window()
+                for span in window.top_cpu:
+                    if span.detail:
+                        details.append(span.detail)
+                for span in window.gc:
+                    if span.detail:
+                        gc_details.append(span.detail)
+    assert details, "no timer step carried attribution"
+    assert any(
+        "TimerApp.tick @" in detail and "test_loop_callback_spans.py" in detail
+        for detail in details
+    ), details[:5]
+    assert any("TimerApp.tick @" in detail for detail in gc_details), gc_details[:5]
+
+
+def test_collection_starting_inside_a_callback_is_attributed_to_that_callback() -> None:
+    """Own work and a triggered collection are different facts, both recorded.
+
+    The S2 witness could only say one Timer step took 667 ms. Whether that was
+    the callback's work or a collection it happened to trigger decides the fix,
+    so the collection is measured with its generation and the callback name,
+    never inferred from the total.
+    """
+    loop = asyncio.new_event_loop()
+    clocks = Clocks()
+    try:
+        with CallbackSpans(
+            loop, cpu_clock=lambda: clocks.cpu, wall_clock=lambda: clocks.wall
+        ) as spans:
+
+            def allocating() -> None:
+                clocks.advance(0.001, 0.001)
+                gc.collect(0)
+                clocks.advance(0.004, 0.004)
+
+            run_handle(loop, allocating)
+            window = spans.take_window()
+        assert window.gc, "a collection inside a tracked callback was not recorded"
+        assert window.gc[0].name == "gc.gen0"
+        assert window.gc[0].detail.endswith(".allocating")
+        # The fake clock advances only on demand, so the collection itself
+        # measures 0 ms here; the assertion is that it was RECORDED against the
+        # right callback, not that the stub produced a real pause.
+        assert window.gc[0].cpu_ms == pytest.approx(0)
+        assert window.top_cpu[0].cpu_ms == pytest.approx(5)
+    finally:
+        loop.close()
+
+
+def test_collection_on_a_worker_thread_is_not_charged_to_the_loop_callback() -> None:
+    """gc.callbacks is process-global; a span belongs to one thread (Q1).
+
+    A worker-thread collection can run while the loop thread is inside a
+    callback. The loop clock never contained that work, so recording it would
+    charge a concurrent pause to the loop step and make the attribution lie.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        with CallbackSpans(loop) as spans:
+            spans._in_callback = True
+            spans._gc_callback_name = "loop-callback"
+
+            def worker_collects() -> None:
+                spans._gc_started("start", {"generation": 2})
+                spans._gc_started("stop", {"generation": 2})
+
+            thread = threading.Thread(target=worker_collects)
+            thread.start()
+            thread.join()
+            assert spans.take_window().gc == []
+    finally:
+        loop.close()
+
+
+def test_tick_on_another_thread_does_not_stamp_the_loop_span() -> None:
+    """A concurrently ticking app on another thread must not forge a label (R1-1).
+
+    The label is recorded on the SPAN, which belongs to one loop thread. A real
+    Textual app ticking elsewhere would otherwise stamp its timer onto a step of
+    this loop that never ran that callback.
+    """
+    loop = asyncio.new_event_loop()
+
+    class Target:
+        pass
+
+    try:
+        with CallbackSpans(loop) as spans:
+            timer = Timer(cast(MessageTarget, Target()), 0.5, callback=lambda: None)
+            setattr(timer, "_callback_spans_label", "other_thread_timer:OtherApp.tick @ x.py:1")
+            before = spans._tick_serial
+
+            def tick_elsewhere() -> None:
+                try:
+                    asyncio.run(timer._tick(next_timer=0.0, count=1))
+                except Exception:  # noqa: BLE001 - no active app on that thread
+                    pass
+
+            thread = threading.Thread(target=tick_elsewhere)
+            thread.start()
+            thread.join()
+            assert spans._tick_serial == before
+            assert spans._tick_detail == ""
+    finally:
+        loop.close()
+
+
+def test_context_removes_its_hooks_and_restores_every_patch() -> None:
+    """Cleanup is part of the contract: a leaked hook outlives the cell (R1-5)."""
+    original_handle = asyncio.Handle._run
+    original_init = Timer.__init__
+    original_tick = Timer._tick
+    loop = asyncio.new_event_loop()
+    try:
+        with CallbackSpans(loop) as spans:
+            assert spans._gc_started in gc.callbacks
+        assert spans._gc_started not in gc.callbacks
+        assert asyncio.Handle._run is original_handle
+        assert Timer.__init__ is original_init
+        assert Timer._tick is original_tick
     finally:
         loop.close()
