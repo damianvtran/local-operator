@@ -445,6 +445,32 @@ def test_the_origin_and_a_second_conversation_resolve_the_right_copies(stacks) -
     )
 
 
+def test_a_team_rollback_that_fails_names_the_rows_it_left(stacks, monkeypatch) -> None:
+    """A remainder is reported by NAME, not as a count.
+
+    The operator has to find the rows in their account, so the sentence lists them
+    and ``PromotionIncomplete.remaining`` carries their ids.
+    """
+
+    _session_role(stacks["agents"], "helper")
+    _team(stacks["teams"], "pod", manager="manager", members=["helper"])
+
+    def exploding_create(_fields):
+        raise OSError("team store full")
+
+    def locked_delete(_agent_id):
+        raise OSError("agent store locked")
+
+    monkeypatch.setattr(stacks["global_teams"], "create_team", exploding_create)
+    monkeypatch.setattr(stacks["global_agents"], "delete_agent", locked_delete)
+
+    with pytest.raises(PromotionIncomplete) as caught:
+        stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+
+    assert "agent 'helper' may still be in your account" in str(caught.value)
+    assert caught.value.remaining[0]["name"] == "helper"
+
+
 def test_a_team_promotion_rolling_back_removes_members_too(stacks, monkeypatch) -> None:
     _session_role(stacks["agents"], "helper")
     _team(stacks["teams"], "pod", manager="manager", members=["helper"])

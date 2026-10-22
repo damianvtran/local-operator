@@ -1493,10 +1493,18 @@ def _undo_all(undo: list[tuple[dict[str, Any], Callable[[], None]]]) -> list[dic
 
 
 def _incomplete_message(kind: str, name: str, remaining: list[dict[str, Any]]) -> str:
+    """Name the rows a failed rollback could not remove.
+
+    A count is not enough: the operator has to find them in the store, so the
+    sentence lists them by name and the exception carries the ids in
+    ``PromotionIncomplete.remaining``.
+    """
+
+    rows = ", ".join(f"{row.get('kind', kind)} {row.get('name', '?')!r}" for row in remaining)
     return (
-        f"promoting {kind} {name!r} failed AND its rollback did not finish, so "
-        f"{len(remaining)} written row(s) may still be in your account. Review the "
-        "account store before retrying; nothing here reported success."
+        f"promoting {kind} {name!r} failed AND its rollback did not finish: {rows} may "
+        "still be in your account. Review the account store before retrying; nothing "
+        "here reported success."
     )
 
 
