@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from typing import (
     Any,
     Awaitable,
@@ -1457,6 +1458,39 @@ class AskRowQuestion(AskQuestion):
 AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]]
 
 
+@dataclass(frozen=True)
+class DurableWriteIntent:
+    """One TOOL-proposed write that would change the user's ACCOUNT store.
+
+    The host's consent seam (:attr:`ToolContext.authorize_durable_write`) is
+    handed this value so it can show the user WHAT would become account-wide
+    before answering. It is deliberately a description and carries no authority:
+    a model cannot construct one on the wire, and the origin string the seam
+    returns is audit only.
+
+    Why a separate type rather than passing ``params``: the seam must not be able
+    to read or mutate the tool's payload, and the question the user answers is
+    this small — kind, operation, name — not a whole AgentParams (whose fields
+    would make the confirmation card a JSON dump).
+
+    ``operation`` names the act in the tool's own vocabulary. ``install`` and
+    ``reset`` are seed operations: they create a row from a packaged starter or
+    overwrite one the tool did not author, and both are account mutations when
+    they land in the account store.
+    """
+
+    kind: Literal["agent", "team"]
+    #: ``sync`` is here because syncing rewrites installed account rows and its
+    #: hub arm fetches account definitions — both are account mutations the
+    #: seam is asked about, even though the tool's own verb is a different one.
+    operation: Literal["create", "update", "delete", "install", "reset", "sync"]
+    name: str
+    #: Always ``global`` today: a conversation-scoped write never asks. Kept
+    #: explicit so a future scope cannot be read as "no consent needed" by
+    #: omission.
+    scope: Literal["global"] = "global"
+
+
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
@@ -1649,6 +1683,27 @@ class ToolContext(BaseModel):
     # accepted (see harness/approval.py); call it through ``ask_approval``
     # rather than directly, which is what picks the one this host wrote.
     request_approval: ApprovalGate | None = None
+    # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may create/update/delete
+    # a CONVERSATION-scoped role or team on its own; changing the user's ACCOUNT
+    # store is a user decision, and a model must not be able to stamp its own
+    # provenance (which is why no tool parameter carries a grant). A host that
+    # CAN show a specific, non-rememberable confirmation installs this callable;
+    # it returns an audit origin string when the user approved, or ``None`` when
+    # they did not. Declared rather than probed, per the class docstring.
+    #
+    # ``None`` IS NOT "ALLOW": with no seam a tool-issued account write is
+    # REFUSED, never silently permitted. There is no in-tree installer in S2:
+    # the existing approval card is satisfied by the session-scoped "approve
+    # all" latch without showing the specific intent, so wiring this to it would
+    # let a blanket shortcut authorize account-wide writes. The refusal names
+    # the user surfaces that ARE the user's own act (desktop editor, TUI form,
+    # CLI) plus the conversation-only retry.
+    #
+    # Off the tool wire, like every other host-owned presence field here: a
+    # callback is a capability, never payload a provider may see.
+    authorize_durable_write: Callable[[DurableWriteIntent], Awaitable[str | None]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process
@@ -2184,6 +2239,19 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: frame old readers already accept.
     cut_off: str = ""
     cut_off_cause: str = ""
+    #: WHICH model produced ``error``, as ``provider/model``, and the selector
+    #: the request started from when the failure came from a DIFFERENT target.
+    #:
+    #: The failover stamps this on the ``ProviderError`` it raises; the loop
+    #: copies it here. Without it the REPORTING layer could only read the
+    #: session's selected model, which is how an OpenAI ``cyber_policy``
+    #: refusal reached the operator attributed to Anthropic — a provider the
+    #: turn had already failed over FROM and never reached. Additive with a
+    #: ``""`` default: ``AgentEvent`` is ``extra="allow"``, so an old viewer
+    #: keeps them as extras and an old runtime's event simply carries no
+    #: attribution (the same story ``cut_off`` tells above).
+    failing_model: str = ""
+    failover_from: str = ""
     # A post-turn compaction happens after the loop creates this event but before
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.
@@ -3049,6 +3117,18 @@ class LoopConfig(BaseModel):
     # One hook here covers every tool at the single choke point where a result
     # becomes a message. ``None`` means no credentials are stored.
     redact_tool_result: Callable[[str], str] | None = Field(default=None, exclude=True)
+
+    #: Mask credentials out of tool-call ARGUMENTS before the retained copy is
+    #: journaled and replayed. A SEPARATE hook from ``redact_tool_result`` because
+    #: arguments are CODE that the harness executes and the model later reads back:
+    #: a heuristic rewrite there is a rewrite of the program (session
+    #: 6ccea512c372: a Python keyword masked in a ``bash`` call was copied into new
+    #: cells, which died with ``NameError``). This pass runs the session's exact-value
+    #: scrub first and then a shape pass with a value-level confidence floor, so only
+    #: HIGH-CONFIDENCE credential values are masked; it never registers what it finds.
+    #: ``None`` means no argument scrubbing, and the loop then falls back to
+    #: ``redact_tool_result`` for backwards compatibility.
+    redact_tool_arguments: Callable[[str], str] | None = Field(default=None, exclude=True)
 
     #: Report one tool call's outcome to the host, as
     #: ``(tool_name, origin, fault, duration_ms)``. A CALLBACK rather than a
@@ -4098,6 +4178,19 @@ class StreamEndEvent(BaseModel):
     #: request's model (after a sticky handoff or driver fallback the request
     #: can name A while B served the failure).
     attempted_selector: "ModelSpec | None" = None
+    #: Effective API selector of the attempt that produced THIS error end.
+    #: FAULT-ONLY, stamped by ``providers/failover.py`` on any end carrying
+    #: ``error``.
+    #:
+    #: The in-band twin of ``attempted_selector``, and it exists because the
+    #: other provenance carriers do not reach this frame: no exception is raised
+    #: (``clients.py`` composes a content-filter refusal onto the end event) and
+    #: ``StreamModelEvent`` is published only when the budget changed or the
+    #: credential is OAuth — never on an ordinary API-key hop. Without this
+    #: field an in-band refusal from a fallback was attributed to the SELECTED
+    #: model, which is the reported defect. ``None`` means UNKNOWN, and every
+    #: consumer then falls back to its previous behaviour rather than guessing.
+    failing_selector: "ModelSpec | None" = None
 
 
 class StreamModelEvent(BaseModel):

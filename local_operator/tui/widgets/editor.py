@@ -2130,6 +2130,10 @@ class Editor(TextArea):
         #: The first argument SLOT of a two-level command (``/mcp login``)
         #: whose choice set depends on it; ``None`` for one-level commands.
         self._argument_subcommand: str | None = None
+        #: The argument text a `/tag` refresh was last posted for. Unlike the
+        #: two-level commands, `/tag`'s row set includes a CREATE row whose
+        #: name is the typed query, so every keystroke can change the rows.
+        self._tag_query: str | None = None
         #: True while a :class:`SkillQueryOpened` has been posted for the token
         #: the caret is in. The transition latch for the skill list, mirroring
         #: ``_argument_command``'s role for argument lists; cleared on leaving
@@ -2770,6 +2774,37 @@ class Editor(TextArea):
         self._command_names = frozenset(
             name.lower() for command in commands for name in command.names
         )
+
+    def current_argument(self) -> str:
+        """The text after the active command word, anchored on the caret.
+
+        The public half of the parse the picker already performs per keystroke,
+        for the app's `/tag` refill: a create row's name IS this text, so the
+        handler must read the same argument the editor ranked.
+        """
+        return (
+            slash_argument(
+                self.text,
+                self._argument_commands,
+                self._caret_offset(),
+                self._command_names,
+            )
+            or ""
+        )
+
+    def open_command_arguments(self, name: str) -> None:
+        """Put ``/<name> `` in the buffer and open that command's value list.
+
+        Used by a REQUIRED command's no-argument handler (a bare `/tag` that
+        arrived through /resume or a hand-typed submit) so the surface the
+        command names is opened rather than reported as a no-op. The caller
+        owns the decision to replace the buffer; this is the same
+        `_set_text_and_caret` funnel every completion uses, so exactly one
+        picker sync runs at the settled caret.
+        """
+        text = f"/{name} "
+        self._set_text_and_caret(text, len(text))
+        self.focus()
 
     def opens_a_list(self, name: str) -> bool:
         """Whether completing the command word ``name`` opens a list INSTEAD of
@@ -8318,6 +8353,15 @@ class Editor(TextArea):
                     self._argument_subcommand = chart_second_slot
                     if was_chart_slot != is_chart_slot:
                         self.post_message(RefreshArgumentChoices(command, cursor))
+            elif command == "tag":
+                # `/tag`'s create row is named AFTER the query, so the row
+                # set is a function of the text rather than of a slot
+                # boundary. Repost only when the argument actually moved;
+                # the app rebuilds the applied-first list plus the exact
+                # create action from this text.
+                if (list_argument or "") != (self._tag_query or ""):
+                    self._tag_query = list_argument or None
+                    self.post_message(RefreshArgumentChoices(command, cursor))
             self._picker.sync_argument(list_argument)
             # The opening message can race session adoption or an in-flight
             # registry load. Retry ONLY these cheap name registries while their

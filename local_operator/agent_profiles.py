@@ -71,6 +71,7 @@ from local_operator.action_class import normalize as normalize_action_class
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.agents import AgentData, AgentRegistry
+    from local_operator.profile_scope import Scope
 
 logger = logging.getLogger(__name__)
 
@@ -183,9 +184,28 @@ class AgentProfile:
     default model tier for the role and is always overridable per launch,
     because the right model for a role depends on the operator's provider mix
     rather than on anything this file can know. The packaged seeds pin NO
-    tier: a child inherits the session's model unless the operator (or the
+    TIER: a child inherits the session's model unless the operator (or the
     launch) picks one, so a review round never silently lands on a weaker
     model than the session it is checking.
+
+    **The one exception is the INHERIT SENTINEL, and it is not a tier.**
+    ``effort`` may carry ``default`` (the inherit sentinel,
+    :data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL`), which says
+    "always run on the LAUNCHING SESSION's model" rather than naming
+    a tier. It is absolute: a delegating model's tier argument, its explicit
+    model pick, and a roster slot's tier all lose to it, because every one of
+    those is reachable by a delegating model and a pin they could move would
+    not be a pin. The ``coder`` seed carries it, and it carries it for the
+    incident it names: a delegating model passing ``effort="hi"`` moved 143
+    coder launches off the session's model onto that tier's, so a child could
+    be working on a different model from the session that launched it. A
+    reviewer's independence is protected a different way — by a role that
+    pins a TIER, which stays the role's DEFAULT and stays overridable — so the
+    sentinel is stated where the child's MODEL must match its parent's, and
+    nowhere else. It cannot be authored through the ``agent`` tool: the
+    sentinel is reachable only from a packaged seed or the operator's own
+    registry row, because a model able to write it could pin a reviewer to
+    the parent's own model.
     """
 
     name: str
@@ -542,6 +562,15 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
     from local_operator.action_class import class_from_tags
     from local_operator.action_class import normalize as normalize_action_class
 
+    # The scope token is USER COPY and localized at build time; this function is
+    # the ONE enumeration the TUI, the argument picker and a detached runtime all
+    # paint, so a locally-worded token here is what keeps those surfaces in one
+    # language (S2 design §3.3).
+    from local_operator.i18n.keys import tui_authoring as author_keys
+    from local_operator.i18n.text import tr
+    from local_operator.profile_scope import row_scope
+
+    session_token = tr("tui.authoring")(author_keys.scope_conversation())
     rows: list[tuple[str, str, str, str]] = []
     seen: set[str] = set()
     if registry is not None and hasattr(registry, "list_agents"):
@@ -553,6 +582,17 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
         specialists: list[tuple[str, str, str, str]] = []
         for agent in agents:
             try:
+                key = str(getattr(agent, "name", "") or "").strip().lower()
+                if key in seen:
+                    # A session row and an account row CAN share a name: the
+                    # composite refuses a session create over an account name,
+                    # but the reverse race (an account row created later) is
+                    # tolerated, and the composite lists session rows FIRST. The
+                    # dedupe below was documented but only consulted for seeds,
+                    # so that race painted the same key twice. First row wins —
+                    # which is session — and its scope fact says which one is in
+                    # force.
+                    continue
                 if is_role(agent):
                     profile = profile_from_agent(registry, agent)
                     facts = "role"
@@ -564,6 +604,13 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
                     # agents that carry config detail.
                     if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
                         facts += " · proactive"
+                    # The store this row lives in, after the class token (design
+                    # round 1, D1 keeps the class first because it is the fact a
+                    # narrow pane must not lose). Only a CONVERSATION row is
+                    # marked: the account is the default a reader already assumes,
+                    # and marking every existing row would rewrite every listing.
+                    if row_scope(registry, agent) == "session":
+                        facts += f" · {session_token}"
                     # Model/effort are facts a user picks a hat by; the rest of
                     # the profile is what the attach applies.
                     if profile.model:
@@ -578,11 +625,14 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
                     class_fact = (
                         " · proactive" if class_from_tags(agent.tags) == PROACTIVE_CLASS else ""
                     )
+                    scope_fact = (
+                        f" · {session_token}" if row_scope(registry, agent) == "session" else ""
+                    )
                     specialists.append(
                         (
                             str(agent.name),
                             str(getattr(agent, "label", "") or ""),
-                            f"specialist{class_fact}",
+                            f"specialist{class_fact}{scope_fact}",
                             summary,
                         )
                     )
@@ -788,6 +838,7 @@ def install_seed(
     name: str,
     *,
     registry: "AgentRegistry",
+    scope: "Scope",
     overwrite: bool = False,
 ) -> tuple[AgentProfile, bool] | None:
     """Copy a packaged seed into the registry; return ``(profile, already_installed)``.
@@ -825,6 +876,15 @@ def install_seed(
     NOT a role. Returning that row (which is what this used to do) reported a
     successful install while writing nothing, so an operator recovering from a
     misbehaving role was told the fix had landed when it had not.
+
+    ``scope`` IS REQUIRED, with no default, for the same reason the registries
+    have none: every caller knows who is acting (the tool's install is the
+    model's conversation-scoped default; a user's ``/agent class`` and the
+    desktop routes are account writes), and a forgotten argument must be a type
+    error at review rather than a seed silently landing in the wrong store. The
+    CREATE goes through :func:`profile_scope.scope_store`; an OVERWRITE writes
+    through the row's own store (``registry.update_agent`` dispatches by owner),
+    so resetting a session role can never rewrite an account row.
     """
 
     seed = load_seed(name)
@@ -930,7 +990,9 @@ def install_seed(
         return AgentEditFields(**base)
 
     if existing is None:
-        agent = registry.create_agent(_fields(name=seed.name))
+        from local_operator.profile_scope import scope_store
+
+        agent = scope_store(registry, scope).create_agent(_fields(name=seed.name))
     else:
         agent = existing
         # An overwrite restores the seed's ROLE FIELDS too, not just its prose.
@@ -2275,7 +2337,9 @@ def _sync_one_seed(
         install still reset a chosen label and lost a user's own tags).
         """
 
-        return install_seed(agent.name, registry=registry, overwrite=True) is not None
+        return (
+            install_seed(agent.name, registry=registry, scope="global", overwrite=True) is not None
+        )
 
     def _apply_clean() -> bool:
         """The unattended-safe writer: only the fields the seed owns.

@@ -117,6 +117,7 @@ def _move(
     wait_s: float = 0.0,
     from_replica: bool = False,
     engage_on_arrival: bool = False,
+    drop_session_roles: bool = False,
     monkeypatch: pytest.MonkeyPatch | None = None,
 ) -> dict[str, Any]:
     """``lop sessions move``, driven the way the CLI drives it.
@@ -139,6 +140,7 @@ def _move(
             to=to,
             keep=keep,
             wait_s=wait_s,
+            drop_session_roles=drop_session_roles,
             root=server.root,
             from_replica=from_replica,
             engage_on_arrival=engage_on_arrival,

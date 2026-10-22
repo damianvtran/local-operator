@@ -708,3 +708,15 @@ def test_a_valid_rehome_frame_passes_and_every_field_is_required() -> None:
         frame[missing] = 3
         with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
             validate_control_frame(frame)
+
+
+@pytest.mark.parametrize("reason", ["answered_in_chat", "moot"])
+def test_ask_dismiss_accepts_the_two_reasons(reason: str) -> None:
+    validate_control_frame({"op": "ask_dismiss", "ask_id": "a-1", "reason": reason})
+    validate_control_frame({"op": "ask_dismiss", "ask_id": "a-1"})  # absent = moot
+
+
+@pytest.mark.parametrize("reason", ["superseded", "", None, 3])
+def test_ask_dismiss_refuses_an_unknown_reason_at_the_wire(reason: Any) -> None:
+    with pytest.raises(ValueError, match="reason must be"):
+        validate_control_frame({"op": "ask_dismiss", "ask_id": "a-1", "reason": reason})

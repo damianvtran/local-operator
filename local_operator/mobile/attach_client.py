@@ -2610,8 +2610,11 @@ class AttachClient:
             fields["by"] = by
         return await self._request("ask_decline", **fields)
 
-    async def ask_dismiss(self, ask_id: str, *, by: str = "") -> str:
-        """Dismiss a TIMED-OUT ask from the view. Asks the model nothing, ever.
+    async def ask_dismiss(self, ask_id: str, *, by: str = "", reason: str | None = None) -> str:
+        """Dismiss an ask from the view. Asks the model nothing, ever.
+
+        ``reason`` (``answered_in_chat`` | ``moot``) rides the frame only when given,
+        so an older runtime sees the frame it always did.
 
         What it can still OWE is the ask's deadline notice, when that was never
         delivered (fork A, 2026-10-16, design §14): the queue's reconcile writes
@@ -2620,6 +2623,8 @@ class AttachClient:
         fields: dict[str, Any] = {"ask_id": ask_id}
         if by:
             fields["by"] = by
+        if reason:
+            fields["reason"] = reason
         return await self._request("ask_dismiss", **fields)
 
     async def recall_steer(self, command_id: str) -> str:

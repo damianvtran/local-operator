@@ -10,7 +10,8 @@ other session without any per-surface choice.
 
 CONSTRUCTION IS NETWORK-FREE AND GATED ON PERSISTED FACTS ONLY (any miss =>
 ``None`` => no tool):
-- ``team_bridge.enabled`` is ON (default OFF; the feature ships dark);
+- ``team_bridge.enabled`` is ON (the shipped default is OFF during the
+  consent hold; an explicit ``true`` is this machine's opt-in);
 - a committed owner exists (``store.active_owner``: zero OR ambiguous rows
   read ``None`` — never a guess);
 - the owner's enrollment generation is still live (``current_generation_is_live``);

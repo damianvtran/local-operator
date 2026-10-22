@@ -1602,3 +1602,318 @@ def test_an_unreadable_hold_list_is_not_read_as_no_holds(tmp_path: Path) -> None
         {"session": {"cleanup": {"delegated": {"non_git_copies": {"hold_sessions": ["ok", 7]}}}}}
     )
     assert policy_from_config(manager).delegated_non_git_copy_holds_unreadable is True
+
+
+# ---------------------------------------------------------------------------
+# The removal RECEIPT: contents, fail-closed writes, holds and fresh creates
+# ---------------------------------------------------------------------------
+
+
+def _log_rows(root: Path) -> list[dict[str, Any]]:
+    path = root / "sessions" / CLEANUP_LOG_NAME
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_a_removal_whose_receipt_cannot_be_written_does_not_happen(tmp_path: Path) -> None:
+    """The reproduced defect: an unwritable log path must NOT lose the session.
+
+    A directory named ``.cleanup-log.jsonl`` gives the append an ``OSError`` of
+    the same shape as ENOSPC/EACCES; before this test the rmtree proceeded and
+    the removal left no row anywhere.
+    """
+    (target,) = _store(tmp_path, 1)
+    (tmp_path / "sessions" / CLEANUP_LOG_NAME).mkdir()
+
+    removed = remove_session_dir(
+        target,
+        config_dir=tmp_path,
+        policy="receipt-test",
+        reason="the receipt path is unwritable",
+        actor="test",
+    )
+
+    assert removed is False
+    assert target.is_dir(), "a directory whose receipt cannot be written must survive"
+
+
+def test_a_removal_row_records_what_the_session_held(tmp_path: Path) -> None:
+    (target,) = _store(tmp_path, 1)  # transcript.jsonl is 100 bytes
+    pad = target / "scratchpad" / "evidence"
+    pad.mkdir(parents=True)
+    (pad / "rig.txt").write_text("y" * 400, encoding="utf-8")
+    (target / "origin.json").write_text('{"origin": "subagent"}', encoding="utf-8")
+
+    assert remove_session_dir(
+        target,
+        config_dir=tmp_path,
+        policy="contents-test",
+        reason="control",
+        actor="test",
+        title="a named session",
+    )
+    rows = _log_rows(tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["transcript_bytes"] == 100
+    assert row["pad_bytes"] >= 400
+    assert row["pad_entries"] >= 1
+    assert row["bytes"] >= 500
+    assert row["entries"] >= 3
+    assert row["origin"] == "subagent"
+    assert row["last_activity_at"] is not None
+    assert row["contents_complete"] is True
+    assert row["path"] == str(target.absolute())
+    assert row["policy"] == "contents-test" and row["actor"] == "test"
+    assert row["title"] == "a named session"
+
+
+def test_a_held_session_is_refused_and_release_writes_its_own_row(tmp_path: Path) -> None:
+    (target,) = _store(tmp_path, 1)
+    sessions = tmp_path / "sessions"
+
+    assert cleanup.set_hold(
+        sessions, "s000", reason="evidence for the tax case", by="operator", kind="evidence"
+    )
+    assert (
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="held-test", reason="r", actor="test"
+        )
+        is False
+    )
+    assert target.is_dir()
+    hold = cleanup.hold_for(sessions, "s000")
+    assert hold is not None
+    assert hold["reason"] == "evidence for the tax case"
+    assert hold["by"] == "operator" and hold["kind"] == "evidence"
+
+    assert cleanup.release_hold(sessions, "s000", reason="case closed", actor="cli")
+    rows = _log_rows(tmp_path)
+    assert rows[-1]["policy"] == "hold-release"
+    assert rows[-1]["reason"] == "case closed"
+    assert rows[-1]["previous"]["kind"] == "evidence"
+    assert cleanup.hold_for(sessions, "s000") is None
+
+    assert (
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="held-test", reason="r", actor="test"
+        )
+        is True
+    )
+    assert not target.exists()
+
+
+def test_an_unreadable_holds_file_refuses_removal_and_the_guard(tmp_path: Path) -> None:
+    (target,) = _store(tmp_path, 1)
+    sessions = tmp_path / "sessions"
+    (sessions / cleanup.HOLDS_NAME).write_text("{ not json", encoding="utf-8")
+
+    assert (
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="holds-test", reason="r", actor="test"
+        )
+        is False
+    )
+    assert target.is_dir()
+    assert cleanup._guard(target, tmp_path, time.time()) == "operator holds unreadable"
+
+
+def test_remove_fresh_session_dir_writes_a_receipt_and_refuses_a_transcript(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    fresh = sessions / "ffff11112222"
+    fresh.mkdir(parents=True)
+    (fresh / "created_at.json").write_text("{}", encoding="utf-8")
+    # Deliberately NO store marker: the fresh-create window is exactly the store
+    # that has never had a session built in it.
+    assert cleanup.remove_fresh_session_dir(
+        fresh,
+        config_dir=tmp_path,
+        policy="wake-rollback",
+        reason="the arm failed",
+        actor="test",
+    )
+    rows = _log_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["policy"] == "wake-rollback"
+    assert rows[0]["session"] == "ffff11112222"
+    assert rows[0]["path"] == str(fresh.absolute())
+
+    live = sessions / "llll11112222"
+    live.mkdir()
+    (live / "transcript.jsonl").write_text("x", encoding="utf-8")
+    assert (
+        cleanup.remove_fresh_session_dir(
+            live, config_dir=tmp_path, policy="failed-create", reason="r", actor="test"
+        )
+        is False
+    )
+    assert live.is_dir()
+
+
+def test_remove_fresh_session_dir_keeps_the_directory_when_the_receipt_fails(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    fresh = sessions / "ffff33334444"
+    fresh.mkdir(parents=True)
+    (sessions / CLEANUP_LOG_NAME).mkdir()
+    assert (
+        cleanup.remove_fresh_session_dir(
+            fresh, config_dir=tmp_path, policy="failed-create", reason="r", actor="test"
+        )
+        is False
+    )
+    assert fresh.is_dir()
+
+
+def test_a_release_with_a_blank_reason_is_refused_and_keeps_the_hold(tmp_path: Path) -> None:
+    """UX round 1, U1: releasing is the decision that lets retention reap.
+
+    The CLI refuses before it resolves a target; this pins the API backstop,
+    which is what a non-CLI caller reaches.
+    """
+    (target,) = _store(tmp_path, 1)
+    sessions = tmp_path / "sessions"
+    assert cleanup.set_hold(sessions, "s000", reason="evidence", by="operator")
+
+    assert cleanup.release_hold(sessions, "s000", reason="", actor="cli") is False
+    assert cleanup.release_hold(sessions, "s000", reason="   ", actor="cli") is False
+    assert cleanup.hold_for(sessions, "s000") is not None
+    assert _log_rows(tmp_path) == []
+    assert (
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="held-test", reason="r", actor="test"
+        )
+        is False
+    )
+
+
+def test_guard_refusals_name_the_hold_and_its_remedy() -> None:
+    """Review round 1, M6: a hold is not an unevaluated guard."""
+    held = cleanup._guard_refusal("held by the operator", "abc123")
+    assert "held as a value" in held
+    assert "lop sessions unhold abc123" in held
+    assert "could not be checked" not in held
+
+    unreadable = cleanup._guard_refusal("operator holds unreadable", "abc123")
+    assert ".session-holds.json" in unreadable
+    assert "could not be checked" not in unreadable
+
+
+def test_an_unreadable_subtree_is_a_lower_bound_not_absent_bytes(tmp_path: Path) -> None:
+    """Review round 1, M1: a 0000 subtree must not measure as a 0-byte pad.
+
+    The census refuses a size comparison on ``contents_complete: False``; the
+    receipt carries the same flag so a removal never understates the loss.
+    """
+    (target,) = _store(tmp_path, 1)
+    pad = target / "scratchpad"
+    pad.mkdir()
+    (pad / "big.bin").write_bytes(b"y" * 4096)
+    os.chmod(pad, 0)
+    try:
+        measured = cleanup.measure_session_dir(target)
+    finally:
+        os.chmod(pad, 0o700)
+    assert measured["contents_complete"] is False
+    assert measured["skipped_entries"] >= 1
+    assert measured["transcript_bytes"] == 100
+
+
+def test_hand_off_takes_the_directory_out_of_the_store_then_the_sweep_ages_it(
+    tmp_path: Path,
+) -> None:
+    """The mesh commit's one rename, and the backstop behind its deletion.
+
+    ``hand_off_session_dir`` is the commit point of a move
+    (``docs/design/mesh-move-outcome.md`` clause 1): the directory leaves
+    ``sessions/`` atomically, so no scanner, listing or resume on this device can see
+    a live copy while the tombstone is being written. Its two post-conditions are
+    asserted here — absent counts as GONE (a retry after the crash window), and a
+    deletion that could not finish is aged out by the sweep rather than retried
+    forever.
+    """
+    (target,) = _store(tmp_path, 1)
+    store = tmp_path / "sessions"
+
+    first = cleanup.hand_off_session_dir(
+        target, config_dir=tmp_path, reason="mesh-move: test", actor="mesh:test"
+    )
+    assert first.handed is True, first
+    assert not target.exists()
+    # THE RECEIPT SURVIVES THE MOVE, and says "moved", not "deleted".
+    logged = [
+        json.loads(line)
+        for line in (store / CLEANUP_LOG_NAME).read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert logged[-1]["policy"] == "mesh-move"
+    assert logged[-1]["actor"] == "mesh:test"
+    # ABSENT IS THE DESIRED POST-STATE: the crash window after the rename must not
+    # be read as a failure to hand the directory away.
+    retry = cleanup.hand_off_session_dir(
+        target, config_dir=tmp_path, reason="mesh-move: retry", actor="mesh:test"
+    )
+    assert retry.handed is True, retry
+
+    handoff_root = tmp_path / "network" / cleanup.HANDED_AWAY_DIRNAME
+    handoff_root.mkdir(parents=True, exist_ok=True)
+    aged = handoff_root / "aged.1.token"
+    fresh = handoff_root / "fresh.1.token"
+    aged.mkdir()
+    fresh.mkdir()
+    old = time.time() - cleanup.HANDED_AWAY_MAX_AGE_S - 60
+    os.utime(aged, (old, old))
+
+    assert cleanup.sweep_handed_away(tmp_path) == ["aged.1.token"]
+    assert not aged.exists()
+    assert fresh.is_dir()
+
+
+def test_a_refused_handoff_names_its_cause(tmp_path: Path) -> None:
+    """Q-4: the refusal says WHY the directory could not be handed away.
+
+    The measured run surfaced only "this device could not hand <id> away, so
+    nothing was moved" — true, but nothing a person can act on. ``HandOffOutcome``
+    carries the cause the caller now puts in that sentence *and* logs, so the two
+    shapes that have different remedies are distinguishable: a guard that refused
+    (the directory is not a session this module may remove) and a rename that
+    failed (the filesystem refused the commit, and a retry may work).
+    """
+    # 1. THE GUARD: a directory that is not directly under a ``sessions/`` store.
+    # ``hand_off_session_dir`` marks the parent on the way in, so the marker is not
+    # what refuses this — the location is.
+    stray = tmp_path / "not-a-store" / "abc123"
+    stray.mkdir(parents=True)
+    (stray / "transcript.jsonl").write_text("", encoding="utf-8")
+
+    refused = cleanup.hand_off_session_dir(
+        stray, config_dir=tmp_path, reason="mesh-move: test", actor="mesh:test"
+    )
+
+    assert refused.handed is False, refused
+    assert "the store guard refused" in refused.reason, refused
+    assert "not directly under a 'sessions/' directory" in refused.reason, refused
+    assert stray.is_dir(), "a refused handoff must leave the directory where it was"
+
+    # 2. THE RENAME: an unwritable quarantine root (the shape of the measured
+    # EACCES run) fails the commit. It is REPORTED with the OSError in the reason
+    # rather than raised, so both callers word the rollback the same way — and the
+    # directory is still in the store, which is what makes the rollback legal.
+    (target,) = _store(tmp_path, 1)
+    network = tmp_path / "network"
+    network.mkdir(exist_ok=True)
+    os.chmod(network, 0o500)
+    try:
+        unusable = cleanup.hand_off_session_dir(
+            target, config_dir=tmp_path, reason="mesh-move: test", actor="mesh:test"
+        )
+    finally:
+        os.chmod(network, 0o700)
+
+    assert unusable.handed is False, unusable
+    assert "could not be renamed" in unusable.reason, unusable
+    assert target.is_dir()

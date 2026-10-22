@@ -4767,6 +4767,7 @@ def _patch_store_maintenance_passes(
 ) -> None:
     """Replace store-wide callbacks with ordered, resumable test probes."""
     from local_operator.analytics import backfill as analytics_backfill
+    from local_operator.session import census as census_mod
     from local_operator.session import cleanup as cleanup_mod
     from local_operator.tools import group_reaper
 
@@ -4781,6 +4782,7 @@ def _patch_store_maintenance_passes(
 
         return callback
 
+    monkeypatch.setattr(census_mod, "run_store_census", record("census"))
     monkeypatch.setattr(cleanup_mod, "cleanup_from_config", record("cleanup"))
     monkeypatch.setattr(group_reaper, "sweep_orphan_groups", record("groups"))
     monkeypatch.setattr(resume_mod, "backfill_session_origins", record("origins"))
@@ -4936,6 +4938,7 @@ def test_store_maintenance_thread_retries_after_lock_owner_exits(
     assert not worker.is_alive(), "worker did not stop when asked"
     assert attempts == 4, "worker abandoned lock retries after its initial contention"
     assert calls == [
+        "census",
         "cleanup",
         "groups",
         "origins",
@@ -5093,7 +5096,7 @@ def test_store_maintenance_malformed_stamp_is_retried(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None
     )
 
-    assert len(calls) == 6
+    assert len(calls) == 7
     assert json.loads(stamp.read_text(encoding="utf-8"))["version"] == (
         session_factory._STORE_MAINTENANCE_STAMP_VERSION
     )
@@ -5160,6 +5163,7 @@ def test_store_maintenance_failed_pass_retries_without_completion_stamp(
     )
     assert calls[: len(first_run)] == first_run
     assert calls[len(first_run) :] == [
+        "census",
         "cleanup",
         "groups",
         "origins",
@@ -5330,7 +5334,13 @@ def test_a_pass_that_stands_down_mid_walk_writes_no_completion_stamp(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop_event=stop
     )
     assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
-    assert calls == ["cleanup", "groups", "origins", "titles"], "a pass ran after the stop"
+    assert calls == [
+        "census",
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+    ], "a pass ran after the stop"
 
     # No stamp means the next run re-derives the worklist rather than trusting
     # a completion record — the resume cost is bounded by the sentinels the
@@ -5340,6 +5350,7 @@ def test_a_pass_that_stands_down_mid_walk_writes_no_completion_stamp(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None
     )
     assert calls == [
+        "census",
         "cleanup",
         "groups",
         "origins",

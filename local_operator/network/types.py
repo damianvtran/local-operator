@@ -493,6 +493,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # GitHub tokens for one ``(key, holder)`` immediately — the same local-op
     # boundary as the three leg-1 verbs, a different direction of travel.
     "credential_revoke",
+    # The member-side repair pull (mesh-mcp-credentials.md §4): a local act by the
+    # same boundary rule — this device's own relay is told to pull one copy from
+    # its owner now, and the link it needs lives in that process.
+    "credential_sync_pull",
     # The MCP definition sync's on-demand half (mcpdefs.py): reach every linked
     # peer, or one named peer, and bring its user-scope MCP servers up to date.
     # A local op for the same reason ``definitions_sync`` is one — this device's
@@ -1708,6 +1712,17 @@ class InviteRecord:
 
     def is_fresh(self, now: float) -> bool:
         return now < self.expires_at
+
+    def listed_state(self, now: float) -> str:
+        """``state`` as a listing should print it: a dead ``minted`` row says ``expired``.
+
+        ``state`` is the single-use ledger and never moves on expiry (nothing
+        redeemed or consumed the token), so a listing that printed it verbatim
+        called a token that redemption already refuses (``not is_fresh``)
+        ``minted`` — 24 of them on one record, 2026-10-21. Display-only: the
+        stored state, and every decision made on it, is unchanged.
+        """
+        return "expired" if self.state == "minted" and not self.is_fresh(now) else self.state
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
