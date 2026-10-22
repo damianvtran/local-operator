@@ -82,5 +82,35 @@
     "role": "settings help text",
     "tone": "plain, precise",
     "note": "Carries both bounds and the default because the page paints help but not min/max. Units are bytes; use the binary prefixes MiB/GiB, not MB/GB."
+  },
+  "wire.settings.remote_compute.title": {
+    "role": "settings section title",
+    "tone": "plain",
+    "note": "Section heading for the remote-compute preview. 'Compute' is the product noun for where a run executes; keep it short enough for the settings header's 34-cell value column."
+  },
+  "wire.settings.remote_compute.description": {
+    "role": "settings section description",
+    "tone": "plain, honest about preview status",
+    "note": "Desktop-only section header sentence. Must say the feature is a PREVIEW and that work runs on Radient-hosted compute. 'Mesh network' is the product term for the user's device network; do not translate it as a social network or a Wi-Fi network."
+  },
+  "wire.settings.remote_compute_enabled.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "note": "Boolean row label under the Remote compute section. Keep under 29 cells."
+  },
+  "wire.settings.remote_compute_enabled.help": {
+    "role": "settings row help",
+    "tone": "plain, precise",
+    "note": "Must state this is a preview, that it sends the user's work to Radient-hosted compute, and that the run is bound to ONE of the user's mesh networks — the tenant claim. The old wording said 'in your mesh network', which read as containment and is not what the slice enforces. 'Radient' is a product name: keep it unchanged. Keep near 67 cells (en is 66; the 80x24 detail line sheds longer copy, so stay within 74)."
+  },
+  "wire.settings.remote_compute_enabled.choice.true.description": {
+    "role": "boolean choice description",
+    "tone": "plain",
+    "note": "What ON means: remote runs are allowed. Lowercase, about 20 cells."
+  },
+  "wire.settings.remote_compute_enabled.choice.false.description": {
+    "role": "boolean choice description",
+    "tone": "plain",
+    "note": "What OFF means: work stays on this machine. Lowercase, about 10 cells."
   }
 }
