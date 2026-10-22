@@ -497,6 +497,7 @@ async def status(
     """
 
     from local_operator.team_bridge.client import (
+        attachments_capability,
         consent_for_display,
         get_status_discipline,
         selected_tenant_id,
@@ -584,7 +585,12 @@ async def status(
         #: Served-text slots refused on this answer — a surface refreshes
         #: rather than rendering refused or stale bytes (review round 1, R3).
         "texts_rejected": sorted(check.rejected),
-        "status": check.payload,
+        # The raw hub payload, except ``attachments``: that block is the one
+        # field a renderer switches behaviour on (show image affordances, send
+        # ``attachment_ids``), so it passes through the client's ONE capability
+        # reading (review R1-06) — malformed/disabled/no usable type is
+        # removed, never forwarded for the UI to second-guess. Absent = off.
+        "status": _status_with_attachments(check.payload, attachments_capability),
         "consent": (
             {"version": consent[0], "text": consent[1], "source": consent[2]}
             if consent is not None
@@ -1191,7 +1197,10 @@ async def scheduled_create(
                 # ``body`` always travels (possibly "" for an image-only
                 # schedule); everything else only when the caller set it, so a
                 # text-only schedule stays the pre-attachment wire.
-                {"body": body.body, **body.model_dump(exclude_unset=True)}
+                # ``exclude_none`` too (review R1-04): an explicit
+                # ``attachment_ids: null`` is "no images", and an old hub
+                # refuses the unknown key even when its value is null.
+                {"body": body.body, **body.model_dump(exclude_unset=True, exclude_none=True)}
             )
         )
     )
@@ -1691,6 +1700,24 @@ async def send_conversation_message(
             )
         )
     )
+
+
+def _status_with_attachments(payload: Any, read_capability: Any) -> Any:
+    """``payload`` with ``attachments`` replaced by its normalized reading.
+
+    Copies rather than mutates: the payload is the discipline's cached
+    last-good answer shared by every caller.
+    """
+
+    if not isinstance(payload, dict) or "attachments" not in payload:
+        return payload
+    out = dict(payload)
+    capability = read_capability(payload)
+    if capability is None:
+        out.pop("attachments", None)
+    else:
+        out["attachments"] = capability
+    return out
 
 
 def _attachment_tenant(request: Request) -> str | None:

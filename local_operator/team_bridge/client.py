@@ -1079,6 +1079,12 @@ class TeamBridgeClient:
                 # buffered whole. The capped body is rebuilt into an ordinary
                 # Response so refusal mapping stays the one shared path.
                 headers["Accept"] = "image/png, image/jpeg, application/json"
+                # identity (review R1-03): ``aiter_bytes`` yields DECODED bytes,
+                # and the rebuilt Response below would decode a gzip
+                # Content-Encoding a second time (a DecodingError surfacing as
+                # "unreachable"). Asking for identity also makes the cap
+                # measure wire bytes, so a compressed bomb cannot slip under it.
+                headers["Accept-Encoding"] = "identity"
                 async with http.stream(
                     method, self._base_url + path, params=params, headers=headers
                 ) as streamed:
@@ -1093,9 +1099,15 @@ class TeamBridgeClient:
                                 http_status=502,
                             )
                         chunks.append(chunk)
+                    # Belt and braces for a proxy that encodes anyway: the
+                    # body is already decoded, so the encoding/length headers
+                    # describing the WIRE form must not ride the rebuilt one.
+                    rebuilt = httpx.Headers(streamed.headers)
+                    for name in ("content-encoding", "content-length", "transfer-encoding"):
+                        rebuilt.pop(name, None)
                     return httpx.Response(
                         streamed.status_code,
-                        headers=streamed.headers,
+                        headers=rebuilt,
                         content=b"".join(chunks),
                         request=streamed.request,
                     )
