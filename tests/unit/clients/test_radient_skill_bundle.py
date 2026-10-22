@@ -200,3 +200,78 @@ def test_download_maps_a_refusal_to_its_machine_readable_half(
             radient_client.download_skill_bundle("sk-1")
 
     assert (caught.value.status_code, caught.value.code) == (404, "skill_not_found")
+
+
+# -- capability probe ------------------------------------------------------------------
+
+
+def test_probe_reads_the_contract_from_one_skill_row(
+    radient_client: RadientClient, base_url: str
+) -> None:
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "msg": "ok",
+        "result": {
+            "skills": [],
+            "sync_contract": {"revision_cas": 1, "skills": 1, "skill_bundles": 1},
+        },
+    }
+    response.raise_for_status.return_value = None
+    with patch("local_operator.clients.radient.requests.get", return_value=response) as get:
+        observed = radient_client.probe_skill_capabilities()
+
+    assert observed == {"revision_cas": 1, "skills": 1, "skill_bundles": 1}
+    args, kwargs = get.call_args
+    assert args[0] == f"{base_url}/skills"
+    assert kwargs["params"] == {"per_page": 1}
+    assert kwargs["allow_redirects"] is False
+    assert kwargs["headers"]["Authorization"] == "Bearer test_api_key"
+
+
+def test_probe_tolerates_a_top_level_contract(radient_client: RadientClient) -> None:
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "sync_contract": {"skill_bundles": 1},
+        "result": {"skills": []},
+    }
+    response.raise_for_status.return_value = None
+    with patch("local_operator.clients.radient.requests.get", return_value=response):
+        observed = radient_client.probe_skill_capabilities()
+
+    assert observed == {"skill_bundles": 1}
+
+
+def test_probe_returns_empty_when_no_contract_was_sent(radient_client: RadientClient) -> None:
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {"msg": "ok", "result": {"skills": []}}
+    response.raise_for_status.return_value = None
+    with patch("local_operator.clients.radient.requests.get", return_value=response):
+        assert radient_client.probe_skill_capabilities() == {}
+
+
+def test_probe_refuses_a_redirect(radient_client: RadientClient) -> None:
+    response = MagicMock()
+    response.status_code = 302
+    response.raise_for_status.return_value = None
+    with patch("local_operator.clients.radient.requests.get", return_value=response):
+        with pytest.raises(APIError) as caught:
+            radient_client.probe_skill_capabilities()
+
+    assert getattr(caught.value, "code", None) == "unexpected_redirect"
+
+
+def test_probe_refuses_a_non_json_body_without_echoing_it(
+    radient_client: RadientClient,
+) -> None:
+    response = MagicMock()
+    response.status_code = 200
+    response.json.side_effect = ValueError("not json")
+    response.raise_for_status.return_value = None
+    with patch("local_operator.clients.radient.requests.get", return_value=response):
+        with pytest.raises(APIError) as caught:
+            radient_client.probe_skill_capabilities()
+
+    assert "unrecognised" in str(caught.value)

@@ -73,7 +73,15 @@ def _manifest_document(
 class RemoteBundle:
     """The fetch + download seam for ONE bundle row (and a publish seam)."""
 
-    def __init__(self, base: str, document: dict[str, Any], data: bytes) -> None:
+    def __init__(
+        self,
+        base: str,
+        document: dict[str, Any],
+        data: bytes,
+        *,
+        contract: dict[str, Any] | None = None,
+        probe_error: BaseException | None = None,
+    ) -> None:
         self.base_url = base
         self.api_key = None
         self.document = document
@@ -82,6 +90,13 @@ class RemoteBundle:
         self.uploads: list[bytes] = []
         self.published: list[dict[str, Any]] = []
         self.upload_error: BaseException | None = None
+        self.contract = (
+            contract
+            if contract is not None
+            else {"revision_cas": 1, "skills": 1, "skill_bundles": 1}
+        )
+        self.probe_error = probe_error
+        self.probe_calls = 0
 
     # -- reads -----------------------------------------------------------------
     def get_skill(self, skill_id: str, **_kw: Any) -> dict[str, Any]:
@@ -92,6 +107,12 @@ class RemoteBundle:
         if dest is not None:
             dest.write(self.data)
         return SimpleNamespace(data=None, not_modified=False, etag=None, server_hash=None)
+
+    def probe_skill_capabilities(self, **_kw: Any) -> dict[str, Any]:
+        self.probe_calls += 1
+        if self.probe_error is not None:
+            raise self.probe_error
+        return dict(self.contract)
 
     # -- publication -----------------------------------------------------------
     def upload_skill_bundle(self, data: bytes, **_kw: Any) -> dict[str, Any]:
@@ -335,7 +356,7 @@ def _published_rig(tmp_path: Path) -> tuple[Path, str, Any, RemoteBundle]:
     return root, base, built, RemoteBundle(base, _manifest_document(built), built.data)
 
 
-def _preview(ctx: svc.HubSyncContext) -> dict[str, Any]:
+def _preview(ctx: svc.HubSyncContext, *, form: str = "bundle") -> dict[str, Any]:
     return svc.preview_skill_publication(
         ctx,
         source_skill=NAME,
@@ -345,7 +366,7 @@ def _preview(ctx: svc.HubSyncContext) -> dict[str, Any]:
         subscribe=True,
         auto_push=False,
         confirm_public_egress=False,
-        form="bundle",
+        form=form,
     )
 
 
@@ -475,8 +496,10 @@ def test_a_server_without_the_bundle_capability_is_refused_before_any_upload(
     tmp_path: Path,
 ) -> None:
     root, base, built, client = _published_rig(tmp_path)
+    # The DEPLOYED server itself advertises no bundle carrier, so the one-shot
+    # observation agrees with the recorded contract and the refusal stands.
+    client.contract = {"revision_cas": 1, "skills": 1}
     ctx = _ctx(root, client)
-    # Advertises skills + CAS but NOT the bundle carrier.
     svc.record_server_capabilities(ctx, {"revision_cas": 1, "skills": 1}, source=base)
 
     preview = _preview(ctx)
@@ -571,3 +594,61 @@ def test_the_cli_push_uploads_the_new_archive_then_publishes(
     assert hashlib.sha256(remote.uploads[0]).hexdigest() == newer.bundle.hash
     assert transport.commit_calls[0]["document"]["bundle"]["hash"] == newer.bundle.hash
     assert transport.preview_calls == []
+
+
+# -- the one-shot capability observation a fresh machine needs --------------------------
+
+
+def _server_sources(ctx: svc.HubSyncContext) -> dict[str, Any]:
+    return dict((ctx.store().load().get("server") or {}).get("sources") or {})
+
+
+def test_a_fresh_store_observes_the_bundle_capability_for_the_preview(tmp_path: Path) -> None:
+    root, base, _built, client = _published_rig(tmp_path)
+    ctx = _ctx(root, client)
+    assert _server_sources(ctx) == {}
+
+    preview = _preview(ctx)
+
+    assert client.probe_calls == 1
+    assert preview["reason"] is None
+    assert preview["can_confirm"] is True
+    # Observation is persisted PER SOURCE, exactly as a check would record it.
+    assert _server_sources(ctx)[base]["skill_bundles"] == 1
+
+
+def test_a_server_without_the_carrier_is_refused_after_the_observation(
+    tmp_path: Path,
+) -> None:
+    root, _base, _built, client = _published_rig(tmp_path)
+    client.contract = {"revision_cas": 1, "skills": 1}
+    ctx = _ctx(root, client)
+
+    preview = _preview(ctx)
+
+    assert client.probe_calls == 1
+    assert preview["reason"] == "bundle-unsupported-server"
+    assert client.uploads == []
+
+
+def test_a_document_preview_never_probes(tmp_path: Path) -> None:
+    root, _base, _built, client = _published_rig(tmp_path)
+    ctx = _ctx(root, client)
+
+    preview = _preview(ctx, form="document")
+
+    assert client.probe_calls == 0
+    assert _server_sources(ctx) == {}
+    assert preview["form"] == "document"
+
+
+def test_a_failed_probe_leaves_the_store_unchanged_and_refuses(tmp_path: Path) -> None:
+    root, _base, _built, client = _published_rig(tmp_path)
+    client.probe_error = RuntimeError("hub unreachable")
+    ctx = _ctx(root, client)
+
+    preview = _preview(ctx)
+
+    assert client.probe_calls == 1
+    assert preview["reason"] == "bundle-unsupported-server"
+    assert _server_sources(ctx) == {}
