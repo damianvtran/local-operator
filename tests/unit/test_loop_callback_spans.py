@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import threading
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -312,5 +313,30 @@ def test_collection_starting_inside_a_callback_is_attributed_to_that_callback() 
         # right callback, not that the stub produced a real pause.
         assert window.gc[0].cpu_ms == pytest.approx(0)
         assert window.top_cpu[0].cpu_ms == pytest.approx(5)
+    finally:
+        loop.close()
+
+
+def test_collection_on_a_worker_thread_is_not_charged_to_the_loop_callback() -> None:
+    """gc.callbacks is process-global; a span belongs to one thread (Q1).
+
+    A worker-thread collection can run while the loop thread is inside a
+    callback. The loop clock never contained that work, so recording it would
+    charge a concurrent pause to the loop step and make the attribution lie.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        with CallbackSpans(loop) as spans:
+            spans._in_callback = True
+            spans._gc_callback_name = "loop-callback"
+
+            def worker_collects() -> None:
+                spans._gc_started("start", {"generation": 2})
+                spans._gc_started("stop", {"generation": 2})
+
+            thread = threading.Thread(target=worker_collects)
+            thread.start()
+            thread.join()
+            assert spans.take_window().gc == []
     finally:
         loop.close()
