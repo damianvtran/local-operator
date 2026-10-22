@@ -148,13 +148,52 @@ _IN_LOOP_RECOVERY_BUDGET_S = 3.0
 # read fails and is reported anyway, and the harness re-observes once the guest
 # is back, so blocking that call for 15 s buys nothing and delays every retry.
 _OBSERVATION_RECOVERY_BUDGET_S = 3.0
-# Backoff between probes: 0.5, 0.5, 1, 1, then 2 s, capped by the budget. A
-# fixed 0.5 s cadence probes more often early and never reaches the later part
-# of a longer blip; this schedule spreads the same probes over a wider window.
-_RECOVERY_PROBE_DELAYS_S = (0.5, 0.5, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0)
-# One probe's own deadline; the readiness endpoint answers in milliseconds on a
-# live guest, and this is a presence check, not a throughput measurement.
-_RECOVERY_PROBE_TIMEOUT_S = 0.5
+
+
+# Backoff between probes: 0.5, 0.5, 1, 1, then 2 s for the rest of the budget.
+# DERIVED from the budget, not hard-coded: a fixed tuple cannot know how many
+# waits fit once the probe timeout changes, and one that outlives the budget is
+# a number a reader mistakes for an attempt the wait can actually make. This is
+# a CADENCE, not a count of attempts: a refused port answers in milliseconds,
+# so the schedule's 15 s of waits fill the budget exactly and the loop probes
+# until the deadline. A server that accepts and never answers spends its probe
+# timeout instead, so the same budget funds at most three such probes (15 // 5)
+# -- at t=0, 5.5 and 11, the last one's deadline clamped to the 4 s that
+# remain. Fewer attempts there is the accepted trade; see the probe timeout
+# below for why patience beats cadence.
+def _recovery_probe_delays(budget_s: float) -> tuple[float, ...]:
+    """The doubling cadence, kept only while a wait still fits the budget."""
+
+    delays: list[float] = []
+    wait = 0.5
+    spent = 0.0
+    while spent + wait <= budget_s:
+        delays.append(wait)
+        spent += wait
+        # Two entries per step, then double: a sub-second blip is retried at
+        # 0.5 s and 1 s before the wait settles into the 2 s tail.
+        if delays[-2:] == [wait, wait]:
+            wait = min(wait * 2, 2.0)
+    if not delays:
+        # A budget shorter than the first wait still makes ONE probe, and a
+        # failed probe indexes this tuple for the wait that follows it. An
+        # empty result would raise IndexError there instead of letting the
+        # budget end the wait.
+        return (0.5,)
+    return tuple(delays)
+
+
+_RECOVERY_PROBE_DELAYS_S = _recovery_probe_delays(_PRE_ACTION_RECOVERY_BUDGET_S)
+# One probe's own deadline, at parity with the watchdog's ``PROBE_TIMEOUT_S``
+# (guest_supervisor.WATCHDOG_SOURCE: 5 s). Both probes only CLASSIFY a running
+# action server, and that server is single-threaded around its control
+# endpoints: a 1280x720 screenshot or a page load blocks /terminal for seconds.
+# A shorter probe sees "connected, never answered" -- ambiguous -- so
+# ``path_unreachable`` stays false and a live, merely BUSY episode is refused.
+# The probe is classification, not a kill: the only cost of patience is time
+# inside a fixed budget, while the cost of impatience is refusing a live
+# episode. The recorded episode loss was exactly this shape.
+_RECOVERY_PROBE_TIMEOUT_S = 5.0
 
 # Where the episode's guest-preparation evidence is written, inside the
 # episode-owned cache root the adapter mints in ``reset_start``. It sits there
@@ -1039,7 +1078,10 @@ class AwsProvider:
 
         Both write ``read_failed`` plus every probe's verdict and errno -- probes
         that only ever answered False used to collapse to ``read_failed: true``,
-        which names a path failure and not its element. The boolean decision is
+        which names a path failure and not its element. The exhaustion record
+        also states the budget, the probe timeout and the wall clock actually
+        waited, so "gave up while busy" and "wedged" are distinguishable. The
+        boolean decision is
         unchanged.
         """
 
@@ -1048,28 +1090,57 @@ class AwsProvider:
         if budget_s is None:
             budget_s = _PRE_ACTION_RECOVERY_BUDGET_S
         probes: list[dict[str, Any]] = []
-        deadline = self._monotonic() + budget_s
+        started = self._monotonic()
+        deadline = started + budget_s
         served = False
         while True:
+            # The budget gates the WAIT, so a probe is never STARTED with no
+            # time left to answer inside it: what remains is this probe's own
+            # deadline. Without the clamp a 5 s probe started at t=14 (which
+            # the schedule permits) would push the recorded wait past the
+            # budget the caller asked for. The clamp bounds the NOMINAL wait,
+            # not the wall clock absolutely: ``requests`` applies the socket
+            # timeout to the connect and read phases separately, so a
+            # pathological connect-then-stall can add up to one clamped timeout
+            # beyond the deadline (a real-clock run measured 15.025 s against
+            # the 15 s budget).
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                break
+            timeout = min(_RECOVERY_PROBE_TIMEOUT_S, remaining)
+            # Start time, so ``at_s`` says when the attempt began and
+            # ``timeout_s`` how long it was allowed; the difference from the
+            # next entry is the probe's own cost.
+            at_s = round(self._monotonic() - started, 3)
             # The RETURNED record, never a shared field: two threads can probe
             # this provider at once (``execute`` on a worker thread, the async
             # RPC), and the verdict must belong to this probe. The record is
             # evidence here; ``served`` is still the decision.
-            served, record = self._probe_control_server_outcome(_RECOVERY_PROBE_TIMEOUT_S)
-            probes.append({"probe": len(probes) + 1, **(record or {"answered": served})})
+            served, record = self._probe_control_server_outcome(timeout)
+            probes.append(
+                {
+                    "probe": len(probes) + 1,
+                    "at_s": at_s,
+                    "timeout_s": round(timeout, 3),
+                    **(record or {"answered": served}),
+                }
+            )
             if served:
                 break
             delay = _RECOVERY_PROBE_DELAYS_S[
                 min(len(probes) - 1, len(_RECOVERY_PROBE_DELAYS_S) - 1)
             ]
-            # The budget gates the WAIT, so a probe is never started with no
-            # time left to answer inside it.
             if self._monotonic() + delay > deadline:
                 break
             self._sleep(delay)
 
         if not served:
-            path_unreachable = all(
+            # ``all([])`` is True: a wait that made no probes (a caller passing
+            # a non-positive budget) learned nothing, and an empty list must
+            # never read as "every probe was connect-class". That flag is the
+            # one verdict that lets a caller attempt the action over an unread
+            # receipt, so absence of evidence must not become permission.
+            path_unreachable = bool(probes) and all(
                 entry.get("delivery") == guest_loss.DELIVERY_NOT_SENT for entry in probes
             )
             # The cause is the line a post-mortem reads first, so it may say only
@@ -1108,6 +1179,9 @@ class AwsProvider:
                     "cause": cause,
                     "probe_outcomes": probes,
                     "path_unreachable": path_unreachable,
+                    "budget_s": budget_s,
+                    "probe_timeout_s": _RECOVERY_PROBE_TIMEOUT_S,
+                    "waited_s": round(self._monotonic() - started, 3),
                     "records": self._supervisor_records,
                     "watchdog": self._watchdog_evidence(),
                     "final_guest_record": "not retrieved: action-server transport unavailable",
