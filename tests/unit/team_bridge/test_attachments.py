@@ -870,6 +870,9 @@ async def test_retry_with_no_local_receipt_trusts_only_the_hub_admission(
         assert out2["code"] == "admission_unverified"
         assert len(cards2) == 1 and screened2 == [] and hub2.admits == []
         assert [p for _, p in hub2.fetches] == ["screen", "context"]
+        # R3-01: the card says the images are withheld, never "view them".
+        assert "[1 image attachment withheld: could not be verified]" in cards2[0]
+        assert "returns the admitted images" not in cards2[0]
 
 
 @pytest.mark.asyncio
@@ -1138,3 +1141,36 @@ async def test_screening_hold_on_an_image_message_admits_nothing(
     assert ("attachments" in screened[0]) is vision
     data, _mime = hub.fetch(hub.descriptors[0]["id"], "screen")
     assert data == hub.images[0]
+
+
+@pytest.mark.asyncio
+async def test_screen_not_found_with_no_verdict_anywhere_stays_metadata_only(
+    monkeypatch, tmp_path
+) -> None:
+    """R3-02: the hub's uniform not-found also covers "no verdict at all"
+    (unbound row, missing blob, message before the member joined).
+
+    With no local receipt and no hub admission, nothing is screened, nothing
+    is admitted, and the card is metadata-only with an explicit withheld line
+    — the fail-closed outcome, never a body or an image in context.
+    """
+
+    hub = Hub([_png()])
+    owner, ref, screened, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    real_fetch = hub.fetch
+
+    def blobless(attachment_id: str, purpose: str | None) -> tuple[bytes, str]:
+        if purpose == "screen":
+            hub.fetches.append((attachment_id, purpose))
+            raise BridgeRefusal("attachment_not_found", "nf", http_status=404)
+        return real_fetch(attachment_id, purpose)
+
+    monkeypatch.setattr(hub, "fetch", blobless)
+    assert hub.admission is None  # the hub holds NO verdict
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert out["action"] == "delivered_unadmitted" and out["code"] == "admission_unverified"
+    assert screened == [] and hub.admits == [] and hub.admission is None
+    assert [p for _, p in hub.fetches] == ["screen", "context"]
+    assert len(cards) == 1
+    assert "[1 image attachment withheld: could not be verified]" in cards[0]
+    assert "returns the admitted images" not in cards[0]
