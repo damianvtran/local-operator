@@ -370,6 +370,9 @@ class AcceptedLaw:
     guidance_version: str
     guidance_sha: str
     consent_sha: str
+    # The hub's accepted consent-version set (``consent.accepted_versions``),
+    # empty when the hub does not send one. See ``_consent_receipt_is_current``.
+    consent_accepted_versions: tuple[str, ...] = ()
 
 
 def _stage_text_floor(kind: str, version: Any, text: Any) -> tuple[str, str]:
@@ -396,6 +399,48 @@ def _stage_text_floor(kind: str, version: Any, text: Any) -> tuple[str, str]:
     if len(encoded) > TEXT_CAP_BYTES:
         raise StoreRefused("policy_stale", f"{kind} text exceeds the acceptance cap")
     return version, _hashlib.sha256(encoded).hexdigest()
+
+
+def _consent_accepted_versions(consent: "Mapping[str, Any]") -> tuple[str, ...]:
+    """The hub's accepted consent-version set from ``consent.accepted_versions``.
+
+    Absent or malformed reads as EMPTY, never as "anything goes": with no
+    well-formed set, currency falls back to the exact served-version match
+    this client always enforced. Only non-empty strings survive.
+    """
+
+    raw = consent.get("accepted_versions")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return ()
+    if not all(isinstance(v, str) and v for v in raw):
+        return ()
+    return tuple(raw)
+
+
+def _consent_receipt_is_current(
+    receipt_version: Any, served_version: str, accepted: "tuple[str, ...]"
+) -> bool:
+    """Is the committed consent receipt still CURRENT under this hub's law?
+
+    WHY A SET (agent-server PR #156): the hub serves ``bridge_consent_v2`` for
+    NEW consents while every ``bridge_consent_v1`` endpoint stays valid — the
+    server never re-consents them. Requiring receipt == served version held
+    every v1 member ``policy_stale`` the moment v2 was served, so the hub now
+    also sends ``consent.accepted_versions``. A receipt is current when it is
+    the served version, or when it is EXACTLY a member of a set that also
+    contains the served version (a set that omits the version it serves is
+    incoherent and grants nothing).
+
+    Exact string membership only — never string or numeric ordering: a
+    version is an identifier, and "v10" > "v9" style comparisons would
+    accept versions the hub never named. Anything not listed fails closed.
+    """
+
+    if not isinstance(receipt_version, str) or not receipt_version:
+        return False
+    if receipt_version == served_version:
+        return True
+    return served_version in accepted and receipt_version in accepted
 
 
 def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: Any) -> AcceptedLaw:
@@ -467,11 +512,15 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     )
     # CONSENT CURRENCY: the served version is the CURRENT server version, NOT
     # proof of acceptance. Acceptance is the COMMITTED native receipt;
-    # currency is that receipt's version matching what the server serves now.
+    # currency is that receipt's version being the served one or in the hub's
+    # accepted set (_consent_receipt_is_current).
+    accepted_versions = _consent_accepted_versions(consent)
     receipt = store.owner_consent_receipt(owner)
     if receipt is None:
         raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
-    if receipt["consent_version"] != consent_version:
+    if not _consent_receipt_is_current(
+        receipt["consent_version"], consent_version, accepted_versions
+    ):
         raise StoreRefused(
             "policy_stale", "committed consent is not current for the served version"
         )
@@ -489,6 +538,7 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
         guidance_version=guidance_version,
         guidance_sha=guidance_sha,
         consent_sha=consent_sha,
+        consent_accepted_versions=accepted_versions,
     )
 
 
@@ -520,6 +570,7 @@ class AcceptedCapture:
         "consent_version",
         "consent_ref",
         "consent_served_version",
+        "consent_accepted_versions",
         "guidance_version",
         "guidance_sha",
         "consent_sha",
@@ -545,6 +596,7 @@ class AcceptedCapture:
         guidance_sha: Any = None,
         consent_sha: Any = None,
         source: Any = None,
+        consent_accepted_versions: "tuple[str, ...]" = (),
     ) -> None:
         if token is not _CAPTURE_TOKEN:
             raise ValueError("AcceptedCapture is minted only by the verified status path")
@@ -564,6 +616,7 @@ class AcceptedCapture:
         self.consent_version = consent_version
         self.consent_ref = consent_ref
         self.consent_served_version = consent_served_version
+        self.consent_accepted_versions = consent_accepted_versions
         self.guidance_version = guidance_version
         self.guidance_sha = guidance_sha
         self.consent_sha = consent_sha
@@ -741,7 +794,11 @@ async def run_screening_cycle(
                     break
             if (
                 receipt_now is None
-                or receipt_now["consent_version"] != capture.consent_served_version
+                or not _consent_receipt_is_current(
+                    receipt_now["consent_version"],
+                    capture.consent_served_version,
+                    capture.consent_accepted_versions,
+                )
                 or receipt_now.get("consent_ref") != capture.consent_ref
                 or not floors_ok
             ):
@@ -775,9 +832,11 @@ async def run_screening_cycle(
         receipt_pre = store.owner_consent_receipt(owner)
         if receipt_pre is None:
             raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
-        if receipt_pre["consent_version"] != law.consent_served_version or not receipt_pre.get(
-            "consent_ref"
-        ):
+        if not _consent_receipt_is_current(
+            receipt_pre["consent_version"],
+            law.consent_served_version,
+            law.consent_accepted_versions,
+        ) or not receipt_pre.get("consent_ref"):
             raise StoreRefused("policy_stale", "consent receipt is not the served version")
         store.advance_text_floors(
             owner,
@@ -796,7 +855,11 @@ async def run_screening_cycle(
             receipt is None
             or receipt_pre["consent_version"] != receipt["consent_version"]
             or receipt_pre.get("consent_ref") != receipt.get("consent_ref")
-            or receipt["consent_version"] != law.consent_served_version
+            or not _consent_receipt_is_current(
+                receipt["consent_version"],
+                law.consent_served_version,
+                law.consent_accepted_versions,
+            )
         ):
             raise StoreRefused("policy_stale", "consent receipt changed across the floor advance")
         capture = AcceptedCapture(
@@ -812,6 +875,7 @@ async def run_screening_cycle(
             consent_version=receipt["consent_version"],
             consent_ref=receipt["consent_ref"],
             consent_served_version=law.consent_served_version,
+            consent_accepted_versions=law.consent_accepted_versions,
             guidance_version=law.guidance_version,
             guidance_sha=law.guidance_sha,
             consent_sha=law.consent_sha,
