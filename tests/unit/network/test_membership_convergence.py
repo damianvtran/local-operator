@@ -1596,6 +1596,179 @@ def test_a_row_no_read_has_fed_says_so_on_every_surface(
     assert "relay did not answer" in sentence, sentence
 
 
+#: How long the relay's SELF-TIMED membership pass is parked for the status-verb
+#: cells. The cadence (``MEMBERSHIP_PULL_PASS_S``) is a second, unprompted
+#: publisher of ``_membership_reports``: left at the 30 s the sibling cells use,
+#: a runner starved past it would let a cadence tick publish behind the cell and
+#: satisfy "a fresh pass happened" for a request that asked for nothing. The wake
+#: a fresh read sets (``_fresh_membership_read_state``) and ``stop()`` both break
+#: the loop's wait independently of this number, so parking it removes only the
+#: unprompted publisher and leaves the path under test fully functional.
+_CADENCE_PARKED_S = 3600.0
+
+
+def _status_pair_after_admit(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Device, Device, types.NetworkRecord, Any]:
+    """Two joined, linked relays with every unprompted publisher on ``a`` drained.
+
+    The pairing makes ``a`` (the inviter) run ``contact_peers`` on a handshake
+    thread once the joiner's result frame is sent: a LEGITIMATE publication into
+    ``_membership_reports`` that lands whenever that thread gets to run. The old
+    form of this cell read the cache straight after the dial and asserted it was
+    still empty, i.e. it asserted that this pass had not landed yet — a race the
+    sibling cells above already close, each for the same reason. A publication is
+    not evidence of anything wrong here, so the cell waits for it instead of
+    betting against it:
+
+    * ``a``'s establishment pull has stamped the link;
+    * the admit-time pass has completed (the sequence moved past the value read
+      BEFORE the join);
+    * every inbound handshake has returned (the semaphore is back at its cap), so
+      neither writer can restamp the link later.
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", _CADENCE_PARKED_S)
+    a = _make(devices, "a", mode=HUB)
+    b = _make(devices, "b", mode=HUB)
+    record = _init_network(a.server)
+    admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
+    assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
+    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    assert link is not None, reason
+
+    # The ambient root is what `health()` scans for the relay's record; a's own
+    # store holds one (published at start, re-stamped by its heartbeat).
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(a.root))
+
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
+    assert a_link is not None
+    assert net_fixtures.wait_for(
+        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+    ), "a's establishment pull never stamped the link"
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0  # noqa: SLF001
+    ), "a's admit-time contact_peers pass never completed"
+    assert net_fixtures.wait_for(
+        lambda: a.server._handshake_slots._value  # noqa: SLF001
+        == a.server.settings.max_handshakes,
+        timeout_s=10.0,
+    ), "an inbound handshake can still restamp the link"
+    return a, b, record, a_link
+
+
+def _observe_status_verb(
+    devices: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ignore_refresh: bool,
+    publication_wait_s: float,
+) -> dict[str, Any]:
+    """Drive plain then fresh `status` over the real control socket; return receipts.
+
+    EVERYTHING IS A LOGICAL RECEIPT, NOT A CLOCK: the completion sequence
+    (``_membership_seq``), the link's pull stamp going from the re-armed ``0.0``
+    to a real value, and the NAME of the thread that ran each pass. No wall-clock
+    ordering is asserted (two reads of ``time.time()`` may tie on some platforms).
+
+    THE ORDER IS THE POINT. The cached baseline is read FIRST, with no direct
+    refresh; only then is the due window re-armed (``member_pulled_at = 0.0``),
+    and nothing that publishes runs between the re-arm and the fresh request. A
+    baseline refresh AFTER the re-arm would consume the due pull, and the fresh
+    request would then (correctly) answer from the not-due gate without a pull.
+
+    ``ignore_refresh`` is the negative control: the relay's bounded fresh read is
+    replaced by one that returns the cache without waking the loop, which is what
+    a handler that dropped the ``refresh`` field would do.
+    """
+    a, b, record, a_link = _status_pair_after_admit(devices, monkeypatch)
+    network_id = record.network_id
+
+    def _table(payload: dict[str, Any]) -> dict[str, Any]:
+        row = next(row for row in payload["networks"] if row["network_id"] == network_id)
+        return row["membership"]["table"]
+
+    # The already-published pass, read through the same socket, with no refresh.
+    baseline = _table(relay.status())
+    seq0 = a.server._membership_seq  # noqa: SLF001
+
+    publishers: list[str] = []
+    real_refresh = a.server.refresh_membership
+
+    def _recording_refresh(*args: Any, **kwargs: Any) -> Any:
+        publishers.append(threading.current_thread().name)
+        return real_refresh(*args, **kwargs)
+
+    monkeypatch.setattr(a.server, "refresh_membership", _recording_refresh)
+    if ignore_refresh:
+        server = a.server
+        monkeypatch.setattr(
+            server,
+            "_fresh_membership_read_state",
+            lambda *args, **kwargs: (server._membership_reports, False),  # noqa: SLF001
+        )
+
+    a_link.member_pulled_at = 0.0
+    plain = _table(relay.status())
+    observed: dict[str, Any] = {
+        "peer": b.device_id,
+        "seq0": seq0,
+        "baseline_refreshed_at": baseline["refreshed_at"],
+        "plain_seq": a.server._membership_seq,  # noqa: SLF001
+        "plain_refreshed_at": plain["refreshed_at"],
+        "plain_stamp": a_link.member_pulled_at,
+    }
+
+    # ONE fresh request; then wait for the SPECIFIC pass it asked for, not for
+    # whichever report happens to look favourable. The read's own wait is bounded
+    # and may return ``in_flight`` — correct behaviour, so the reply is not
+    # asserted on; the receipt is the sequence and the plain read after it.
+    _table(relay.status(refresh=True))
+    observed["published"] = net_fixtures.wait_for(
+        lambda: a.server._membership_seq > seq0,  # noqa: SLF001
+        timeout_s=publication_wait_s,
+    )
+    observed["seq_after"] = a.server._membership_seq  # noqa: SLF001
+    observed["publishers"] = list(publishers)
+    observed["pulled_stamp"] = a_link.member_pulled_at
+    final = _table(relay.status())
+    observed["final"] = final
+    observed["final_seq"] = a.server._membership_seq  # noqa: SLF001
+    return observed
+
+
+def _assert_status_verb_asked_for_a_fresh_pass(observed: dict[str, Any]) -> None:
+    """The oracle: plain status asks nothing, the fresh verb causes ONE real pass.
+
+    Each message names the guard that fired — the controls below assert on them,
+    so a control cannot pass because something else broke first.
+    """
+    # PLAIN STATUS reports the completed pass and asks for nothing.
+    assert observed["plain_seq"] == observed["seq0"], "a plain status ran a membership pass"
+    assert (
+        observed["plain_refreshed_at"] == observed["baseline_refreshed_at"]
+    ), "a plain status replaced the cached report"
+    assert observed["plain_stamp"] == 0.0, "a plain status pulled a member table"
+
+    # THE FRESH VERB causes a NEW completed pass: the sequence moved, exactly
+    # once, run by the membership loop that the wake released — not by a cadence
+    # tick (parked) and not by any other caller.
+    assert observed["published"], (
+        "the fresh request produced no new completed pass: sequence stayed at "
+        f"{observed['seq_after']} (was {observed['seq0']}), publishers={observed['publishers']}"
+    )
+    assert observed["seq_after"] == observed["seq0"] + 1, observed
+    assert observed["publishers"] == ["mesh-membership"], observed["publishers"]
+    # ... and that pass did a REAL pull (the stamp went 0.0 -> set), so the table
+    # was read for this request rather than answered from the not-due gate.
+    assert observed["pulled_stamp"] > 0.0, "the fresh pass did not pull the member table"
+    final = observed["final"]
+    assert final["answered"] == [observed["peer"]], final
+    assert final["complete"] is True, final
+    assert final["in_flight"] is False, final
+    assert final["not_due"] == [], final
+    assert observed["final_seq"] == observed["seq_after"], "reading the result ran another pass"
+
+
 def test_the_status_verb_asks_over_the_control_socket_for_a_fresh_pass(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1606,24 +1779,56 @@ def test_the_status_verb_asks_over_the_control_socket_for_a_fresh_pass(
     off the frame) and that the module-level read the CLI's `status` verb calls
     waits long enough for the answer — by reading a real relay through its real
     control socket.
+
+    WHAT THIS CELL DOES NOT ASSERT: that the cache is empty before the verb. It
+    used to, and a legitimate admit-time publication made that false on a loaded
+    runner (``answered == [b]`` — CI main, 10 heads). The contract is the
+    sequence: a plain read leaves it alone, a fresh read moves it by exactly one
+    real pull. The controls below prove the oracle rejects the two ways that
+    could go wrong.
     """
-    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
-    a = _make(devices, "a", mode=HUB)
-    b = _make(devices, "b", mode=HUB)
-    record = _init_network(a.server)
-    assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
-    assert link is not None, reason
+    observed = _observe_status_verb(
+        devices, monkeypatch, ignore_refresh=False, publication_wait_s=10.0
+    )
+    _assert_status_verb_asked_for_a_fresh_pass(observed)
 
-    # The ambient root is what `health()` scans for the relay's record; a's own
-    # store holds one (published at start, re-stamped by its heartbeat).
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(a.root))
 
-    def _row(payload: dict[str, Any]) -> dict[str, Any]:
-        return next(row for row in payload["networks"] if row["network_id"] == record.network_id)
+def test_status_verb_control_a_dropped_refresh_field_is_rejected_for_not_asking(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: when the relay ignores ``refresh`` the oracle fails — on the missing pass.
 
-    stale = _row(relay.status())["membership"]["table"]
-    assert stale["answered"] == [], stale
-    fresh = _row(relay.status(refresh=True))["membership"]["table"]
-    assert fresh["answered"] == [b.device_id], fresh
-    assert fresh["complete"] is True
+    The cached answer still lists the peer (``answered == [b]``), so an oracle
+    that read that list would pass here; this one reads the sequence, the
+    publisher and the pull stamp, and must fail on the pass that never ran. The
+    absence wait is short because it can only ever be a bound: the cadence is
+    parked, so nothing else is going to publish into it.
+    """
+    observed = _observe_status_verb(
+        devices, monkeypatch, ignore_refresh=True, publication_wait_s=2.0
+    )
+    assert observed["seq_after"] == observed["seq0"], observed
+    assert observed["publishers"] == [], observed
+    assert observed["pulled_stamp"] == 0.0, observed
+    with pytest.raises(AssertionError, match=r"the fresh request produced no new completed pass"):
+        _assert_status_verb_asked_for_a_fresh_pass(observed)
+
+
+def test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pass(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: the old ``answered == []`` precondition is false once a pass publishes.
+
+    A direct ``refresh_membership`` stands in for the admit-time pass (same
+    function, same link, same report) so the control does not itself depend on a
+    thread's timing. It reproduces the CI failure's dict: the peer answered, the
+    table complete, nothing in flight.
+    """
+    a, b, record, _a_link = _status_pair_after_admit(devices, monkeypatch)
+    a.server.refresh_membership()  # noqa: SLF001
+    row = next(r for r in relay.status()["networks"] if r["network_id"] == record.network_id)
+    stale = row["membership"]["table"]
+    with pytest.raises(AssertionError) as caught:
+        assert stale["answered"] == [], stale
+    assert b.device_id in str(caught.value)
+    assert stale["complete"] is True and stale["in_flight"] is False, stale
