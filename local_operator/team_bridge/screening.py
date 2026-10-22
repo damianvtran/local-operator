@@ -234,6 +234,14 @@ class ScreenResult:
     #: sends it as ``attachments_hash`` with the v3 template hash); every
     #: text-only verdict leaves it ``None``, so the images stay withheld.
     attachments_hash: str | None = None
+    #: The template that ACTUALLY rendered this screen (review R1-07). The
+    #: stored receipt keeps the served policy's template because every store
+    #: fence compares receipt == policy; for an image envelope the render is
+    #: v3, and this is where that fact is carried to the connector's outcome
+    #: (the hub's admission row records the v3 hash durably). ``None`` for a
+    #: cache hit, which rendered nothing.
+    rendered_version: str | None = None
+    rendered_template_sha256: str | None = None
 
     def __post_init__(self) -> None:
         self._private_reason: str | None = None
@@ -1363,6 +1371,8 @@ async def _screen_core(
         receipt=receipt,
         screened_bytes=rendered.screened_bytes,
         attachments_hash=envelope.attachments_hash,
+        rendered_version=SCREENING_VERSION_V3 if images is not None else snapshot.screening_version,
+        rendered_template_sha256=rendered.template_sha256,
     ).set_private_reason(reason)
 
 
