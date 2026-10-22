@@ -601,6 +601,9 @@ ATTACHMENT_MIME_TYPES = ("image/png", "image/jpeg")
 #: every agent read keeps the runtime from ever reusing screen bytes.
 ATTACHMENT_FETCH_PURPOSES = ("screen", "context")
 _ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
+_OVERSIZE_ATTACHMENT_SENTENCE = (
+    "Radient returned an attachment larger than allowed."  # i18n: ignore, no code
+)
 
 #: §5.2's body bound: a settings body is a fixed small shape, never content.
 SETTINGS_BODY_MAX_BYTES = 4 * 1024
@@ -1086,7 +1089,7 @@ class TeamBridgeClient:
                         if size > max_response_bytes:
                             raise BridgeRefusal(
                                 "attachment_too_large",
-                                "Radient returned an attachment larger than allowed.",  # i18n: ignore, no code
+                                _OVERSIZE_ATTACHMENT_SENTENCE,
                                 http_status=502,
                             )
                         chunks.append(chunk)
