@@ -346,6 +346,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("ask_id must be a non-empty string")
         if "by" in frame and not isinstance(frame.get("by"), str):
             raise ValueError("by must be a string")
+        if op == "ask_dismiss" and "reason" in frame:
+            # The operator's word for why (design docs/design/ask-nonblocking.md
+            # §15): the same two words ``ask_withdraw`` takes. Refused at the wire
+            # so an unknown one is never half-applied; absent reads as ``moot``.
+            from local_operator.asks.render import DISMISS_BAD_REASON
+            from local_operator.asks.store import DISMISS_REASONS
+
+            if frame.get("reason") not in DISMISS_REASONS:
+                raise ValueError(DISMISS_BAD_REASON)
         if op in ("ask_respond", "ask_revise"):
             answers = frame.get("answers")
             if not isinstance(answers, dict):
@@ -551,7 +560,7 @@ ControlOp = Literal[
     # separate op is also what makes it fail closed on an old runtime.
     "ask_revise",  # {ask_id, answers: {qid: [str]}, by?}
     "ask_decline",  # {ask_id, by?}
-    "ask_dismiss",  # {ask_id, by?}
+    "ask_dismiss",  # {ask_id, by?, reason?}
     "snapshot",  # {} — ask for a fresh welcome-equivalent projection
     "ping",  # {} — liveness probe; answered with {"op": "ack", ...}
     # v2 (attach + reaping): phone SSE subscriber transitions, daemon ->

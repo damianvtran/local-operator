@@ -225,9 +225,12 @@ STT_TOO_LARGE_ERROR = (
     "Try a shorter clip."
 )
 
-#: Memo for the lifted feature-flag dict (``capabilities.features``). The dict is
-#: a build-static server fact; the lazy import keeps starlette-time cost off
-#: daemon startup, and the memo keeps it off the list repaint path.
+#: Memo for the STATIC half of the lifted feature-flag dict
+#: (``capabilities.features``). Only ``server.features.static_feature_flags``
+#: is cached: those keys are build facts, while the live half (the
+#: ``remote_compute`` consent switch, the ``references`` kill switch) must be
+#: resolved on every negotiation. The lazy import keeps starlette-time cost off
+#: daemon startup, and the memo keeps the static half off the list repaint path.
 _FEATURE_FLAGS_MEMO: dict[str, Any] | None = None
 
 
@@ -2212,26 +2215,40 @@ def _optional_capabilities() -> dict[str, Any]:
 def _feature_flags() -> dict[str, Any]:
     """The lifted feature-flag dict for the mobile capabilities payload.
 
-    The reader is cf9f's ``server/features.py::feature_flags()``, imported
-    lazily (the module is server-tier; the daemon must stay importable without
-    it) and memoised for the reason every repaint would otherwise re-read it. An
-    absent module or symbol reads as an EMPTY dict — deliberately, because the
-    wire's contract for a missing feature is "this build does not have it", and
-    a mobile-side literal restating a server key (`input_mode: 1`) would be a
-    second spelling of a fact one hand owns. QA asserts equality against the
-    symbol, never a number.
+    The reader is cf9f's ``server/features.py``, imported lazily (the module is
+    server-tier; the daemon must stay importable without it). ONLY ITS STATIC
+    HALF IS MEMOISED -- every key there is a build fact -- while the live half
+    is resolved on EVERY call. Memoising the merged map instead is what pinned
+    ``remote_compute`` at the value it had on the first list request: a phone
+    kept advertising the remote destination after the operator switched it off,
+    and that switch is the consent gate for sending work off the device, so the
+    stale direction is the dangerous one (``features.py`` promises withdrawal at
+    the next negotiation).
+
+    An absent module or symbol reads as an EMPTY dict -- deliberately, because
+    the wire's contract for a missing feature is "this build does not have it",
+    and a mobile-side literal restating a server key (``input_mode: 1``) would be
+    a second spelling of a fact one hand owns. A failure in the live half fails
+    CLOSED the same way: an unreadable reader advertises no live key rather than
+    the last one it managed to read. QA asserts equality against the symbol,
+    never a number.
     """
     global _FEATURE_FLAGS_MEMO
     if _FEATURE_FLAGS_MEMO is None:
-        flags: dict[str, Any] = {}
         try:
-            from local_operator.server.features import feature_flags as reader
+            from local_operator.server.features import static_feature_flags as reader
 
-            flags = dict(reader())
+            _FEATURE_FLAGS_MEMO = dict(reader())
         except Exception:  # noqa: BLE001 — an absent/unreadable reader is "no features"
-            flags = {}
-        _FEATURE_FLAGS_MEMO = flags
-    return dict(_FEATURE_FLAGS_MEMO)
+            _FEATURE_FLAGS_MEMO = {}
+    flags = dict(_FEATURE_FLAGS_MEMO)
+    try:
+        from local_operator.server.features import live_feature_flags
+
+        flags.update(live_feature_flags())
+    except Exception:  # noqa: BLE001 — fail closed: advertise no live key at all
+        pass
+    return flags
 
 
 class _CapabilityCarrier(Protocol):
@@ -5016,7 +5033,8 @@ def build_app(daemon: MobileDaemon):
         ``capabilities`` rides HERE for the same single-source reason: the phone
         shows the voice mic iff ``stt.available`` is true, so both transports
         must carry the same answer. ``features`` is the lifted feature-flag dict
-        (:func:`_feature_flags` — lazy, memoised, empty when the server module is
+        (:func:`_feature_flags` — lazy; its static half memoised, its live half
+        resolved per negotiation; empty when the server module is
         absent; a missing key means "this build does not have it", never an
         error). ``stt`` is ``mobile.stt.stt_availability()``, TTL-cached inside
         that module so this payload's repaint cadence never becomes a
@@ -5916,7 +5934,7 @@ def build_app(daemon: MobileDaemon):
         relay's half of ``POST /v1/desktop/sessions/{session_id}/transfer``:
         same body (``{to, keep?, wait_s?, request_id?}``, ``to`` a device id or
         ``"local"``), same receipt (``phases``, ``locality``, ``owner_device``,
-        ``source_retired``, ``session_id``, ``new_session_id``, ``mode``,
+        ``state``, ``source_retired``, ``session_id``, ``new_session_id``, ``mode``,
         ``replayed``), and — where the two planes differ — this plane's
         vocabulary: refusals carry the move's own sentence in ``error`` and its
         machine ``code`` beside it, which is what ``web/src/api.ts`` reads, and
@@ -6723,6 +6741,7 @@ def build_app(daemon: MobileDaemon):
                         # remote door, which is what ``dismiss_cold`` records for it
                         # (the same word the live op's own door defaults to).
                         by=str(body.get("by") or ""),
+                        reason=str(body.get("reason") or "") or None,
                     )
                     if outcome.get("ok"):
                         # THE SCREEN IS REPAINTED HERE BECAUSE NOTHING ELSE WILL (UX
@@ -6794,6 +6813,9 @@ def build_app(daemon: MobileDaemon):
                             return await client.ask_revise(ask_id, answers, by=by)
                         if op == "ask_decline":
                             return await client.ask_decline(ask_id, by=by)
+                        dismiss_reason = str(body.get("reason") or "")
+                        if dismiss_reason:
+                            return await client.ask_dismiss(ask_id, by=by, reason=dismiss_reason)
                         return await client.ask_dismiss(ask_id, by=by)
                     finally:
                         client.close()

@@ -100,6 +100,10 @@ SUPPORTED_API_VERSION = 1
 #: name bytes nobody rendered).
 TEXT_CAP_BYTES = 2048
 
+#: Bound on the pre-enable feed-head read (review R2-2): the user's enable
+#: never waits longer than this on it; past it the seed falls back to cursor 0.
+SEED_HEAD_TIMEOUT_S = 3.0
+
 CONSENT_VERSION_V1 = "bridge_consent_v1"
 SCREENING_VERSION_V1 = "bridge-screen-v1"
 GUIDANCE_VERSION_V1 = "bridge-guidance-v1"
@@ -514,6 +518,11 @@ class AcceptedTexts:
 #: round trip, and a hung read must not hold a desktop route open.
 REQUEST_TIMEOUT_S = 30.0
 
+#: Read-timeout headroom over an events long-poll's ``wait``: the hub parks
+#: for up to ``wait`` seconds and answers on a ~1 s shared-DB poll, so the
+#: client must outlast the park by more than that plus transit.
+EVENTS_PARK_MARGIN_S = 15.0
+
 #: The most of an ERROR body this client will read. Error bodies are small and
 #: content-free; the bound exists so a misbehaving proxy cannot hand us a
 #: caller-sized buffer on the failure path.
@@ -914,6 +923,7 @@ class TeamBridgeClient:
         *,
         params: Mapping[str, Any] | None,
         body: Mapping[str, Any] | None,
+        timeout: float = REQUEST_TIMEOUT_S,
     ) -> httpx.Response:
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
@@ -921,7 +931,7 @@ class TeamBridgeClient:
         # lifetime — an injected-socket seam lands with it, deliberately not
         # half-built here (the architect's finding 5; tracked on the PR).
         async with httpx.AsyncClient(
-            timeout=REQUEST_TIMEOUT_S,
+            timeout=timeout,
             transport=self._transport,
             follow_redirects=False,
         ) as http:
@@ -1152,6 +1162,7 @@ class TeamBridgeClient:
         tenant_id: str,
         after: int | None = None,
         access: OAuthAccess | None = None,
+        wait: int | None = None,
     ) -> dict[str, Any] | None:
         """The §6.7 delivery substrate: ONE read; ``None`` = the 204 timeout.
 
@@ -1161,19 +1172,48 @@ class TeamBridgeClient:
         refresh-once discipline is mirrored here so the one special case does
         not lose it. Long-poll lifetime, reconnects and schedules are H4's;
         this is a one-shot primitive.
+
+        ``wait`` is the server-side PARK in seconds (the hub clamps it to 30).
+        WHY IT EXISTS: without it the hub answers a caught-up cursor at once,
+        and a loop that re-polls on every answer becomes a request storm — the
+        live E2E on local-operator-ui #1314 measured 124 reads in under 2 s and
+        then 429 ``rate_limited`` for 42 s. The read timeout is stretched past
+        the park (plus margin for the hub's ~1 s shared-DB poll and transit),
+        because a parked request outliving ``REQUEST_TIMEOUT_S`` would surface
+        as a client timeout instead of the server's ordinary 204. ``None``
+        keeps the plain-poll shape for one-shot callers.
+
+        ``after`` is sent whenever it is not ``None`` — INCLUDING 0. Cursor 0
+        is a real position (a fresh endpoint's), and an absent ``after`` is
+        the hub's "no cursor" arm, which answers a resync at the CURRENT head
+        and so skips the first message ever delivered.
         """
 
         pinned = access or await self.current_access()
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if after is not None:
             params["after"] = int(after)
+        timeout = REQUEST_TIMEOUT_S
+        if wait is not None:
+            params["wait"] = int(wait)
+            timeout = max(REQUEST_TIMEOUT_S, float(wait) + EVENTS_PARK_MARGIN_S)
         response = await self._dispatch(
-            "GET", "/messaging/events", pinned.access_token, params=params, body=None
+            "GET",
+            "/messaging/events",
+            pinned.access_token,
+            params=params,
+            body=None,
+            timeout=timeout,
         )
         if response.status_code == 401:
             refreshed = await self._refreshed_access(pinned)
             response = await self._dispatch(
-                "GET", "/messaging/events", refreshed.access_token, params=params, body=None
+                "GET",
+                "/messaging/events",
+                refreshed.access_token,
+                params=params,
+                body=None,
+                timeout=timeout,
             )
             if response.status_code == 401:
                 raise BridgeSignInRequired(SIGN_IN_SENTENCE)
@@ -1258,17 +1298,24 @@ class TeamBridgeClient:
             body["label"] = label
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
+        # R2-1: the seed position is read BEFORE the write (see _pre_enable_head).
+        head = (
+            await self._pre_enable_head(tenant_id=tenant_id, access=access)
+            if state == "active" and consent_version and tenant_id
+            else None
+        )
         result = await self._send("PUT", "/messaging/settings", body=body, access=access)
-        self._commit_explicit_enable(
+        await self._commit_explicit_enable(
             state=state,
             tenant_id=tenant_id,
             consent_version=consent_version,
             result=result,
             access=access,
+            head=head,
         )
         return result
 
-    def _commit_explicit_enable(
+    async def _commit_explicit_enable(
         self,
         *,
         state: str,
@@ -1276,6 +1323,7 @@ class TeamBridgeClient:
         consent_version: str | None,
         result: Mapping[str, Any],
         access: OAuthAccess | None,
+        head: int | None = None,
     ) -> None:
         """Commit the native receipt for THIS user's explicit settings enable.
 
@@ -1320,7 +1368,7 @@ class TeamBridgeClient:
                 commit_settings_enrollment,
             )
 
-            commit_settings_enrollment(
+            committed = commit_settings_enrollment(
                 config_dir=self._config_dir,
                 credential_id=credential_id,
                 account_id=account_id,
@@ -1331,6 +1379,74 @@ class TeamBridgeClient:
                 cos_session_id=(local.session or None) if local is not None else None,
             )
         except Exception:  # noqa: BLE001 - the server-side enable already succeeded
+            return
+        if committed and head is not None:
+            self._seed_feed_cursor(head)
+
+    async def _pre_enable_head(self, *, tenant_id: str, access: OAuthAccess | None) -> int | None:
+        """The hub's feed head for this account, read BEFORE the enable write.
+
+        WHY BEFORE (review R2-1). The seed (R1-2) starts a never-polled store
+        at the hub's head so a previously used endpoint does not replay up to
+        7 days of feed as fresh wakes. Read AFTER the PUT, a message landing
+        between the write and the read sat at or below the seeded cursor and
+        was never woken. Read before, any message that arrives once the
+        endpoint is enabled carries a HIGHER seq than the seed, so nothing is
+        skipped; at worst a message sent just before the read is replayed
+        (at-least-once, never lost).
+
+        HOW THE CASES SEPARATE. A brand-new endpoint does not exist yet, so the
+        hub refuses this read: no head, the cursor stays 0, and its first
+        message (seq 1) arrives (F2). A used endpoint (another machine, a
+        reinstall, a wiped store) answers its current head.
+
+        BOUNDED (review R2-2): the user's enable must not wait on it, so the
+        read is capped at :data:`SEED_HEAD_TIMEOUT_S`. A timeout, a refusal or
+        any failure answers ``None`` — the F2-safe cursor 0. Only asked when
+        this machine has no committed owner, i.e. when a commit can follow.
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None:
+            return None
+        try:
+            from local_operator.team_bridge.store import Store
+
+            if Store(config_dir).committed_owner_count() != 0:
+                return None
+            answer = await asyncio.wait_for(
+                self.events(tenant_id=tenant_id, access=access), timeout=SEED_HEAD_TIMEOUT_S
+            )
+        except Exception:  # noqa: BLE001 - no head is the F2-safe default (cursor 0)
+            return None
+        cursor = answer.get("cursor") if isinstance(answer, Mapping) else None
+        if isinstance(cursor, bool) or not isinstance(cursor, (int, str)):
+            return None
+        try:
+            return int(cursor)
+        except ValueError:
+            return None
+
+    def _seed_feed_cursor(self, head: int) -> None:
+        """Write the pre-enable head into the freshly committed store (R1-2/R2-1).
+
+        ``Store.seed_feed_cursor`` applies it only while the row is still the
+        untouched commit default, so it never moves a cursor a poll advanced.
+        Best-effort: a failure keeps cursor 0 (a replay, never a loss).
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None:
+            return
+        try:
+            from local_operator.team_bridge.store import Store
+            from local_operator.team_bridge.types import feed_seq as _feed_seq
+
+            store = Store(config_dir)
+            owner = store.active_owner()
+            if owner is not None:
+                store.seed_feed_cursor(owner, _feed_seq(head))
+        except Exception:  # noqa: BLE001 - a seed failure keeps the safe default (replay)
             return
 
     async def allowlist(self, *, tenant_id: str | None = None) -> dict[str, Any]:

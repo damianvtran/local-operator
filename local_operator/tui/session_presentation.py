@@ -1388,8 +1388,13 @@ def project_settled_rows(
         for block in transcript.blocks()
         if isinstance(block, (UserBlock, HubMessageBlock)) and block.navigation_anchor_id
     }
+    # Only adjacent duplicate bookkeeping for the SAME recorded identity may
+    # fold. A real turn resets this; identical prose is not account identity.
+    last_binding_notice: tuple[Any, ...] | None = None
     with batch:
         for message in history:
+            if getattr(message, "custom_type", None) != SESSION_BINDING_NOTICE_MESSAGE_TYPE:
+                last_binding_notice = None
             # A mounted replay consumes the actual quiet result at its original
             # ordered seat. Collected pages carry metadata to the list planner.
             replay_call_id = getattr(message, "tool_call_id", None)
@@ -1679,7 +1684,16 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()
+                identity = (
+                    text,
+                    details.get("provider"),
+                    details.get("owner_device"),
+                    details.get("credential_id"),
+                )
+                if text and identity == last_binding_notice:
+                    continue
                 if text:
+                    last_binding_notice = identity
                     self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
                     appended = True
                 continue

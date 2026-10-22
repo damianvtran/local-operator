@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import socket
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple, Protocol, Sequence
@@ -69,6 +70,10 @@ CAPABILITY_MCP_SERVERS = "mcp_servers"
 CAPABILITY_MODEL_CREDENTIAL = "model_credential"
 CAPABILITY_MCP_CREDENTIAL = "mcp_credential"
 CAPABILITY_TOOLING = "tooling"
+#: (h) memory resilience: whether the peer has the RAM/swap headroom to host
+#: offloaded sessions without the kernel OOM killer reaching its mesh relay
+#: (2026-10-21: a 2 GB, swapless cloud-node-1 OOM-killed its own relay).
+CAPABILITY_RESILIENCE = "resilience"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -94,7 +99,15 @@ CLASS_EQUIPMENT = "equipment"
 #: default until the operator decides — this set is a policy, never a
 #: per-call carve-out.
 NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
-    {CAPABILITY_MCP_CREDENTIAL, CAPABILITY_MCP_SERVERS, CAPABILITY_TOOLING}
+    {
+        CAPABILITY_MCP_CREDENTIAL,
+        CAPABILITY_MCP_SERVERS,
+        CAPABILITY_TOOLING,
+        # A small node IS onboarded; it is a resilience risk, said with its
+        # remedy, and the admission gate (``memory_guard.admission_check``) is
+        # its point of use.
+        CAPABILITY_RESILIENCE,
+    }
 )
 
 #: The fixed set of peer-side checks that exist even when no answer arrived —
@@ -109,6 +122,7 @@ PEER_SIDE_CHECKS: tuple[str, ...] = (
     CAPABILITY_MCP_SERVERS,
     CAPABILITY_MODEL_CREDENTIAL,
     CAPABILITY_TOOLING,
+    CAPABILITY_RESILIENCE,
 )
 
 #: Failure codes. OK rows carry no code; a code is a machine token for a
@@ -132,6 +146,8 @@ CODE_OBSERVED_FAILURE = "observed_failure"
 #: different acts, and a consumer branches on which one it must arrange.
 CODE_NOT_ON_PATH = "not_on_path"
 CODE_NOT_AUTHENTICATED = "not_authenticated"
+#: Resilience (2026-10-21): under :data:`RESILIENCE_MIN_RAM_MB` of RAM and no swap.
+CODE_LOW_MEMORY = "low_memory"
 
 #: Rows read from the peer's own state carry ``source: "peer"``; rows about a
 #: fact that could not be established carry ``"unknown"``. ``"local"`` is kept
@@ -1000,7 +1016,95 @@ def collect_peer_facts(
         "git": git_identity_fact(home),
         "tooling": tooling_fact(home),
         "operator": operator_fact(),
+        "memory": memory_fact(),
     }
+
+
+#: The RAM below which a swapless member is reported as a resilience risk. 4 GB
+#: is the measured line, not a guess: cloud-node-1 at 2 GB with no swap OOM-killed
+#: its own relay running ordinary session work plus one Next.js build, and the
+#: same work fits on this family's 8 GB hosts with headroom.
+RESILIENCE_MIN_RAM_MB = 4096
+
+
+def memory_fact() -> dict[str, Any]:
+    """Total RAM and swap on THIS device, in MB, or ``None`` per unknown field.
+
+    Read through ``memory_guard``'s own probes so the readiness row and the
+    admission gate cannot disagree about what the host has. Swap TOTAL (not
+    free) on Linux, because the question is "is there any swap to absorb a
+    burst", which a momentarily full swap does not answer.
+    """
+    from local_operator import memory_guard
+
+    total = memory_guard._total_memory_mb()
+    swap_total: int | None = None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("SwapTotal:"):
+                    swap_total = int(line.split()[1]) // 1024
+                    break
+    except (OSError, ValueError):
+        swap_total = None
+    if swap_total is None and sys.platform == "darwin":
+        # macOS grows swap on demand (dynamic_pager), so a Mac is never
+        # "swapless" in the sense that kills a Linux node; say so with a value
+        # that cannot trip the rule rather than leave it unknown.
+        swap_total = -1
+    return {"total_mb": total, "swap_total_mb": swap_total}
+
+
+def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """(h) Can this peer host offloaded sessions without OOM-killing its relay?"""
+    fact = facts.get("memory")
+    total = fact.get("total_mb") if isinstance(fact, Mapping) else None
+    swap = fact.get("swap_total_mb") if isinstance(fact, Mapping) else None
+    if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+        # An older peer does not carry the fact; that is not a risk claim.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_RESILIENCE,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry its memory size",
+            source=SOURCE_UNKNOWN,
+        )
+    swapless = isinstance(swap, int) and not isinstance(swap, bool) and swap == 0
+    if total < RESILIENCE_MIN_RAM_MB and swapless:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_RESILIENCE,
+            ok=False,
+            code=CODE_LOW_MEMORY,
+            detail=(
+                f"{peer_label} has {total} MB of RAM and no swap: a few concurrent "
+                "sessions plus one build can exhaust it, and the kernel OOM killer "
+                "may then end its mesh relay and take every session there off the mesh"
+            ),
+            remedies=[
+                f"on {peer_label}, add a swap file (for example 2-4 GB) or move it to a "
+                f"host with at least {RESILIENCE_MIN_RAM_MB // 1024} GB of RAM",
+                f"run `lop update` on {peer_label} so its relay unit carries "
+                "OOMScoreAdjust and its runtimes refuse to start when memory is short",
+            ],
+            source=SOURCE_PEER,
+            observed={"total_mb": total, "swap_total_mb": swap},
+        )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_RESILIENCE,
+        ok=True,
+        detail=(
+            f"{peer_label} has {total} MB of RAM"
+            + ("" if not isinstance(swap, int) or swap < 0 else f" and {swap} MB of swap")
+        ),
+        source=SOURCE_PEER,
+        observed={"total_mb": total, "swap_total_mb": swap},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3326,6 +3430,7 @@ def _peer_checks(
         )
         selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))
+    rows.append(resilience_row(member, facts, peer_label=peer_label))
     rows.extend(mcp_credential_rows(member, facts, viewer=viewer, peer_label=peer_label))
     return rows
 

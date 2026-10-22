@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from local_operator.asks import render, store
 
 
@@ -411,3 +413,95 @@ def test_the_op_constants_are_the_sentences_the_queue_emits():
     assert "no answers" in render.WITHDRAW_MOOT_TAKES_NO_ANSWERS
     assert "secret" in render.WITHDRAW_SECRET_REFUSAL
     assert "card" in render.WITHDRAW_SECRET_REFUSAL
+
+
+# ---------------------------------------------------------------------------
+# Operator dismissal of an OPEN ask (design §15)
+# ---------------------------------------------------------------------------
+
+
+def _dismiss_record(status: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "ask_id": "a-9",
+        "status": status,
+        "questions": [{"id": "q1", "prompt": "Which?", "options": []}],
+        **extra,
+    }
+
+
+def test_the_refusal_table():
+    from local_operator.asks import store
+
+    assert render.dismiss_refusal(_dismiss_record(store.STATUS_TIMED_OUT)) == ""
+    assert render.dismiss_refusal(_dismiss_record(store.STATUS_TIMED_OUT), agent_running=True) == ""
+    assert render.dismiss_refusal(_dismiss_record(store.STATUS_OPEN)) == ""
+    assert (
+        render.dismiss_refusal(_dismiss_record(store.STATUS_OPEN), agent_running=True)
+        == render.DISMISS_AGENT_RUNNING
+    )
+    assert render.dismiss_refusal(_dismiss_record(store.STATUS_DISMISSED)) == (
+        render.DISMISS_ALREADY_DISMISSED
+    )
+    assert (
+        render.dismiss_refusal(_dismiss_record(store.STATUS_LATE))
+        == "this ask was already answered."
+    )
+    assert (
+        render.dismiss_refusal(_dismiss_record(store.STATUS_DECLINED))
+        == "you already declined this."
+    )
+    assert render.dismiss_refusal(None) == render.refusal_copy(None)
+    assert not hasattr(render, "DISMISS_NOT_LAPSED")
+
+
+def test_a_bridge_request_is_dismissible_only_after_it_times_out():
+    from local_operator.asks import store
+
+    bridge = {"ask_id": "a-9", "questions": [{"id": "q1", "question_id": "qid-1"}]}
+    assert render.dismiss_refusal({**bridge, "status": store.STATUS_OPEN}) == (
+        render.DISMISS_BRIDGE_OPEN
+    )
+    assert render.dismiss_refusal({**bridge, "status": store.STATUS_TIMED_OUT}) == ""
+
+
+@pytest.mark.parametrize(
+    ("reason", "needle"),
+    [
+        ("answered_in_chat", "settled in the conversation"),
+        ("moot", "no longer needed"),
+        (None, "no longer needed"),
+    ],
+)
+def test_the_dismissal_text_per_reason(reason: str | None, needle: str):
+    text = render.response_text(_dismiss_record("dismissed", dismissed_reason=reason))
+    assert needle in text
+    assert "a-9" in text
+    # Never the answer report: a dismissal has no answers to render.
+    assert "answered" not in text.lower().replace("answered_in_chat", "")
+    assert "Which?" not in text
+
+
+@pytest.mark.parametrize("reason", ["answered_in_chat", "moot"])
+def test_the_secret_dismissal_names_no_value(reason: str):
+    record = _dismiss_record("dismissed", dismissed_reason=reason)
+    record["questions"] = [{"id": "q1", "prompt": "Key?", "secret": True}]
+    text = render.response_text(record)
+    assert text.startswith("The user dismissed the credential ask a-9 without entering a value")
+    assert render.DISMISS_REASON_LABELS[reason] in text
+    assert "Key?" not in text
+
+
+def test_an_open_relay_is_dismissible_only_after_it_times_out():
+    """#2520 relays stay timed-out-only: an open one is answered at its origin, and a
+    timed-out one is the user closing a lapsed card, as on main."""
+    from local_operator.asks import store
+
+    relay = {"ask_id": "a-r", "questions": [], "relay": {"session_id": "s", "ask_id": "a"}}
+    assert render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}) == (
+        render.DISMISS_RELAY_OPEN
+    )
+    assert (
+        render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}, agent_running=False)
+        == render.DISMISS_RELAY_OPEN
+    )
+    assert render.dismiss_refusal({**relay, "status": store.STATUS_TIMED_OUT}) == ""

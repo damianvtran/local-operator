@@ -848,6 +848,28 @@ MAX_REASONING_ECHO_FILL_RETRIES = 1
 MAX_REASONING_ECHO_RETRIES = 1
 
 
+def _describe_stream_failure(exc: BaseException) -> str:
+    """The diagnosable text for a stream that raised, attribution included.
+
+    Used for the LOG line, not for ``AgentEndEvent.error``: that field is read
+    by ``incidents.classify_incident`` and stays the kind label plus the
+    provider's own words. A log reader needs one sentence that names the model
+    that actually failed, because the log has no sidebar, no incident card and
+    no session model to fall back on — which is how a log line about an OpenAI
+    refusal came to be read as Anthropic's problem.
+
+    ``ProviderError.describe()`` writes that sentence and then repeats
+    ``str(exc)`` — the kind, the status and the provider's words — UNCHANGED.
+    Read through ``getattr`` because this module does not import ``providers``
+    (the loop is deliberately downstream of it); a plain ``httpx`` error or a
+    tool defect takes the old ``str()`` path untouched.
+    """
+    describe = getattr(exc, "describe", None)
+    if callable(describe):
+        return str(describe())
+    return str(exc)
+
+
 def _is_reasoning_echo_rejection(error: str | None) -> bool:
     """Did the provider refuse this request for a missing reasoning echo?"""
     if not error:
@@ -1671,7 +1693,11 @@ def _scrub_raw_arguments(raw: str, redact: Callable[[str], str]) -> str:
     return redact(_scrub_json_string_values(raw, redact))
 
 
-def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | None) -> Message:
+def _scrub_history_arguments(
+    message: Message,
+    redact: Callable[[str], str] | None,
+    redact_arguments: Callable[[str], str] | None = None,
+) -> Message:
     """The copy of an assistant turn that history STORES and REPLAYS.
 
     **Why a copy rather than a scrub in place.** ``tool_calls[].arguments`` is
@@ -1694,13 +1720,26 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     paths never carry tool calls, so a scrubbed copy is only ever produced where
     that check is not in play — but returning a copy unconditionally would leave
     a refused turn in history the moment one of them grew a call.
+
+    **ARGUMENTS USE THEIR OWN PASS** (``redact_arguments``) where the session
+    provides one. This text is CODE: the model wrote it, the harness executes it,
+    and the retained copy is replayed to the provider on every later request — so a
+    shape heuristic that rewrites it rewrites the program the model then reads back
+    and copies. Session 6ccea512c372 measured exactly that: a Python keyword masked
+    as an assignment value in a ``bash`` call, replayed, and copied into new
+    ``eval`` cells that died with ``NameError``. The argument pass keeps the
+    exact-value scrub and a high-confidence shape floor, and skips the
+    name-driven guesses. ``redact`` remains the fallback for a caller that
+    supplies only the result hook, so a store outside this tree keeps its current
+    behaviour rather than losing argument scrubbing entirely.
     """
     # The executor still holds the original assistant/calls. Only the retained
     # copy changes, following this function's existing secret-argument contract.
     from local_operator.memory_privacy import retained_message
 
     message = retained_message(message)
-    if redact is None or not message.tool_calls:
+    scrub = redact_arguments if redact_arguments is not None else redact
+    if scrub is None or not message.tool_calls:
         return message
     calls: list[ToolCall] = []
     changed = False
@@ -1710,9 +1749,9 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
         # carries it), and a hit found here must be reported with the call it
         # came from rather than as an anonymous one.
         with tool_source(call.name, call.arguments):
-            arguments, arguments_changed = _scrub_argument_value(call.arguments, redact)
+            arguments, arguments_changed = _scrub_argument_value(call.arguments, scrub)
             raw = (
-                _scrub_raw_arguments(call.raw_arguments, redact)
+                _scrub_raw_arguments(call.raw_arguments, scrub)
                 if isinstance(call.raw_arguments, str)
                 else None
             )
@@ -2232,6 +2271,12 @@ class AgentLoop:
                     turn_retryable_interruption = False
                     turn_attempted_selector: "ModelSpec | None" = None
                     nameless_call_drops = 0
+                    # Attribution of THIS call's failure: reset per call for the
+                    # same reason as every other turn-local above. A stale pair
+                    # from a previous iteration would name a model that did not
+                    # produce this end event.
+                    turn_failing_model = ""
+                    turn_failover_from = ""
                     # The spec this call was BUILT with, which is not
                     # ``config.model`` whenever the host resolves per call. The
                     # echo fill below is gated on what was actually sent.
@@ -2275,6 +2320,12 @@ class AgentLoop:
                             turn_retryable_interruption = event.retryable_interruption
                             turn_attempted_selector = event.attempted_selector
                             nameless_call_drops = event.nameless_call_drops
+                            # WHICH model failed, carried to the end event so the
+                            # session's incident and the transcript name it —
+                            # never the model the user selected. Empty on a
+                            # clean turn and on any error with no provenance.
+                            turn_failing_model = event.failure_selector
+                            turn_failover_from = event.failure_failover_from
                         else:
                             yield event
                     if assistant is None:
@@ -2477,7 +2528,9 @@ class AgentLoop:
                                 # ``_scrub_history_arguments`` for why the
                                 # executor keeps the original.
                                 stored = _scrub_history_arguments(
-                                    assistant, config.redact_tool_result
+                                    assistant,
+                                    config.redact_tool_result,
+                                    config.redact_tool_arguments,
                                 )
                                 context.messages.append(stored)
                                 new_messages.append(stored)
@@ -2676,7 +2729,9 @@ class AgentLoop:
                         # omits it must not blank a figure the previous call
                         # (or the host's seed) supplied.
                         run_context_tokens = int(assistant.usage.context_tokens)
-                    stored = _scrub_history_arguments(assistant, config.redact_tool_result)
+                    stored = _scrub_history_arguments(
+                        assistant, config.redact_tool_result, config.redact_tool_arguments
+                    )
                     context.messages.append(stored)
                     new_messages.append(stored)
 
@@ -2912,6 +2967,8 @@ class AgentLoop:
                             messages=new_messages,
                             aborted=aborted,
                             error=stream_error,
+                            failing_model=turn_failing_model,
+                            failover_from=turn_failover_from,
                             generation=generation,
                         )
                         self._discard_pending_custom(pending)
@@ -3774,6 +3831,15 @@ class AgentLoop:
         #: the event field for why it is an eligibility, not a cause.
         retryable_interruption = False
         attempted_selector: "ModelSpec | None" = None
+        #: WHICH model produced ``error``, and what it failed over from, when
+        #: the provider layer knows. The failover controller stamps this on the
+        #: ``ProviderError`` it raises (see ``ProviderError.provenance``); the
+        #: loop only carries it. Both empty means "not known here" — a
+        #: synthesised error, or a build whose driver does not stamp — and
+        #: every consumer then falls back to its previous behaviour rather
+        #: than guessing the session's model.
+        failure_selector = ""
+        failure_failover_from = ""
 
         yield TurnStartEvent()
         yield MessageStartEvent(message=assistant)
@@ -4205,6 +4271,26 @@ class AgentLoop:
                     attempted_selector = (
                         event.attempted_selector if retryable_interruption else None
                     )
+                    if error:
+                        # IN-BAND FAILURES. A provider can END the stream with a
+                        # refusal or an ``error`` finish instead of raising, and
+                        # those are how real clients report a content filter
+                        # (``clients.py`` composes the refusal text on exactly
+                        # this frame). No exception exists to carry provenance,
+                        # so the walk stamps the attempt's own selector here.
+                        #
+                        # READ THE STAMP, not ``model``: ``StreamModelEvent`` is
+                        # published only when the budget changed or the
+                        # credential is OAuth, so on an ordinary API-key hop
+                        # ``model`` is still the SELECTION — which is the defect
+                        # (agent review round 2). No stamp means UNKNOWN, and the
+                        # session then falls back to its old behaviour rather
+                        # than to a guess dressed as provenance.
+                        stamped_selector = getattr(event, "failing_selector", None)
+                        if stamped_selector is not None:
+                            failure_selector = (
+                                f"{stamped_selector.provider}/{stamped_selector.model_id}"
+                            )
                     if isinstance(provider_payload, dict):
                         recovery = provider_payload.get("input_refusal_recovery")
                         if isinstance(recovery, dict):
@@ -4248,10 +4334,23 @@ class AgentLoop:
             # extra information. Unexpected types keep the stack — for a defect
             # the frames are the only clue there is.
             logger.warning(
-                "model stream failed: %s", exc, exc_info=not isinstance(exc, RenderedStreamError)
+                "model stream failed: %s",
+                _describe_stream_failure(exc),
+                exc_info=not isinstance(exc, RenderedStreamError),
             )
             stop_reason = "aborted" if (signal is not None and signal.aborted) else "error"
+            # The CLASSIFIED text stays exactly what it was: the kind label
+            # plus the provider's own words. Provenance rides BESIDE it, on the
+            # end event, because ``incidents.classify_incident`` reads this
+            # string and a harness-authored prefix is how this file has already
+            # misdiagnosed itself once (see the "provider error" note there).
             error = error or str(exc)
+            # Read off the exception, never re-derived from the request: after a
+            # failover the request's model is the SELECTION, and the whole bug
+            # this carries the fix for was a refusal by one provider reported
+            # against the model the user chose.
+            failure_selector = getattr(exc, "selector", "") or ""
+            failure_failover_from = getattr(exc, "failover_from", "") or ""
             # A stream the NETWORK cut, as opposed to one a provider failed. Read
             # off the exception rather than re-classified here: the single
             # definition lives in ``providers.failover.is_connectivity_loss`` and
@@ -4390,6 +4489,8 @@ class AgentLoop:
             attempted_selector=attempted_selector,
             model=request_model,
             nameless_call_drops=nameless_call_drops,
+            failure_selector=failure_selector,
+            failure_failover_from=failure_failover_from,
         )
 
     @staticmethod
@@ -6598,3 +6699,10 @@ class _ModelTurnResult:
     #: row to replay for such a call, so only the run loop can tell the model;
     #: carried out for the recovery in ``run``.
     nameless_call_drops: int = 0
+    #: ``provider/model`` of the target that produced ``error``, and the
+    #: selector the walk started from when that target was not the selection.
+    #: Empty when unknown (a synthesised error, or nothing raised). See
+    #: ``ProviderError.provenance``; the run loop copies both onto the end
+    #: event so the session's incident names the model that actually failed.
+    failure_selector: str = ""
+    failure_failover_from: str = ""

@@ -337,6 +337,7 @@ def render_systemd_unit(
     restart: str = "on-failure",
     restart_sec: int = 5,
     kill_mode: str | None = None,
+    oom_score_adjust: int | None = None,
     separate_sections: bool = True,
     wanted_by: str = "default.target",
 ) -> str:
@@ -354,6 +355,9 @@ def render_systemd_unit(
     predates the parameter renders byte-identically; the relay is its one
     caller today, and the reasoning for its value lives at the use site
     (``network/relay.render_systemd``) and beside the emit below.
+
+    ``oom_score_adjust`` follows the same rule: emitted only when a daemon names
+    one (the relay, today), so every other unit renders byte-identically.
 
     ``separate_sections=False`` exists for the tunnel unit, whose layout
     predates this function; blank lines between sections are cosmetic to
@@ -390,6 +394,12 @@ def render_systemd_unit(
         # this line removes. A stop/kill leaves the runtimes alive by design;
         # sessions are ended through their own verbs.
         lines.append(f"KillMode={kill_mode}")
+    if oom_score_adjust is not None:
+        # The value's reasoning lives at the use site (``network/relay.py``'s
+        # ``RELAY_OOM_SCORE_ADJUST``): under a USER manager only values at or
+        # above the manager's ``oom_score_adj_min`` take effect, and a lower one
+        # is dropped by systemd without failing the unit.
+        lines.append(f"OOMScoreAdjust={int(oom_score_adjust)}")
     lines += list(post_lines)
     if separate_sections:
         lines.append("")

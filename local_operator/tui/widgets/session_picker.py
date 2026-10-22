@@ -3234,6 +3234,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   that changes nothing here: this signature decides whether the RESULTS
     #:   list repaints, and the pane is repainted from the selected row on
     #:   every cursor move regardless.
+    #: * `team` / `agent` carry a REMOTE row's binding as its owner reported
+    #:   it, for the desktop sidebar's team badge (local rows leave them empty;
+    #:   their binding is read at projection time). Nothing on THIS screen
+    #:   paints them, so comparing them would repaint on a change no pixel
+    #:   reflects. THE DAY A TUI SURFACE RENDERS THEM, they move into
+    #:   `_SIGNATURE_FIELDS` — the rule `degraded`'s entry above states.
     _SIGNATURE_EXCLUDED = (
         "mtime",
         "created_at",
@@ -3241,6 +3247,8 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "degraded",
         "last_user_at",
         "opened_by",
+        "team",
+        "agent",
     )
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form

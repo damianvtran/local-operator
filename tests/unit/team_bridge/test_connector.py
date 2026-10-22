@@ -35,6 +35,7 @@ from local_operator.team_bridge.types import (
     InboxCursor,
     OwnerSnapshot,
     ScreeningReceipt,
+    feed_seq,
 )
 
 
@@ -200,7 +201,7 @@ def test_loop_reissue_and_cursor_persistence(tmp_path, monkeypatch) -> None:
     store, owner = _enroll(tmp_path)
     calls: list[dict[str, Any]] = []
 
-    async def fake_events(owner_, *, config_dir, access, after=None, client=None):
+    async def fake_events(owner_, *, config_dir, access, after=None, wait=None, client=None):
         calls.append({"after": after})
         if len(calls) == 1:
             return None  # 204 → reissue
@@ -210,7 +211,9 @@ def test_loop_reissue_and_cursor_persistence(tmp_path, monkeypatch) -> None:
     first = asyncio.run(
         loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
-    assert first["reissued"] is True and calls[0]["after"] is None
+    # A fresh enrolment's cursor is 0 and is SENT as 0 (live E2E F2): an
+    # omitted ``after`` is the hub's no-cursor arm and skips the first message.
+    assert first["reissued"] is True and calls[0]["after"] == 0
     # Simulate the durable cursor having advanced (as record_feed_batch would):
     with store_mod.Store(tmp_path)._connect() as conn:  # noqa: SLF001 — test introspection
         store_mod.Store(tmp_path)._init(conn)  # noqa: SLF001
@@ -335,6 +338,9 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
     monkeypatch.setattr(wake_mod, "screen_item", fake_screen)
     monkeypatch.setattr(wake_mod, "ack_read", fake_ack)
     monkeypatch.setattr(wake_mod, "deliver_wake", fake_deliver)
+    # These cases model an ENGAGED designated session; F8's unused-session
+    # gate has its own cases below.
+    monkeypatch.setattr(wake_mod, "engagement_hold", lambda designation, config_dir: "")
     _enable_bridge(tmp_path)  # S-8a: the fence reads the DISK config
     return record, body
 
@@ -872,6 +878,7 @@ def test_cancel_during_retry_keeps_claim_releasable(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(pull_mod, "message", fake_message)
     monkeypatch.setattr(wake_mod, "fetch_item", fake_fetch)
+    monkeypatch.setattr(wake_mod, "engagement_hold", lambda designation, config_dir: "")
     monkeypatch.setattr(wake_mod, "screen_item", slow_screen)
     # The spine sits BEHIND the fence, so this case must enable the feature —
     # and it BOUNDS the wait: a refusal here used to hang the suite instead of
@@ -952,3 +959,458 @@ def test_deliver_wake_selects_branch_by_typed_history_predicate(tmp_path, monkey
         "text": "payload-2",
     }
     assert calls["cold_errand"].custom_type == "team_bridge_message"
+
+
+# -- Live E2E findings (local-operator-ui #1314 QA): the connector as shipped ---
+# never delivered to an agent. Each case below failed on main before its fix.
+
+
+def test_first_poll_after_enrolment_sends_cursor_zero(tmp_path, monkeypatch) -> None:
+    """F2: a fresh enrolment's stored cursor is 0, and 0 is a POSITION.
+
+    Omitting it reads as "no cursor", which the hub answers with the resync
+    arm at the CURRENT head — so the first message ever delivered to a fresh
+    endpoint was skipped and never woke the agent.
+    """
+
+    store, owner = _enroll(tmp_path)
+    calls: list[Any] = []
+
+    async def fake_events(owner_, *, config_dir, access, after=None, wait=None, client=None):
+        calls.append({"after": after, "wait": wait})
+        return None
+
+    monkeypatch.setattr(pull_mod, "events", fake_events)
+    asyncio.run(
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    assert calls[0]["after"] == 0 and calls[0]["after"] is not None
+    # F1: every connector read is the long poll, never a plain poll.
+    assert calls[0]["wait"] == loop_mod.EVENTS_WAIT_S
+
+
+@pytest.mark.parametrize("reissued", [False, True], ids=["instant-200", "instant-204"])
+def test_run_forever_never_hot_loops_on_instant_answers(tmp_path, monkeypatch, reissued) -> None:
+    """F1: a hub that answers every read at once (resync arms, a busy feed, a
+    proxy that strips the park) must not turn the loop into a request storm.
+    Measured on main: 124 reads in under 2 s, then 429 rate_limited. The 204
+    arm is review R1-1: a proxy stripping ``wait`` makes every caught-up poll
+    an INSTANT 204, which the bare 0.2 s reissue delay let through at
+    ~300/min against the hub's 120/min."""
+
+    store, owner = _enroll(tmp_path)
+    polls: list[float] = []
+    stop = asyncio.Event()
+
+    async def instant_iteration(owner_, **kwargs):
+        polls.append(time.monotonic())
+        # The fake ends the loop itself after a storm-sized count: the unfixed
+        # loop never yields to the event loop, so a timer-driven stop could
+        # never fire and the test would spin without bound.
+        if len(polls) >= 50:
+            stop.set()
+        return {"events": 0, "reissued": reissued, "resync": not reissued, "handled": []}
+
+    async def access_provider():
+        return _access(owner)
+
+    monkeypatch.setattr(loop_mod, "run_iteration", instant_iteration)
+
+    async def drive() -> None:
+        task = asyncio.create_task(
+            loop_mod.run_forever(
+                owner,
+                config_dir=tmp_path,
+                auth_store=None,
+                access_provider=access_provider,
+                stop=stop,
+            )
+        )
+        await asyncio.sleep(1.5)
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(drive())
+    assert 1 <= len(polls) <= 3, len(polls)
+
+
+def test_failure_delay_honours_retry_after_and_stays_bounded() -> None:
+    """F1: a 429 names its own wait; re-polling sooner only extends the
+    refusal. The server's value wins over a shorter local backoff, is never
+    shorter than the backoff, and is capped so a hostile header cannot park
+    the connector for hours."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    limited = BridgeRefusal("rate_limited", "slow down", http_status=429, retry_after_seconds=42)
+    assert loop_mod._failure_delay(limited, 1.0) == 42.0
+    assert loop_mod._failure_delay(limited, 60.0) == 60.0
+    huge = BridgeRefusal("rate_limited", "x", http_status=429, retry_after_seconds=10**9)
+    assert loop_mod._failure_delay(huge, 1.0) == loop_mod.RETRY_AFTER_MAX_S
+    assert loop_mod._failure_delay(RuntimeError("boom"), 4.0) == 4.0
+
+
+def test_screen_item_hands_screening_the_production_status_source(tmp_path, monkeypatch) -> None:
+    """F3: without a status source every screen holds ``policy_stale`` before
+    any model call. The connector must pass the module's OWN sealed fetcher
+    (the H1 client's status read over the owner's pinned row), not none."""
+
+    from local_operator.team_bridge import scheduler as scheduler_mod
+
+    store, owner = _enroll(tmp_path)
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    def fake_default_status_fetcher(*, config_dir, owner, transport=None):
+        captured["factory"] = (config_dir, owner)
+        return sentinel
+
+    async def fake_cycle(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(scheduler_mod, "default_status_fetcher", fake_default_status_fetcher)
+    monkeypatch.setattr(scheduler_mod, "run_screening_cycle", fake_cycle)
+    asyncio.run(wake_mod.screen_item(owner, _item(), config_dir=tmp_path, auth_store=None))
+    assert captured["status_fetcher"] is sentinel
+    assert captured["factory"] == (tmp_path, owner)
+
+
+def test_connector_entry_point_builds_the_config_rooted_credential_store(
+    tmp_path, monkeypatch
+) -> None:
+    """F4: the entry point started with ``auth_store=None``, so the screener
+    found no provider key and held every message as ``provider_error``."""
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.team_bridge.connector import __main__ as main_mod
+
+    _enroll(tmp_path)
+    captured: dict[str, Any] = {}
+
+    async def fake_run_forever(owner, *, config_dir, auth_store, access_provider, **kwargs):
+        captured["auth_store"] = auth_store
+        captured["config_dir"] = config_dir
+
+    monkeypatch.setattr(loop_mod, "run_forever", fake_run_forever)
+    assert main_mod.main(["--config-dir", str(tmp_path)]) == 0
+    auth_store = captured["auth_store"]
+    assert isinstance(auth_store, AuthStore)
+    # The SAME root as the enrollment: config_dir alone does not relocate the
+    # database, so the explicit db_path is what makes this the right store.
+    assert auth_store._db_path == tmp_path / "auth.db"  # noqa: SLF001 — the root is the contract
+
+
+def test_bare_conversation_hold_never_reaches_the_pair_spine(tmp_path, monkeypatch) -> None:
+    """F5: screening records a ``provider_error`` hold under the bare
+    ``bcmsg_`` id. The retry handed it to the PAIR spine, which asked the hub
+    for a pair message that does not exist and raised on every iteration —
+    BEFORE the poll, so the whole connector stalled. The conversation's own
+    encoded-ref row is the re-drive authority; the bare row is retired."""
+
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    store, owner = _enroll(tmp_path)
+    ref = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+    ).validated()
+    store.persist_hold(owner, "bcmsg_abcdef01", "provider_error", retry_at=time.time() - 5)
+    store.persist_hold(owner, ref.encode(), "provider_error", retry_at=time.time() - 5)
+    pair_calls: list[str] = []
+    conversation_calls: list[str] = []
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        pair_calls.append(message_id)
+        from local_operator.team_bridge.client import BridgeRefusal
+
+        raise BridgeRefusal("message_not_found", "This message does not exist.", http_status=404)
+
+    async def conversation_spine(owner_, conversation_ref, **kwargs):
+        conversation_calls.append(conversation_ref.message_id)
+        return {"action": "delivered", "message_id": conversation_ref.message_id}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    monkeypatch.setattr(loop_mod, "handle_conversation_available", conversation_spine)
+    result = asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    assert pair_calls == []
+    assert conversation_calls == ["bcmsg_abcdef01"]
+    assert store.screening_hold(owner, "bcmsg_abcdef01") is None
+    assert {o["message_id"]: o["action"] for o in result["outcomes"]}["bcmsg_abcdef01"] == (
+        "retired"
+    )
+
+
+def test_a_failing_redrive_never_escapes_the_retry_pass(tmp_path, monkeypatch) -> None:
+    """F5 (bound): one hold's re-drive raising must not abort the iteration
+    before its poll. A message the hub says is gone (404) is terminal and its
+    row is retired; any other failure is held again on the bounded backoff."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    store, owner = _enroll(tmp_path)
+    store.persist_hold(owner, "bmsg_gone", "provider_error", retry_at=time.time() - 5)
+    store.persist_hold(owner, "bmsg_flaky", "provider_error", retry_at=time.time() - 5)
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        if message_id == "bmsg_gone":
+            raise BridgeRefusal(
+                "message_not_found", "This message does not exist.", http_status=404
+            )
+        raise RuntimeError("transport hiccup")
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    result = asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    actions = {o["message_id"]: o["action"] for o in result["outcomes"]}
+    assert actions == {"bmsg_gone": "retired", "bmsg_flaky": "hold"}
+    assert store.screening_hold(owner, "bmsg_gone") is None
+    flaky = store.screening_hold(owner, "bmsg_flaky")
+    assert flaky is not None and flaky["retry_at"] > time.time()
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+
+# -- Live E2E F8: a designated chief of staff its owner has never messaged ------
+
+
+def _f8_enroll(tmp_path: Path, consent_version: str, *, enabled: bool = True) -> OwnerSnapshot:
+    """A committed enrollment with the given ACCEPTED consent and a designated
+    session that has no transcript at all (never engaged)."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    store = Store(tmp_path)
+    store.commit_enrollment(
+        OWNER, OwnerReceipt(consent_version, "ref-1"), cos_session_id="sess_cos"
+    )
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": enabled}}}), encoding="utf-8"
+    )
+    return OWNER
+
+
+def _engage_transcript(tmp_path: Path, session_id: str = "sess_cos") -> None:
+    """Give the session one real user turn on disk (what the owner's first message writes)."""
+
+    from local_operator.session.runtime.engagement import TRANSCRIPT_FILENAME
+
+    directory = tmp_path / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    row = {"type": "message", "payload": {"kind": "message", "role": "user", "content": "hi"}}
+    (directory / TRANSCRIPT_FILENAME).write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "version,engaged,expected",
+    [
+        ("bridge_consent_v1", False, "open_chief_of_staff"),  # v1 + never engaged: hold
+        ("bridge_consent_v1", True, ""),  # v1 + engaged: the F1-F6 path
+        ("bridge_consent_v2", False, ""),  # v2 + never engaged: may engage
+        ("bridge_consent_v3", False, "open_chief_of_staff"),  # unknown: never inferred
+        ("bridge_consent_v10", False, "open_chief_of_staff"),  # not "v2 or later" by order
+    ],
+)
+def test_engagement_hold_is_gated_on_the_accepted_consent(
+    tmp_path, version, engaged, expected
+) -> None:
+    owner = _f8_enroll(tmp_path, version)
+    if engaged:
+        _engage_transcript(tmp_path)
+    assert Store(tmp_path).designated_session_for(owner) == "sess_cos"
+    assert wake_mod.engagement_hold("sess_cos", tmp_path) == expected
+
+
+def test_engagement_never_trusts_a_disabled_feature_or_another_session(tmp_path) -> None:
+    from local_operator.team_bridge.engagement import designated_session_may_be_engaged
+
+    _f8_enroll(tmp_path, "bridge_consent_v2")
+    assert designated_session_may_be_engaged("sess_cos", config_dir=tmp_path) is True
+    # Not the designated session: never an exception.
+    assert designated_session_may_be_engaged("sess_other", config_dir=tmp_path) is False
+    # No store at all (another machine root): refused, and no store is created.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert designated_session_may_be_engaged("sess_cos", config_dir=empty) is False
+    assert not (empty / "team_bridge").exists()
+    # Feature switched off on disk: refused.
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": False}}}), encoding="utf-8"
+    )
+    assert designated_session_may_be_engaged("sess_cos", config_dir=tmp_path) is False
+
+
+def test_v1_unengaged_conversation_message_holds_visibly_and_never_wakes(
+    tmp_path, monkeypatch
+) -> None:
+    """F8, v1: the card is held under the visible code before ANY spend — no
+    body fetch, no screen, no admit, no wake — and the loop keeps a bounded
+    retry row so it is delivered once the owner sends the session a message."""
+
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    calls: list[str] = []
+
+    async def must_not_run(*args, **kwargs):
+        calls.append("called")
+        raise AssertionError("no spend before the engagement gate")
+
+    monkeypatch.setattr(conversation_mod, "_wire_for", must_not_run)
+    monkeypatch.setattr(conversation_mod, "screen_item", must_not_run)
+    monkeypatch.setattr(conversation_mod, "deliver_wake", must_not_run)
+    ref = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+        conversation_name="qa",
+        sender_label="Ada",
+        sender_kind="human",
+    ).validated()
+    out = asyncio.run(
+        conversation_mod.handle_conversation_available(
+            owner, ref, config_dir=tmp_path, auth_store=None, access=_access(owner)
+        )
+    )
+    assert out == {"action": "hold", "message_id": "bcmsg_abcdef01", "code": "open_chief_of_staff"}
+    assert calls == []
+    # Through the loop: a durable, future-dated retry row under the encoded ref.
+    loop_mod._persist_hold_backoff(Store(tmp_path), owner, ref.encode(), out["code"])
+    row = Store(tmp_path).screening_hold(owner, ref.encode())
+    assert row is not None and row["hold_code"] == "open_chief_of_staff"
+    assert row["retry_at"] > time.time()
+    # The owner's surface shows the specific reason, not ``unknown_hold``.
+    from local_operator.team_bridge.read_context import _screening_state
+
+    assert _screening_state(row)["hold_code"] == "open_chief_of_staff"
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+
+def test_open_chief_of_staff_hold_is_counted_for_the_owner_surface(tmp_path) -> None:
+    """F8: the held count the desktop status read shows the owner (code + count only)."""
+
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    store = Store(tmp_path)
+    ref = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+    ).validated()
+    assert store.hold_count_readonly(owner, "open_chief_of_staff") == 0
+    store.persist_hold(owner, ref.encode(), "open_chief_of_staff", retry_at=time.time() + 60)
+    # A bare-id duplicate is never double-counted.
+    store.persist_hold(owner, "bcmsg_abcdef01", "open_chief_of_staff", retry_at=time.time() + 60)
+    assert store.hold_count_readonly(owner, "open_chief_of_staff") == 1
+
+
+def test_a_rehold_for_a_new_reason_replaces_the_visible_code(tmp_path, monkeypatch) -> None:
+    """F8: once the owner messages the session, a later hold for another reason
+    must replace ``open_chief_of_staff`` — the visible code may not keep asking
+    them to do what they already did."""
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    store = Store(tmp_path)
+    store.persist_hold(owner, "bmsg_x", "open_chief_of_staff", retry_at=time.time() - 5)
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        return {"action": "hold", "message_id": message_id, "code": "policy_stale"}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    row = store.screening_hold(owner, "bmsg_x")
+    assert row is not None and row["hold_code"] == "policy_stale" and row["retry_at"] > time.time()
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+
+def test_seed_starts_a_used_endpoint_at_head_and_a_fresh_one_at_zero(tmp_path) -> None:
+    """Review R1-2 without reopening F2. The seed is the hub's head when THIS
+    machine commits: a brand-new endpoint's head is 0 (its first message, seq 1,
+    still arrives); a previously used endpoint's head is N (no 7-day replay).
+    The seed never moves a cursor a poll already advanced."""
+
+    fresh = _f8_enroll(tmp_path / "fresh", "bridge_consent_v1")
+    store = Store(tmp_path / "fresh")
+    assert store.seed_feed_cursor(fresh, feed_seq(0)) is True
+    assert store.sync_state(fresh)["feed_seq"] == 0  # F2: after=0 still sent
+
+    used_root = tmp_path / "used"
+    used = _f8_enroll(used_root, "bridge_consent_v1")
+    used_store = Store(used_root)
+    assert used_store.seed_feed_cursor(used, feed_seq(412)) is True
+    assert used_store.sync_state(used)["feed_seq"] == 412
+
+    # A poll already advanced the cursor: a late seed is refused.
+    polled_root = tmp_path / "polled"
+    polled = _f8_enroll(polled_root, "bridge_consent_v1")
+    polled_store = Store(polled_root)
+    polled_store.record_feed_batch(polled, feed_seq(3), ["ref-a"], resync_required=False)
+    assert polled_store.seed_feed_cursor(polled, feed_seq(900)) is False
+    assert polled_store.sync_state(polled)["feed_seq"] == 3
+
+
+def test_pair_holds_count_in_the_owner_surface(tmp_path) -> None:
+    """Review R1-3: a PAIR message is held under its bare pair id, and must
+    count toward ``delivery_hold`` like a conversation hold does."""
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    store = Store(tmp_path)
+    store.persist_hold(owner, "bmsg_pair01", "open_chief_of_staff", retry_at=time.time() + 60)
+    assert store.hold_count_readonly(owner, "open_chief_of_staff") == 1
+
+
+def test_a_held_message_is_redriven_on_the_next_pass_once_the_owner_messages_the_cos(
+    tmp_path, monkeypatch
+) -> None:
+    """Review of local-operator-ui #1325: an ``open_chief_of_staff`` hold whose
+    reason is gone (the owner sent their chief of staff a message) must be
+    re-driven on the NEXT pass, not after the rest of its doubling backoff (up
+    to an hour). Every other hold code keeps its backoff."""
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    store = Store(tmp_path)
+    later = time.time() + 3000
+    store.persist_hold(owner, "bmsg_cos001", "open_chief_of_staff", retry_at=later)
+    store.persist_hold(owner, "bmsg_other1", "provider_error", retry_at=later)
+    driven: list[str] = []
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        driven.append(message_id)
+        store.delete_hold(owner_, message_id)
+        return {"action": "woken", "message_id": message_id}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+    def one_pass() -> None:
+        asyncio.run(
+            loop_mod.retry_due_holds(
+                owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+            )
+        )
+
+    # Not yet messaged: the hold keeps waiting (no re-drive, backoff intact).
+    one_pass()
+    assert driven == []
+    waiting = store.screening_hold(owner, "bmsg_cos001")
+    assert waiting is not None and waiting["retry_at"] == later
+
+    # The owner sends one message: the very next pass re-drives it.
+    _engage_transcript(tmp_path)
+    one_pass()
+    assert driven == ["bmsg_cos001"]
+    # The unrelated hold is still on its own backoff.
+    other = store.screening_hold(owner, "bmsg_other1")
+    assert other is not None and other["retry_at"] == later
+    loop_mod._RETRY_ATTEMPTS.clear()

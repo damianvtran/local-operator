@@ -15,7 +15,10 @@ REPO = Path(__file__).resolve().parents[3]
 
 PATHS = {
     "local_operator/harness/loop.py": 2,
-    "local_operator/incidents.py": 14,
+    # 14 -> 15: the failover sentence in `Incident.render` is the same
+    # model-facing incident block as its siblings, so it carries the same
+    # pragma rather than an extracted string.
+    "local_operator/incidents.py": 15,
 }
 
 

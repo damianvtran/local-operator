@@ -2692,6 +2692,14 @@ class SessionRow(NamedTuple):
     #: every existing construction site keeps working (the file's rule for a new
     #: field), and never re-derived here: it is a claim that travels.
     last_user_at: float | None = None
+    #: The team / agent a REMOTE row's session is attached to, as its owner
+    #: reported it (``relay._row_binding`` → ``PeerRow.team``/``agent``). Empty
+    #: is no claim. LOCAL rows leave these empty on purpose: their binding is
+    #: read from this device's own ``attachment.json`` at projection time
+    #: (``DesktopSessions.list``), and a second copy here would be a second
+    #: answer to one question. Appended last and defaulted, the file's rule.
+    team: str = ""
+    agent: str = ""
 
     @property
     def is_remote(self) -> bool:
