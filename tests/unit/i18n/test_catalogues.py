@@ -75,6 +75,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # The tier-1 remote-compute CLI copy is its own English-only namespace,
+        # the `wire.host_speed` shape: `lop exec --remote` adds keys to `wire.exec`,
+        # which fr/hi/vi CARRY, and an English edit to a carried namespace
+        # invalidates that locale's ledger row and unships the whole locale.
+        "wire.remote_compute",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -86,6 +91,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     # not a stub or an exemption from the exact namespace contract.
     assert catalogues.load_catalogue("en", "wire.errors.sdk_spec") != {}
     assert catalogues.load_catalogue("en", "wire.exec") != {}
+    assert catalogues.load_catalogue("en", "wire.remote_compute") != {}
     # Approved source namespace, not a prefix-wide wildcard. Mutation controls
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
@@ -157,9 +163,15 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # `tui.team_authoring` after its independent 35-key audit passed. P4a adds
     # `tui.viewer` after its independent audit and keyboard-hint audit refresh.
     # The wire.memory slice adds the independently audited `wire.memory`
-    # namespace, whose ledger row is what un-ships it.
+    # namespace, whose ledger row is what un-ships it. The LOH-11 relay-web
+    # tag slice adds `relay.session.tags` on the same terms: one audited
+    # namespace with its own fresh ledger row. The remote-compute wave (S3e)
+    # adds `cli.exec_remote_help` and `wire.remote_compute`, each carried only
+    # once its independent audit row passed against the current en bytes.
     locale = "hi"
     namespaces = (
+        "cli.exec_remote_help",
+        "relay.session.tags",
         "tui.authoring",
         "tui.projects_edit",
         "tui.review",
@@ -176,6 +188,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "wire.incidents",
         "wire.memory",
         "wire.notices",
+        "wire.remote_compute",
         "wire.settings",
         "wire.slash",
     )

@@ -1,0 +1,21 @@
+{
+  "relay.session.tags.action": "टैग…",
+  "relay.session.tags.sheet_title": "टैग",
+  "relay.session.tags.loading": "लोड हो रहा है…",
+  "relay.session.tags.empty": "अभी कोई टैग श्रेणी नहीं है",
+  "relay.session.tags.empty_hint": "डेस्कटॉप ऐप या टर्मिनल में एक बनाएँ",
+  "relay.session.tags.load_error": "टैग कैटलॉग लोड नहीं हो सका।",
+  "relay.session.tags.retry": "फिर कोशिश करें",
+  "relay.session.tags.limit_hint": "{count} टैग ही किसी बातचीत पर लग सकते हैं — एक और जोड़ने के लिए एक हटाएँ।",
+  "relay.session.tags.primary": "प्राथमिक",
+  "relay.session.tags.make_primary": "{name} को प्राथमिक टैग बनाएँ",
+  "relay.session.tags.more": "{count, plural, one {# और टैग} other {# और टैग}}",
+  "relay.session.tags.missing": "कैटलॉग में नहीं है",
+  "relay.session.tags.saving": "सहेजा जा रहा है…",
+  "relay.session.tags.save_error": "टैग सहेजे नहीं जा सके",
+  "relay.session.tags.remove_all": "सभी टैग हटाएँ",
+  "relay.session.tags.remove_all_confirm": "सभी टैग हटाएँ?",
+  "relay.session.tags.cancel": "रद्द करें",
+  "relay.session.tags.done": "हो गया",
+  "relay.session.tags.pin_and_tags_hint": "किसी पंक्ति को पिन या टैग करने के लिए उसे दबाकर रखें"
+}

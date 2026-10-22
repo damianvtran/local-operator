@@ -95,6 +95,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the operator's own stored hold reason, printed in this device's listing",
     ),
+    # The ``ask_dismiss`` ``reason`` (design ``ask-nonblocking.md`` §15): a closed
+    # operator token, ``answered_in_chat`` | ``moot``, validated against that set in
+    # ``mobile/types.py`` and forwarded to the engine, where it picks the agent-facing
+    # copy. It is never rendered to a person as a reason and carries no peer prose.
+    ("local_operator/mobile/daemon.py", "build_app", "reason"): (
+        2,
+        "ask_dismiss closed-set operator token (cold + dial arms), never rendered",
+    ),
+    ("local_operator/session/runtime/server.py", "RuntimeServer._dispatch", "reason"): (
+        1,
+        "ask_dismiss closed-set operator token forwarded to the session, never rendered",
+    ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
     # The hub-links CLI is a HUB surface, not a mesh one, and these tokens come
@@ -180,6 +192,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/relay.py", "refresh_unit_if_stale", "reason"): (
         1,
         "the wrapper's machine reason, compared to pick the failure clause — never printed",
+    ),
+    # The install's supervision-conflict warning (2026-10-21, cloud-node-1): the
+    # ``detail`` read is ``foreign_supervision``'s own composed SENTENCE ("a system
+    # unit (<path>) also runs the relay; …"), never a wire token, joined with its
+    # remedy into one ``steps`` line.
+    ("local_operator/network/relay.py", "_install_systemd", "detail"): (
+        1,
+        "foreign_supervision's composed sentence, not a machine token",
     ),
     # The onboarding adapter COPIES the runner's own receipt row into the store's
     # six fields: ``detail`` here was composed by the runner a moment earlier
@@ -313,6 +333,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "LinkTransport.ask",
         "detail",
     ): (1, "the ack's own payload key, not a rendered reason"),
+    # ``hand_off_session_dir``'s ``HandOffOutcome.reason``: a cause THIS device
+    # composed (``session/cleanup.py``'s guard sentence, the receipt failure, the
+    # rename's ``OSError``), put in the refusal sentence so the person who asked for
+    # the move can act on it (QA round 1, Q-4). No peer writes it and nothing
+    # crosses the wire.
+    (
+        "local_operator/network/mobility.py",
+        "_source_commit",
+        "reason",
+    ): (1, "this device's own handoff cause, printed in its own refusal"),
     # The refusing device's code and sentence, handed to ``refusal_from_pairing``, whose
     # code-to-sentence map is what a person reads (Q-R3-3).
     ("local_operator/network/cli.py", "_finish_pairing", "detail"): (

@@ -98,6 +98,7 @@ from local_operator.paths import config_dir
 # `local_operator.resume` is deliberately tiny (pathlib only): importing the
 # session factory here for the same constant dragged the harness and asyncio
 # onto the CLI startup path, which test_import_graph exists to prevent.
+from local_operator.remote_compute.arguments import add_remote_arguments, wants_remote
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
@@ -2092,6 +2093,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=(_eh.supervisor_fd().envelope(locale=help_locale)["text"]),
     )
+    # Tier-1 remote compute (``lop exec --remote``). Registered from its own
+    # module because the flag set is also the classification the refusal reads:
+    # keeping the parser and the "what does this flag mean remotely" table
+    # together is what stops the two from disagreeing.
+    add_remote_arguments(exec_parser, help_locale=help_locale)
 
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
@@ -6535,21 +6541,45 @@ def _sessions_move_words(
         # The caller's own `to` (what they typed) beats an opaque device id, and
         # a product phrase beats both: a raw id means nothing to a person (D9).
         target = str(to_block_q.get("name") or to or "another device")
+        # THE SENTENCE MUST NOT READ AS A COMPLETED MOVE (docs/design/
+        # mesh-move-outcome.md, "Why this exists" item 1): a queued receipt is a
+        # durable INTENT, and several surfaces rendered "queued" as "Moved" — the
+        # reported failure was a move that announced itself and changed nothing. The
+        # raw phase token stays on the record (`--json`); the sentence says where the
+        # move really is, and only ``resumed`` speaks about arrival.
         notes = {
-            "queued": ("waiting for a safe point", "queued"),
+            "queued": "It is waiting for a safe point before it starts.",
             "finishing": (
-                "waiting for the current step to finish (a pending approval holds this up)",
-                "queued",
+                "It is waiting for the current step to finish (a pending approval "
+                "holds this up)."
             ),
-            "paused": ("the move has started", "running"),
-            "copying": ("the move has started", "running"),
-            "resumed": (f"it has arrived on {target}", "arrived"),
+            "paused": "",
+            "copying": "",
+            "resumed": "",
         }
-        note, shape = notes.get(phase, ("", "queued"))
+        note = notes.get(phase, "")
+        if phase in ("resumed",):
+            shape = "arrived"
+        elif phase in ("paused", "copying"):
+            shape = "running"
+        else:
+            shape = "queued"
         head = f"Queued a move of {session_id} to {target}"
-        head += f" — {note}." if note else "."
+        if shape == "running":
+            # THE COPY STARTED, so the cancel hint would be a lie: from ``paused``
+            # on, ``move_queue.cancel`` answers ``too_late``.
+            head += f" — the copy has started (phase: {phase})."
+        elif shape == "queued":
+            head += f" — nothing has moved yet (phase: {phase})."
+        else:
+            head += "."
         if shape == "arrived":
-            return [head, "It is no longer running on this device.", *stay_lines]
+            return [
+                head,
+                f"It has arrived on {target}.",
+                "It is no longer running on this device.",
+                *stay_lines,
+            ]
         if shape == "running":
             return [
                 head,
@@ -6558,6 +6588,7 @@ def _sessions_move_words(
             ]
         return [
             head,
+            *([note] if note else []),
             "Windows open on it are told first and get a moment to follow; any that "
             f"can't will be disconnected, and the conversation continues on {target}.",
             f"Cancel the queued move before it starts with "
@@ -6598,6 +6629,20 @@ def _sessions_move_words(
         engage_lines = [
             f"{target} was asked to start it as soon as it lands; that device's own "
             "listing is where it shows."
+        ]
+    from local_operator.network import mobility as mobility_mod
+
+    if mobility_mod.move_receipt_state(result) != "completed":
+        # THE SAME RULE, WITHOUT A QUEUE BLOCK: an in-progress receipt is a handoff
+        # whose commit has not landed yet, and no surface may call that "Moved".
+        # NOT "QUEUED" EITHER (QA round 1, Q-3): no producer reaches here through the
+        # queue (that receipt carries a ``queue`` block and is worded above), so the
+        # mechanism word would name the wrong thing — this is a handoff that started
+        # and has not finished.
+        return [
+            f"The move of {session_id} to {target} is still in progress "
+            f"(phase: {result.get('phase') or 'in_progress'}); nothing has landed yet.",
+            "Run this verb again to finish it.",
         ]
     if result.get("mode") == "keep":
         return [
@@ -15652,6 +15697,51 @@ def _seed_sync_command(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _reject_extra_positionals(parser: Any, args: Any) -> None:
+    """Refuse a second positional on ``exec``; ``parser.error`` exits.
+
+    ONE HOME, TWO CALLERS. The positional trap is that a title reads as a second
+    prompt, so ``lop exec "Some Title" "do the work"`` would otherwise silently
+    treat the title as the prompt and run under the wrong brief. The remote
+    dispatch needs the same refusal — it now runs BEFORE the exec branch — and
+    duplicating the wording would let the two paths describe the rule differently.
+    """
+    # `args.command` is never None here: the catch-all `extra` only receives
+    # positionals that follow a first one.
+    extras = getattr(args, "extra", None) or []
+    if not extras:
+        return
+    quoted = [repr(part) for part in (args.command, *extras)]
+    received = (
+        ", ".join(quoted[:-1]) + f" and {quoted[-1]}" if len(quoted) > 2 else " and ".join(quoted)
+    )
+    # Exactly two positionals is the common shape — a title mistaken for the
+    # prompt — and can be repaired with a concrete command. Three or more cannot:
+    # a `--name <title> <prompt>` example would silently DROP the tail, handing
+    # the caller a valid command that runs a different brief than the one they
+    # composed. Those get the rule instead of a misleading example.
+    if len(quoted) == 2:
+        hint = (
+            "The first positional is the prompt, not a title. To name the run, "
+            "pass the title via --name:\n"
+            # shlex.quote, not repr: the suggestion is composed to be pasted into
+            # a shell, and repr's escaping is Python's, not the shell's (a title
+            # like `O'Brien's audit` renders differently under each).
+            f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
+        )
+    else:
+        hint = (
+            "The first positional is the prompt, not a title: pass the title via "
+            "--name, and quote the prompt as the ONE positional — the extra "
+            "positionals are not consumed.\n"
+        )
+    parser.error(
+        f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
+        f"{received}.\n{hint}"
+        "(--workstream is a flag — it publishes the run and takes no value.)"
+    )
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -15696,6 +15786,22 @@ def main() -> int:
         )
         if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
             setup_cross_platform_environment()
+
+        # REMOTE COMPUTE IS DISPATCHED BEFORE `--resume` IS RESOLVED. A remote
+        # invocation is not a session: `--remote --resume x` has to get the
+        # named local-only refusal (it is in LOCAL_ONLY_FLAGS), and it must not
+        # read or backfill the session store — the branch below classifies
+        # pre-existing sessions and stamps title sidecars, which are writes this
+        # command has no business making. `wants_remote` also covers the
+        # flags whose only meaning is remote, so a bare `--remote-status` reaches
+        # the same refusals instead of a local run that ignores it. The heavy
+        # module (client, httpx, exec_mode) is imported HERE, never at the top of
+        # this file.
+        if getattr(args, "subcommand", None) == "exec" and wants_remote(args):
+            _reject_extra_positionals(parser, args)
+            from local_operator.remote_compute.cli import remote_command
+
+            return remote_command(args)
 
         # Resolve `--resume` HERE, before anything is started. Left to the
         # session factory it surfaces inside the TUI as "session failed to
@@ -16318,48 +16424,13 @@ def main() -> int:
             print("usage: lop install {status, prune, migrate}", file=sys.stderr)
             return 1
         elif args.subcommand == "exec":
-            # Refuse a second positional BEFORE anything else in the branch. The
-            # trap is that a title reads as a second prompt, so
-            # `lop exec "Some Title" "do the work"` would otherwise silently
-            # treat the title as the prompt and run under the wrong brief.
-            # `--workstream` is the flag that publishes a run and takes no value,
-            # which is exactly why the title cannot be passed positionally.
-            # `args.command` is never None here: the catch-all `extra` only
-            # receives positionals that follow a first one.
-            extras = getattr(args, "extra", None) or []
-            if extras:
-                quoted = [repr(part) for part in (args.command, *extras)]
-                received = (
-                    ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
-                    if len(quoted) > 2
-                    else " and ".join(quoted)
-                )
-                # Exactly two positionals is the common shape — a title mistaken
-                # for the prompt — and can be repaired with a concrete command.
-                # Three or more cannot: a `--name <title> <prompt>` example would
-                # silently DROP the tail, handing the caller a valid command that
-                # runs a different brief than the one they composed. Those get the
-                # rule instead of a misleading example.
-                if len(quoted) == 2:
-                    hint = (
-                        "The first positional is the prompt, not a title. To name the run, "
-                        "pass the title via --name:\n"
-                        # shlex.quote, not repr: the suggestion is composed to be pasted
-                        # into a shell, and repr's escaping is Python's, not the shell's
-                        # (a title like `O'Brien's audit` renders differently under each).
-                        f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
-                    )
-                else:
-                    hint = (
-                        "The first positional is the prompt, not a title: pass the title via "
-                        "--name, and quote the prompt as the ONE positional — the extra "
-                        "positionals are not consumed.\n"
-                    )
-                parser.error(
-                    f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
-                    f"{received}.\n{hint}"
-                    "(--workstream is a flag — it publishes the run and takes no value.)"
-                )
+            # The positional refusal lives in one helper because the remote
+            # dispatch above needs it too; see `_reject_extra_positionals`.
+            # Remote invocations never reach this branch: they are dispatched
+            # above, before `--resume` is resolved, and the predicate there is
+            # the same `wants_remote` — one site, so a remote refusal cannot be
+            # described one way early and another late.
+            _reject_extra_positionals(parser, args)
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
             # handling matches the legacy pre-run behavior.

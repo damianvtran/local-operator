@@ -306,6 +306,64 @@ def describe_failed_action(index: int, verdict: TransportVerdict) -> str:
     )
 
 
+def describe_unattempted_action(index: int) -> str:
+    """The message for an action that was never sent because no receipt could be read.
+
+    Deliberately NOT ``describe_failed_action``. That function describes a
+    classified TRANSPORT failure, and every verdict it can be given means a
+    request was MADE. Here none was: the pre-action supervisor check could not
+    reach the guest, so the action was refused before any input was compiled
+    into a request. Reusing the transport vocabulary for this state produced
+    "connection could not be established, delivery=not_sent" for a guest that
+    nothing had tried to connect to, which sent an investigation to the wrong
+    layer for days -- the guest was reachable again seconds later.
+
+    The message names NO cause. The branch that calls it is reached for a
+    non-200 answer, an ambiguous probe failure and a failed restart verification
+    alike -- cases where the server WAS reachable -- so a parenthetical
+    "unreachable control server" would be false in every one of them, which is
+    the exact class of defect this function exists to remove. The caller appends
+    the supervisor cause and the guest-health cause; this function owns only the
+    distinction between "was not sent" and "was not attempted", and it carries
+    no ``delivery=`` token because no delivery happened.
+    """
+
+    return f"guest action {index + 1} was not attempted; no input was sent"
+
+
+def failure_record(error: BaseException, *, origin: str | None) -> dict[str, Any]:
+    """A value-free account of one failed guest request, for EVIDENCE only.
+
+    The same discipline as ``describe_failed_action``: ``delivery`` and ``kind``
+    come from the closed classifier vocabulary, ``errno`` is a number and
+    ``error_class`` a type name. Nothing here can carry exception text -- such
+    text echoes the URL (the guest's address) and sometimes the command, which
+    is why ``execute`` has never exposed a transport error.
+
+    WHY THIS EXISTS. A recovery attempt that probes the guest six times and
+    gives up used to record only ``read_failed: true``, which says a path failed
+    and not WHICH element of it: a name that did not resolve, a route that had
+    no answer, a port with nothing listening and a server that accepted and
+    stayed silent are four different faults with four different fixes. The kind
+    names the element and the errno names the OS's reason; neither changes any
+    decision -- every caller of this function is already on a failure branch.
+    """
+
+    verdict = classify_transport_failure(error, origin=origin)
+    errno: int | None = None
+    for link in _walk(error):
+        value = getattr(link, "errno", None)
+        if isinstance(value, int):
+            errno = value
+            break
+    return {
+        "delivery": verdict.delivery,
+        "kind": verdict.kind or "unknown",
+        "errno": errno,
+        "error_class": type(error).__name__,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 2. Console capture
 # ---------------------------------------------------------------------------
@@ -601,6 +659,33 @@ _HEALTH_FIELDS = frozenset(
 )
 
 
+def _guest_probe_cause(outcome: tuple[str, Any], *, origin: str | None) -> str:
+    """Name what the HEALTH PROBE observed, never what was assumed about it.
+
+    The probe is an ordinary command POST through the same transport as an
+    action, so its failures are distinguishable: the server ANSWERED (a non-200
+    status, or a command failure it reported itself), it never connected
+    (connect-class), or the outcome is unknown (a lost response, a shared
+    deadline expiring with the request possibly delivered). "guest unreachable"
+    used to be written for all of them -- including a 503 answer -- and it is
+    the label a post-mortem acts on, so ``unreachable`` is reserved for the
+    connect-class verdict and every other branch says only what it saw.
+    """
+
+    state, value = outcome
+    if state == "timeout":
+        return "guest probe did not answer within the deadline"
+    if state != "error":
+        return "guest probe answered, not ready"
+    status = getattr(getattr(value, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return f"guest probe answered, not ready (status={status})"
+    verdict = classify_transport_failure(value, origin=origin)
+    if verdict.delivery == DELIVERY_NOT_SENT:
+        return f"guest probe unreachable ({verdict.kind or 'connect_failed'})"
+    return "guest probe outcome unknown (the request may have been delivered)"
+
+
 def capture_guest_health(
     ec2: Any,
     instance_id: str,
@@ -608,14 +693,21 @@ def capture_guest_health(
     run_command: Callable[..., Any],
     *,
     budget_s: float = 4.0,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     """Capture one bounded, read-only health snapshot after failed readiness.
 
     The command uses the existing guest transport, not an invented SSH or SSM
-    credential. A dead action server therefore yields ``guest-unreachable``;
-    that is not evidence that the VM died or that a restart is possible. AWS
-    state and each probe status survive separately so missing permissions or a
-    broken diagnostics channel never replace the original execution failure.
+    credential. Its OUTCOME is named, not assumed: an answered 503 is recorded
+    as an answer with its status, and only a connect-class verdict is called
+    ``unreachable`` (see ``_guest_probe_cause``) -- the cause is the line a
+    post-mortem reads before choosing a layer to investigate. AWS state and each
+    probe status survive separately so missing permissions or a broken
+    diagnostics channel never replace the original execution failure.
+
+    ``origin`` is the guest's ``scheme://host:port``; without it the classifier
+    cannot vouch for a connect-phase failure and the cause says the outcome is
+    unknown rather than claiming unreachability.
     """
     record: dict[str, Any] = {"schema_version": 1, "cause": "readiness check failed"}
     try:
@@ -663,10 +755,17 @@ def capture_guest_health(
                     remaining,
                 )["guest"]
                 record["guest_probe"] = probe[0]
-                record["cause"] = "instance running; guest unreachable"
+                if probe[0] != "ok":
+                    record["cause"] = (
+                        f"instance running; {_guest_probe_cause(probe, origin=origin)}"
+                    )
                 if probe[0] == "ok" and probe[1].returncode != 0:
                     record["guest_probe"] = "command_failed"
+                    record["cause"] = "instance running; guest probe answered, command failed"
                 if probe[0] == "ok" and probe[1].returncode == 0:
+                    # Answered but not yet understood: the parse below may fail,
+                    # and the cause must still say the server ANSWERED.
+                    record["cause"] = "instance running; guest probe answered"
                     data = json.loads(probe[1].stdout)
                     # No arbitrary guest strings are persisted, even on malformed output.
                     counters = {

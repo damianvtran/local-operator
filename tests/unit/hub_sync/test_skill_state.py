@@ -20,7 +20,8 @@ from local_operator.hub_sync import policies as pol
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
-from local_operator.hub_sync.identity import LinkError, Visibility
+from local_operator.hub_sync.identity import LinkError, LinkIdentity, Visibility
+from local_operator.hub_sync.skill_document import SkillDocument
 from local_operator.hub_sync.skill_storage import ManagedSkillStorage
 from local_operator.providers.radient_credentials import configured_radient_base_url
 
@@ -761,3 +762,148 @@ def test_a_lost_directory_is_still_the_error_it_was(tmp_path: Path) -> None:
     assert refused.value.code == "local-concurrent-edit"
     stored = prov.read_baseline(storage.config_dir, "skill", identity.local_id)
     assert stored is not None and stored.content_state == "present"
+
+
+# -- alias-collision refusals ---------------------------------------------------------
+#
+# These sentences are rendered VERBATIM to the user (LinkError -> the desktop
+# routes' 422 ``detail.message``), so each one is the product and not a log
+# line. One test per SITUATION: a personal copy at the alias (pull, then
+# publish's own pre-check) and a non-skill file using the name.
+
+
+def test_a_pull_refusal_names_the_personal_copy_and_its_remedy(tmp_path: Path) -> None:
+    """A personal skill at the alias: say WHAT exists and WHAT the user can do.
+
+    The refusal never touches the personal bytes, and it carries
+    ``alias-occupied`` -- the same category the publish preview reports -- so a
+    desktop client can key on it instead of matching words in the sentence (D1).
+    """
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    personal = ctx.config_dir / "skills" / ALIAS
+    personal.mkdir(parents=True)
+    # A REAL personal skill: valid frontmatter, so the refusal is the alias
+    # ownership one and not the earlier "unparseable SKILL.md" validation.
+    (personal / "SKILL.md").write_text(
+        "---\nname: example-skill\ndescription: My own copy\n---\n# Mine\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LinkError) as refused:
+        svc.install_skill(
+            ctx,
+            hub_source=base,
+            hub_id=HUB_ID,
+            visibility="public",
+            tenant_id=None,
+            alias=ALIAS,
+        )
+
+    assert refused.value.code == "alias-occupied"
+    message = str(refused.value)
+    assert f"{ALIAS!r}" in message
+    assert "already exists on this machine outside the hub" in message
+    assert "move it elsewhere or give it a different name, then try again" in message
+    # "Rename" alone would mislead: a skill's folder must match its frontmatter
+    # name, so the remedy says "give it a different name" (D3).
+    assert "rename" not in message
+    # Pull's chokepoint is shared with UPDATE, so it must not name "pull" here.
+    assert "pull" not in message
+    # The behaviour is unchanged: the personal copy is byte-identical.
+    assert (personal / "SKILL.md").read_text(encoding="utf-8") == (
+        "---\nname: example-skill\ndescription: My own copy\n---\n# Mine\n"
+    )
+
+
+def test_a_publish_refusal_names_the_personal_copy_and_offers_another_name(
+    tmp_path: Path,
+) -> None:
+    """Publish's OWN pre-check runs before the storage chokepoint: here a rename is possible.
+
+    Reached through ``_materialize_published_skill``'s adopt guard, the same
+    entry the accepted-publication confirm takes; no network client is needed
+    because the refusal happens before any write.
+    """
+
+    ctx, _manager, _remote, base, document = _rig(tmp_path)
+    personal = ctx.config_dir / "skills" / ALIAS
+    personal.mkdir(parents=True)
+    (personal / "SKILL.md").write_text(
+        "---\nname: example-skill\ndescription: My own copy\n---\n# Mine\n",
+        encoding="utf-8",
+    )
+    # The authored draft lives somewhere else -- the only reason publish cannot
+    # adopt in place, which is exactly the refused situation.
+    authored = tmp_path / "authored"
+    authored.mkdir()
+    (authored / "SKILL.md").write_text("# My own copy\n", encoding="utf-8")
+
+    identity = LinkIdentity("skill", "immutable-local", base, "public", None, "remote")
+    draft = SkillDocument.from_json(document)
+    baseline = prov.make_record("skill", identity.local_id, HUB_ID, None, document, "pull")
+
+    with pytest.raises(LinkError) as refused:
+        svc._materialize_published_skill(
+            ctx,
+            identity=identity,
+            alias=ALIAS,
+            draft=draft,
+            baseline=baseline,
+            source_dir=str(authored),
+            subscribe=True,
+            auto_push=False,
+            confirm_public_egress=False,
+        )
+
+    assert refused.value.code == "alias-occupied"
+    message = str(refused.value)
+    assert f"{ALIAS!r}" in message
+    assert "already exists on this machine outside the hub" in message
+    # Publish can pick a different name, so its remedy differs from pull's.
+    assert "publish under a different name, or move the existing one" in message
+    assert "move it elsewhere" not in message
+    # "The local copy" would read as the skill being published (D3).
+    assert "the local copy" not in message
+    assert (personal / "SKILL.md").read_text(encoding="utf-8") == (
+        "---\nname: example-skill\ndescription: My own copy\n---\n# Mine\n"
+    )
+
+
+def test_a_publish_refusal_calls_a_file_occupant_a_file(tmp_path: Path) -> None:
+    """A plain file at the alias is NOT a skill, even at publish's pre-check (F1).
+
+    The branch is the same one a personal skill reaches, so it keeps the same
+    ``alias-occupied`` category -- but the sentence must state the occupant's
+    actual kind: a file is not "a skill named ...".
+    """
+
+    ctx, _manager, _remote, base, document = _rig(tmp_path)
+    occupant = ctx.config_dir / "skills" / ALIAS
+    occupant.parent.mkdir(parents=True)
+    occupant.write_text("not a skill directory\n", encoding="utf-8")
+    authored = tmp_path / "authored"
+    authored.mkdir()
+    (authored / "SKILL.md").write_text("# Authored\n", encoding="utf-8")
+
+    identity = LinkIdentity("skill", "immutable-local", base, "public", None, "remote")
+    with pytest.raises(LinkError) as refused:
+        svc._materialize_published_skill(
+            ctx,
+            identity=identity,
+            alias=ALIAS,
+            draft=SkillDocument.from_json(document),
+            baseline=prov.make_record("skill", identity.local_id, HUB_ID, None, document, "pull"),
+            source_dir=str(authored),
+            subscribe=True,
+            auto_push=False,
+            confirm_public_egress=False,
+        )
+
+    assert refused.value.code == "alias-occupied"
+    message = str(refused.value)
+    assert f"a file named {ALIAS!r} is already in the skills folder" in message
+    assert "move it somewhere else, then try again" in message
+    # It must not claim a skill exists, and it must not borrow A/B's sentence.
+    assert "a skill named" not in message
+    assert "outside the hub" not in message

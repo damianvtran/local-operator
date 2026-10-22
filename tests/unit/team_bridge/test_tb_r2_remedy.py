@@ -75,7 +75,7 @@ def _patch_loop(monkeypatch, *, refs, handle):
 
     state = {"polls": 0}
 
-    async def _events(owner, *, config_dir, access, after):
+    async def _events(owner, *, config_dir, access, after, wait=None):
         state["polls"] += 1
         if state["polls"] > 1:
             return None  # a 204 timeout on every later poll

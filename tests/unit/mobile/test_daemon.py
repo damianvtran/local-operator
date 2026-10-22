@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -323,6 +324,38 @@ def test_http_gate_and_login_flow() -> None:
     assert logout.headers["location"] == "/login"
     assert logout.headers["clear-site-data"] == '"storage"'
     assert "lop_mobile=" in logout.headers["set-cookie"]
+
+
+def test_the_remote_compute_bit_follows_a_live_toggle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1-1: a phone must see the consent switch, not a memoised verdict.
+
+    The daemon's memo now holds ``static_feature_flags`` only. This toggles
+    ``remote_compute.enabled`` in a private config root between two capability
+    reads and requires the key to appear and then disappear. The withdrawal is
+    the direction that matters: a stale ON offers to send work off the device
+    after the operator turned the switch off, and the switch IS the consent
+    gate. ``features.py`` promises exactly this per-negotiation reading.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.mobile import daemon as daemon_module
+    from local_operator.server.features import feature_flags
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # The memo is deliberately NOT reset: the static half is config-independent,
+    # and a memo populated by an earlier test must not be able to mask a stale
+    # ``remote_compute`` bit.
+    assert "remote_compute" not in daemon_module._feature_flags()
+
+    ConfigManager(tmp_path).set_config_value("remote_compute", {"enabled": True})
+    on = daemon_module._feature_flags()
+    assert on.get("remote_compute") == 1
+    # The same reading the HTTP capabilities route serves, not a second one.
+    assert on["remote_compute"] == feature_flags()["remote_compute"]
+
+    ConfigManager(tmp_path).set_config_value("remote_compute", {"enabled": False})
+    assert "remote_compute" not in daemon_module._feature_flags()
 
 
 def test_login_page_clears_private_storage_without_relying_on_header() -> None:
