@@ -113,6 +113,17 @@ class SkillPull(Input):
     subscribe: StrictBool | None = None
     auto_push: StrictBool | None = None
     confirm_public_egress: StrictBool | None = None
+    #: ``form`` is optional on a pull: the REMOTE row decides the carrier, and a
+    #: caller that names one is asserting what it expects to install (a mismatch
+    #: refuses rather than silently installing the other form). ``dry_run`` returns
+    #: the bundle summary and publisher and writes nothing.
+    form: Literal["document", "bundle"] | None = None
+    dry_run: StrictBool = False
+    #: The bundle confirmation (design §6.2): the publisher id the prompt named
+    #: and the exact archive hash, or ``confirm`` after both were shown.
+    confirm_publisher_id: str | None = Field(default=None, min_length=1, max_length=256)
+    confirm_bundle_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    confirm: StrictBool = False
 
 
 class SkillSubscribe(Input):
@@ -165,6 +176,10 @@ class SkillPublish(Input):
     confirm_public_egress: StrictBool
     preview_receipt: str | None = Field(default=None, min_length=1, max_length=4096)
     confirm_publish: Literal[True] | None = None
+    #: Explicit carrier selection (§6.3): ``--bundle`` / ``form:"bundle"``. Never
+    #: an automatic fallback -- a text skill that outgrows document bounds must
+    #: name the bundle form rather than route around the generalizer.
+    form: Literal["document", "bundle"] = "document"
 
     @model_validator(mode="after")
     def _reviewed_draft(self) -> "SkillPublish":
@@ -223,6 +238,22 @@ def _refusal(status: int, message: str, *, code: str | None = None) -> HTTPExcep
     return HTTPException(status, {"code": code, "message": message})
 
 
+#: Bundle refusals that are a STATE problem, not a malformed request: the
+#: caller's body was well-formed, but the current local/remote state cannot
+#: accept it. Everything else named ``bundle-*`` is a 422 (an unusable or
+#: unconfirmed input), and every code is still carried on the error body so the
+#: renderer can word it by name.
+_BUNDLE_STATE_REFUSALS = frozenset(
+    {
+        "bundle-local-changes",
+        "bundle-conflict",
+        "bundle-form-changed",
+        "bundle-alias-rename-unsupported",
+        "bundle-unsupported-server",
+    }
+)
+
+
 def _raise_skill_refusal(error: Any) -> NoReturn:
     """The refusal vocabulary every skill route shares, mapped once.
 
@@ -241,6 +272,10 @@ def _raise_skill_refusal(error: Any) -> NoReturn:
     if code == "skill-not-found":
         raise _refusal(404, str(error), code=code) from None
     if code == "policy-revision-changed":
+        raise _refusal(409, str(error), code=code) from None
+    if code in _BUNDLE_STATE_REFUSALS:
+        # The request is well-formed; the CURRENT STATE refuses it (local edits,
+        # both sides moved, a flipped form, a server without the carrier).
         raise _refusal(409, str(error), code=code) from None
     if code == "hub-upstream":
         raise _refusal(502, str(error), code=code) from None
@@ -709,6 +744,11 @@ async def skill_pull(
                 subscribe=body.subscribe,
                 auto_push=body.auto_push,
                 confirm_public_egress=bool(body.confirm_public_egress),
+                confirm_publisher_id=body.confirm_publisher_id,
+                confirm_bundle_hash=body.confirm_bundle_hash,
+                confirm=bool(body.confirm),
+                dry_run=bool(body.dry_run),
+                form=body.form,
             )
         except LinkError as error:
             _raise_skill_refusal(error)
@@ -852,6 +892,7 @@ async def skill_publish(
                 confirm_public_egress=body.confirm_public_egress,
                 dry_run=body.dry_run,
                 preview_receipt=body.preview_receipt,
+                form=body.form,
             )
         except LinkError as error:
             code = getattr(error, "code", "") or ""
@@ -874,7 +915,7 @@ async def skill_publish(
                 "preview_expired",
                 "preview_stale",
                 "policy-revision-changed",
-            ):
+            ) or code in _BUNDLE_STATE_REFUSALS:
                 raise _refusal(409, str(error), code=code) from None
             if code in ("hub-upstream", "hub-error"):
                 raise _refusal(502, str(error), code=code) from None
