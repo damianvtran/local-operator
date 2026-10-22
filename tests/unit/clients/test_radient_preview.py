@@ -198,9 +198,7 @@ def test_preview_timeout_error_names_the_setting_and_the_budget(
     monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "400")
     with patch("requests.request", side_effect=requests.exceptions.Timeout("timed out")):
         with pytest.raises(APIError) as exc_info:
-            radient_client.preview_publish_team_document(
-                dict(_TEAM_DOCUMENT), tenant_id="org-a"
-            )
+            radient_client.preview_publish_team_document(dict(_TEAM_DOCUMENT), tenant_id="org-a")
 
     message = str(exc_info.value)
     assert PREVIEW_TIMEOUT_ENV in message
@@ -222,9 +220,7 @@ def test_preview_connect_timeout_keeps_the_generic_message(
     monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "400")
     with patch("requests.request", side_effect=requests.exceptions.ConnectTimeout("offline")):
         with pytest.raises(APIError) as exc_info:
-            radient_client.preview_publish_team_document(
-                dict(_TEAM_DOCUMENT), tenant_id="org-a"
-            )
+            radient_client.preview_publish_team_document(dict(_TEAM_DOCUMENT), tenant_id="org-a")
 
     assert PREVIEW_TIMEOUT_ENV not in str(exc_info.value)
     assert "Could not preview the team publication" in str(exc_info.value)
