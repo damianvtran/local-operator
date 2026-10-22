@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import socket
 import threading
 import time
@@ -314,3 +315,107 @@ def test_scheduled_create_never_forwards_an_explicit_null_attachment_ids(proxy):
     }
     assert client.post("/v1/desktop/team-bridge/scheduled", json=create).status_code == 200
     assert "attachment_ids" not in calls[-1][2]
+
+
+# -- access-log redaction (QA #1314 Q2) ------------------------------------------
+
+
+def _access_record(path: str) -> logging.LogRecord:
+    # The exact shape uvicorn's access logger emits (h11_impl / httptools_impl).
+    return logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:5000", "GET", path, "1.1", 200),
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "expected"),
+    [
+        (
+            "GET",
+            f"/v1/desktop/team-bridge/conversations/{CID}/messages/{MID}/attachments/{AID}"
+            "?tenant_id=org-a",
+            "/v1/desktop/team-bridge/conversations/:conversationid/messages/:messageid"
+            "/attachments/:attachmentid?tenant_id=org-a",
+        ),
+        (
+            "POST",
+            f"/v1/desktop/team-bridge/conversations/{CID}/attachments",
+            "/v1/desktop/team-bridge/conversations/:conversationid/attachments",
+        ),
+        (
+            "DELETE",
+            f"/v1/desktop/team-bridge/conversations/{CID}/attachments/{AID}?tenant_id=org-a",
+            "/v1/desktop/team-bridge/conversations/:conversationid/attachments/:attachmentid"
+            "?tenant_id=org-a",
+        ),
+    ],
+)
+def test_access_log_line_carries_no_attachment_message_or_conversation_ids(
+    method, path, expected
+) -> None:
+    from local_operator.server.routes import desktop_team_bridge as routes
+
+    access = logging.getLogger("uvicorn.access")
+    assert routes._ACCESS_LOG_REDACTION in access.filters  # installed on import
+    record = _access_record(path)
+    record.args = (record.args[0], method, *record.args[2:])
+    assert access.filters and all(f.filter(record) for f in access.filters)
+    line = record.getMessage()
+    assert expected in line and line.startswith(f'127.0.0.1:5000 - "{method} ')
+    for prefix in ("batt_", "bcmsg_", "bcv_"):
+        assert prefix not in line
+
+
+def test_access_log_redaction_leaves_other_paths_and_odd_records_alone() -> None:
+    from local_operator.server.routes import desktop_team_bridge as routes
+
+    other = f"/v1/desktop/team-bridge/conversations/{CID}/messages"
+    record = _access_record(other)
+    assert routes._ACCESS_LOG_REDACTION.filter(record) and record.getMessage().count(other) == 1
+    odd = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, "plain", None, None)
+    assert routes._ACCESS_LOG_REDACTION.filter(odd) and odd.getMessage() == "plain"
+
+
+def test_real_uvicorn_access_line_is_templated(proxy, caplog) -> None:
+    """The real access logger path: uvicorn serves the attachment fetch and the
+    record it writes (captured at the logger) has no ids."""
+
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    from local_operator.server.app import app
+
+    caplog.set_level(logging.INFO, logger="uvicorn.access")
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, lifespan="off", log_config=None))
+    thread = threading.Thread(target=lambda: server.run(sockets=[sock]), daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 20
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        url = (
+            f"http://127.0.0.1:{port}/v1/desktop/team-bridge/conversations/{CID}"
+            f"/messages/{MID}/attachments/{AID}"
+        )
+        httpx.get(url, timeout=10)  # status is irrelevant: every request is logged
+    finally:
+        server.should_exit = True
+        thread.join(10)
+    lines = [r.getMessage() for r in caplog.records if r.name == "uvicorn.access"]
+    assert lines, "uvicorn wrote no access record"
+    assert any(":messageid/attachments/:attachmentid" in line for line in lines)
+    for line in lines:
+        for prefix in ("batt_", "bcmsg_", "bcv_"):
+            assert prefix not in line

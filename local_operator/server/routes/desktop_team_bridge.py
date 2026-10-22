@@ -55,6 +55,7 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
@@ -109,6 +110,82 @@ _ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
 #: ``attachment_ids`` on a send or schedule: the hub's per-message bound and id
 #: grammar, enforced before the request leaves the machine.
 _ATTACHMENT_IDS = Field(default=None, min_length=1, max_length=4)
+
+
+# -- access-log redaction ----------------------------------------------------
+#
+# WHY: uvicorn's access logger writes the REQUEST PATH, and the three attachment
+# routes carry the conversation, message and attachment ids in it. The desktop
+# backend's log captures those lines (QA on local-operator-ui#1314, Q2), and the
+# attachment contract (D9) keeps ids out of logs; the hub already logs these
+# routes by template (``:attachmentid``). This filter rewrites the logged path to
+# the same template form so the two ends agree.
+#
+# Scope: ONLY ``/v1/desktop/team-bridge/conversations/.../attachments...`` paths.
+# Other team-bridge paths (e.g. scheduled ids) are out of this change. The
+# filter sits on the ``uvicorn.access`` LOGGER, not on a handler, so it applies
+# whatever handler config uvicorn or the launcher installs, and dictConfig
+# (which uvicorn runs) leaves logger filters in place. The request itself is
+# untouched — only the record's text changes.
+_ATTACHMENT_ROUTE_PATH = re.compile(
+    r"^(?P<prefix>/v1/desktop/team-bridge/conversations/)[^/?#]+"
+    r"(?P<middle>(?:/messages/[^/?#]+)?/attachments)(?P<tail>(?:/[^/?#]+)?)"
+    r"(?P<query>[?#].*)?$"
+)
+
+
+def _template_attachment_path(path: str) -> str:
+    """``path`` with its id segments replaced by route placeholders.
+
+    The query string is kept as is: these routes accept only ``tenant_id``
+    (anything else is refused), which is not one of the redacted ids.
+    """
+
+    match = _ATTACHMENT_ROUTE_PATH.match(path)
+    if match is None:
+        return path
+    middle = match["middle"]
+    if middle.startswith("/messages/"):
+        middle = "/messages/:messageid/attachments"
+    tail = "/:attachmentid" if match["tail"] else ""
+    return f"{match['prefix']}:conversationid{middle}{tail}{match['query'] or ''}"
+
+
+class _AttachmentPathRedaction(logging.Filter):
+    """Template the attachment routes' ids out of uvicorn access records.
+
+    uvicorn logs ``'%s - "%s %s HTTP/%s" %d'`` with the path as ``args[2]``;
+    only that argument is rewritten so the line keeps its format. A filter
+    must never raise (``Logger.handle`` consults it before any handler's
+    error handling), so anything unexpected passes the record through.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            args = record.args
+            if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+                templated = _template_attachment_path(args[2])
+                if templated != args[2]:
+                    record.args = (*args[:2], templated, *args[3:])
+        except Exception:  # noqa: BLE001 — never break the caller's logging
+            pass
+        return True
+
+
+_ACCESS_LOG_REDACTION = _AttachmentPathRedaction()
+
+
+def install_access_log_redaction() -> None:
+    """Attach the filter to ``uvicorn.access``; idempotent."""
+
+    access = logging.getLogger("uvicorn.access")
+    if _ACCESS_LOG_REDACTION not in access.filters:
+        access.addFilter(_ACCESS_LOG_REDACTION)
+
+
+# Installed when the router is imported, i.e. whenever the app that serves these
+# routes is built — no separate wiring step a launcher could forget.
+install_access_log_redaction()
 
 
 class _Strict(BaseModel):
