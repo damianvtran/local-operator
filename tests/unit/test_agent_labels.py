@@ -280,7 +280,7 @@ def test_the_name_collision_key_stays_label_free(registry: AgentRegistry) -> Non
 
 
 def test_install_seed_ships_the_canonical_label(registry: AgentRegistry) -> None:
-    install_seed("ux-reviewer", registry=registry)
+    install_seed("ux-reviewer", registry=registry, scope="global")
     row = registry.get_agent_by_name("ux-reviewer")
     assert row is not None and row.label == "UX Reviewer"
 
@@ -288,7 +288,7 @@ def test_install_seed_ships_the_canonical_label(registry: AgentRegistry) -> None
 def test_reset_restores_the_packaged_label_after_a_local_edit(
     registry: AgentRegistry,
 ) -> None:
-    install_seed("reviewer", registry=registry)
+    install_seed("reviewer", registry=registry, scope="global")
     row = registry.get_agent_by_name("reviewer")
     assert row is not None
     registry.update_agent(row.id, _fields(label="My Reviewer"))
@@ -297,14 +297,14 @@ def test_reset_restores_the_packaged_label_after_a_local_edit(
 
     # ``overwrite`` is the reset lane: the seed's own fields are restored,
     # including the canonical label, because it rides ``install_seed._fields``.
-    install_seed("reviewer", registry=registry, overwrite=True)
+    install_seed("reviewer", registry=registry, overwrite=True, scope="global")
     reset = registry.get_agent_by_name("reviewer")
     assert reset is not None and reset.label == "Reviewer"
 
 
 def test_a_label_only_edit_is_not_seed_divergence(registry: AgentRegistry) -> None:
     """A label is display metadata, excluded from ``_SEED_FIELDS`` (teams' stance)."""
-    install_seed("reviewer", registry=registry)
+    install_seed("reviewer", registry=registry, scope="global")
     row = registry.get_agent_by_name("reviewer")
     assert row is not None
     seed = load_seed("reviewer")
@@ -327,7 +327,7 @@ def test_a_label_only_edit_is_not_seed_divergence(registry: AgentRegistry) -> No
 def test_agent_listing_rows_carries_the_raw_label_beside_the_name(
     registry: AgentRegistry,
 ) -> None:
-    install_seed("ux-reviewer", registry=registry)
+    install_seed("ux-reviewer", registry=registry, scope="global")
     rows = agent_listing_rows(registry)
     row = next(r for r in rows if r[0] == "ux-reviewer")
     # (name, label, facts, summary): the RAW label, never a composed form.

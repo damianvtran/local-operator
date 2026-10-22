@@ -38,5 +38,6 @@
   "tui.authoring.footer": "/agent new · /agent edit <name> · /agent clear अलग करता है",
   "tui.authoring.save_error": "सहेज नहीं सके: {reason}",
   "tui.authoring.description_clear_unsupported": "यह फ़ॉर्म अभी मौजूदा विवरण मिटा नहीं सकता।",
-  "tui.authoring.notice_read_only": "केवल पढ़ने के लिए: इस बातचीत का रनटाइम दूसरे डिवाइस पर है, इसलिए यहाँ प्रोफ़ाइल नहीं बदल सकते।"
+  "tui.authoring.notice_read_only": "केवल पढ़ने के लिए: इस बातचीत का रनटाइम दूसरे डिवाइस पर है, इसलिए यहाँ प्रोफ़ाइल नहीं बदल सकते।",
+  "tui.authoring.scope_conversation": "यह बातचीत"
 }

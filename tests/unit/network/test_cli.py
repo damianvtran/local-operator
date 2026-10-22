@@ -2799,6 +2799,62 @@ def test_the_explain_frame_renders_inherited_readings_as_codes_and_token_first()
     assert all("`" not in line for line in lines)
 
 
+def test_mcp_credentials_repair_reports_member_state_and_reason(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The member's ``--repair --json`` row carries the status word and its why.
+
+    The owner-side receipt was names and counts; a member's question is different
+    ("why does this server not work"), so every row carries the same
+    ``state``/``reason`` pair the page renders — and still no value: the sentinel
+    planted in the config must never reach the document.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    sentinel = "REPAIR" + "-VALUE-NEVER-PRINTED"
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "linear": {
+                        "type": "http",
+                        "url": "https://linear.example.test/mcp",
+                        "auth": {"type": "oauth"},
+                    },
+                    "slack": {
+                        "type": "http",
+                        "url": "https://slack.example.test/mcp",
+                        "headers": {"Authorization": sentinel},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # No relay answers in a unit root; the placement pull is reported, not raised.
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_answer",
+        lambda op, **fields: {"ok": False, "state": "unknown", "code": "no_relay"},
+    )
+
+    code = net_cli._cmd_mcp_credentials(  # noqa: SLF001
+        Namespace(json=True, adopt=False, repair=True), root
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["server"]: row for row in payload["servers"]}
+    assert rows["linear"]["state"] == "needs_operator_login"
+    assert rows["linear"]["reason"]
+    # ``--repair`` ADOPTS first (slice A's rule): the literal header becomes a
+    # store row plus a ``${NAME}`` reference, so by the time the status rows are
+    # built this server resolves here. The value itself must never appear.
+    assert rows["slack"]["state"] == "synced"
+    assert sentinel not in json.dumps(payload)
+    assert "${" in (root / "mcp.json").read_text()
+
+
 def test_install_dispatches_to_the_restart_on_boot_installer(monkeypatch, capsys) -> None:
     """The advertised recovery verb reaches the actual service installer."""
     called = []

@@ -114,6 +114,17 @@ OFFLOAD_CONFIRM_WAIT_S = 30.0
 #: was about to answer (the whole of QA round 1, Q4a).
 MOVE_CONTROL_SLACK_S = 10.0
 
+#: The budget for the ONE ``status`` frame a destination sends after a promote.
+#:
+#: SHORT ON PURPOSE: it is not part of the move — the commit has already landed and
+#: the destination already holds the promoted copy — and it exists only to catch a
+#: CONTRADICTION (the owner still listing the id, which means two live copies). A
+#: peer that does not answer inside this is not evidence against the commit: the
+#: new commit order means the owner's own ``committed`` answer already implies its
+#: directory left ``sessions/``, so silence is treated as the proof it sent, and
+#: only an explicit ``owner: true`` downgrades the move.
+VERIFY_STATUS_TIMEOUT_S = 10.0
+
 #: The margin a CLIENT adds to a published bound before its own deadline. It has to
 #: exceed the round trip that carries the answer back — the link has just been busy
 #: for the whole bound — so a client may not simply EQUAL the bound it is given. 15 s
@@ -354,6 +365,14 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         # protocol one: the source holds an entry the copy set does not carry, so
         # moving it would delete that entry with nothing to copy it from (B-M2).
         "unlisted_content",
+        # LOH-9 S2: the conversation owns role/team definitions and a mesh move
+        # does not carry them. A data-integrity refusal like ``unlisted_content``
+        # — the remedy is recreating them at the destination or the explicit
+        # ``--drop-session-roles`` stash, never a retry.
+        "session_roles",
+        # The fail-closed arm: the roles tree exists but cannot be read, so the
+        # gate cannot say whether a move would drop definitions.
+        "session_roles_unreadable",
         # PR #1756 round 1 (design finding D1), and it exists for the SENTENCE
         # discipline rather than the wire: split off ``unreachable`` so a consumer
         # can tell "a peer stopped answering" (its remedy is time) from "no row
@@ -443,6 +462,25 @@ class MoveCarryBlock(TypedDict, total=False):
     #: start fresh on the destination". Subject of the negative is the STATE —
     #: the spec rows do ride the transcript (design round 1, D3/D6).
     monitors_notice: str
+    #: How many role/team definitions the source left behind because
+    #: ``--drop-session-roles`` was passed (LOH-9 S2). The COUNT is the source's
+    #: (it read the store before the commit deleted the directory), carried on the
+    #: prepare reply so the destination can state it in the receipt it produces;
+    #: absent means the move was not a role-dropping one.
+    session_roles: int
+    #: The sentence built from that count and the SOURCE device's name: "N session
+    #: role/team definition(s) stayed on <device> — a mesh move does not carry
+    #: them in this version". Present only with ``session_roles``.
+    session_roles_notice: str
+    #: The working directory the destination REWROTE, ``{"from": old, "to": new}``
+    #: (``carry.rewrite_host_cwd``). Present only when there was something to
+    #: rewrite: the recorded path did not exist on the destination and was mapped,
+    #: or the session arrived with NO marker of its own and the source's own record
+    #: became one. A cwd is host-specific, and a moved conversation whose marker
+    #: named `/home/ec2-user/project` opened onto a directory that does not exist
+    #: there. Additive inside an already-optional block, so a move that carried
+    #: nothing new parses exactly as before.
+    cwd: dict[str, str]
 
 
 class SessionMoveResult(TypedDict):
@@ -453,11 +491,23 @@ class SessionMoveResult(TypedDict):
     ``keep``. ``phase`` is the last phase reached and is always in
     :data:`MOVE_OPENABLE_PHASES` on this shape; ``phases`` is the history.
 
-    ``engagement`` is the ONE optional member, and it is ``NotRequired`` rather than
-    ``... | None`` on purpose: it is absent — not null — for every caller that did
-    not ask for it, so the document every existing reader parses is unchanged
-    (``test_the_session_move_contract_is_frozen`` pins the set, and this is the one
-    addition made to it since the contract was frozen).
+    ``state`` IS THE OUTCOME, and it exists because a success document could say
+    "queued" (nothing copied yet) and "done" (the destination holds it, the source
+    let go) in the same shape: every surface rendered both as "Moved". It is
+    REQUIRED and has exactly two values — ``completed`` (verified: the destination
+    holds a promoted copy and the source no longer holds a directory for the id) and
+    ``in_progress`` (the intent is durable and a live driver owns it, or a committed
+    handoff has not landed yet). A refusal is the failed state and stays a
+    ``SessionMoveRefusal``; there is deliberately no ``failed`` value here, so a
+    caller cannot mistake a success document for a failure one
+    (``docs/design/mesh-move-outcome.md``, "The contract").
+
+    ``engagement``, ``queue`` and ``carry`` are the OPTIONAL members, all
+    ``NotRequired`` rather than ``... | None`` on purpose: each is absent — not
+    null — for every caller that did not ask for it, so the document a reader parses
+    is unchanged by the ones that did not apply (``test_the_session_move_contract_
+    is_frozen`` pins the set, and ``state`` is the one REQUIRED addition made since
+    the contract was frozen).
     """
 
     ok: Literal[True]
@@ -468,17 +518,20 @@ class SessionMoveResult(TypedDict):
     to_device: MoveDevice
     phase: SessionMovePhase
     phases: list[MovePhaseStamp]
+    #: ``completed`` or ``in_progress`` — see the docstring. Never inferred by a
+    #: surface from ``phase``: the same phase vocabulary serves the queued record's
+    #: phases and the move's own, and only the device that performed the commit can
+    #: say whether the copy is the only one.
+    state: Literal["completed", "in_progress"]
     #: Present ONLY when the move was asked to engage on arrival
     #: (``--engage-on-arrival``); absent otherwise.
     engagement: NotRequired[MoveEngagement]
     #: Present ONLY on a QUEUED receipt (``--queue``): the source's queue record.
-    #: The second addition to this shape since the contract was frozen, made for
-    #: the same reason as ``engagement`` — a queued request is a SUCCESS (the
-    #: intent is durable) whose state a caller renders from this block, and the
-    #: ``phase`` field alone would say "queued" with nothing to show about it.
-    #: Absent — not null — for every caller that did not queue, so existing
-    #: readers parse the identical document (``test_slow_ops`` pins the set and
-    #: was updated in the same commit that added this key).
+    #: ``NotRequired`` for the same reason as ``engagement``: a queued request is a
+    #: SUCCESS whose state a caller renders from this block, and the ``phase`` field
+    #: alone would say "queued" with nothing to show about it. A queued receipt always
+    #: carries ``state: "in_progress"``, which is the field a caller that never looks
+    #: inside this block still branches on.
     queue: NotRequired[MoveQueueBlock]
     #: Present ONLY when the move carried scheduled state worth reporting: the two
     #: scheduled-state halves (see :class:`MoveCarryBlock`). The third addition to
@@ -556,10 +609,18 @@ class _Progress:
         self._carry: dict[str, dict[str, Any]] = {}
 
     def note(self, session_id: str, phase: SessionMovePhase) -> None:
+        """Record a phase AND signal its marker.
+
+        The signal is what ``_await_own_progress`` waits on; without it the
+        "queued" outcome was unreachable — the waiter polled an Event nothing
+        ever set, so a queued move was reported as "nothing happened" while its
+        driver ran to completion (round 3).
+        """
         with self._lock:
             history = self._phases.setdefault(session_id, [])
             if phase not in [item["phase"] for item in history]:
                 history.append({"phase": phase, "at": time.time()})
+        self.signal(session_id, phase)
 
     def phases(self, session_id: str) -> list[MovePhaseStamp]:
         with self._lock:
@@ -688,6 +749,119 @@ def _own_block(server: "RelayServer") -> MoveDevice:
 def new_lease_epoch() -> str:
     """A fresh handoff epoch. Its only job is to be unique per handoff attempt."""
     return "e_" + os.urandom(4).hex()
+
+
+def move_receipt_state(result: dict[str, Any]) -> Literal["completed", "in_progress"]:
+    """The outcome a SUCCESS receipt reports, tolerating a document that predates it.
+
+    ``state`` is authoritative when present — that is the contract, and every receipt
+    this build produces carries it. It is absent only on a document built by a build
+    (or a test) from before the field existed, and inferring it there keeps such a
+    document rendering exactly as it always did: completed only when its last phase
+    says the move reached an openable one and it carries no queue block. ONE function
+    for the two surfaces that must agree (``cli._sessions_move_words`` and
+    ``server.utils.desktop_mesh.transfer_receipt``), because two derivations of one
+    fact is how a desktop says "the copy here is gone" about a queued move.
+    """
+    state = str(result.get("state") or "")
+    if state == "completed":
+        return "completed"
+    if state == "in_progress" or isinstance(result.get("queue"), dict):
+        return "in_progress"
+    phase = str(result.get("phase") or "")
+    if not phase:
+        stamps = result.get("phases") or []
+        if stamps and isinstance(stamps[-1], dict):
+            phase = str(stamps[-1].get("phase") or "")
+    return "completed" if phase in MOVE_OPENABLE_PHASES else "in_progress"
+
+
+def _duplicate_refusal(
+    server: "RelayServer",
+    session_id: str,
+    owner_device: str,
+    *,
+    phase_reached: SessionMovePhase,
+    promoted: bool = True,
+) -> SessionMoveRefusal:
+    """The refusal for a commit the OWNER contradicts by still listing the id.
+
+    ``changed`` is TRUE and that is the honest answer: this device's copy is promoted
+    and its bytes are the conversation, so a caller must not retry as though nothing
+    had happened. The sentence names the owner, both copies, the source's retrying
+    cleanup and the one rule that keeps the state from becoming two diverging
+    conversations.
+
+    ``promoted=False`` IS A DIFFERENT STATE and gets its own words (review round 2,
+    R2-2): the tombstone path checks the contradiction BEFORE the promote, so on that
+    arm nothing was promoted and the only copy is still staged here while the owner
+    still lists the id. Reusing the sentence above there claimed a committed copy the
+    device does not have, and told the reader about "both copies" when there is one.
+    """
+    name = server._member_name(owner_device) or owner_device  # noqa: SLF001
+    if promoted:
+        state = (
+            f"so both devices now list the same conversation. The copy here is "
+            f"committed; {name}'s cleanup is retrying, and until it finishes do not "
+            "edit both copies."
+        )
+    else:
+        state = (
+            "so this device did not promote the copy it holds. The verified copy is "
+            f"still staged here and is adopted once {name}'s handoff completes; "
+            "nothing here is openable yet, and this device is not one of two live "
+            "copies."
+        )
+    return _move_refusal(
+        session_id,
+        "duplicate",
+        f"{name} still lists {session_id} after the handoff, {state}",
+        phase_reached=phase_reached,
+        changed=True,
+    )
+
+
+def _owner_still_lists(transport: LinkTransport, session_id: str, *, to_device: str) -> bool:
+    """Whether the owner still answers ``owner: true`` for a committed id.
+
+    THE CONTRADICTION CHECK (``docs/design/mesh-move-outcome.md``, clause 1). A
+    promoted copy plus a source that still holds its directory is two live copies of
+    one id — the state INV-1 exists to prevent — and no acknowledgement can prove it
+    is not happening: the old commit answered ``committed`` after a delete its own
+    guards refused. So the destination asks the owner ONE short ``status`` frame and
+    lets the owner's own record decide.
+
+    SILENCE IS NOT A CONTRADICTION, and this is the asymmetry the contract rests on:
+    with the new commit order the source RENAMES its directory out of ``sessions/``
+    before it writes the tombstone and answers, so a ``committed`` answer that reached
+    this device already implies the directory left the store. A peer that has since
+    stopped answering (``Moved``), timed out, or answered a shape this build cannot
+    read is therefore the proof it sent — only an explicit ``owner: true`` downgrades
+    the move, because only an explicit answer is evidence AGAINST the commit.
+    """
+    try:
+        status = transport.ask(
+            {
+                "op": "net_session_move",
+                "phase": "status",
+                "session_id": session_id,
+                "to_device": to_device,
+            },
+            timeout=VERIFY_STATUS_TIMEOUT_S,
+        )
+    except Moved:
+        # Unreachable, a timeout, or the owner's own ``not_owner`` refusal: none of
+        # them says the directory is still there, so the commit answer stands.
+        return False
+    except Exception:  # noqa: BLE001 — verification is best-effort, never a second failure
+        logger.warning(
+            "mobility: could not verify the owner retired %s; treating the commit answer "
+            "as the proof",
+            session_id,
+            exc_info=True,
+        )
+        return False
+    return bool(status.get("owner"))
 
 
 def _move_refusal(
@@ -1265,6 +1439,8 @@ def _queued_receipt(
     keep: bool,
     from_block: MoveDevice,
     to_block: MoveDevice,
+    root: str | Path | None = None,
+    carry: dict[str, Any] | None = None,
 ) -> SessionMoveResult:
     """A queued accept as a receipt — SUCCESS, carrying the queue's own phase.
 
@@ -1283,20 +1459,65 @@ def _queued_receipt(
         if isinstance(history, list) and history
         else [{"phase": "queued", "at": time.time()}]
     )
-    return cast(
-        SessionMoveResult,
-        {
-            "ok": True,
-            "session_id": session_id,
-            "new_session_id": session_id,
-            "mode": "keep" if keep else "move",
-            "from_device": from_block,
-            "to_device": to_block,
-            "phase": phase,
-            "phases": stamps,
-            "queue": queue,
-        },
-    )
+    result: dict[str, Any] = {
+        "ok": True,
+        "session_id": session_id,
+        "new_session_id": session_id,
+        "mode": "keep" if keep else "move",
+        "from_device": from_block,
+        "to_device": to_block,
+        "phase": phase,
+        "phases": stamps,
+        "queue": queue,
+        # IN PROGRESS, NOT COMPLETED: the intent is durable and the driver owns it,
+        # but no byte has been copied yet. This is the field a surface renders, and
+        # it is why a queued receipt can never again read as "Moved".
+        "state": "in_progress",
+    }
+    # THE QUEUED DROP PROMISES ITS STASH UP FRONT (QA round 2). The record knows
+    # the flag; the source still holds the definitions, so the receipt can name
+    # the path the run will move them to and the count it will move. Without
+    # this, a queued drop said nothing about the definitions until (or unless)
+    # the resume ran.
+    # THE CARRY COMES FROM THE SOURCE (round 3, MAJOR 1). A recall runs on the
+    # DESTINATION: its root holds no queue record and no definitions, so computing
+    # anything here from ``root`` can only answer nothing. The source's reply
+    # carries its block; the record's stamped promise is the fallback; only a
+    # source-local caller (which HAS the tree) recomputes.
+    explicit = carry if isinstance(carry, dict) and carry.get("session_roles_notice") else None
+    if explicit is not None:
+        result["carry"] = dict(explicit)
+    elif bool(queue.get("drop_session_roles") or False):
+        # THE STAMP IS A QUEUE-TIME FACT (round 4): it is written at enqueue and
+        # re-read on a re-delivery after the safe point, when the live tree may
+        # have gained definitions. Trust it ONLY while the record is still
+        # `queued`; afterwards the live tree (still here until the commit) is the
+        # count the stash will hold.
+        phase = str(queue.get("phase") or "")
+        queued_now = phase in ("", "queued")
+        notice = str(queue.get("session_roles_notice") or "").strip() if queued_now else ""
+        count = int(queue.get("session_roles") or 0) if queued_now else 0
+        if root is not None:
+            try:
+                names = _session_role_definitions(root, session_id)
+            except _SessionRolesUnreadable:
+                names = []
+            if names:
+                count = len(names)
+                notice = _session_roles_notice(
+                    len(names),
+                    str(from_block.get("name") or "this device"),
+                    session_roles_stash_path(root, session_id),
+                    # Still prospective until the record reaches a terminal
+                    # phase: a paused/copying re-delivery has not stashed yet.
+                    future=phase not in ("resumed", "failed", "cancelled"),
+                )
+        if notice:
+            result["carry"] = {
+                "session_roles": count,
+                "session_roles_notice": notice,
+            }
+    return cast(SessionMoveResult, result)
 
 
 def _destination_move(
@@ -1315,6 +1536,7 @@ def _destination_move(
     queue: bool = False,
     request_id: str = "",
     resume_queued: bool = False,
+    drop_session_roles: bool = False,
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
@@ -1368,6 +1590,12 @@ def _destination_move(
 
     lease_epoch = ""
     manifest: dict[str, Any] = {}
+    session_roles_left = 0
+    #: The working directory the SOURCE last used for this conversation, when it
+    #: knows one. ``""`` for an older peer (the key is additive) and for a session
+    #: with no cwd anywhere — see ``_source_prepare``'s ``cwd`` and
+    #: ``carry.rewrite_host_cwd``.
+    source_cwd = ""
     attempts = 0
     while True:
         try:
@@ -1449,6 +1677,11 @@ def _destination_move(
                     # is the record's own transfer and not a third party's
                     # second move — see ``_source_prepare``'s queue guard.
                     "resume_queued": bool(resume_queued),
+                    # LOH-9 S2: without this the SOURCE refuses a conversation that
+                    # owns session definitions (see ``_source_prepare``); sent on
+                    # every prepare so the key's presence does not depend on a
+                    # boolean, and an older source ignores it.
+                    "drop_session_roles": bool(drop_session_roles),
                 }
             )
         except Moved as refusal:
@@ -1477,6 +1710,7 @@ def _destination_move(
             # value cannot differ.
             raw_queue = prepared.get("queue")
             queue_block = dict(raw_queue) if isinstance(raw_queue, dict) else {}
+            raw_carry = prepared.get("carry")
             return (
                 _queued_receipt(
                     session_id,
@@ -1484,6 +1718,7 @@ def _destination_move(
                     keep=keep,
                     from_block=_device_block(server, owner_device, owner_name),
                     to_block=_own_block(server),
+                    carry=dict(raw_carry) if isinstance(raw_carry, dict) else None,
                 ),
                 None,
                 "",
@@ -1491,6 +1726,13 @@ def _destination_move(
         lease_epoch = str(prepared.get("lease_epoch") or "")
         manifest_raw = prepared.get("manifest")
         manifest: dict[str, Any] = manifest_raw if isinstance(manifest_raw, dict) else {}
+        # HOW MANY DEFINITIONS THE SOURCE LEFT BEHIND. The SOURCE owns this count
+        # (it read the store before its commit deleted the directory); this side
+        # only carries it into the receipt. Absent on an older peer => 0.
+        session_roles_left = int(prepared.get("session_roles") or 0)
+        stash_raw = str(prepared.get("session_roles_stash") or "")
+        roles_stash = Path(stash_raw) if stash_raw else None
+        source_cwd = str(prepared.get("cwd") or "")
         note("prepared")
         break
 
@@ -1533,6 +1775,89 @@ def _destination_move(
                 session_id,
                 "digest_mismatch" if refusal.code == "digest_mismatch" else refusal.code,
                 refusal.message if refusal.code == "digest_mismatch" else refusal.message,
+            ),
+            "",
+        )
+    except Moved as refusal:
+        # A PEER-LINK FAILURE MID-COPY IS A REFUSAL, NOT AN EXCEPTION. ``sync_from``'s
+        # ``ask`` raises ``Moved`` when the source stops answering between chunks —
+        # measured live on 2026-10-21, where the escape tore down the relay's
+        # ``mesh-control-conn`` thread and the CLI read a wedged relay
+        # (``relay_unavailable``) while the source kept a ``prepared`` journal that
+        # refused every retry. Nothing has committed here (the owner only commits on
+        # the later ``ready``), so the partial staging is swept exactly as a
+        # ``SyncRefused`` is. The sentence has to say the SOURCE still holds the
+        # conversation: that is what makes a retry safe, and why the source's own
+        # journal may need its relay restarted before it can be re-prepared.
+        _roll_back_destination(server, session_id, staging)
+        dest = str(server._own_label())  # noqa: SLF001
+        holder = owner_name or owner_device or "the source"
+        if dest == holder:
+            # NAMES ARE NOT UNIQUE (m1): two members can share one, and the
+            # sentence's whole job is to say which device discarded a copy and
+            # which one still holds the only one.
+            dest = f"{dest} (this move's destination)"
+            holder = f"{holder} (the source)"
+        # THE CAUSE MAY NOT STACK A SECOND STATE CLAIM (D1). The production cause
+        # for a dead link is ``_unreachable(None)``'s "that device is unreachable
+        # (no answer on its link); nothing was changed" — appended above the rest,
+        # it says "nothing was changed" and then says the destination discarded a
+        # copy and the source is paused, which contradict each other in one
+        # sentence. The trailing clause is dropped, and for an unreachable peer the
+        # cause names the HOLDER instead of "that device" (which the destination
+        # reading it cannot resolve). Other codes keep the producer's own sentence,
+        # minus the same trailing clause.
+        cause = str(refusal.message)
+        # ONE TRAILING PERIOD BELONGS TO THE COMPOSED SENTENCE (R4-4), not to the
+        # producer's fragment: strip it before the clause so a peer message ending
+        # in a period cannot produce ".." when the sentence appends its own.
+        if cause.endswith("."):
+            cause = cause[:-1]
+        for clause in (
+            "; nothing was changed",
+            "; nothing has changed",
+            # ``LinkTransport.ask``'s "the peer answered something this build does
+            # not understand" / "answered with nothing this build can read" pair
+            # joins the same claim with a COMMA, and those are real producer
+            # sentences a destination composes its notice over (R5-1).
+            ", so nothing was changed",
+            ", so nothing has changed",
+        ):
+            if cause.endswith(clause):
+                cause = cause[: -len(clause)]
+                break
+        # R4-2: the holder-named rewrite is for a LINK-LEVEL silence only. A peer
+        # that ANSWERED with code unreachable (a build that does not understand the
+        # op, a refusal it composed itself) did not stop answering, and claiming it
+        # did would be a false diagnosis of a working link.
+        if refusal.code == "unreachable" and "no answer on its link" in cause:
+            cause = f"{holder} stopped answering during the copy (no answer on its link)"
+        if keep:
+            # A COPY LEAVES THE SOURCE RUNNING AND JOURNALS NOTHING (U8), so
+            # "paused" and "restart" would be false: there is no handoff to
+            # unpick, and the source must not be told to stop its conversation.
+            sentence = (
+                f"{cause}. {dest} discarded its partial copy; {holder} "
+                "still has the conversation and was not paused (a copy leaves it "
+                "running). Run the copy again."
+            )
+        else:
+            # U9: the restart is spelled with the DEVICE IT RUNS ON first, so a
+            # reader does not run a local command expecting it to act remotely.
+            sentence = (
+                f"{cause}. {dest} discarded its partial copy; {holder} "
+                "still has the conversation, paused for this move. On "
+                f"{holder}, restart the relay (`lop network restart`), then run "
+                "the move again."
+            )
+        return (
+            None,
+            _move_refusal(
+                session_id,
+                refusal.code or "unreachable",
+                sentence,
+                phase_reached="prepared",
+                changed=False,
             ),
             "",
         )
@@ -1615,6 +1940,14 @@ def _destination_move(
         "promoted": False,
         "at": time.time(),
     }
+    if source_cwd:
+        # ADDITIVE, and deliberately OUTSIDE every digest: the copy's content digest
+        # was computed from the bytes above (``ready.json`` is not content), so a
+        # peer that never wrote this key and one that did agree on the same value.
+        # It is the source's OWN record of the working directory, which a session
+        # with no ``desktop.json`` (a TUI-created one) has nowhere else to carry —
+        # and ``_promote`` turns it into this host's marker.
+        ready["source_cwd"] = source_cwd
     (staging / "ready.json").write_text(json.dumps(ready, sort_keys=True), encoding="utf-8")
     if not keep:
         # From HERE the id is in transit on this device too, so an engage here
@@ -1658,6 +1991,51 @@ def _destination_move(
                 }
             )
         except Moved as refusal:
+            if refusal.code in ("unreachable", "refused"):
+                # A LOST REPLY IS NOT A REFUSAL (review round 1, R1-2 / QA round 1,
+                # Q-1), AND NEITHER IS AN ERROR FRAME (review round 2, R2-1(b)).
+                # The owner renames its directory out of ``sessions/`` and deletes
+                # the quarantine BEFORE it answers ``ready``, so neither a reply
+                # that never arrives nor an ``op: error`` raised after the rename
+                # proves the source still holds the id: ``refused`` is the
+                # transport's word for "the peer threw", and every genuine refusal
+                # travels INSIDE the ack with its own code (``busy``,
+                # ``digest_mismatch``, ``cleanup_refused``, ``not_owner``, ...).
+                # Clearing the entry and sweeping the verified staging on either
+                # would destroy the ONLY copy left. Keep both, say so, and let the
+                # destination's own reconcile adopt the copy when the owner's
+                # record says the handoff committed.
+                note("handing_off")
+                logger.warning(
+                    "mobility: %s %s the commit for %s; keeping the verified copy "
+                    "under %s until its record says otherwise",
+                    owner_name or owner_device,
+                    "did not answer" if refusal.code == "unreachable" else "failed inside",
+                    session_id,
+                    staging,
+                )
+                if refusal.code == "unreachable":
+                    why = f"{owner_name or owner_device} did not answer the commit"
+                else:
+                    why = (
+                        f"the commit failed on {owner_name or owner_device} after it could "
+                        f"already have taken the session out of its store ({refusal.message})"
+                    )
+                return (
+                    None,
+                    _move_refusal(
+                        session_id,
+                        "unconfirmed",
+                        f"the verified copy of {session_id} is kept under {staging}: "
+                        f"{why}, so this device cannot yet say the move is complete. "
+                        "It will be adopted here if the owner's own record says the "
+                        "handoff committed. Do not retry as though nothing happened — "
+                        "the source may already have handed its copy away.",
+                        phase_reached="handing_off",
+                        changed=True,
+                    ),
+                    "",
+                )
             clear_handoff_entry(server.root, session_id)
             _roll_back_destination(server, session_id, staging)
             return None, _move_refusal(session_id, refusal.code, refusal.message), ""
@@ -1714,6 +2092,16 @@ def _destination_move(
             "",
         )
     carry_block = promote_outcome.carry
+    if session_roles_left:
+        # THE NOTICE THE TARGET RECORDS (design §3.5): the count came from the
+        # source, the device name is the source's, and the sentence rides the
+        # receipt AND the completion frame so an offload's inviter reports it too.
+        carried = dict(carry_block or {})
+        carried["session_roles"] = session_roles_left
+        carried["session_roles_notice"] = _session_roles_notice(
+            session_roles_left, owner_name or owner_device, roles_stash, kept=keep
+        )
+        carry_block = carried
     note("committed")
     if not keep:
         clear_handoff_entry(server.root, session_id)
@@ -1738,6 +2126,17 @@ def _destination_move(
         transport.ask(done_frame)
     except Moved:
         logger.debug("mobility: %s did not acknowledge the handoff", session_id)
+    if not keep and _owner_still_lists(transport, session_id, to_device=server.identity.device_id):
+        # THE COMMIT IS CONTRADICTED BY THE OWNER'S OWN RECORD. Report the state the
+        # two devices are actually in rather than the success the frames implied: the
+        # copy here is promoted and editable, the source still lists the id, and its
+        # cleanup is what retries. ``changed`` is True — a caller that retried as
+        # though nothing had happened would be editing the wrong one of two copies.
+        return (
+            None,
+            _duplicate_refusal(server, session_id, owner_device, phase_reached="committed"),
+            target_id,
+        )
     note("done")
     _audit(server, AUDIT_DONE, session_id, owner_device, new_session_id=target_id)
     # §6.3 STEP 17's ``--open``, AS AN OPT-IN FLAG, AND LAST ON PURPOSE. The engage
@@ -1758,6 +2157,10 @@ def _destination_move(
         "to_device": _own_block(server),
         "phase": "done",
         "phases": phases,
+        # VERIFIED COMPLETED: the promote landed here and the owner's own commit
+        # answer said its directory left ``sessions/``; the contradiction check just
+        # above is what can still downgrade this to a refusal.
+        "state": "completed",
     }
     if carry_block is not None:
         receipt["carry"] = carry_block
@@ -1906,6 +2309,33 @@ def _finish_from_tombstone(
             ),
             "",
         )
+    # THE SAME CONTRADICTION CHECK AS THE LIVE PATH, and it is the one this path needs
+    # most: it adopts from the owner's TOMBSTONE, which is the owner's own statement
+    # that it handed the id away — so an owner that still answers ``owner: true`` is
+    # contradicting the record this device is acting on. The status answer here is
+    # expected to be the tombstone; anything else is the commit answer re-read. An
+    # absent link or no answer is not a contradiction (see ``_owner_still_lists``).
+    #
+    # BEFORE THE PROMOTE, deliberately (review round 1, R1-5): checking afterwards
+    # minted the second live copy this refusal exists to report, and cleared the
+    # destination's handoff entry for a handoff that had not finished — a recovery
+    # then recorded ``waiting`` for an entry that no longer existed, and only a log
+    # line said so. Here the staging is KEPT (it may be the only copy left) and the
+    # entry stays, so the next attempt re-reads the same two records instead of
+    # inventing a third state.
+    link = server._ensure_link(owner_device)  # noqa: SLF001 — the one dial seam
+    if link is not None and _owner_still_lists(
+        LinkTransport(server, link, session_id),
+        session_id,
+        to_device=server.identity.device_id,
+    ):
+        return (
+            None,
+            _duplicate_refusal(
+                server, session_id, owner_device, phase_reached="handing_off", promoted=False
+            ),
+            "",
+        )
     promote_outcome = _promote(server, staging, session_id)
     if not promote_outcome.ok:
         return (
@@ -1937,6 +2367,7 @@ def _finish_from_tombstone(
         "to_device": _own_block(server),
         "phase": "committed",
         "phases": phases,
+        "state": "completed",
     }
     if carry_block is not None:
         # Reported on the receipt this device answers with — and for a RECALL that
@@ -2126,6 +2557,28 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
     carry_block: dict[str, Any] | None = None
     from local_operator.network import carry
 
+    # THE HOST-SPECIFIC HALF OF THE CARRY, immediately before the rebuild that reads
+    # it: the marker's cwd belongs to the device the conversation came FROM, and the
+    # indexes rebuilt below take their cwd from that marker (``carry.resolve_cwd``).
+    # Rewriting after the rebuild would leave both indexes naming a directory this
+    # device does not have. The transcript is never edited — the copy was verified
+    # byte-for-byte against it, and a cwd is host state rather than conversation.
+    cwd_report: dict[str, str] = {}
+    try:
+        cwd_report = carry.rewrite_host_cwd(
+            target,
+            target_id,
+            config_dir=server.root,
+            # WHAT THE SOURCE RECORDED, for the session that has no marker of its own
+            # (a TUI-created one carries no ``desktop.json``): the move wrote it into
+            # ``ready.json`` at the prepare, and this is the one moment it can become
+            # this host's marker. Absent for an older peer, which then behaves exactly
+            # as it did before.
+            source_cwd=str(ready_doc.get("source_cwd") or ""),
+        )
+    except Exception:  # noqa: BLE001 — a mapping this could not compute must not fail a promote
+        logger.warning("mobility: could not map %s's cwd for this host", target_id, exc_info=True)
+
     try:
         report = carry.rebuild_indexes(server.root, target_id)
         wakes = int(report.get("wakes") or 0)
@@ -2147,6 +2600,13 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         # — so that copy has ONE definition (``network/carry.py``) and this call
         # site cannot end in silence or in a failed promote.
         carry_block = carry.move_carry_block(server.root, wakes, str(_own_block(server)["name"]))
+    if cwd_report:
+        # ADDITIVE INSIDE AN ALREADY-OPTIONAL BLOCK: a move whose cwd was usable here
+        # reports nothing new, and one that was mapped says both paths so the user is
+        # told where their conversation now opens.
+        carried = dict(carry_block or {})
+        carried["cwd"] = cwd_report
+        carry_block = carried
     return _PromoteOutcome(ok=True, carry=carry_block)
 
 
@@ -2306,6 +2766,10 @@ def _after_source_commit(root: Path, session_id: str) -> None:
     them, and so the queue record folds to ``resumed`` on the same step that
     observes the commit. Best effort: the commit has landed either way, and the
     indexes self-heal on the next open (``network/carry.py``).
+
+    IT MUST RUN WHATEVER THE TOMBSTONE DID (review round 3, R3-1): the queue fold
+    below is this function's, and a record left live here is one the queue driver
+    fails terminally, after which no reconcile can repair it.
     """
     try:
         from local_operator.network import carry, move_queue
@@ -2317,6 +2781,101 @@ def _after_source_commit(root: Path, session_id: str) -> None:
             "mobility: could not clear derived state for %s after its commit",
             session_id,
             exc_info=True,
+        )
+
+
+def _settle_source_commit(
+    root: Path,
+    session_id: str,
+    *,
+    device_id: str,
+    device_name: str,
+    network_id: str,
+) -> bool:
+    """The commit's durable half: tombstone, journal clear, F5 prune. NEVER raises.
+
+    THE COMMIT POINT IS THE RENAME, NOT THIS FUNCTION (review round 2, R2-1). Every
+    caller gets here with the directory already out of ``sessions/`` and the
+    destination already told to expect a commit, so a raise here must not become the
+    relay's ``op: error`` frame: ``LinkTransport.ask`` reads that as
+    ``Moved("refused")``, and a refusal makes the destination clear its entry and
+    sweep the VERIFIED STAGING it holds — which is the only copy left once this one
+    is gone. So each step is individually guarded and the outcome is returned.
+
+    THE TOMBSTONE DECIDES WHAT COMES NEXT FOR THE JOURNAL, not for the commit: without
+    it the id is not durably the destination's, so the journal is LEFT AT
+    ``handing-off`` — the phase forbids a rollback — and :func:`_complete_handoff`
+    writes it on the next reconcile. ``True`` means the tombstone landed; the steps
+    after it are derived state and the commit holds either way.
+
+    THE DERIVED-STATE STEP RUNS ON EVERY COMMIT, tombstone or not (review round 3,
+    R3-1). It is the only caller of ``move_queue.note_committed``, and that fold is
+    what takes a queued move's record from ``copying`` to ``resumed``. Skipping it
+    when the tombstone write fails leaves the record live, and the queue driver's
+    tombstone-only watch then folds it terminally ``failed`` after ``COPY_WATCH_S``
+    — "this device still holds the conversation" — while the directory here is gone
+    and the destination holds the only copy. Terminal is write-once, so the reconcile
+    that later writes the tombstone cannot repair the record. The rename already
+    proved what the fold records, so the tombstone's outcome must not gate it; the
+    journal is the one thing still kept back, because it is how reconcile knows to
+    write the tombstone it did not get to write.
+    """
+    from local_operator.network.projection import write_tombstone
+    from local_operator.session.placement import clear_handoff_entry
+
+    tombstoned = True
+    try:
+        write_tombstone(
+            session_id,
+            device_id=device_id,
+            device_name=device_name,
+            network_id=network_id,
+            config_dir=root,
+        )
+    except Exception:  # noqa: BLE001 — a commit reported as a refusal loses the only copy
+        tombstoned = False
+        logger.exception(
+            "mobility: %s left the store but its tombstone could not be written; the "
+            "journal stays handing-off so reconcile completes the handoff",
+            session_id,
+        )
+    else:
+        try:
+            clear_handoff_entry(root, session_id)
+        except Exception:  # noqa: BLE001 — a stale entry is cleared from the tombstone
+            logger.exception(
+                "mobility: %s committed but its journal entry could not be cleared; the "
+                "next reconcile clears it from the tombstone",
+                session_id,
+            )
+    # The directory is gone, so the source's derived state goes with it — the same F5
+    # prune the ordinary commit runs, or the moved session's wakes would stay armed on
+    # a device that no longer holds it, and its queue record would stay live for the
+    # driver to fail. Already best effort internally; the guard is this function's own
+    # promise that no failure here reaches the wire.
+    try:
+        _after_source_commit(root, session_id)
+    except Exception:  # noqa: BLE001 — derived state; the commit already landed
+        logger.exception(
+            "mobility: %s committed but its derived state could not be cleared", session_id
+        )
+    return tombstoned
+
+
+def _note_committed(server: "RelayServer", session_id: str, to_device: str) -> None:
+    """Record a commit's phase and audit — never raises (review round 2, R2-1).
+
+    ``progress_for(...).note`` releases the in-memory waiter an inviter is blocked on
+    and ``_audit`` is a never-raise by its own contract; the guard here is the same
+    rule one level down: no bookkeeping may turn a commit into a refusal frame.
+    """
+    try:
+        progress_for(server).note(session_id, "committed")
+        _audit(server, AUDIT_COMMITTED, session_id, to_device)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.exception(
+            "mobility: %s committed but its progress note or audit could not be recorded",
+            session_id,
         )
 
 
@@ -2507,6 +3066,29 @@ def _source_status(
             entry = handoff_in_flight(server.root, session_id)
         except Exception:  # noqa: BLE001 — the journal's own refusal text is elsewhere
             entry = None
+        queue = _queue_projection(server.root, session_id)
+        if queue is not None and str(queue.get("phase") or "") not in (
+            "resumed",
+            "failed",
+            "cancelled",
+        ):
+            # READING THE RECORD STARTS ITS DRIVER (design clause 5). The record is
+            # durable; the thread that advances it lives in the relay process that
+            # accepted the request, so a restart — or a status read from the device
+            # that can see the record but not its thread — used to leave the move
+            # frozen at ``queued`` while the surface said it was progressing. The
+            # start is idempotent (``move_queue.start_driver`` no-ops for a live
+            # thread), so a status read can never spawn a second driver.
+            try:
+                from local_operator.network import move_queue
+
+                move_queue.start_driver(server, session_id)
+            except Exception:  # noqa: BLE001 — a status answer must not fail on housekeeping
+                logger.warning(
+                    "mobility: could not restart the queued move's driver for %s",
+                    session_id,
+                    exc_info=True,
+                )
         return {
             "result": "state",
             "owner": True,
@@ -2522,7 +3104,7 @@ def _source_status(
             # the requesting surface reads the same record its own device cannot
             # see — this answer is the one path it has to it. ``None`` when
             # there is no queued move, which is every ordinary session.
-            "queue": _queue_projection(server.root, session_id),
+            "queue": queue,
             "session_id": session_id,
         }
     tombstone = _tombstone(server.root, session_id)
@@ -2556,6 +3138,351 @@ def _source_status(
     }
 
 
+class _SessionRolesUnreadable(RuntimeError):
+    """The conversation's ``roles`` tree exists but cannot be read.
+
+    FAIL CLOSED (agent/QA round 1, M5/R-M5): a check that answers "no roles" for
+    an unreadable tree lets the commit delete definitions it never saw. The
+    refusal says which store failed; the remedy is to make it readable, or to
+    take the explicit ``--drop-session-roles`` path (which stashes it).
+    """
+
+
+def _session_role_definitions(root: str | Path, session_id: str) -> list[str]:
+    """The human names of the conversation's role/team definitions, sorted.
+
+    Read through the SAME scoped registries a session builds (``profile_scope``),
+    so a row this version can create is a row this check can see. A tree that
+    exists but cannot be read RAISES ``_SessionRolesUnreadable``: the alternative
+    (an empty answer) is a gate that fails open on exactly the condition that
+    hides definitions.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import SESSION_ROLES_DIRNAME
+    from local_operator.teams import TeamRegistry
+
+    base = Path(root) / "sessions" / session_id / SESSION_ROLES_DIRNAME
+    if not base.exists():
+        return []
+    names: list[str] = []
+
+    def _unparsed(store_dir: Path, suffix: str, parsed: int) -> Path | None:
+        """The first row file on disk that the registry did NOT parse.
+
+        THE STORES LOG AND SKIP a corrupt row (``invalid agent metadata in <id>``),
+        so a list that came back short is indistinguishable from a clean tree by
+        its length alone. This counts the marker files the registry OUGHT to have
+        parsed and compares with what it returned, which turns a silent skip into
+        the gate's own refusal (round 3, item 1).
+
+        COUNT-BASED, not id-based, on purpose (round 3): a row's YAML ``id`` need
+        not equal its directory name (a copied or hand-edited store), so matching
+        names would refuse a perfectly parseable tree. Dot-prefixed siblings are
+        skipped for the same reason — the team store stages writes under a
+        temporary `.name` directory that no registry lists.
+        """
+        if not store_dir.is_dir():
+            return None
+        markers = sorted(
+            child / suffix
+            for child in store_dir.iterdir()
+            if child.is_dir() and not child.name.startswith(".") and (child / suffix).is_file()
+        )
+        if len(markers) <= parsed:
+            return None
+        # NAME THE FILE THE WALK FAILED ON (round 4), not just the first marker:
+        # parse each one and return the first that is not valid YAML. When every
+        # file parses but a row still failed validation, the count is the only
+        # honest statement, so the first marker is reported as the candidate.
+        import yaml
+
+        for marker in markers:
+            try:
+                yaml.safe_load(marker.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 — this is the offending file
+                return marker
+        return markers[0]
+
+    try:
+        store = AgentRegistry(base, initialize=False, migrate=False)
+        agents = list(store.list_agents())
+        unparsed = _unparsed(base / "agents", "agent.yml", len(agents))
+        if unparsed is not None:
+            raise _SessionRolesUnreadable(
+                f"the role store at {base / 'agents'} holds a file that does not parse: "
+                f"{unparsed}"
+            )
+        names.extend(str(row.name) for row in agents)
+    except _SessionRolesUnreadable:
+        raise
+    except Exception as exc:  # noqa: BLE001 — turned into a refusal, never a pass
+        raise _SessionRolesUnreadable(
+            f"the role store at {base / 'agents'} could not be read ({exc})"
+        ) from exc
+    try:
+        teams = list(TeamRegistry(base).list_teams())
+        unparsed = _unparsed(base / "teams", "team.yml", len(teams))
+        if unparsed is not None:
+            raise _SessionRolesUnreadable(
+                f"the team store at {base / 'teams'} holds a file that does not parse: "
+                f"{unparsed}"
+            )
+        names.extend(str(team.name) for team in teams)
+    except _SessionRolesUnreadable:
+        raise
+    except Exception as exc:  # noqa: BLE001 — turned into a refusal, never a pass
+        raise _SessionRolesUnreadable(
+            f"the team store at {base / 'teams'} could not be read ({exc})"
+        ) from exc
+    return sorted(name for name in names if name)
+
+
+#: Where a ``--drop-session-roles`` move puts the definitions it cannot carry.
+#: DEVICE-LEVEL, outside every session directory: the commit deletes the session
+#: tree, and nothing (sync, retention, cleanup) owns or walks this root. It holds
+#: user-authored definitions, so the only removal path is the user's own.
+DROPPED_ROLES_DIRNAME = "dropped-session-roles"
+
+
+def session_roles_stash_path(root: str | Path, session_id: str) -> Path:
+    """The directory a dropped move stashes this conversation's definitions in.
+
+    Deterministic from the device root and the session id, with a numeric suffix
+    when a previous drop already used the name (a conversation can be moved back
+    and dropped again; overwriting a stash would delete earlier definitions).
+    Nothing else for the same id can race it: one handoff per session at a time.
+    """
+    base = Path(root) / DROPPED_ROLES_DIRNAME
+    candidate = base / session_id
+    suffix = 2
+    while candidate.exists():
+        candidate = base / f"{session_id}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _role_names_in(store_dir: Path) -> list[str]:
+    """The definition names inside one ``roles`` tree, by the same registries.
+
+    Used for the stash record; a failure degrades to no names rather than
+    blocking the move, because the directory itself is what was preserved.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.teams import TeamRegistry
+
+    names: list[str] = []
+    try:
+        store = AgentRegistry(store_dir, initialize=False, migrate=False)
+        names.extend(str(row.name) for row in store.list_agents())
+    except Exception:  # noqa: BLE001 — the record is advisory
+        pass
+    try:
+        names.extend(str(team.name) for team in TeamRegistry(store_dir).list_teams())
+    except Exception:  # noqa: BLE001 — the record is advisory
+        pass
+    return sorted(name for name in names if name)
+
+
+def _stash_session_roles(root: str | Path, session_id: str) -> Path | None:
+    """Move ``<session>/roles`` to the device stash BEFORE the tree is deleted.
+
+    THE COMMIT DELETES THE SESSION DIRECTORY (``_remove_handed_away``), and v1
+    does not carry ``roles/`` in the copy set — so a drop move that did not stash
+    first would delete definitions no other device holds, while the notice said
+    they "stayed". A directory RENAME on one filesystem leaves them in exactly
+    one of the two places even if the process dies mid-commit; a write failure
+    RAISES so the caller treats the commit as not-cleaned instead of deleting
+    past it.
+    """
+    from local_operator.profile_scope import SESSION_ROLES_DIRNAME
+
+    source = Path(root) / "sessions" / session_id / SESSION_ROLES_DIRNAME
+    if not source.is_dir():
+        return None
+    target = session_roles_stash_path(root, session_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(str(source), str(target))
+    (target / "stash.json").write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "at": time.time(),
+                "reason": "mesh move with --drop-session-roles: v1 does not carry roles",
+                "definitions": _role_names_in(target),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def _unstash_session_roles(root: str | Path, session_id: str) -> None:
+    """Put a stashed ``roles/`` tree back after a commit was refused.
+
+    A REFUSAL MUST CHANGE NOTHING, and the stash is a RENAME out of the session: a
+    move that stashed and then could not hand the directory away would leave the
+    conversation without definitions whose departure nothing reported. Best effort
+    and logged — the refusal's own answer does not depend on it, and a stash that
+    cannot be moved back is the same recoverable state ``--drop-session-roles``
+    produces deliberately (``session_roles_stash_path`` still names it).
+    """
+    from local_operator.profile_scope import SESSION_ROLES_DIRNAME
+
+    stash = session_roles_stash_path(root, session_id)
+    if not stash.is_dir():
+        return
+    source = Path(root) / "sessions" / session_id / SESSION_ROLES_DIRNAME
+    if source.exists():
+        return
+    try:
+        source.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(stash), str(source))
+    except OSError:
+        logger.warning(
+            "mobility: could not restore the stashed session roles for %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _session_roles_notice(
+    count: int, device_name: str, stash: Path | None, *, kept: bool = False, future: bool = False
+) -> str:
+    """The receipt sentence for definitions a drop move left behind.
+
+    States the count, the DEVICE, and where they are: the EXACT stash path for a
+    deleting move, the still-running source conversation for ``--keep``. The
+    location is what makes the promise checkable — without it "stayed on this
+    device" is unfalsifiable, and the failure this finding measured was exactly
+    that the words were true of nothing.
+    """
+    noun = "definition" if count == 1 else "definitions"
+    if kept:
+        return (
+            f"{count} session role/team {noun} "
+            f"{'remains' if count == 1 else 'remain'} in the source conversation on "
+            f"{device_name} (--keep leaves it running) — a mesh move does not carry "
+            "them in this version."
+        )
+    where = f"at {stash}" if stash is not None else "under the dropped-session-roles root"
+    # ONE CONCEPT WORD (round 3, U9): "stash" across the flag's prose, the
+    # refusal, the receipt and this notice. The earlier wording mixed
+    # stayed/dropped/not deleted for the same act, which reads as three
+    # different outcomes.
+    #
+    # THE TENSE IS THE CALLER'S (U12): a queued move has not run yet, so its
+    # notice is future — "will be stashed". And the verb agrees with the count
+    # (round 3): `1 … definition was stashed`, `2 … definitions were stashed`.
+    if future:
+        verb = "will be stashed"
+    else:
+        verb = "was stashed" if count == 1 else "were stashed"
+    return (
+        f"{count} session role/team {noun} {verb} on {device_name} {where} — a "
+        "mesh move does not carry them in this version. The stash holds the definition "
+        "files and a stash.json record of what it contains; to use them again, recreate "
+        "the roles and teams on the destination and copy their instructions from that "
+        "directory."
+    )
+
+
+def _session_roles_refusal(
+    server: "RelayServer", session_id: str, names: list[str]
+) -> dict[str, Any]:
+    """Refuse a move that would leave the conversation's definitions behind.
+
+    The default is the refusal (LOH-9 S2): a move deletes the source's directory,
+    so a conversation with session roles would silently lose definitions that no
+    other device holds — the opposite of "never silently lost". The message NAMES
+    them (a count alone leaves the user guessing which role is at risk) and names
+    the two ways forward, including the explicit opt-out.
+    """
+    listed = ", ".join(repr(name) for name in names)
+    stash = session_roles_stash_path(server.root, session_id)
+
+    return {
+        "result": "refused",
+        "code": "session_roles",
+        "message": (
+            f"this conversation owns {len(names)} session "
+            f"{'definition' if len(names) == 1 else 'definitions'} ({listed}), and a "
+            "mesh move does not carry "
+            f"{'it' if len(names) == 1 else 'them'} in this version. Either stay on this "
+            "device, "
+            "or re-run with --drop-session-roles: the definitions will then be stashed "
+            f"at {stash} on this device, and the receipt names that path."
+        ),
+        "session_id": session_id,
+    }
+
+
+def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
+    """The working directory this device's copy of ``session_id`` was last used in.
+
+    WHY THIS EXISTS (the owner's report, clause 4): a session the TUI created and
+    nothing else touched may carry no ``desktop.json`` at all, and its cwd then
+    lives only where the DESTINATION cannot see it — in this device's wake index or
+    in the discovery record of the runtime that has it open. A move whose copy
+    carried neither arrived with no marker, so ``carry.rebuild_indexes`` resolved
+    the cwd to the session DIRECTORY: a path that exists on every device and means
+    nothing, which is how a moved conversation opened in an empty folder.
+
+    THE ORDER IS THE AUTHORITY ORDER, and each step answers a different shape:
+
+    1. the wake index (``wakes.store.read_entry``) — what this device's supervisor
+       last read, kept in step by every arm and present for a scheduled session;
+    2. ``carry.resolve_cwd`` — the session's own ``desktop.json`` marker, which
+       travels in the copy set when it exists;
+    3. the live runtime's discovery record (``find_runtime_record``) — the only
+       record of an open session whose marker was never written.
+
+    THE SESSION DIRECTORY IS NOT A CWD: ``resolve_cwd`` returns it as its last
+    resort, so it is filtered out here rather than sent as a value the destination
+    would write into a marker as though it meant something. Returns ``""`` when
+    nothing usable is known, which is what makes the prepare answer carry no
+    ``cwd`` key and the destination invent no marker.
+    """
+    root = Path(server.root)
+    session_dir = root / "sessions" / session_id
+
+    def usable(value: Any) -> bool:
+        if not isinstance(value, str) or not value.strip():
+            return False
+        try:
+            return Path(value) != session_dir
+        except (OSError, ValueError):  # a path this host cannot even spell
+            return False
+
+    try:
+        from local_operator.wakes import store as wake_store
+
+        entry = wake_store.read_entry(root, session_id) or {}
+        if usable(entry.get("cwd")):
+            return str(entry["cwd"])
+    except Exception:  # noqa: BLE001 — a cwd is never worth a failed move
+        logger.debug("mobility: could not read %s's wake index cwd", session_id, exc_info=True)
+    try:
+        from local_operator.network import carry as carry_mod
+
+        from_marker = carry_mod.resolve_cwd(session_dir)
+        if usable(from_marker):
+            return from_marker
+    except Exception:  # noqa: BLE001
+        logger.debug("mobility: could not read %s's desktop marker", session_id, exc_info=True)
+    try:
+        from local_operator.mobile.attach_client import find_runtime_record
+
+        record, _pid = find_runtime_record(root, session_id)
+        if record is not None and usable(record.cwd):
+            return str(record.cwd)
+    except Exception:  # noqa: BLE001
+        logger.debug("mobility: could not read %s's runtime record", session_id, exc_info=True)
+    return ""
+
+
 def _source_prepare(
     server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2564,6 +3491,14 @@ def _source_prepare(
     Every validation is before the first mutation, and the busy refusal leaves both
     devices untouched (§6.3 step 2/3) — which is what makes ``--wait`` a re-probe
     rather than a resumed half-move.
+
+    A PREPARED ANSWER CARRIES ``cwd`` WHEN THIS DEVICE KNOWS ONE — the working
+    directory the conversation was last used in, read by ``_source_session_cwd``
+    (wake index, then the session's own marker, then a live runtime's record). It
+    is ADDITIVE: an older peer ignores it, and the key is absent when nothing
+    usable is known. The destination turns it into ``ready.json``'s ``source_cwd``
+    and, at the promote, into the ``desktop.json`` a session with no marker of its
+    own could never otherwise have.
     """
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import (
@@ -2583,6 +3518,38 @@ def _source_prepare(
             "message": f"this device does not hold {session_id} any more",
             "session_id": session_id,
         }
+    # THE ROLE-DEFINITION GATE (LOH-9 S2). The copy set excludes ``roles/`` for
+    # v1, so this is the one place that can stop a deleting move from losing
+    # definitions no other device has. It runs for BOTH modes (a ``--keep`` copy
+    # would arrive without them too) and after ownership, so a third device's
+    # ask still answers ``not_owner``.
+    drop_session_roles = bool(frame.get("drop_session_roles") or False)
+    try:
+        session_roles = _session_role_definitions(server.root, session_id)
+    except _SessionRolesUnreadable as unreadable:
+        return {
+            "result": "refused",
+            "code": "session_roles_unreadable",
+            "message": (
+                "this conversation's session roles could not be read, so this device "
+                f"cannot tell whether moving it would lose them: {unreadable}. Nothing "
+                "was moved. Make that directory readable, or re-run with "
+                "--drop-session-roles to move the conversation and stash the tree under "
+                "this device's dropped-session-roles directory."
+            ),
+            "session_id": session_id,
+        }
+    if session_roles and not drop_session_roles:
+        return _session_roles_refusal(server, session_id, session_roles)
+    # THE STASH PATH IS PART OF THE PROMISE. The commit runs on THIS device after
+    # the copy verifies, so the path is computed here and carried to the
+    # destination's receipt — deterministic, because one handoff per session is
+    # in flight at a time (the journal refuses a second).
+    roles_stash = (
+        str(session_roles_stash_path(server.root, session_id))
+        if (session_roles and drop_session_roles and not keep)
+        else ""
+    )
     try:
         existing = handoff_in_flight(server.root, session_id)
     except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
@@ -2614,6 +3581,11 @@ def _source_prepare(
             # entry's writer is alive — and that gap is recorded, not guessed at.
             phase = str(existing.get("phase") or "")
             age = _handoff_age(existing)
+            # THE DEVICE, NOT "this device": the reader is the DESTINATION, so
+            # "this device" named the wrong machine and its remedy (restart the
+            # destination's relay) cleared nothing. The journal is device-local,
+            # so the holder for an entry here is always this relay's own device.
+            holder = str(server._own_label())  # noqa: SLF001
             # THE ESCAPE IS NAMED, because it is not derivable from the state. An
             # entry written by this device's LIVE relay is skipped by every reconcile
             # (the instance rule that stops a merely slow peer losing an in-flight
@@ -2628,10 +3600,10 @@ def _source_prepare(
                 "result": "refused",
                 "code": "in_progress",
                 "message": (
-                    "a handoff of that conversation is already in progress on this "
-                    f"device (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    "changed; if the other device has stopped answering, restart this "
-                    "device's relay (`lop network restart`) and try the move again"
+                    "a handoff of that conversation is already in progress on "
+                    f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
+                    f"changed. If the move does not finish on its own, restart the "
+                    f"relay on {holder} (`lop network restart`), then try the move again."
                 ),
                 "session_id": session_id,
             }
@@ -2710,14 +3682,24 @@ def _source_prepare(
             attachments_dir=Path(server.root) / "attachments",
         )
         _audit(server, AUDIT_PREPARE, session_id, link.device_id, mode="keep", keep=True)
-        return {
+        keep_answer: dict[str, Any] = {
             "result": "prepared",
             "phase": "prepared",
             "lease_epoch": "",
             "mode": "keep",
             "manifest": manifest,
+            # The destination states what stayed behind, in the receipt it builds
+            # (see ``MoveCarryBlock.session_roles``); 0 means none, which is every
+            # ordinary move.
+            "session_roles": len(session_roles),
+            "session_roles_stash": roles_stash,
             "session_id": session_id,
         }
+        # ADDITIVE, and absent when nothing usable is known (see the docstring).
+        keep_cwd = _source_session_cwd(server, session_id)
+        if keep_cwd:
+            keep_answer["cwd"] = keep_cwd
+        return keep_answer
     # BEFORE ANY WORK AND BEFORE THE RETIRE: does this directory hold anything the
     # copy set cannot carry? Asking here costs a directory listing and refuses a
     # move that would delete unaccounted-for content without stopping the
@@ -2732,6 +3714,11 @@ def _source_prepare(
             "message": incomplete.message,
             "session_id": session_id,
         }
+    # THE CWD IS READ BEFORE THE RETIRE, because one of its three sources is the
+    # runtime's own discovery record: after the retire there is no process left to
+    # ask, and a queued move that resumes here would then lose the only value a
+    # marker-less session has. Nothing is mutated by the read.
+    source_cwd = _source_session_cwd(server, session_id)
     # THE EXPENSIVE PASS RUNS BEFORE THE CONVERSATION IS STOPPED (review round 2, MAJOR
     # 2). Every member of the copy set is digested here — the one pass a move cannot avoid,
     # because the commit compares digests derived from these bytes — and only then is the
@@ -2779,6 +3766,19 @@ def _source_prepare(
                     request_id=request_id or f"move-{session_id}-{int(time.time() * 1000)}",
                     requested_by=str(frame.get("requester") or link.device_id),
                     engage_on_arrival=bool(frame.get("engage_on_arrival") or False),
+                    drop_session_roles=drop_session_roles,
+                    session_roles=len(session_roles) if drop_session_roles else 0,
+                    session_roles_notice=(
+                        _session_roles_notice(
+                            len(session_roles),
+                            device_name=server._own_label(),  # noqa: SLF001
+                            stash=session_roles_stash_path(server.root, session_id),
+                            kept=False,
+                            future=True,
+                        )
+                        if drop_session_roles and session_roles
+                        else ""
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 — a record that cannot be written is a refusal
                 return {
@@ -2805,12 +3805,27 @@ def _source_prepare(
             move_queue.start_driver(server, session_id)
             progress_for(server).note(session_id, "queued")
             _audit(server, AUDIT_PREPARE, session_id, link.device_id, mode="queue")
-            return {
+            queued_receipt: dict[str, Any] = {
                 "result": "queued",
                 "phase": str(record.get("phase") or "queued"),
                 "queue": move_queue.payload(record),
                 "session_id": session_id,
             }
+            if session_roles and drop_session_roles:
+                # THE PROMISE THE QUEUED MOVE MAKES (M3): the very line the run
+                # will print later, in the tense that is true NOW — the stash does
+                # not exist yet, but the path is deterministic and the flag is
+                # durable on the record.
+                queued_receipt["carry"] = {
+                    "session_roles": len(session_roles),
+                    "session_roles_notice": _session_roles_notice(
+                        len(session_roles),
+                        str(server._own_label()),  # noqa: SLF001
+                        session_roles_stash_path(server.root, session_id),
+                        future=True,
+                    ),
+                }
+            return queued_receipt
         return {
             "result": "refused",
             # THE REFUSAL TAXONOMY SPLIT (scout-state-ui Q3): ``viewed_elsewhere`` is
@@ -2886,14 +3901,19 @@ def _source_prepare(
     )
     progress_for(server).note(session_id, "prepared")
     _audit(server, AUDIT_PREPARE, session_id, link.device_id, mode="move")
-    return {
+    answer: dict[str, Any] = {
         "result": "prepared",
         "phase": "prepared",
         "lease_epoch": lease_epoch,
         "mode": "move",
         "manifest": manifest,
+        "session_roles": len(session_roles),
+        "session_roles_stash": roles_stash,
         "session_id": session_id,
     }
+    if source_cwd:
+        answer["cwd"] = source_cwd
+    return answer
 
 
 def _remove_handed_away(root: Path, session_id: str, to_device: str) -> bool:
@@ -2926,7 +3946,29 @@ def _remove_handed_away(root: Path, session_id: str, to_device: str) -> bool:
     )
 
     directory = Path(root) / "sessions" / session_id
+    if not directory.is_dir():
+        # ABSENT IS GONE — THE DESIRED POST-STATE (design clause 1). The commit
+        # renames the directory into ``network/handed-away/`` and only then writes the
+        # tombstone, so a crash in between leaves exactly this: no directory, journal
+        # still open. The earlier answer, ``False`` ("cleanup pending"), made
+        # ``reconcile`` retry forever and left the launch guard latched on an id whose
+        # conversation had already left.
+        return True
     mark_store(directory.parent)
+    # NEVER DELETE DEFINITIONS THIS MOVE DOES NOT CARRY. The stash runs for every
+    # removing commit, not only the drop-flagged ones: recovery paths (a crashed
+    # prepare, a reconcile) have no frame to read the flag from, and an older
+    # peer never sent it at all. A failure leaves the directory in place, which
+    # is the existing ``cleanup_pending`` outcome — never a delete past it.
+    try:
+        _stash_session_roles(root, session_id)
+    except OSError:
+        logger.warning(
+            "mobility: could not stash %s's session roles; leaving the directory",
+            session_id,
+            exc_info=True,
+        )
+        return False
     return remove_session_dir(
         directory,
         config_dir=root,
@@ -2984,6 +4026,30 @@ def _source_commit(
             "result": "refused",
             "code": "not_authorised",
             "message": "that handoff belongs to another device, so nothing was changed",
+            "session_id": session_id,
+        }
+    directory = Path(server.root) / "sessions" / session_id
+    if str(entry.get("phase") or "") == HANDOFF_PHASE_HANDING_OFF and not directory.exists():
+        # THE CRASH WINDOW AFTER THE COMMIT POINT (clause 1): the journal says
+        # ``handing-off``, the directory already left ``sessions/``, and the
+        # tombstone was never written. Completing the handoff is the only legal
+        # direction — a rollback is forbidden from this phase by rule — and the
+        # digests below are NOT recomputed: there is no directory left to hash, and
+        # the destination has already been told to expect a commit. Every write below
+        # is guarded: a commit reported as a refusal would make the destination sweep
+        # the verified copy it holds (review round 2, R2-1).
+        _settle_source_commit(
+            Path(server.root),
+            session_id,
+            device_id=to_device,
+            device_name=server._member_name(to_device),  # noqa: SLF001
+            network_id=link.network_id,
+        )
+        _note_committed(server, session_id, to_device)
+        return {
+            "result": "committed",
+            "phase": "committed",
+            "lease_epoch": str(entry.get("lease_epoch") or ""),
             "session_id": session_id,
         }
     # The SAME predicate the plan used, so a commit cannot disagree with the plan it is
@@ -3071,42 +4137,100 @@ def _source_commit(
     progress_for(server).note(session_id, "handing_off")
     _audit(server, AUDIT_HANDING_OFF, session_id, to_device)
 
-    from local_operator.network.projection import write_tombstone
+    from local_operator.session import cleanup as cleanup_mod
 
-    write_tombstone(
+    # THE DEFINITIONS ARE STASHED BEFORE THE DIRECTORY LEAVES (blocker Q-2), and this
+    # is load-bearing on this path: ``_remove_handed_away`` used to do it as part of
+    # its delete, and the commit no longer calls it — the quarantine below is the
+    # removal. A stash that cannot be written REFUSES the move exactly as a failed
+    # handoff does: a conversation whose role/team definitions were dropped at the
+    # commit point has lost data nothing else holds, and ``--drop-session-roles`` is
+    # the only flag that authorises leaving them behind (and it still stashes them).
+    try:
+        _stash_session_roles(server.root, session_id)
+    except OSError:
+        logger.warning(
+            "mobility: could not stash %s's session roles; refusing the move",
+            session_id,
+            exc_info=True,
+        )
+        # A partial stash (the rename landed, its record write failed) is put back:
+        # the helper is a no-op when there is nothing to restore.
+        _unstash_session_roles(server.root, session_id)
+        clear_handoff_entry(server.root, session_id)
+        progress_for(server).note(session_id, "prepared")
+        _audit(server, AUDIT_ROLLED_BACK, session_id, to_device, cause="cleanup_refused")
+        return {
+            "result": "refused",
+            "code": "cleanup_refused",
+            "message": (
+                f"this device could not hand {session_id} away, so nothing was moved and "
+                "this device still holds the conversation"
+            ),
+            "session_id": session_id,
+        }
+
+    # THE COMMIT POINT, AND IT IS THE RENAME — NOT THE TOMBSTONE. Every validation
+    # above this line has passed, so from here the move is decided; taking the
+    # directory OUT of ``sessions/`` atomically is what makes "exactly one copy"
+    # structural rather than eventual. The old order wrote the tombstone first and
+    # deleted afterwards, and a delete the guards refused still answered
+    # ``committed`` — the destination adopted, and one id was live on two devices
+    # (docs/design/mesh-move-outcome.md clause 1).
+    try:
+        handoff = cleanup_mod.hand_off_session_dir(
+            directory,
+            config_dir=Path(server.root),
+            reason=(
+                f"mesh-move: {session_id} was verified complete on "
+                f"{server._member_name(to_device) or to_device}; the destination adopts "
+                "only after this rename"
+            ),
+            actor=f"mesh:{to_device}",
+        )
+    except OSError as exc:
+        # THE HELPER REPORTS ITS OWN FAILURES; this catch is the safety net for the
+        # one OSError it cannot (a marker write, a measurement). Nothing has been told
+        # to anybody yet, so the move rolls back exactly as a refusal does.
+        logger.warning(
+            "mobility: could not quarantine %s for %s; rolling the move back",
+            session_id,
+            to_device,
+            exc_info=True,
+        )
+        handoff = cleanup_mod.HandOffOutcome(False, f"the directory could not be renamed: {exc}")
+    if not handoff.handed and directory.exists():
+        # NOTHING HAS BEEN TOLD TO ANYBODY, so a rollback here is free: the journal
+        # is cleared, the session is ``prepared`` again, and the source still holds
+        # the whole conversation. The refusal NAMES the state instead of reporting a
+        # commit whose local half did not happen — and names the CAUSE, so the person
+        # reading it can act on it (QA round 1, Q-4).
+        _unstash_session_roles(server.root, session_id)
+        clear_handoff_entry(server.root, session_id)
+        progress_for(server).note(session_id, "prepared")
+        _audit(server, AUDIT_ROLLED_BACK, session_id, to_device, cause="cleanup_refused")
+        return {
+            "result": "refused",
+            "code": "cleanup_refused",
+            "message": (
+                f"this device could not hand {session_id} away ({handoff.reason}), so "
+                "nothing was moved and this device still holds the conversation"
+            ),
+            "session_id": session_id,
+        }
+    # THE COMMIT IS THE RENAME ABOVE: from here the answer is ``committed`` whatever
+    # the bookkeeping does (review round 2, R2-1). A tombstone that cannot be written
+    # leaves the journal at ``handing-off`` — reconcile completes it — and nothing
+    # else in this tail may turn a commit into a refusal frame, because the
+    # destination answers a refusal by sweeping the only copy left.
+    _settle_source_commit(
+        Path(server.root),
         session_id,
         device_id=to_device,
         device_name=server._member_name(to_device),  # noqa: SLF001
         network_id=link.network_id,
-        config_dir=server.root,
     )
-    directory = Path(server.root) / "sessions" / session_id
-    removed = _remove_handed_away(Path(server.root), session_id, to_device)
-    if removed:
-        clear_handoff_entry(server.root, session_id)
-        # THE PRUNE, AND ONLY AFTER A SUCCESSFUL COMMIT (F5, design note §5.3).
-        # The commit is the instant this conversation stops living here, so this
-        # device's DERIVED state for it goes with it — and the queue record folds
-        # to ``resumed`` in the same step (terminal is write-once; the driver's
-        # own tombstone poll is an idempotent second observer). Guarded by
-        # ``removed`` because a commit that could not delete its directory is not
-        # done cleaning: pruning then would strand a session whose only copy is
-        # still here, and its wakes would not come back until somebody opened it.
-        _after_source_commit(Path(server.root), session_id)
-    else:
-        # THE TOMBSTONE IS WHAT GOVERNS THE ID, so the move IS complete and the
-        # destination may promote. What is left is this device's own cleanup, and
-        # the journal entry stays so `reconcile` retries it — never so a runtime
-        # here could start (the launch guard reads the same entry).
-        logger.warning(
-            "mobility: %s was handed to %s but its directory could not be removed; "
-            "reconcile will retry",
-            session_id,
-            to_device,
-        )
-        _audit(server, AUDIT_COMMITTED, session_id, to_device, cleanup="pending")
-    progress_for(server).note(session_id, "committed")
-    _audit(server, AUDIT_COMMITTED, session_id, to_device)
+    _note_committed(server, session_id, to_device)
     return {
         "result": "committed",
         "phase": "committed",
@@ -3188,6 +4312,9 @@ def _destination_invite(
     # this invite to START the copy it promised; the flag rides with the id so
     # the source's guard admits exactly this pull (see ``_source_prepare``).
     resume_queued = bool(frame.get("resume_queued") or False)
+    # LOH-9 S2: the inviter's explicit opt-out from the source's role-definition
+    # gate travels to the prepare this destination sends; absent reads False.
+    drop_session_roles = bool(frame.get("drop_session_roles") or False)
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
@@ -3233,6 +4360,7 @@ def _destination_invite(
                 queue=queue,
                 request_id=request_id,
                 resume_queued=resume_queued,
+                drop_session_roles=drop_session_roles,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -3467,7 +4595,8 @@ def resolve_remote_owner(server: "RelayServer", session_id: str) -> tuple[str, s
     makes "recall the idle session I left on the build box" a thing this can do at
     all. Raises :class:`Moved` when nobody owns it.
     """
-    rows = server.federated_rows().get("sessions") or []
+    listing = server.federated_rows()
+    rows = listing.get("sessions") or []
     for row in rows:
         if str(row.get("session_id") or "") != session_id:
             continue
@@ -3485,6 +4614,34 @@ def resolve_remote_owner(server: "RelayServer", session_id: str) -> tuple[str, s
                 + "; nothing was changed",
             )
         return device_id, str(peer.get("name") or "")
+    # NO ROW HOLDS IT — BUT WHICH SILENCE IS IT? The fan-out emits NO rows for a peer
+    # that did not answer (§8.3: a listing must not show phantom rows), so an id that
+    # lived on an unreachable device looks exactly like an id nobody ever had. The
+    # operator's report was this state reported as a move that had happened; the
+    # honest answer names the device that would know and says nothing was changed
+    # (docs/design/mesh-move-outcome.md clause 2).
+    silent: list[str] = []
+    peers = listing.get("peers") or {}
+    for device_id, block in peers.items():
+        if not isinstance(block, dict) or block.get("reachable", True):
+            continue
+        silent.append(str(block.get("name") or device_id))
+    if silent:
+        # AT MOST TWO NAMES, then a count: a network of ten dark devices must not
+        # turn one refusal into a paragraph.
+        named = ", ".join(silent[:2])
+        if len(silent) > 2:
+            named += f" and {len(silent) - 2} others"
+        tail = (
+            "if that device holds it, retry when it is back"
+            if len(silent) == 1
+            else "if one of them holds it, retry when that device is back"
+        )
+        raise Moved(
+            "unreachable",
+            f"{named} did not answer, so {session_id} could not be handed over and nothing "
+            f"was changed; {tail}.",
+        )
     # Its OWN code, distinct from the per-peer ``unreachable`` above (design
     # review round 1, D1): the two sentences have DIFFERENT remedies — a device
     # that stopped answering may recover on its own, while "no row at all" is
@@ -3717,6 +4874,18 @@ def reconcile(
     """
     from local_operator.session.placement import read_handoff_journal
 
+    # HOUSEKEEPING FIRST, and best effort: quarantined handoffs are trees a completed
+    # commit renamed out of ``sessions/`` and could not delete. They are outside the
+    # store, so leaving them is safe; the sweep is what stops a stuck deletion from
+    # growing without bound. It must never stop a recovery — the entries below are
+    # the ones a user is waiting on.
+    try:
+        from local_operator.session import cleanup as cleanup_mod
+
+        cleanup_mod.sweep_handed_away(Path(root))
+    except Exception:  # noqa: BLE001 — housekeeping is never worth a failed reconcile
+        logger.debug("mobility: could not sweep handed-away handoffs", exc_info=True)
+
     owner_instance = own_instance or (str(server.instance_id) if server is not None else "")
     try:
         entries = read_handoff_journal(root)
@@ -3773,8 +4942,18 @@ def _reconcile_source(
 
 
 def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dict[str, Any]:
-    """Finish a commit the relay died in the middle of (§6.5 row 3)."""
-    from local_operator.network.projection import write_tombstone
+    """Finish a commit the relay died in the middle of (§6.5 row 3).
+
+    ORDER MATTERS EVEN HERE, which is the point of the clause-1 rewrite: a recovery
+    that wrote the tombstone first and then found it could not take the directory
+    away would have told the destination to adopt a second copy. So the rename is
+    attempted first, and its failure rolls the handoff back while no tombstone
+    exists to make that illegal. A tombstone that IS present was written by a build
+    (or a run) that already passed the commit point; there the only honest answer is
+    ``cleanup_pending`` — the id is the destination's and this device's leftover is
+    swept later.
+    """
+    from local_operator.session import cleanup as cleanup_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_HANDING_OFF,
         clear_handoff_entry,
@@ -3786,22 +4965,72 @@ def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dic
     from local_operator.session.placement import write_handoff_entry
 
     write_handoff_entry(root, session_id, entry)
-    write_tombstone(
+    directory = Path(root) / "sessions" / session_id
+    handoff = cleanup_mod.HandOffOutcome(True, "the directory was already gone")
+    if directory.exists():
+        # THE DEFINITIONS GO TO THE STASH FIRST, the same guarantee the live commit
+        # gives: a recovery that renamed the tree away without stashing would delete
+        # definitions ``--drop-session-roles`` promised to keep (it stashes them too).
+        try:
+            _stash_session_roles(root, session_id)
+            handoff = cleanup_mod.hand_off_session_dir(
+                directory,
+                config_dir=Path(root),
+                reason=f"mesh-move: completing a committed handoff of {session_id}",
+                actor=f"mesh:{to_device}",
+            )
+        except OSError as exc:
+            logger.warning(
+                "mobility: could not quarantine %s while completing its handoff: %s",
+                session_id,
+                exc,
+                exc_info=True,
+            )
+            handoff = cleanup_mod.HandOffOutcome(
+                False, f"the directory could not be renamed: {exc}"
+            )
+        if not handoff.handed:
+            logger.warning(
+                "mobility: %s stayed in the store while completing its handoff: %s",
+                session_id,
+                handoff.reason,
+            )
+            _unstash_session_roles(root, session_id)
+    if not handoff.handed and directory.exists():
+        if _tombstone(root, session_id):
+            # THE ID IS ALREADY THE DESTINATION'S, so a rollback would be a lie about
+            # a commit that happened; the leftover directory is this device's cleanup.
+            return {
+                "session_id": session_id,
+                "action": "cleanup_pending",
+                "phase": "committed",
+            }
+        # NOTHING WAS TOLD TO ANYBODY, so the handoff is undone rather than
+        # half-done: the phase returns to ``prepared`` and the session stays here.
+        clear_handoff_entry(root, session_id)
+        return {"session_id": session_id, "action": "rolled_back", "phase": "prepared"}
+    # THE RENAME ABOVE IS THE COMMIT POINT, so nothing from here may raise (review
+    # round 2, R2-1). The tombstone is the only step whose failure changes the answer:
+    # without it the id is not durably the destination's, so the journal keeps saying
+    # ``handing-off`` (a rollback would be a lie about a commit that happened) and the
+    # next reconcile writes it — which is why this reports ``cleanup_pending`` rather
+    # than an error the inviter would read as a refusal.
+    settled = _settle_source_commit(
+        root,
         session_id,
         device_id=to_device,
         device_name=str(entry.get("to_name") or ""),
         network_id=str(entry.get("network_id") or ""),
-        config_dir=root,
     )
-    removed = _remove_handed_away(root, session_id, to_device)
-    if removed:
-        clear_handoff_entry(root, session_id)
-        # The same post-commit cleanup as the ordinary path, and for the same
-        # F5 reason: the directory is gone, so the derived state goes with it.
-        _after_source_commit(root, session_id)
+    if not settled:
+        return {
+            "session_id": session_id,
+            "action": "cleanup_pending",
+            "phase": "committed",
+        }
     return {
         "session_id": session_id,
-        "action": "completed" if removed else "cleanup_pending",
+        "action": "completed",
         "phase": "committed",
     }
 
@@ -4076,32 +5305,61 @@ def local_move_handler(server: "RelayServer") -> Any:
         # The queue record's own commit rides in the same shape (§5.4); a bare
         # move never sets it, so its absence is exactly today's behaviour.
         resume_queued = bool(frame.get("resume_queued") or False)
+        # LOH-9 S2: the explicit opt-out from the source's role-definition gate.
+        # Absent reads False, so an older caller gets the protective default.
+        drop_session_roles = bool(frame.get("drop_session_roles") or False)
         to = str(frame.get("to") or "local")
         try:
             reconcile(server.root, server=server, only=session_id)
         except Exception:  # noqa: BLE001 — recovery is best effort
             logger.debug("mobility: reconcile before a move failed", exc_info=True)
-        if to == "local":
-            return _recall(
+        try:
+            if to == "local":
+                return _recall(
+                    server,
+                    session_id,
+                    keep=keep,
+                    wait_s=wait_s,
+                    engage_on_arrival=engage_on_arrival,
+                    queue=queue,
+                    drop_session_roles=drop_session_roles,
+                    request_id=request_id,
+                    resume_queued=resume_queued,
+                )
+            return _offload(
                 server,
                 session_id,
+                to=to,
                 keep=keep,
                 wait_s=wait_s,
                 engage_on_arrival=engage_on_arrival,
                 queue=queue,
                 request_id=request_id,
-                resume_queued=resume_queued,
+                drop_session_roles=drop_session_roles,
             )
-        return _offload(
-            server,
-            session_id,
-            to=to,
-            keep=keep,
-            wait_s=wait_s,
-            engage_on_arrival=engage_on_arrival,
-            queue=queue,
-            request_id=request_id,
-        )
+        except Moved as refusal:
+            # THE CONTROL CONNECTION MAY NOT DIE ON A MOVEMENT FAILURE. Every
+            # ``ask`` the recall/offload path makes can raise ``Moved`` on a dead
+            # or refusing peer, and an escape here unwound the relay's
+            # ``mesh-control-conn`` thread — the CLI then reported
+            # ``relay_unavailable`` about a relay that was still serving, which is
+            # exactly the "wedged relay" a failed move may not impersonate. The
+            # callers below already turn the peer's answers into refusals; this is
+            # the last arm, and it never swallows anything but ``Moved``.
+            logger.warning(
+                "mobility: %s of %s failed on the peer link (%s); answering a "
+                "refusal instead of dropping the control connection",
+                "recall" if to == "local" else "offload",
+                session_id,
+                refusal.code or "unreachable",
+                exc_info=True,
+            )
+            return _move_refusal(
+                session_id,
+                refusal.code or "unreachable",
+                refusal.message,
+                changed=False,
+            )
 
     return _handle
 
@@ -4116,6 +5374,7 @@ def _recall(
     queue: bool = False,
     request_id: str = "",
     resume_queued: bool = False,
+    drop_session_roles: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to local``: this device is the destination and pulls.
 
@@ -4183,6 +5442,7 @@ def _recall(
         queue=queue,
         request_id=request_id,
         resume_queued=resume_queued,
+        drop_session_roles=drop_session_roles,
     )
     return result or refusal or _move_refusal(session_id, "unreachable", "the move did not finish")
 
@@ -4288,6 +5548,7 @@ def _offload(
     engage_on_arrival: bool = False,
     queue: bool = False,
     request_id: str = "",
+    drop_session_roles: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to <peer>``: this device owns the session and asks the peer to pull.
 
@@ -4412,6 +5673,10 @@ def _offload(
                 # False for an older peer.
                 "queue": bool(queue) and not keep,
                 "request_id": request_id,
+                # LOH-9 S2: the step it configures (the source's role-definition
+                # gate) runs on the SOURCE, so the flag must travel with the
+                # invite — the destination folds it into its prepare.
+                "drop_session_roles": bool(drop_session_roles),
                 "to_device": target_device,
                 # THE SESSION'S AUTO AUTHORITY TRAVELS WITH THE INVITE, for the same
                 # reason as the two fields above: the runtime it would be applied at
@@ -4439,6 +5704,7 @@ def _offload(
             keep=keep,
             from_block=_own_block(server),
             to_block=_device_block(server, target_device, target_name),
+            root=server.root,
         )
     if outcome == "done":
         phases = _move_phases(server, session_id)
@@ -4467,6 +5733,11 @@ def _offload(
             "to_device": _device_block(server, target_device, target_name),
             "phase": str(phases[-1]["phase"]),
             "phases": phases,
+            # The SOURCE's own commit is what this receipt reports (the destination
+            # ran the pull), so reaching the done outcome with a committed phase is
+            # the completed state — an ordinary offload that reached here. A queued
+            # one returned above with ``in_progress``.
+            "state": "completed",
         }
         # THE CARRY, MERGED ON THIS SIDE (§ ``MoveCarryBlock``): the destination's half
         # arrived on the ``done`` frame — wakes carried plus the supervisor's verified
@@ -4667,6 +5938,9 @@ def _recover_from_replica(
                 {"phase": "committed", "at": time.time()},
             ],
             "recovered": True,
+            # A replica promote is a new-id COPY of bytes this device holds; the
+            # source was never asked to retire anything, so nothing is in flight.
+            "state": "completed",
         },
     )
 
@@ -4832,6 +6106,7 @@ def request_move(
     from_replica: bool = False,
     engage_on_arrival: bool = False,
     queue: bool = False,
+    drop_session_roles: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """Move (or with ``keep``, copy) ``session_id`` to the device named by ``to``.
 
@@ -4902,6 +6177,10 @@ def request_move(
         # carry a flag the other end must know to disregard.
         queue=bool(queue) and not keep,
         request_id=(f"cli-{session_id}-{int(time.time() * 1000)}" if (queue and not keep) else ""),
+        # THE EXPLICIT OPT-OUT FROM THE ROLE-DEFINITION GATE (LOH-9 S2). Sent on
+        # every request, never only when true, so the frame's shape does not
+        # depend on a boolean; absent on an older relay reads False.
+        drop_session_roles=bool(drop_session_roles),
     )
     if reply is None:
         return _relay_refusal(session_id, "relay_unavailable", _relay_message())
@@ -5146,6 +6425,12 @@ def recover_on_start(server: "RelayServer") -> list[dict[str, Any]]:
     that machine. Nothing here is on the critical path of a move — an entry it
     cannot settle stays in the journal and the next attempt picks it up.
     """
+    try:
+        from local_operator.session import cleanup as cleanup_mod
+
+        cleanup_mod.sweep_handed_away(Path(server.root))
+    except Exception:  # noqa: BLE001 — housekeeping, same contract as the sweep above
+        logger.debug("mobility: could not sweep handed-away handoffs", exc_info=True)
     try:
         swept = sweep_staging(server.root)
         report = reconcile(server.root, server=server)

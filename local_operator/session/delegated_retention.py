@@ -335,6 +335,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from local_operator.session import cleanup as cleanup_module
 from local_operator.session.cleanup import (
     CLEANUP_LOG_NAME,
     DEFAULT_DELEGATED_MAX_AGE_HOURS,
@@ -343,6 +344,7 @@ from local_operator.session.cleanup import (
     Candidate,
     CleanupPolicy,
     CleanupResult,
+    HoldsUnreadable,
     _append_cleanup_log,
     _claimed,
     _forget_monitor_entry,
@@ -356,6 +358,7 @@ from local_operator.session.cleanup import (
     _is_deletable_dir,
     _lease_runtime_alive,
     _write_record,
+    hold_for,
     policy_from_config,
     remove_scratchpad_entry,
     remove_session_dir,
@@ -938,45 +941,20 @@ is_deletable_dir = _is_deletable_dir
 
 
 def _bounded_dir_stats(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> tuple[int, int]:
-    """``(bytes, entries)`` under ``directory``, counting at most ``max_entries``.
+    """``(bytes, entries)`` under ``directory``; the pass's 2,000-entry default.
 
-    Both figures are LOWER BOUNDS once capped. One walk serves both the size
-    estimate a notice records and the entry count a cleanup-log row carries, so
-    the two can never disagree about what was measured. Deliberately not
-    ``cleanup._dir_bytes`` (an unbounded ``rglob`` that also follows into
-    ``node_modules``): this runs per removed item, so its cost is bounded.
+    The walk body lives in ``cleanup`` now (the removal receipt needs the same
+    bounded walk and cannot import this module), but the DEFAULT stays here:
+    this pass plans every pad, and ``SIZE_MAX_ENTRIES`` is its measured cost
+    bound. A wrapper rather than a bare re-export so moving the walk cannot
+    silently raise the per-pad cost tenfold.
     """
-    total = 0
-    seen = 0
-    stack = [os.fspath(directory)]
-    while stack:
-        current = stack.pop()
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    seen += 1
-                    if seen > max_entries:
-                        return total, max_entries
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
-                            total += entry.stat(follow_symlinks=False).st_size
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    return total, seen
+    return cleanup_module._bounded_dir_stats(directory, max_entries)
 
 
 def bounded_dir_bytes(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> int:
-    """Bytes under ``directory`` counting at most ``max_entries`` entries.
-
-    A lower bound once capped. Deliberately not ``cleanup._dir_bytes`` (an
-    unbounded ``rglob`` that also follows into ``node_modules``): this runs only
-    for the sessions about to be removed, so its cost is bounded per removal.
-    """
-    return _bounded_dir_stats(directory, max_entries)[0]
+    """Bytes under ``directory``; the pass's 2,000-entry default (see above)."""
+    return cleanup_module.bounded_dir_bytes(directory, max_entries)
 
 
 # ---------------------------------------------------------------------------
@@ -2828,6 +2806,23 @@ def _content_guard(
     that raises keeps the pad and counts an error (fail closed).
     """
     fresh = session_activity_path(os.fspath(cand.path))
+    # THE OPERATOR'S HOLD OUTRANKS EVERY OTHER ANSWER, including the age gate:
+    # a held session is one a person has said must survive, so the content pass
+    # may not reclaim cache-shaped bytes out of it either. Checked before the
+    # clock so a held pad is refused even when it would otherwise be past the
+    # window. Fail closed on an unreadable holds file for the same reason the
+    # record pass does.
+    try:
+        held = hold_for(Path(config_dir) / SESSIONS_DIRNAME, cand.path.name)
+    except HoldsUnreadable as exc:
+        logger.error(
+            "session cleanup: holds unreadable for %s (%s); keeping its content",
+            cand.path.name,
+            exc,
+        )
+        return _ContentGuard("operator holds unreadable", fresh)
+    if held is not None:
+        return _ContentGuard("held by the operator", fresh)
     if fresh is not None and fresh >= now:
         return _ContentGuard("active since the scan", fresh)
     if live_resolved is not None:
@@ -3037,6 +3032,46 @@ def _reclaim_pad_content(
         except Exception as exc:
             manifest_error = f"planned: {exc.__class__.__name__}"
             logger.warning("session cleanup: cannot write manifest %s: %s", manifest_path, exc)
+    # THE RECEIPT IS WRITTEN BEFORE THE FIRST REMOVAL (fail closed). The
+    # manifest above says what the pass MEANT to take; the cleanup log is the
+    # store's durable record, and a removal whose receipt cannot be written
+    # must not happen. One row per pad per pass, keyed ``phase``: this
+    # ``planned`` row names every path the pass is about to take, and the row
+    # built after the loop is the ``completed`` half a reader pairs it with. A
+    # pass that dies between them leaves the planned row plus the manifest —
+    # attributable, never silent.
+    if not dry_run:
+        planned_classes = _manifest_classes(plan.removals)
+        planned_record: dict[str, Any] = {
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "session": cand.path.name,
+            "title": _title(cand),
+            "policy": DELEGATED_SCRATCHPAD_POLICY,
+            "reason": " + ".join(planned_classes),
+            "actor": actor,
+            "pid": os.getpid(),
+            "phase": "planned",
+            "completed": False,
+            "bytes": sum(removal.bytes for removal in plan.removals),
+            "entries": sum(removal.entries for removal in plan.removals),
+            "classes": list(planned_classes),
+            "method": "planned",
+            "trigger": trigger,
+            "manifest": os.fspath(manifest_path) if manifest_written else "",
+            "paths": [os.fspath(removal.path) for removal in plan.removals[:CONTENT_ROW_PATHS_CAP]],
+            "paths_total": len(plan.removals),
+        }
+        if manifest_error:
+            planned_record["manifest_error"] = manifest_error
+        if not _append_cleanup_log(sessions_dir, planned_record):
+            outcome.errors += 1
+            outcome.kept.append("cannot write the removal receipt")
+            logger.error(
+                "session cleanup: REFUSED to reclaim %s: its receipt could not be written to %s",
+                cand.path.name,
+                sessions_dir / CLEANUP_LOG_NAME,
+            )
+            return outcome
     taken: list[_PlannedRemoval] = []
     bundles: list[tuple[str, int]] = []
     for removal in plan.removals:
@@ -3095,9 +3130,11 @@ def _reclaim_pad_content(
         removal.bytes for removal in taken if removal.cls == CONTENT_CLASS_COPY
     )
     if not taken:
-        # The planned manifest (if written) stays: it names what the pass meant
-        # to take, which is the honest record when every removal was kept
-        # (a failed bundle, a refused entry) and nothing was logged.
+        # The planned manifest (if written) and the planned ROW (written above)
+        # stay: together they name what the pass meant to take, which is the
+        # honest record when every removal was kept (a failed bundle, a refused
+        # entry) and nothing was removed. No completed row is written because
+        # nothing completed.
         return outcome
     classes = _manifest_classes(taken)
     if not dry_run:
@@ -3184,6 +3221,11 @@ def _content_log_record(row: ContentRow, *, actor: str) -> dict[str, Any]:
         "reason": row.reason,
         "actor": actor,
         "pid": os.getpid(),
+        # The completion half of the pass's receipt; the row written before the
+        # first removal carries ``phase: "planned"`` and ``completed: false``,
+        # so a reader can pair them by session within one pass.
+        "phase": "completed",
+        "completed": True,
         "bytes": row.bytes,
         "entries": row.entries,
         "classes": list(row.classes),
@@ -3910,7 +3952,17 @@ def run_delegated_pass(
             if dry_run:
                 continue
             content_in_batch += 1
-            _append_cleanup_log(sessions_dir, _content_log_record(outcome.row, actor=actor))
+            if not _append_cleanup_log(sessions_dir, _content_log_record(outcome.row, actor=actor)):
+                # The removals already happened; the planned row written before
+                # them is the durable half of this receipt, so the loss is still
+                # attributable. Say the completion row was lost rather than
+                # pretending the pass was silent.
+                logger.error(
+                    "session cleanup: reclaimed content in %s but could not write the "
+                    "completion row to %s; the planned row remains",
+                    name,
+                    sessions_dir / CLEANUP_LOG_NAME,
+                )
             if len(result.content) > content_recorded:
                 _record_content_progress(
                     sessions_dir, rows=result.content, already=content_recorded

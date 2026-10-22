@@ -1974,6 +1974,22 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
    Preserve runtime sequence/epoch checks independently of semantic event dedupe.
+   A roster tick is a MERGE, not a replacement: `frontend.update` carries
+   `job_deltas: {upserted: [row, …], removed: [job_id, …]}` and the receiver
+   merges those rows by `id` into the roster it holds (unchanged rows keep their
+   position and identity). `job_deltas.order: [job_id, …]` is present ONLY on a
+   tick whose order the merge cannot derive (a job re-added anywhere but the
+   end); when present it is authoritative. `changes["jobs"]` remains the
+   REPLACEMENT form and is what a snapshot/seed carries; a renderer that has
+   never heard of `job_deltas` ignores it and keeps its last snapshot until the
+   next sync, which is safe. Rows in both forms are the same bounded summaries.
+   A DEGRADED frame says so rather than going silent: `frontend.update` with
+   `degraded: true, paused: true` + `degraded_reason`, and an `event` whose
+   type is `notice` with `paused: true, action: "reload"`. `paused` means the
+   stream is no longer describing canonical state; CLEAR it on the next
+   complete frame — a `frontend_sync`/`frontend.replace` snapshot or the next
+   non-degraded `frontend.update` — and re-sync rather than painting the last
+   delta. No new frame op is needed for the clear.
    `frontend.replace` is the desktop-only REPLACEMENT of that projection,
    published once per accepted move and ordered by the BRIDGE's outer `seq`
    rather than the owner's clock (see "The replacement frame" under the move
@@ -2947,7 +2963,20 @@ something alive or ready until then.
 | `entry_ts` | 1 | `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and `GET .../{id}/events`, which turns on the per-row `ts_source` vocabulary for wire rows (`ts: null` + `"unstated"` where the owner shipped no true entry time) | the renderer sends no `entry_ts` and reads no `ts_source`, keeping today's serve-stamp ordering exactly. It must NOT gate any existing surface on this key: `ts_source` itself is additive and ignored by an older reader, so nothing breaks in either direction — the key only lets a NEW renderer tell whether asking is worthwhile |
 | `open_frame` | 1 | `open_frame=1` on `GET .../{id}`, `GET .../{id}/history` and `GET .../{id}/events`: a page counted in PAINTABLE rows, cut back to the oldest included run's opening user row under a hard cap (with `head_cut` when the cap binds), with non-painted bytes stripped and `runs[]` / `runs_state` carry the per-run facts the bar needs — see [the open frame](#the-open-frame-a-turn-aligned-paint-only-page-open_frame-1) | the renderer sends no `open_frame` and receives today's page byte-for-byte: counts in journal entries, unstripped rows, no `runs`. It must NOT send the flag unless it reads `runs`/`head_cut`, because the unit of `limit` changes with it |
 | `supplements` | 1 | `features.supplements: 1` — the turn-supplement ("Highlights") contract is in the build: the `supplement_progress` event family, the `supplement_v1` journal row, the `supplements-v1` attach capability and the document assembler. It is a BUILD fact, NOT the attach gate: live events and the history projection reach a viewer only under the two-half `supplements-v1` gate (the owner's own capability string ANDed with the viewer's declaration — `auth["supplements"] = true`, or `?supplements=1` on the desktop live path). See [Turn supplements](#turn-supplements-the-supplement_v1-row-and-the-supplement_progress-event) | the renderer draws nothing supplement-shaped and is never refused for it: a viewer that does not declare is not sent a `supplement_progress` event or a supplement projection, and rows are journaled either way. It must NOT gate any existing surface on this key |
+| `profile_scope` | 1 | `scope: "global" \| "session"` on the rows of `GET /v1/desktop/profiles`, `GET /v1/desktop/profiles/{name}`, `GET /v1/desktop/teams`, `GET /v1/desktop/teams/{name}` and the `agent`/`team` rows of `GET /v1/desktop/sessions/{id}/command-entities` | the renderer paints no scope badge and sends no session id to a picker route; the fields are additive, so an older reader parses the same payload it did before |
 | `session_files` | 1 | `GET /v1/desktop/sessions/{id}/files` and `POST …/files/{file_id}/materialise` — the authoritative per-session file inventory (written, edited, command outputs, screenshots, downloads, generated images/videos, subagent files, Highlights callouts), and the `details.artifacts` list the image/video tools now write | the Files view builds from its own transcript scan exactly as today, and the renderer MUST NOT call the route (an older backend answers 404). A 404 from a backend that DID advertise the key is a broken backend: treat it as definitive "unsupported" for the session |
+
+`profile_scope` STATES A ROW'S STORE, not a caller's permission. `GET /v1/desktop/profiles`,
+`GET /v1/desktop/profiles/{name}`, `GET /v1/desktop/teams` and `GET /v1/desktop/teams/{name}`
+stay ACCOUNT-ONLY (they are built over the global registry): their rows carry
+`scope: "global"` today, including packaged starters, which have no row yet and are
+installed into one of the two stores. The session picker route,
+`GET /v1/desktop/sessions/{id}/command-entities?command=agent|team`, reads the session's
+composite and can therefore return `scope: "session"` rows: a role or team created for
+THIS conversation, invisible to every other one and gone with it. Clients paint the badge
+from the field, never from a name or description; the mobile sheet reads the same field
+on the same route. On a backend that does not advertise the key, do not send `session_id`
+for a badge and keep the current rendering: the rows are the same, only unlabelled.
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

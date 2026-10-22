@@ -2417,7 +2417,7 @@
     {
       "locale": "es",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2431,12 +2431,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "fr",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2450,12 +2450,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "hi",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2469,12 +2469,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. Devanagari shaping artifact isolated to cell-grid SVG reprojection by same-frame raw Rich SVG/rsvg control; semantic and Textual-cell fit passed, native-terminal shaping not claimed."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. Devanagari shaping artifact isolated to cell-grid SVG reprojection by same-frame raw Rich SVG/rsvg control; semantic and Textual-cell fit passed, native-terminal shaping not claimed. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "ru",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2488,12 +2488,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "vi",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2507,7 +2507,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. MINOR A1 fixed by translator in 6fc3652677: inherit choice now keeps the literal config token per vi style-guide lines 82-86; final runtime notice delta rechecked in real form at both widths."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. MINOR A1 fixed by translator in 6fc3652677: inherit choice now keeps the literal config token per vi style-guide lines 82-86; final runtime notice delta rechecked in real form at both widths. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "es",
@@ -2907,6 +2907,196 @@
       },
       "status": "passed",
       "note": "2nd indep pass fr19b: 1st 6 MAJOR fixed; 8/8 verified, 9 unchanged; no tu; validé=DB commit (not user confirm); token cap separate; sync.label 27c; check 0. MINOR: doubled space before ';' in 3 strings."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 96bfab4939ede7e68a15159a166a5a57cc452cc65afa2ae559d39294ea24d1cb. 0 findings."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 2cdfb697b12c864b728ef1b5115d8c6ea36c8dc669c982633d3556bb2e05099a. 1 MINOR recorded: three U+202F in `invalid` replaced by ASCII spaces; non-gating, bytes unchanged."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 03245aa0e5f63ad1c2722b2a1598d45899b22070f811a8be94723dd28818b34d. 0 findings."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 0534e295816e51689af4ddcd66bad131c233944a188d79652e477e7dac07d0d1. 0 findings."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 a597880d8b045c1000412af91bea5034de4567f4a383fd366632c6033bb61864. 0 findings."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Initial ES-1 minor (confirm lost its object), ES-2 nit (idiomatic hacer de), ES-3/ES-4 fit notes. ES-1 and ES-2 fixed; fit notes closed by the status-cell min-w-14/nowrap fix. Re-audit round 2 PASS."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "Initial FR-1 major (saving label overflowed the fixed status cell), FR-2/FR-3 nits. FR-1 resolved by min-w-14/whitespace-nowrap; FR-3 transient row shift noted for design. Copy re-audit round 2 PASS."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Initial HI-1 minor (saving wraps in fixed status cell), resolved by min-w-14/nowrap; copy otherwise clean. Translation audit PASS."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Initial RU-1 nit only (pin hint wraps at 320px); accepted as a wrapping hint. Translation audit PASS."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Initial VI-1 minor (saving fit), VI-2 nit (missing-label width). VI-1 closed by the status-cell fix; VI-2 accepted. Translation audit PASS."
     },
     {
       "locale": "es",

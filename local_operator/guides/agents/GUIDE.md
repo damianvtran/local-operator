@@ -179,6 +179,16 @@ Why this matters: a short budget does not make the result arrive sooner; it cost
 
 Use `jobs` to inspect background work, and `hub` to question or steer a running child rather than cancelling and relaunching it. Independent slices go out as ONE `task` call (`tasks` plus a shared `context` that states the goal and constraints once), and the role supplies how the work is done well — `agent="reviewer"` rather than hand-written review instructions. To see what a quiet child is doing, `hub op='peek'` reads its transcript (ranged, so it stays cheap) without spending its attention; a question sent with `hub` waits until a busy child finishes its current step, so give it minutes, or peek instead of re-asking. `hub` also cancels, pauses and resumes children (a whole batch at once) against their own transcripts. Inside a subagent, `hub` is how you reach the agent that delegated to you: answer its questions, and speak up unprompted when you are blocked or the task turns out to be wrong.
 
+## Reuse, ephemeral, durable: the scope ladder
+
+A role you author from a session is CONVERSATION-SCOPED by default. That is the right home for a hat this task needs and the next conversation does not:
+
+1. **Reuse** — list/search the registry. An account role (or a packaged starter) that fits is always the first answer: it is usable in every conversation.
+2. **Ephemeral** — `agent(op='create')` with no `scope`: the role lives for this conversation only. It is usable for the rest of it (`task(agent=…)`, `/agent`, a team roster), survives restart and resume, is invisible in every other conversation, and is removed with this one. A fork starts with a COPY of this conversation's roles, after which the two sets are independent: editing or deleting one never touches the other. `agent(op='delete')` cleans one up early; it cannot delete an account role.
+3. **Durable** — a role saved in the user's ACCOUNT and visible everywhere. That is the user's decision, never yours to infer: `scope='global'` requires their confirmation, and this host may not be able to ask — the refusal names the desktop Profiles editor, the TUI `/agent` form and `lop agents`, plus the retry without `scope`. Do not reach for durable because it is one keyword away; reach for it when the user said the role should outlive this conversation.
+
+Account rows are never migrated, rewritten or deleted by this mechanism. A conversation role can shadow nothing: a create whose name already exists in the account is refused with reuse guidance, because a session row would otherwise change what `task(agent=<name>)` launches here.
+
 ## Selection rule
 
 - Existing specialist with relevant durable instructions or state: list the registry, inspect the descriptions, then run that registered agent.

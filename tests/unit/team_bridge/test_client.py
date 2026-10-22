@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -114,10 +115,10 @@ def _err(status: int, code: str, *, details: dict[str, Any] | None = None) -> ht
 
 
 def _make_client(
-    handler, *, store: Any = None, credential_id: int | None = None
+    handler, *, store: Any = None, credential_id: int | None = None, config_dir: Path | None = None
 ) -> TeamBridgeClient:
     return TeamBridgeClient(
-        None,
+        config_dir,
         base_url="https://hub.example/v1",
         store=store or FakeStore(),
         transport=httpx.MockTransport(handler),
@@ -735,6 +736,27 @@ async def test_tenant_state_reads_the_frozen_route_with_the_pinned_bearer():
     assert seen == [("/v1/tenants/tnt_1/messaging/state", "Bearer token-1")]
 
 
+async def test_directory_sends_the_tenant_as_a_query_parameter():
+    """The directory is one org's answer: one GET, tenant in the QUERY, no body."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"members": [{"account_id": "acc_2"}]})
+
+    client = _make_client(handler)
+    result = await client.directory("tnt_1")
+
+    assert result == {"members": [{"account_id": "acc_2"}]}
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/v1/messaging/directory"
+    assert dict(seen[0].url.params) == {"tenant_id": "tnt_1"}
+    assert seen[0].content == b""
+    assert seen[0].headers["authorization"] == "Bearer token-1"
+
+
 # ---------------------------------------------------------------------------
 # the account-scope read surface (desktop multi-org forwarding)
 # ---------------------------------------------------------------------------
@@ -903,3 +925,68 @@ async def test_conversations_passes_discoverable_rows_through_untouched():
 
     assert result["conversations"] == [row]
     assert result["next_cursor"] == "bcur_2"
+
+
+# ---------------------------------------------------------------------------
+# the explicit settings write is the only native-enrollment path (consent hold)
+# ---------------------------------------------------------------------------
+
+
+async def test_an_explicit_enable_commits_the_native_receipt(tmp_path: Path):
+    """A user's own ACTIVE settings PUT commits the owner + consent receipt.
+
+    #2712's status-read enrollment is gone; this is the path that keeps an
+    explicit enable able to receive.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(
+        state="active",
+        tenant_id="tnt_1",
+        consent_version="bridge_consent_v1",
+        consented_via="settings",
+        endpoint=None,
+        expected_account_id="acc_1",
+    )
+
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert (owner.account_id, owner.tenant_id, owner.endpoint_id) == ("acc_1", "tnt_1", "bep_1")
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": "bridge_consent_v1",
+        "consent_ref": "bep_1",
+    }
+
+
+async def test_a_pause_never_commits_a_receipt(tmp_path: Path):
+    """Turning off is not consent: a pause leaves the store empty."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "paused"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(state="paused", endpoint={"state": "active"})
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+async def test_a_resume_without_a_consent_echo_commits_nothing(tmp_path: Path):
+    """Only the CONSENTED active write enrolls; a bare resume is not an opt-in."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(state="active", endpoint={"state": "paused"})
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0

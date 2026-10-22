@@ -78,18 +78,26 @@ class ReceiptConflict(ValueError):
 class Unclaimed(Exception):
     """An operation's outcome that must NOT be recorded against its key.
 
-    THE ONE WAY TO SAY "this refusal is not this request's outcome". ``run``
-    records whatever the operation returns, and a recorded refusal is REPLAYED —
-    the right answer for a request that may already have left something behind
-    (a created conversation, a snapshot written before the base moved), and the
-    wrong one for a refusal raised before any write at all, whose own sentence
-    tells the caller to retry: replaying that would refuse a retry that could
-    have succeeded, forever, for that id (review round 2, Q4).
+    THE ONE WAY TO SAY "this outcome is not FINAL for this request id". ``run``
+    records whatever the operation returns, and a recorded outcome is REPLAYED.
+    That is the right answer for a request that may already have left something
+    behind (a created conversation, a snapshot written before the base moved),
+    and the wrong one for an outcome whose own next step is the SAME id running
+    again:
 
-    Raised from inside the operation rather than acted on afterwards, so the
-    withdrawal happens INSIDE this journal's critical section: the row never
-    exists in its recorded state, and a same-id request waiting on the lock sees
-    a free key rather than a refusal it has to distinguish from an outcome.
+    * a refusal raised before any write — its sentence tells the caller to
+      retry, so replaying it would refuse a retry that could have succeeded,
+      forever, for that id (review round 2, Q4);
+    * an intermediate ``pending-reconciliation`` answer — the remote row exists
+      but local reconciliation has not landed, and a retry with the same id is
+      the only action that can finish it; replaying the pending answer would
+      make that action unreachable.
+
+    The CALLER decides finality; the journal never infers it. Raised from inside
+    the operation rather than acted on afterwards, so the withdrawal happens
+    INSIDE this journal's critical section: the row never exists in its recorded
+    state, and a same-id request waiting on the lock sees a free key rather than
+    an outcome it has to distinguish as final or not.
     """
 
     def __init__(self, result: dict[str, Any]) -> None:
