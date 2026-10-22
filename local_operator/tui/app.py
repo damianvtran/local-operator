@@ -35159,13 +35159,17 @@ class OperatorApp(App[None]):
             # conversation the failed reopen leaves current. It never says a move
             # completed: `changed` only widens it to "check where it is now", which
             # is exactly the state a half-committed handoff leaves behind.
-            if reached:
-                # U11: the reopen itself failed, and the producer already stated the
-                # state and the action. Appending "did not answer / Nothing moved"
-                # here would replace that with the pre-check's story and hide the
-                # pause/restart remedy on the only notice the user has left. Only
-                # the placement-neutral fact that this window could not get back is
-                # added; `home` is named when a reopen had a peer to name.
+            if reached and not changed:
+                # U11, GATED ON ``not changed`` (R4-1): a reached+changed handoff
+                # may already have committed — the source may have deleted its copy
+                # — so "it is still there" would be the same false placement claim
+                # this branch exists to avoid. The `elif changed` below keeps its
+                # own "check where it is now" wording for that state. For a paused
+                # handoff the producer already stated the state and the action;
+                # appending "did not answer / Nothing moved" would hide the remedy
+                # on the only notice the user has left. Only the placement-neutral
+                # fact that this window could not get back is added; `home` is
+                # named when a reopen had a peer to name.
                 fallback = (
                     f"Could not move {session_id}: {message}. This window could not "
                     f"reopen the conversation{' on ' + home if home else ''}; it is "

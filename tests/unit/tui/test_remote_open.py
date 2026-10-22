@@ -565,6 +565,49 @@ async def test_a_refused_move_says_so_and_reopens_nothing(
 
 
 @pytest.mark.asyncio
+async def test_a_non_left_reached_failure_gets_no_nothing_changed_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4-5: the wrapper "Nothing changed." tail is suppressed for any reached refusal.
+
+    Not only the left ones: the producer's sentence already ends on a state and an
+    action, and the wrapper would tack a second, lesser claim onto it.
+    """
+    producer = "the copy was discarded and the source is paused for this move"
+
+    def fake_move(
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "busy",
+            "message": producer,
+            "session_id": session_id,
+            "phase_reached": "prepared",
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move other1 --to pixel-8")
+        for _ in range(30):
+            await pilot.pause()
+            if any("Could not move" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert f"Could not move other1: {producer}." in shown, shown
+        assert "Nothing changed." not in shown, shown
+        assert "it did not move" not in shown, shown
+
+
+@pytest.mark.asyncio
 async def test_a_busy_refusal_names_the_shell_route_its_wait_belongs_to(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1668,13 +1711,19 @@ async def test_a_reached_copy_failure_keeps_the_producers_sentence(
             await pilot.pause()
             if any("paused for this move" in notice for notice in _notices(app)):
                 break
-        shown = " ".join(_notices(app))
-        assert "paused for this move" in shown, shown
-        assert "restart the relay" in shown, shown
-        assert "did not answer" not in shown, shown
-        assert "Nothing moved" not in shown, shown
-        assert "it did not move" not in shown, shown
-        assert "nothing was changed" not in shown, shown
+        move_notice = next(
+            notice for notice in _notices(app) if notice.startswith("Could not move ux-session:")
+        )
+        # THE WHOLE NOTICE, NOT A SUBSTRING (D1): an equality assert fails if the
+        # composer appends the stripped "nothing was changed" clause back, which a
+        # membership test against a producer string that never had it cannot.
+        assert move_notice == f"Could not move ux-session: {producer}", move_notice
+        assert "paused for this move" in move_notice, move_notice
+        assert "restart the relay" in move_notice, move_notice
+        assert "did not answer" not in move_notice, move_notice
+        assert "Nothing moved" not in move_notice, move_notice
+        assert "it did not move" not in move_notice, move_notice
+        assert "nothing was changed" not in move_notice, move_notice
         assert opened == ["ux-session"], opened
 
 
@@ -1812,6 +1861,58 @@ async def test_a_reached_copy_failure_whose_listing_goes_stale_keeps_the_sentenc
         assert "Nothing moved" not in move_notice, move_notice
         assert "Nothing changed" not in move_notice, move_notice
         assert opened == [], opened
+
+
+@pytest.mark.asyncio
+async def test_a_reached_changed_failure_that_cannot_reopen_keeps_the_changed_wording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4-1: a reached+changed handoff may already be committed, so no "still there".
+
+    The reopen failed, and the producer's message says the destination may already
+    have taken the id. The fallback must keep the changed branch's "check where it
+    is now" wording, not the paused-handoff "it is still there".
+    """
+    opened = _patch_the_peer(monkeypatch)
+    producer = (
+        "pixel-8 did not finish taking ux-session in time. This device has already "
+        "committed the handoff, so ask again rather than retrying from scratch."
+    )
+
+    async def dropped_link(session_id: str, **kwargs: Any) -> Any:
+        opened.append(session_id)
+        raise ConnectionError("synthetic peer link dropped during reopen")
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "deadline_exceeded",
+            "message": producer,
+            "session_id": session_id,
+            "phase_reached": "committed",
+            "changed": True,
+        }
+
+    monkeypatch.setattr("local_operator.session.remote_open.open_remote_viewer", dropped_link)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(_OwnedRemote()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move --to local")
+        for _ in range(80):
+            await pilot.pause()
+            if any("could not reopen" in notice for notice in _notices(app)):
+                break
+        move_notice = next(
+            notice for notice in _notices(app) if notice.startswith("Could not move ux-session:")
+        )
+        assert move_notice == (
+            f"Could not move ux-session: {producer} This window could not reopen the "
+            "conversation ux-session; check where it is now before asking again."
+        ), move_notice
+        assert "it is still there" not in move_notice, move_notice
+        assert "still has" not in move_notice, move_notice
+        assert opened == ["ux-session"], opened
 
 
 @pytest.mark.asyncio
