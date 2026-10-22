@@ -556,56 +556,9 @@ class HubSyncRunner:
     def _push_transport(
         self, ctx: svc.HubSyncContext, record: Any
     ) -> tuple[Any | None, str | None]:
-        """A per-LINK push transport, or ``(None, named reason)`` when unavailable.
+        """The ONE per-link transport builder (see ``service.push_transport``)."""
 
-        The destination is the link's own identity, not a global default: the
-        client comes from the SAME per-tenant selector the check/pull path uses
-        (publishing is a person's act, so even a public link needs the signed-in
-        client), the base is that client's configured base, and the base is
-        POSITIVELY verified against the link's recorded ``hub_source`` before any
-        credential could leave -- a mismatch is refused, never followed.
-        """
-
-        from local_operator.hub_sync.identity import LinkError, normalize_source
-
-        if record is None or record.identity is None:
-            return None, "baseline-unknown"
-        identity = record.identity
-        try:
-            # A non-None tenant selects the signed-in client from the shared
-            # selector (its docstring blesses any string, even ""); a public link
-            # publishes unauthored only if there is no login at all, in which
-            # case the selector answers None and the push is skipped.
-            client = ctx.client_for_tenant(identity.tenant_id if identity.tenant_id else "")
-        except Exception:  # noqa: BLE001 - a selector failure is simply no transport
-            return None, "no-credential"
-        if client is None:
-            return None, "no-credential"
-        try:
-            base = str(client.base_url).rstrip("/")
-            headers = dict(client.bearer_headers())
-        except Exception:  # noqa: BLE001 - an unauthorized client cannot publish
-            return None, "no-credential"
-        try:
-            if normalize_source(base) != identity.hub_source:
-                return None, "origin-conflict"
-        except LinkError:
-            return None, "origin-conflict"
-        from local_operator.hub_sync.outbox import AsyncDispatcher
-        from local_operator.hub_sync.push import HttpPushTransport
-
-        return (
-            HttpPushTransport(
-                AsyncDispatcher(),
-                kind=identity.kind,
-                hub_id=record.hub_id,
-                base_url=base,
-                headers=headers,
-                visibility=identity.visibility,
-                tenant_id=identity.tenant_id,
-            ),
-            None,
-        )
+        return svc.push_transport(ctx, record)
 
     async def _push_one(
         self,
@@ -641,6 +594,14 @@ class HubSyncRunner:
         bundle_attested = record.identity is not None and svc._capability_bundle(
             ctx.store().load(), record.identity
         )
+        # A bundle republish must store the archive BEFORE the commit: the
+        # server opens the blob for the manifest's new hash. Documents have no
+        # blob, so the hook is built only for the bundle form.
+        bundle_upload = (
+            svc.bundle_upload_hook(ctx, record.identity, record)
+            if record.identity is not None and "bundle" in (record.fields or {})
+            else None
+        )
         outcome = await push_item(
             kind=c.kind,
             local_id=c.local_id,
@@ -655,6 +616,7 @@ class HubSyncRunner:
             budget=budget,
             document_builder=self._document_builder(ctx, c),
             bundle_attested=bundle_attested,
+            bundle_upload=bundle_upload,
         )
         report.skipped = None
         await self._offload(self._record_push, ctx, c, outcome)
@@ -686,40 +648,9 @@ class HubSyncRunner:
         ctx.store().mutate(fold)
 
     def _record_push(self, ctx: svc.HubSyncContext, c: Any, outcome: Any) -> None:
-        """Stamp ``last_pushed_at`` on an accepted push; persist a skip otherwise.
+        """Persist the outcome through the ONE shared recorder (receipt + skip)."""
 
-        On success the outbound RECEIPT is advanced first (A = the local input
-        that was sent, P = the server-returned canonical document, revision =
-        the accepted opaques ETag): without that, every later attempt would
-        derive from a stale pair and the QA-observed "receipt stayed r1 while the
-        server moved to r2" class of bug returns.
-        """
-
-        key = st.item_key(c.kind, c.local_id)
-        if outcome.state == "pushed":
-            result = outcome.accepted
-            accepted_doc = result.get("accepted_document") if isinstance(result, Mapping) else None
-            if isinstance(accepted_doc, Mapping):
-                svc.record_outbound_receipt(
-                    ctx,
-                    c.kind,
-                    c.local_id,
-                    accepted=accepted_doc,
-                    current_local=c.local or {},
-                    revision=outcome.revision,
-                    operation_id=str(result.get("operation_id") or "") or None,
-                )
-
-            def fold(doc: dict[str, Any]) -> None:
-                item = doc.get("items", {}).get(key)
-                if item is not None:
-                    item["last_pushed_at"] = st.now_iso()
-                    st.clear_push_skipped(item)
-
-            ctx.store().mutate(fold)
-            return
-        if outcome.reason:
-            self._mark_push_skipped(ctx, c, str(outcome.reason))
+        svc.record_push_outcome(ctx, c, outcome)
 
     def _first_run_grace(self, ctx: svc.HubSyncContext) -> bool:
         """True exactly once per config root: the first tick after upgrade never auto-applies."""

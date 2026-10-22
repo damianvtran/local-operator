@@ -830,6 +830,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     skills_pull.add_argument("--json", action="store_true")
 
+    skills_push = skills_subparsers.add_parser(
+        "push",
+        help="Republish one linked skill's local changes (documents and bundles)",
+        parents=[parent_parser],
+    )
+    skills_push.add_argument("name", help="The linked skill's name")
+    skills_push.add_argument(
+        "--yes", action="store_true", help="Push without prompting (required off a terminal)"
+    )
+    skills_push.add_argument("--json", action="store_true")
+
     skills_sync = skills_subparsers.add_parser(
         "sync",
         help="Check hub skills and fast-forward the ones that are safe to update",
@@ -11782,6 +11793,8 @@ def skills_command(args: argparse.Namespace, base_dir: Path) -> int:
         return _skills_publish(args, base_dir)
     if command == "pull":
         return _skills_pull(args, base_dir)
+    if command == "push":
+        return _skills_push(args, base_dir)
     if command == "sync":
         return _skills_sync(args, base_dir)
     if command == "status":
@@ -11969,6 +11982,146 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     link = result.get("link") or {}
     print(f"installed {link.get('name') or args.hub_id}")
     return 0
+
+
+def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop skills push`` -- republish ONE linked skill through the push engine.
+
+    The manual twin of the runner's tick: a fresh check (the revision the commit
+    conditions on and the local fields it projects), the SAME outbound
+    projection, the SAME per-link transport and the SAME ``push_item`` -- a
+    second publish path would be a second place for the receipt/attestation
+    rules to drift. A bundle additionally uploads its rebuilt archive before
+    the commit, which ``push_item`` enforces through ``bundle_upload_hook``.
+    """
+
+    import asyncio
+    import json as _json
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync.adapters import publish_document
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.budget import OperationBudget
+    from local_operator.hub_sync.outbox import Outbox
+    from local_operator.hub_sync.push import push_item
+
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    checks = svc.check_items(ctx, kinds=("skill",), names=[args.name])
+    check = svc.find_check(checks, "skill", args.name)
+    if check is None:
+        print(f"error: no linked skill named {args.name!r} (see `lop skills status`)")
+        return 1
+    record = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
+    if record is None or record.identity is None:
+        print("error: this skill link has no confirmed origin; resolve it first")
+        return 1
+    if record.outbound is None:
+        # THE MANUAL FIRST PUBLICATION. An unattended push refuses to invent an
+        # ancestor, but an explicit push IS that deliberate act: seed (A, P) from
+        # the KNOWN baseline -- the tree this link last pulled -- and only while
+        # the hub still holds exactly that tree, so the declared ancestor is a
+        # fact rather than a guess.
+        if record.lineage != "clean" or record.recorded_by == prov.UNKNOWN_BASELINE:
+            print("error: this link's lineage is not clean; resolve or pull again first")
+            return 1
+        try:
+            # Both sides are already canonical (a baseline's fields verbatim, the
+            # check's adapter projection), so the fingerprint IS the comparison;
+            # the carrier dispatch inside it keeps bundles on tree hashes.
+            agreed = prov.fingerprint_snapshot(
+                "skill", dict(record.fields)
+            ) == prov.fingerprint_snapshot("skill", dict(check.remote or {}))
+        except Exception:  # noqa: BLE001 - an unreadable side proves no agreement
+            agreed = False
+        if not agreed:
+            print("error: the hub moved since this link's baseline; run `lop skills sync` first")
+            return 1
+        from dataclasses import replace as dc_replace
+
+        from local_operator.hub_sync.push import receipt_for
+
+        receipt = receipt_for(
+            "skill",
+            dict(record.fields),
+            dict(record.fields),
+            revision=record.remote_revision,
+            operation_id=None,
+        )
+        prov.write_baseline(ctx.config_dir, dc_replace(record, outbound=receipt))
+        record = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
+        assert record is not None
+    outbound = record.outbound
+    assert outbound is not None
+    identity = record.identity
+    if identity is None:
+        print("error: this skill link has no confirmed origin; resolve it first")
+        return 1
+    is_bundle = "bundle" in (record.fields or {})
+    if is_bundle and not svc._capability_bundle(ctx.store().load(), identity):
+        print("error: the hub does not advertise the skill-bundles carrier")
+        print("  (bundle-unsupported-server): update the hub before pushing a bundle")
+        return 1
+    expected = check.remote_revision or outbound.remote_revision
+    if not expected:
+        print("error: this link has no remote revision to condition the write on; run a check")
+        return 1
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            print("error: pass --yes to push (no terminal to confirm on)")
+            return 1
+        form = "bundle" if is_bundle else "document"
+        answer = input(
+            f"Republish {check.name!r} ({form}) at {expected}? [y/N] "
+        ).strip().lower()
+        if answer not in ("y", "yes"):
+            print("cancelled")
+            return 1
+    transport, refused = svc.push_transport(ctx, record)
+    if transport is None:
+        print(f"error: cannot publish this link: {refused or 'no-credential'}")
+        return 1
+    # Manual intent outranks the schedule: a backoff window left by an earlier
+    # outage must not turn an explicit push into a silent skip.
+    svc.clear_retry(ctx, "skill", args.name)
+    operation_id = f"push-skill-{check.local_id}"
+    outcome = asyncio.run(
+        push_item(
+            kind="skill",
+            local_id=check.local_id,
+            captured_local=outbound.local_fields,
+            accepted=outbound.accepted_fields,
+            current_local=check.local or {},
+            remote_latest=check.remote or {},
+            expected_revision=expected,
+            transport=transport,
+            outbox=Outbox(ctx.config_dir),
+            operation_id=operation_id,
+            budget=OperationBudget.start("manual", operation_id, 1),
+            document_builder=lambda fields: publish_document(
+                "skill", ctx.config_dir, check.local_id, fields
+            ),
+            bundle_attested=not is_bundle
+            or svc._capability_bundle(ctx.store().load(), identity),
+            bundle_upload=(
+                svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None
+            ),
+        )
+    )
+    svc.record_push_outcome(ctx, check, outcome)
+    payload = {
+        "name": check.name,
+        "form": "bundle" if is_bundle else "document",
+        "state": outcome.state,
+        "reason": outcome.reason,
+        "revision": outcome.revision,
+        "operation_id": outcome.operation_id,
+    }
+    if getattr(args, "json", False):
+        print(_json.dumps(payload, indent=2))
+    else:
+        detail = f" {outcome.reason}" if outcome.reason else ""
+        print(f"{check.name}: {outcome.state}{detail}")
+    return 0 if outcome.state in ("pushed", "no-op") else 1
 
 
 def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:

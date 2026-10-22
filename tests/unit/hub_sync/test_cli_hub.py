@@ -524,3 +524,23 @@ def test_skills_status_reads_the_empty_inventory(
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["links"] == []
+
+
+def test_skills_push_parses(parser) -> None:
+    a = parser.parse_args(["skills", "push", "pdf-forms", "--yes", "--json"])
+    assert (a.skills_command, a.name, a.yes, a.json) == ("push", "pdf-forms", True, True)
+
+
+def test_skills_push_without_a_link_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    root = tmp_path / ".local-operator"
+
+    rc = cli.skills_command(
+        argparse.Namespace(skills_command="push", name="no-such-skill", yes=True, json=True),
+        root,
+    )
+
+    assert rc == 1
+    assert "no linked skill named" in capsys.readouterr().out

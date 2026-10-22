@@ -14,6 +14,7 @@ so every assertion reads a PERSISTED effect or the exact wire answer.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -97,11 +98,10 @@ class RemoteBundle:
         if self.upload_error is not None:
             raise self.upload_error
         self.uploads.append(bytes(data))
-        return {
-            "hash": self.document["bundle"]["hash"],
-            "size": self.document["bundle"]["size"],
-            "tree_hash": self.document["bundle"]["tree_hash"],
-        }
+        # A real server re-hashes the streamed bytes; the fake must answer for
+        # the bytes it was GIVEN, never for whatever document it happens to hold.
+        digest = hashlib.sha256(bytes(data)).hexdigest()
+        return {"hash": digest, "size": len(data)}
 
     def publish_skill_document(self, document: dict[str, Any], **_kw: Any) -> dict[str, Any]:
         self.published.append(dict(document))
@@ -483,3 +483,44 @@ def test_a_server_without_the_bundle_capability_is_refused_before_any_upload(
 
     assert preview["reason"] == "bundle-unsupported-server"
     assert client.uploads == []
+
+
+# -- the pre-commit upload a republish needs -------------------------------------------
+
+
+def test_the_push_upload_hook_sends_the_rebuilt_archive_bytes(tmp_path: Path) -> None:
+    root, base, built, remote = _rig(tmp_path)
+    ctx = _ctx(root, remote)
+    result = _install(ctx, base, confirm=True)
+    record = prov.read_baseline(root, "skill", result["link"]["local_id"])
+    assert record is not None and record.identity is not None
+
+    hook = svc.bundle_upload_hook(ctx, record.identity, record)
+    hook(dict(record.fields))
+
+    assert len(remote.uploads) == 1
+    # The bytes are the deterministic archive for the INSTALLED tree, and their
+    # hash is exactly the manifest hash the commit will send.
+    assert hashlib.sha256(remote.uploads[0]).hexdigest() == built.bundle.hash
+    assert remote.uploads[0] == built.data
+
+
+def test_the_push_upload_hook_refuses_a_locally_edited_tree(tmp_path: Path) -> None:
+    root, base, _built, remote = _rig(tmp_path)
+    ctx = _ctx(root, remote)
+    result = _install(ctx, base, confirm=True)
+    record = prov.read_baseline(root, "skill", result["link"]["local_id"])
+    assert record is not None and record.identity is not None
+    # The check's projected document still describes the OLD tree; the managed
+    # directory has moved on. Nothing may be uploaded for a tree that was not
+    # the one reviewed.
+    stale = dict(record.fields)
+    (root / "skills" / NAME / "references" / "guide.md").write_text("edited\n", encoding="utf-8")
+
+    hook = svc.bundle_upload_hook(ctx, record.identity, record)
+    with pytest.raises(LinkError) as caught:
+        hook(stale)
+
+    assert caught.value.code == "bundle-local-changes"
+    assert remote.uploads == []
+
