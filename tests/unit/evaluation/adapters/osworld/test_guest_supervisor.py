@@ -14,10 +14,13 @@ import errno
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -509,16 +512,17 @@ async def test_crash_loop_exhausts_wait_and_ends_cleanly(
         ):
             await provider.execute(["not_applied()"])
         # The whole pre-action wall-clock wait (probes at t=0, 0.5, 1, 2, 3, 5,
-        # 7, 9, 11, 13, 15), then a clean end without sending input: a patched
-        # probe reports no verdict, so the receipt is treated as genuinely
+        # 7, 9, 11, 13; no probe is started at t=15 with nothing left to answer
+        # inside), then a clean end without sending input: a patched probe
+        # reports no verdict, so the receipt is treated as genuinely
         # unavailable and the action is never attempted.
         assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["recovered"] is False
         assert evidence["final_guest_record"].startswith("not retrieved")
         # Every probe is accounted for, even when the probe itself is stubbed:
-        # the list is index-aligned with the six attempts, never padded.
-        assert [entry["probe"] for entry in evidence["probe_outcomes"]] == list(range(1, 12))
+        # the list is index-aligned with the attempts, never padded.
+        assert [entry["probe"] for entry in evidence["probe_outcomes"]] == list(range(1, 11))
         assert not any("not_applied()" in str(body) for body in stubs.guest_posts)
 
 
@@ -578,8 +582,13 @@ def test_exhaustion_evidence_names_which_path_element_failed(
     evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
     assert evidence["read_failed"] is True
     outcomes = evidence["probe_outcomes"]
-    assert len(outcomes) == 11, "one probe plus the backoff schedule"
+    assert len(outcomes) == 10, "one probe plus the backoff schedule"
     assert evidence["path_unreachable"] is True
+    assert evidence["budget_s"] == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+    # A real-clock refused-port run ends before the budget (13.596 s measured):
+    # the last 2 s wait does not fit, so equality is an artefact of the stub
+    # clock. The invariant is that the wait never spends MORE than its budget.
+    assert 0.0 < evidence["waited_s"] <= aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
     assert {outcome["kind"] for outcome in outcomes} == {"refused"}
     assert {outcome["errno"] for outcome in outcomes} == {errno.ECONNREFUSED}
     assert all(outcome["answered"] is False for outcome in outcomes)
@@ -587,6 +596,216 @@ def test_exhaustion_evidence_names_which_path_element_failed(
     # names the element. An answered 503 must never reach this wording.
     assert "unreachable" in evidence["cause"]
     assert "refused" in evidence["cause"]
+
+
+#: How long the loopback server below holds ``/terminal``. Longer than the OLD
+#: 0.5 s probe deadline, far shorter than the watchdog-parity 5 s one -- the
+#: window where a busy action server was mistaken for an ambiguous path.
+_BUSY_TERMINAL_DELAY_S = 1.5
+
+
+def _start_action_server(
+    *, terminal_delay_s: float
+) -> tuple[ThreadingHTTPServer, list[dict[str, Any]], threading.Thread]:
+    """A real loopback action server: delayed ``/terminal``, recording ``/execute``.
+
+    Real sockets rather than a stubbed client, because the defect lives in the
+    interaction between the probe's deadline and a server that is slow to
+    answer; a stub cannot reproduce a read timeout. The receipt command is
+    answered with a healthy baseline, so a probe that succeeds proceeds to a
+    normal ``verified_none`` rather than a restart.
+    """
+
+    action_posts: list[dict[str, Any]] = []
+    baseline = {
+        "schema_version": 1,
+        "records": [],
+        "captured_exits": 0,
+        "baseline_nrestarts": 0,
+        "baseline_active_enter": 100,
+        "systemd_nrestarts": 0,
+        "systemd_active_enter": 100,
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        # The stdlib's own signature: the parameter is literally ``format`` and
+        # keyword-capable, and pyright rejects a ``*args``-only override as an
+        # incompatible method override.
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def _respond(self, body: bytes) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            # Accepted immediately, answered only after the simulated screenshot
+            # or page load: exactly the shape a short probe calls ambiguous.
+            time.sleep(terminal_delay_s)
+            self._respond(b"")
+
+        def do_POST(self) -> None:
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            script = " ".join(payload["command"])
+            if "/var/lib/lop-action-supervisor" in script:
+                output = "escalation=agentless\n" + json.dumps(baseline)
+            else:
+                action_posts.append(payload)
+                output = ""
+            self._respond(json.dumps({"returncode": 0, "output": output, "error": ""}).encode())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, action_posts, thread
+
+
+def _stop_action_server(server: ThreadingHTTPServer, thread: threading.Thread) -> None:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+def _provider_with_real_transport(stubs: _Stubs, tmp_path: Path) -> aws_mod.AwsProvider:
+    """The provider wired to the REAL loopback transport, with a supervisor unit."""
+
+    provider = _provider_over(stubs, tmp_path)
+    assert provider._cache_root is not None
+    provider._supervisor_unit = "action-server.service"
+    transport = aws_mod.build_clients(provider._credentials, provider._region)
+    provider._clients.http_get = transport.http_get
+    provider._clients.http_post_json = transport.http_post_json
+    provider._clients.ec2 = _NoConsoleEc2()
+    return provider
+
+
+def test_recovery_probe_timeout_is_not_shorter_than_the_watchdogs() -> None:
+    """Probe-timeout parity, pinned at the source of the other constant.
+
+    The watchdog states its 5 s bound inside its guest source, derived from the
+    same fact: the probe classifies, it does not kill, so a mislabel costs
+    evidence fidelity and nothing else. The host probe had no such parity --
+    0.5 s against a server whose control endpoints answer in seconds -- and
+    that asymmetry refused a live episode. Parsed rather than duplicated so an
+    edit to either constant fails here instead of in production.
+    """
+
+    watchdog = re.search(
+        r"^PROBE_TIMEOUT_S = ([\d.]+)$", guest_supervisor.WATCHDOG_SOURCE, re.MULTILINE
+    )
+    assert watchdog is not None, "the watchdog's probe bound moved or was renamed"
+    assert aws_mod._RECOVERY_PROBE_TIMEOUT_S >= float(watchdog.group(1))
+
+
+@pytest.mark.asyncio
+async def test_a_busy_server_is_not_mistaken_for_a_dead_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Busy is not dead: one real busy server, one constant apart.
+
+    The action server is single-threaded around its control endpoints, so a
+    1280x720 screenshot or a page load blocks ``/terminal`` for seconds. At the
+    old 0.5 s probe deadline that reads as ``ambiguous`` -- connected, never
+    answered -- which leaves ``path_unreachable`` false and refuses an action
+    the SAME server serves once the probe is allowed the watchdog's 5 s. The
+    negative control runs the old constant against this server and must send
+    nothing; the positive control runs the new one and must attempt and deliver.
+    """
+
+    server, action_posts, thread = _start_action_server(terminal_delay_s=_BUSY_TERMINAL_DELAY_S)
+    real_probe_timeout = aws_mod._RECOVERY_PROBE_TIMEOUT_S
+    try:
+        monkeypatch.setattr(aws_mod, "GUEST_PORT", server.server_address[1])
+        with _Stubs() as stubs:
+            provider = _provider_with_real_transport(stubs, tmp_path)
+            assert provider._cache_root is not None
+
+            # Negative control: the OLD constant on the SAME server. The budget
+            # is shortened only because ten 0.5 s timeouts would spend 5 s of
+            # real test time; no budget makes a 0.5 s probe outlast a 1.5 s
+            # answer, which is the point.
+            monkeypatch.setattr(aws_mod, "_RECOVERY_PROBE_TIMEOUT_S", 0.5)
+            monkeypatch.setattr(aws_mod, "_PRE_ACTION_RECOVERY_BUDGET_S", 2.0)
+            with pytest.raises(aws_mod.GuestExecutionError, match="not attempted"):
+                await provider.execute(["busy()"], settle=False)
+            assert action_posts == [], "the old probe must refuse without sending input"
+            evidence = json.loads(
+                (provider._cache_root / "guest-supervisor-recovery.json").read_text()
+            )
+            assert evidence["path_unreachable"] is False
+            assert "unreachable" not in evidence["cause"]
+            assert {entry["error_class"] for entry in evidence["probe_outcomes"]} == {"ReadTimeout"}
+            assert evidence["probe_timeout_s"] == 0.5
+            assert evidence["budget_s"] == 2.0
+            assert evidence["waited_s"] == 2.0
+            assert all(entry["timeout_s"] == 0.5 for entry in evidence["probe_outcomes"])
+
+            # Positive control: the watchdog-parity constant, same server, same
+            # delay. The probe answers, the receipt reads, the action lands.
+            monkeypatch.setattr(aws_mod, "_RECOVERY_PROBE_TIMEOUT_S", real_probe_timeout)
+            monkeypatch.setattr(aws_mod, "_PRE_ACTION_RECOVERY_BUDGET_S", 15.0)
+            await provider.execute(["busy()"], settle=False)
+            assert len(action_posts) == 1, "the patient probe must attempt and deliver"
+    finally:
+        _stop_action_server(server, thread)
+
+
+@pytest.mark.asyncio
+async def test_a_zero_budget_refuses_instead_of_licensing_the_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``all([])`` is True, and that must never become permission to send.
+
+    ``path_unreachable`` is the one verdict that lets ``execute`` attempt an
+    action over an unread receipt. A non-positive budget makes ZERO probes; on
+    an empty list ``all(...)`` used to evaluate True, so the wait granted the
+    very licence it had learned nothing to support. The real server here would
+    accept and record the action, which is exactly what must not happen.
+    """
+
+    server, action_posts, thread = _start_action_server(terminal_delay_s=0.0)
+    try:
+        monkeypatch.setattr(aws_mod, "GUEST_PORT", server.server_address[1])
+        with _Stubs() as stubs:
+            provider = _provider_with_real_transport(stubs, tmp_path)
+            assert provider._cache_root is not None
+            monkeypatch.setattr(aws_mod, "_PRE_ACTION_RECOVERY_BUDGET_S", 0.0)
+            with pytest.raises(aws_mod.GuestExecutionError, match="not attempted"):
+                await provider.execute(["must_not_send()"], settle=False)
+            assert action_posts == [], "a wait that probed nothing must not authorize a send"
+            evidence = json.loads(
+                (provider._cache_root / "guest-supervisor-recovery.json").read_text()
+            )
+            assert evidence["probe_outcomes"] == []
+            assert evidence["path_unreachable"] is False
+            assert evidence["budget_s"] == 0.0
+            assert evidence["waited_s"] == 0.0
+            assert "unreachable" not in evidence["cause"]
+    finally:
+        _stop_action_server(server, thread)
+
+
+def test_a_budget_shorter_than_the_first_wait_does_not_index_an_empty_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sub-0.5 s budget still makes one probe, so the schedule cannot be empty.
+
+    The failed probe indexes the wait that follows it; when the derivation
+    returned ``()`` for a budget below the first 0.5 s wait, that lookup raised
+    ``IndexError`` instead of letting the deadline end the wait.
+    """
+
+    assert aws_mod._recovery_probe_delays(0.0) == (0.5,)
+    assert aws_mod._recovery_probe_delays(0.1) == (0.5,)
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
+    with _Stubs() as stubs:
+        provider = _provider_with_real_transport(stubs, tmp_path)
+        result = provider._recover_guest_supervisor(budget_s=0.1)
+    assert result.state == "read_failed"
+    assert result.recovery_exhausted is True
+    assert result.path_unreachable is True
 
 
 _LOOPBACK_SERVER = r"""
