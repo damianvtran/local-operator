@@ -2511,6 +2511,173 @@ def push_eligibility(ctx: HubSyncContext, record: prov.BaselineRecord | None) ->
     return _eligibility(ctx, record.identity, None, values, record, doc)
 
 
+def push_transport(
+    ctx: HubSyncContext, record: prov.BaselineRecord | None
+) -> tuple[Any | None, str | None]:
+    """A per-LINK push transport, or ``(None, named reason)`` when unavailable.
+
+    The destination is the link's own identity, not a global default: the client
+    comes from the SAME per-tenant selector the check/pull path uses (publishing
+    is a person's act, so even a public link needs the signed-in client), the
+    base is that client's configured base, and the base is POSITIVELY verified
+    against the link's recorded ``hub_source`` before any credential could leave
+    -- a mismatch is refused, never followed.
+
+    ONE implementation for the runner's automatic tick and ``lop skills push``:
+    a second transport builder would be a second place where the origin proof
+    could be skipped.
+    """
+
+    from local_operator.hub_sync.identity import LinkError, normalize_source
+
+    if record is None or record.identity is None:
+        return None, "baseline-unknown"
+    identity = record.identity
+    try:
+        # A non-None tenant selects the signed-in client from the shared
+        # selector (its docstring blesses any string, even ""); a public link
+        # publishes unauthored only if there is no login at all, in which
+        # case the selector answers None and the push is skipped.
+        client = ctx.client_for_tenant(identity.tenant_id if identity.tenant_id else "")
+    except Exception:  # noqa: BLE001 - a selector failure is simply no transport
+        return None, "no-credential"
+    if client is None:
+        return None, "no-credential"
+    try:
+        base = str(client.base_url).rstrip("/")
+        headers = dict(client.bearer_headers())
+    except Exception:  # noqa: BLE001 - an unauthorized client cannot publish
+        return None, "no-credential"
+    try:
+        if normalize_source(base) != identity.hub_source:
+            return None, "origin-conflict"
+    except LinkError:
+        return None, "origin-conflict"
+    from local_operator.hub_sync.outbox import AsyncDispatcher
+    from local_operator.hub_sync.push import HttpPushTransport
+
+    return (
+        HttpPushTransport(
+            AsyncDispatcher(),
+            kind=identity.kind,
+            hub_id=record.hub_id,
+            base_url=base,
+            headers=headers,
+            visibility=identity.visibility,
+            tenant_id=identity.tenant_id,
+        ),
+        None,
+    )
+
+
+def bundle_upload_hook(
+    ctx: HubSyncContext, identity: LinkIdentity, record: prov.BaselineRecord | None
+) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+    """The pre-commit upload a BUNDLE push must run, bound to THIS link's scope.
+
+    A republish sends a manifest whose ``bundle.hash`` the server has never seen;
+    ``RepublishSkill`` opens the blob for that hash before touching the row, so
+    without this upload every bundle push would answer ``skill_bundle_not_uploaded``.
+    The archive is REBUILT from the linked managed directory (the only bytes this
+    machine may publish) and the rebuilt manifest must equal the projected
+    document field for field -- a local edit between the check and the commit is
+    ``bundle-local-changes`` with nothing sent, never a blob for an older tree.
+
+    The upload is idempotent by hash on the server (``Put`` is keyed by it), so a
+    retry after a failed commit may send the same bytes again; what the ordering
+    in ``push_item`` guarantees is that no COMMIT leaves before its blob is stored.
+    """
+
+    from local_operator.clients._http import APIError
+    from local_operator.hub_sync.skill_bundle import build_bundle
+    from local_operator.hub_sync.skill_bundle_storage import ManagedBundleStorage
+
+    def upload(document: Mapping[str, Any]) -> Mapping[str, Any]:
+        alias = record.local_alias if record is not None else None
+        if not alias:
+            raise LinkError("baseline-unknown", "this bundle link has no recorded local alias")
+        built = build_bundle(ManagedBundleStorage(ctx.config_dir).path(alias))
+        declared = document.get("bundle")
+        if not isinstance(declared, Mapping):
+            raise LinkError("bundle-invalid", "the projected document carries no bundle reference")
+        rebuilt = built.manifest.bundle.to_json()
+        for key in ("hash", "tree_hash", "size", "file_count"):
+            if declared.get(key) != rebuilt[key]:
+                raise LinkError(
+                    "bundle-local-changes",
+                    f"the managed bundle changed since the check ({key} differs); "
+                    "recheck and push again",
+                )
+        client = ctx.client_for_tenant(identity.tenant_id if identity.tenant_id else "")
+        if client is None:
+            raise LinkError("no-credential", "publishing a bundle needs a signed-in client")
+        try:
+            result = client.upload_skill_bundle(
+                built.data, visibility=identity.visibility, tenant_id=identity.tenant_id
+            )
+        except APIError as error:
+            status = getattr(error, "status_code", None)
+            if isinstance(status, int) and 400 <= status < 500:
+                # A refused body is an ANSWER: retrying the same bytes is spent
+                # work, so it settles deterministically under the server's own
+                # code when it named one.
+                raise LinkError(
+                    getattr(error, "code", None) or "invalid_skill_bundle", str(error)
+                ) from None
+            raise
+        if not isinstance(result, Mapping):
+            raise LinkError("hub-upstream", "the hub's bundle upload answer was unreadable")
+        if str(result.get("hash") or "") != rebuilt["hash"]:
+            # The server's inventory must describe OUR bytes.
+            raise LinkError("hub-upstream", "the hub's bundle inventory does not match the archive")
+        return dict(result)
+
+    return upload
+
+
+def record_push_outcome(ctx: HubSyncContext, c: Any, outcome: Any) -> None:
+    """Persist one push outcome: advance the receipt on success, name a skip.
+
+    On success the outbound RECEIPT is advanced (A = the local input that was
+    sent, P = the server-returned canonical document, revision = the accepted
+    opaque ETag): without that, every later attempt derives from a stale pair.
+    Shared by the runner's tick and the manual ``lop skills push``.
+    """
+
+    key = st.item_key(c.kind, c.local_id)
+    if outcome.state == "pushed":
+        result = outcome.accepted
+        accepted_doc = result.get("accepted_document") if isinstance(result, Mapping) else None
+        if isinstance(accepted_doc, Mapping):
+            record_outbound_receipt(
+                ctx,
+                c.kind,
+                c.local_id,
+                accepted=accepted_doc,
+                current_local=c.local or {},
+                revision=outcome.revision,
+                operation_id=str(result.get("operation_id") or "") or None,
+            )
+
+        def fold(doc: dict[str, Any]) -> None:
+            item = doc.get("items", {}).get(key)
+            if item is not None:
+                item["last_pushed_at"] = st.now_iso()
+                st.clear_push_skipped(item)
+
+        ctx.store().mutate(fold)
+        return
+    if outcome.reason:
+        reason = str(outcome.reason)
+
+        def skip(doc: dict[str, Any]) -> None:
+            item = doc.get("items", {}).get(key)
+            if item is not None:
+                st.mark_push_skipped(item, reason)
+
+        ctx.store().mutate(skip)
+
+
 def record_outbound_receipt(
     ctx: HubSyncContext,
     kind: Kind,

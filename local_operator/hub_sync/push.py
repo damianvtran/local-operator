@@ -331,6 +331,7 @@ async def push_item(
     opts: MergeOptions = MergeOptions(),
     document_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     bundle_attested: bool = False,
+    bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> PushOutcome:
     """Project and conditionally publish one authored item; settle the outbox.
 
@@ -486,6 +487,31 @@ async def push_item(
             )
 
     assert isinstance(preview_document, Mapping)
+    if is_bundle:
+        # THE BLOB BEFORE THE COMMIT. A republish names a hash the server has
+        # never stored; its RepublishSkill opens that blob before touching the
+        # row, so a commit without a prior upload would answer
+        # ``skill_bundle_not_uploaded``. This runs BEFORE the durable intent, so
+        # a crash after a successful upload simply re-uploads the same
+        # (idempotent, hash-keyed) bytes -- it can never publish twice.
+        if bundle_upload is None:
+            # A caller that cannot upload must not commit a manifest nobody can
+            # serve; refusing here keeps the invariant local.
+            return _settle_deterministic(
+                outbox, operation_id, generation, "unsupported-precondition"
+            )
+        try:
+            bundle_upload(dict(preview_document))
+        except LinkError as exc:
+            # A named local/remote refusal of these bytes: an ANSWER, so it
+            # settles deterministically instead of being retried on a timer.
+            return _settle_refused(outbox, operation_id, generation, exc.code)
+        except Exception:  # noqa: BLE001 - an outage owes nothing; retry with backoff
+            logger.warning("hub bundle upload failed for %s %s", kind, local_id, exc_info=True)
+            return _settle_refused(
+                outbox, operation_id, generation, "bundle-upload-failed", outage=True
+            )
+
     # DURABLE INTENT BEFORE THE COMMIT LEAVES: a crash or deadline after this
     # write can replay exactly these bytes (same pin/body/expected revision).
     intent = {
