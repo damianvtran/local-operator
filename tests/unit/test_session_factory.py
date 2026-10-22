@@ -5962,9 +5962,7 @@ def test_cell_a_control_the_old_observer_setup_fails_its_precondition(
     not pass by a setup that could not tell a departure from a finished walk.
     """
     report = _run_store_walk_child(tmp_path, "old_setup", record_property)
-    _judge_store_walk(
-        report, record_property, expect="precondition: the observer saw 60 of 60"
-    )
+    _judge_store_walk(report, record_property, expect="precondition: the observer saw 60 of 60")
 
 
 def test_cell_a_control_a_consumer_that_ignores_a_set_stop_runs_the_walk_to_the_end(
@@ -5984,9 +5982,7 @@ def test_cell_a_control_a_consumer_that_ignores_a_set_stop_runs_the_walk_to_the_
     # producer that never signalled (that defect trips the stop-set guard instead).
     assert report["stop_set_at_hold"] is True
     assert report["after_titles"] == 60
-    _judge_store_walk(
-        report, record_property, expect="after-work guard: 60 directories answered"
-    )
+    _judge_store_walk(report, record_property, expect="after-work guard: 60 directories answered")
 
 
 @pytest.mark.asyncio

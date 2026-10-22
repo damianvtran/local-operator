@@ -1069,6 +1069,14 @@ def _top_level_names(path: Path) -> list[str]:
     ]
 
 
+def _flag_value(argv: list[str], flag: str) -> str | None:
+    """The token after ``flag`` in a parsed command line, or None when absent."""
+    if flag not in argv:
+        return None
+    index = argv.index(flag) + 1
+    return argv[index] if index < len(argv) else None
+
+
 def _audit_unit_serial_wiring(steps: list[dict[str, Any]], env: dict[str, Any]) -> list[str]:
     """Every way the serial-control wiring can be wrong, as sentences ([] when right).
 
@@ -1123,19 +1131,40 @@ def _audit_unit_serial_wiring(steps: list[dict[str, Any]], env: dict[str, Any]) 
     minutes = serial.get("timeout-minutes")
     if minutes != 7:
         problems.append(f"the serial step ceiling must be the declared 7 minutes, is {minutes!r}")
-    names = [s.get("name") for s in steps]
+    # THE WRAPPER'S OWN BOUND MUST FIRE INSIDE THE STEP'S: SIGTERM at --timeout, SIGKILL
+    # --grace later, both before the step's timeout-minutes cancels it from outside (an
+    # outside cancel is the path the in-child orphan guard exists for). Parsed from the
+    # real command, so an edit to either number is judged, not assumed.
+    try:
+        bound = float(_flag_value(argv, "--timeout") or "nan")
+        grace = float(_flag_value(argv, "--grace") or "nan")
+    except ValueError:
+        bound = grace = float("nan")
+    if isinstance(minutes, int) and not bound + grace < minutes * 60:
+        problems.append(
+            f"the wrapper's bound plus grace ({bound}+{grace}s) must be shorter than the "
+            f"step's {minutes} minutes, and both must be given"
+        )
+    # NO INVENTED MEMORY CAP: this job has no memory policy today, a guessed ceiling
+    # could kill a healthy test, and the wrapper refuses to start with no resolvable
+    # auto budget. Zero is passed EXPLICITLY (it reports "disabled (explicit)") so the
+    # absence is visible and a future cap is a deliberate decision.
+    if _flag_value(argv, "--memory-mb") != "0":
+        problems.append("the serial run must pass an explicit --memory-mb 0 (no invented cap)")
     order = [ORDINARY_STEP_ID, "serial_absent", SERIAL_STEP_ID, "serial_proof"]
     positions = [next((i for i, s in enumerate(steps) if s.get("id") == k), -1) for k in order]
     if -1 in positions or positions != sorted(positions):
         problems.append(f"serial steps missing or out of order: {positions}")
-    final = [
-        i for i, s in enumerate(steps) if "mv .coverage" in (s.get("run") or "")
-    ]
+    final = [i for i, s in enumerate(steps) if "mv .coverage" in (s.get("run") or "")]
     if len(final) != 1 or final[0] <= max(positions):
         problems.append("the coverage rename must be one step, AFTER every pytest step")
     proof = by_id.get("serial_proof")
     if proof is not None and "steps.serial_controls.outcome" not in str(proof.get("if")):
         problems.append("the proof step is not gated on the serial step being attempted")
+    if proof is not None and "always()" not in str(proof.get("if")):
+        # Without it the implicit success() skips the proof exactly when the serial
+        # step FAILED or hit its bound, and a failed run would carry no verdict.
+        problems.append("the proof step must run under always(), not only on success")
     absent = by_id.get("serial_absent")
     if absent is not None and "always()" not in str(absent.get("if")):
         problems.append("the absence proof must run even when the ordinary run failed")
@@ -1147,7 +1176,6 @@ def _audit_unit_serial_wiring(steps: list[dict[str, Any]], env: dict[str, Any]) 
         problems.append("the junit-timings artifact does not carry the serial XML")
     if junit is not None and str(junit.get("if")).strip() != "always()":
         problems.append("the junit upload must stay `if: always()`")
-    del names
     return problems
 
 
@@ -1170,86 +1198,195 @@ def test_the_serial_controls_are_wired_once_deselected_everywhere_and_run_on_sha
     assert "--deselect" in _run_step("test")
 
 
-def _mutated_wiring() -> list[tuple[str, list[str]]]:
-    """(label, problems) for each deliberate corruption of a copy of the real steps."""
+def _in_run(step_id: str, old: str, new: str) -> Any:
+    """A mutation: replace ``old`` by ``new`` inside one step's ``run:`` body."""
+
+    def mutate(steps: list[dict[str, Any]]) -> None:
+        step = next(s for s in steps if s.get("id") == step_id)
+        assert old in step["run"], f"mutation target {old!r} is not in step {step_id}"
+        step["run"] = step["run"].replace(old, new)
+
+    return mutate
+
+
+def _set_field(step_id: str, **fields: Any) -> Any:
+    """A mutation: set top-level keys of one step (``if``, ``timeout-minutes``, ...)."""
+
+    def mutate(steps: list[dict[str, Any]]) -> None:
+        next(s for s in steps if s.get("id") == step_id).update(fields)
+
+    return mutate
+
+
+def _serial_xml_not_uploaded(steps: list[dict[str, Any]]) -> None:
+    upload = next(
+        s
+        for s in steps
+        if "upload-artifact" in str(s.get("uses")) and "junit" in str(s["with"]["name"])
+    )
+    upload["with"].update(path="junit-3.12-0.xml")
+
+
+def _five_ids(env: dict[str, Any]) -> None:
+    env.update(SERIAL_CONTROLS="\n".join(env["SERIAL_CONTROLS"].split()[:5]))
+
+
+def _duplicate_id(env: dict[str, Any]) -> None:
+    ids = env["SERIAL_CONTROLS"].split()
+    env.update(SERIAL_CONTROLS="\n".join(ids[:5] + ids[:1]))
+
+
+def _missing_selector(env: dict[str, Any]) -> None:
+    gone = "test_cell_a_control_the_old_observer_setup_fails_its_precondition"
+    env.update(SERIAL_CONTROLS=env["SERIAL_CONTROLS"].replace(gone, "test_nope"))
+
+
+#: (label, the problem text that corruption MUST produce, step mutation, env mutation).
+#: Keyed to the EXPECTED sentence, not merely "some problem": a corruption that trips a
+#: different guard would otherwise count as caught while its own guard is dead.
+_WIRING_MUTATIONS: list[tuple[str, str, Any, Any]] = [
+    (
+        "no deselect",
+        "does not deselect",
+        _in_run(ORDINARY_STEP_ID, "--deselect", "--ignore"),
+        None,
+    ),
+    (
+        "serial on every shard",
+        "shard 0 only",
+        _set_field(SERIAL_STEP_ID, **{"if": "true"}),
+        None,
+    ),
+    (
+        "serial under xdist",
+        "lost -n0",
+        _in_run(SERIAL_STEP_ID, "-n0", "-n4"),
+        None,
+    ),
+    (
+        "bare --cov",
+        "a bare --cov resets",
+        _in_run(SERIAL_STEP_ID, "--cov=local_operator", "--cov"),
+        None,
+    ),
+    (
+        "no append",
+        "lost --cov-append",
+        _in_run(SERIAL_STEP_ID, "--cov-append", ""),
+        None,
+    ),
+    (
+        "masked failure",
+        "continue-on-error",
+        _set_field(SERIAL_STEP_ID, **{"continue-on-error": True}),
+        None,
+    ),
+    (
+        "unbounded",
+        "is not bounded by run_bounded",
+        _in_run(SERIAL_STEP_ID, "scripts/run_bounded.py", ""),
+        None,
+    ),
+    (
+        "ceiling bumped",
+        "must be the declared 7 minutes",
+        _set_field(SERIAL_STEP_ID, **{"timeout-minutes": 20}),
+        None,
+    ),
+    (
+        "wrapper bound overflows the step",
+        "must be shorter than the step's 7 minutes",
+        _in_run(SERIAL_STEP_ID, "--timeout 400", "--timeout 420"),
+        None,
+    ),
+    (
+        "no explicit memory policy",
+        "explicit --memory-mb 0",
+        _in_run(SERIAL_STEP_ID, "--memory-mb 0", ""),
+        None,
+    ),
+    (
+        "proof only always()",
+        "not gated on the serial step being attempted",
+        _set_field("serial_proof", **{"if": "always()"}),
+        None,
+    ),
+    (
+        "proof loses always()",
+        "must run under always()",
+        _set_field("serial_proof", **{"if": "steps.serial_controls.outcome != 'skipped'"}),
+        None,
+    ),
+    (
+        "absence not always",
+        "the absence proof must run even when",
+        _set_field("serial_absent", **{"if": None}),
+        None,
+    ),
+    (
+        "rename inside the ordinary run",
+        "must not append or rename coverage data",
+        _in_run(
+            ORDINARY_STEP_ID,
+            "--cov-fail-under=0",
+            "--cov-fail-under=0; mv .coverage .coverage.x",
+        ),
+        None,
+    ),
+    (
+        "serial XML not uploaded",
+        "does not carry the serial XML",
+        _serial_xml_not_uploaded,
+        None,
+    ),
+    ("five ids", "expected six unique serial ids", None, _five_ids),
+    ("duplicate id", "expected six unique serial ids", None, _duplicate_id),
+    ("missing selector", "not a top-level test function", None, _missing_selector),
+]
+
+
+def _mutated_wiring() -> list[tuple[str, str, list[str]]]:
+    """(label, expected problem text, problems found) per deliberate corruption."""
     import copy
 
     job = _ci_jobs()["test"]
-    cases: list[tuple[str, list[str]]] = []
-
-    def run(label: str, mutate: Any, env_mutate: Any = None) -> None:
+    results: list[tuple[str, str, list[str]]] = []
+    for label, expected, mutate_steps, mutate_env in _WIRING_MUTATIONS:
         steps = copy.deepcopy(job["steps"])
         env = copy.deepcopy(job["env"])
-        mutate(steps)
-        if env_mutate is not None:
-            env_mutate(env)
-        cases.append((label, _audit_unit_serial_wiring(steps, env)))
-
-    def by_id(steps: list[dict[str, Any]], key: str) -> dict[str, Any]:
-        return next(s for s in steps if s.get("id") == key)
-
-    run("no deselect", lambda st: by_id(st, ORDINARY_STEP_ID).update(
-        run=by_id(st, ORDINARY_STEP_ID)["run"].replace("--deselect", "--ignore")))
-    run("serial on every shard", lambda st: by_id(st, SERIAL_STEP_ID).update({"if": "true"}))
-    run("serial under xdist", lambda st: by_id(st, SERIAL_STEP_ID).update(
-        run=by_id(st, SERIAL_STEP_ID)["run"].replace("-n0", "-n4")))
-    run("bare --cov", lambda st: by_id(st, SERIAL_STEP_ID).update(
-        run=by_id(st, SERIAL_STEP_ID)["run"].replace("--cov=local_operator", "--cov")))
-    run("no append", lambda st: by_id(st, SERIAL_STEP_ID).update(
-        run=by_id(st, SERIAL_STEP_ID)["run"].replace("--cov-append", "")))
-    run("masked failure", lambda st: by_id(st, SERIAL_STEP_ID).update(
-        {"continue-on-error": True}))
-    run("unbounded", lambda st: by_id(st, SERIAL_STEP_ID).update(
-        run=by_id(st, SERIAL_STEP_ID)["run"].replace("scripts/run_bounded.py", "")))
-    run("ceiling bumped", lambda st: by_id(st, SERIAL_STEP_ID).update({"timeout-minutes": 20}))
-    run("proof not gated", lambda st: by_id(st, "serial_proof").update({"if": "always()"}))
-    run("absence not always", lambda st: by_id(st, "serial_absent").update({"if": None}))
-    run("rename before serial", lambda st: by_id(st, ORDINARY_STEP_ID).update(
-        run=by_id(st, ORDINARY_STEP_ID)["run"] + "\nmv .coverage .coverage.x"))
-    run("five ids", lambda st: None, lambda env: env.update(
-        SERIAL_CONTROLS="\n".join(env["SERIAL_CONTROLS"].split()[:5])))
-    def _duplicate(env: dict[str, Any]) -> None:
-        ids = env["SERIAL_CONTROLS"].split()
-        env.update(SERIAL_CONTROLS="\n".join(ids[:5] + ids[:1]))
-
-    run("duplicate id", lambda st: None, _duplicate)
-    run("missing selector", lambda st: None, lambda env: env.update(
-        SERIAL_CONTROLS=env["SERIAL_CONTROLS"].replace(
-            "test_cell_a_control_the_old_observer_setup_fails_its_precondition", "test_nope")))
-    def _drop_serial_xml(steps: list[dict[str, Any]]) -> None:
-        upload = next(
-            s
-            for s in steps
-            if "upload-artifact" in str(s.get("uses")) and "junit" in str(s["with"]["name"])
-        )
-        upload["with"].update(path="junit-3.12-0.xml")
-
-    run("no serial xml artifact", _drop_serial_xml)
-    return cases
+        if mutate_steps is not None:
+            mutate_steps(steps)
+        if mutate_env is not None:
+            mutate_env(env)
+        results.append((label, expected, _audit_unit_serial_wiring(steps, env)))
+    return results
 
 
 def test_every_wiring_defect_is_caught_by_the_audit() -> None:
-    """Each deliberate corruption of the serial wiring is reported (non-empty problems)."""
-    escaped = [label for label, problems in _mutated_wiring() if not problems]
-    assert not escaped, f"the audit missed these corruptions: {escaped}"
+    """Each corruption is reported, and by the guard written for it (not just any guard)."""
+    missed = [
+        (label, expected, problems)
+        for label, expected, problems in _mutated_wiring()
+        if not any(expected in problem for problem in problems)
+    ]
+    assert not missed, f"the audit did not report these corruptions as expected: {missed}"
+    assert _audit_unit_serial_wiring(
+        _ci_jobs()["test"]["steps"], _ci_jobs()["test"]["env"]
+    ) == [], "the real wiring must be clean"
 
 
 def test_a_third_or_misnamed_pytest_step_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_pytest_steps`` refuses an extra pytest command and a renamed serial step."""
+    """``_pytest_steps`` refuses an extra pytest command and a renamed or missing serial step."""
     import copy
 
-    job = copy.deepcopy(_ci_jobs()["test"])
-    extra = {"name": "sneak", "run": "python -m pytest tests/unit -q"}
-    for label, steps in (
-        ("third", job["steps"] + [extra]),
-        ("renamed", [dict(s, id="other") if s.get("id") == SERIAL_STEP_ID else s
-                     for s in job["steps"]]),
-        ("missing", [s for s in job["steps"] if s.get("id") != SERIAL_STEP_ID]),
-    ):
-        monkeypatch.setattr(sys.modules[__name__], "_steps", lambda _job, _s=steps: _s)
+    steps = copy.deepcopy(_ci_jobs()["test"]["steps"])
+    third = steps + [{"name": "sneak", "run": "python -m pytest tests/unit -q"}]
+    renamed = [dict(s, id="other") if s.get("id") == SERIAL_STEP_ID else s for s in steps]
+    missing = [s for s in steps if s.get("id") != SERIAL_STEP_ID]
+    for broken in (third, renamed, missing):
+        monkeypatch.setattr(sys.modules[__name__], "_steps", lambda _job, _s=broken: _s)
         with pytest.raises(AssertionError, match="two audited pytest steps"):
             _pytest_steps("test")
-        del label
 
 
 def test_the_serial_budget_is_accounted_in_full_and_fits_the_unchanged_job_ceiling() -> None:
@@ -1276,6 +1413,7 @@ def test_the_serial_budget_is_accounted_in_full_and_fits_the_unchanged_job_ceili
 # ---------------------------------------------------------------------------
 # scripts/check_serial_controls.py — exercised on SYNTHETIC XML only
 # ---------------------------------------------------------------------------
+
 
 def _serial_pairs() -> list[tuple[str, str]]:
     """(JUnit classname, function) for each id of the real SERIAL_CONTROLS list."""
