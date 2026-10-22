@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.loop_callback_spans import CallbackSpans
+from textual.timer import Timer
 from tests.unit.test_tui_responsiveness import StallRecorder
 
 
@@ -265,22 +266,30 @@ async def test_textual_timer_step_names_the_timer_callback_and_creation_site() -
             self.set_interval(0.01, self.tick)
 
         def tick(self) -> None:
-            pass
+            # Force a collection INSIDE the callback: its attribution must name
+            # this timer, not the anonymous ``Timer._run_timer`` step (R1-2).
+            gc.collect(0)
 
     loop = asyncio.get_running_loop()
     details: list[str] = []
+    gc_details: list[str] = []
     with CallbackSpans(loop) as spans:
         async with TimerApp().run_test() as pilot:
             for _ in range(30):
                 await pilot.pause(0.01)
-                for span in spans.take_window().top_cpu:
+                window = spans.take_window()
+                for span in window.top_cpu:
                     if span.detail:
                         details.append(span.detail)
+                for span in window.gc:
+                    if span.detail:
+                        gc_details.append(span.detail)
     assert details, "no timer step carried attribution"
     assert any(
         "TimerApp.tick @" in detail and "test_loop_callback_spans.py" in detail
         for detail in details
     ), details[:5]
+    assert any("TimerApp.tick @" in detail for detail in gc_details), gc_details[:5]
 
 
 def test_collection_starting_inside_a_callback_is_attributed_to_that_callback() -> None:
@@ -338,5 +347,55 @@ def test_collection_on_a_worker_thread_is_not_charged_to_the_loop_callback() -> 
             thread.start()
             thread.join()
             assert spans.take_window().gc == []
+    finally:
+        loop.close()
+
+
+def test_tick_on_another_thread_does_not_stamp_the_loop_span() -> None:
+    """A concurrently ticking app on another thread must not forge a label (R1-1).
+
+    The label is recorded on the SPAN, which belongs to one loop thread. A real
+    Textual app ticking elsewhere would otherwise stamp its timer onto a step of
+    this loop that never ran that callback.
+    """
+    loop = asyncio.new_event_loop()
+
+    class Target:
+        pass
+
+    try:
+        with CallbackSpans(loop) as spans:
+            timer = Timer(Target(), 0.5, callback=lambda: None)
+            timer._callback_spans_label = "other_thread_timer:OtherApp.tick @ x.py:1"
+            before = spans._tick_serial
+
+            def tick_elsewhere() -> None:
+                try:
+                    asyncio.run(timer._tick(next_timer=0.0, count=1))
+                except Exception:  # noqa: BLE001 - no active app on that thread
+                    pass
+
+            thread = threading.Thread(target=tick_elsewhere)
+            thread.start()
+            thread.join()
+            assert spans._tick_serial == before
+            assert spans._tick_detail == ""
+    finally:
+        loop.close()
+
+
+def test_context_removes_its_hooks_and_restores_every_patch() -> None:
+    """Cleanup is part of the contract: a leaked hook outlives the cell (R1-5)."""
+    original_handle = asyncio.Handle._run
+    original_init = Timer.__init__
+    original_tick = Timer._tick
+    loop = asyncio.new_event_loop()
+    try:
+        with CallbackSpans(loop) as spans:
+            assert spans._gc_started in gc.callbacks
+        assert spans._gc_started not in gc.callbacks
+        assert asyncio.Handle._run is original_handle
+        assert Timer.__init__ is original_init
+        assert Timer._tick is original_tick
     finally:
         loop.close()
