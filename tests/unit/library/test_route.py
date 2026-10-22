@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.library import index
+from local_operator.library import indexer, service
 from local_operator.server.routes import capabilities, desktop_library
 from local_operator.session.attachments import cache_media
 
@@ -53,8 +53,11 @@ def seed(root: Path) -> tuple[str, str, str]:
     assert block and block.attachment
     session(root, SESSION, write_rows("w1", 1, text) + image_rows("g1", 2, block.attachment))
     session(root, OTHER, [user_row("u1", 3, f"see {text}")])
-    catalog = index.build_catalog(root, budget_s=None)
-    by_name = {asset.derived_name: asset.id for asset in catalog.assets}
+    # Build the index the daemon would have built, then read the ids back from
+    # the same SQLite tables the route reads.
+    indexer.rebuild_now(root)
+    frame = service.list_assets(root, service.Query())
+    by_name = {row["name"]: row["id"] for row in frame["rows"]}
     return by_name["report.txt"], by_name["cat.png"], block.attachment
 
 
@@ -236,6 +239,7 @@ async def test_a_metadata_edit_does_not_duplicate_or_skip_a_page(api) -> None:
         path.write_text(name)
         rows += write_rows(f"w{number}", number + 1, path)
     session(root, SESSION, rows)
+    indexer.rebuild_now(root)
 
     first = await client.get(
         "/v1/desktop/library/assets", params={"sort": "name", "order": "asc", "limit": 2}
