@@ -13,9 +13,13 @@ resource; it is called from ``reset_start``, never from ``prepare``.
 
 from __future__ import annotations
 
+import math
+import random
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from lop_osworld_v2_adapter.guest_loss import DELIVERY_NOT_SENT, TransportVerdict
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
@@ -158,6 +162,106 @@ def guest_deadline_for(socket_timeout_s: float) -> float:
 # ``GUEST_EXECUTE_TIMEOUT_S < GUEST_COMMAND_TIMEOUT_S``, and a hand-written
 # second number is exactly how that invariant was lost the first time.
 GUEST_EXECUTE_TIMEOUT_S = guest_deadline_for(GUEST_COMMAND_TIMEOUT_S)
+
+# ---------------------------------------------------------------------------
+# Retrying a guest request that PROVABLY never left this host
+# ---------------------------------------------------------------------------
+#
+# WHY A RETRY IS NOT A REPLAY. A request whose TCP connection was never
+# established carried no byte of the batch, so the guest applied nothing; sending
+# it again is not a second application of an effect, it is the FIRST delivery.
+# That is a different fact from "the response was lost", which stays fatal: the
+# guest may already have typed the text, and no retry can undo or safely repeat
+# that. The classifier in ``guest_loss`` is the authority on which of the two
+# happened, and ``transport_retry_delay`` below refuses to schedule a retry
+# unless that authority said ``DELIVERY_NOT_SENT``.
+#
+# WHY THE BOUND IS A CONSTANT RATHER THAN A CALLER'S CHOICE. An episode budget is
+# measured in minutes and a lost guest costs all of it, so spending a few seconds
+# to distinguish "the network path blinked" from "the guest is gone" is cheap.
+# Spending an unbounded number of them is not: the one preserved execute-phase
+# loss refused every request for the remaining ~4 minutes, and a policy that
+# followed it would have turned four minutes of dead time into four minutes of
+# retries.
+#
+# TWO BOUNDS, because an attempt count alone bounds nothing. Four attempts with
+# 0.5 s / 1 s / 2 s backoff is ~3.5 s of DELAYS, but each attempt carries the
+# guest command's own 90 s socket deadline (``GUEST_COMMAND_TIMEOUT_S``), and a
+# blackholed connect is exactly the case that spends it -- so an attempt-count
+# bound alone permits ~4 x 90 s. ``TRANSPORT_RETRY_WINDOW_S`` is that missing
+# bound: a per-statement wall-clock budget measured from the FIRST failure, so a
+# slow attempt ends the retrying (its own deadline was the episode's normal
+# cost) while a fast refusal still gets its retries. Measured envelope: one full
+# attempt deadline (~90 s, unchanged from a single send) plus the window, and
+# typically ~3.5 s.
+TRANSPORT_RETRY_ATTEMPTS = 4  # TOTAL sends: the first attempt plus three retries
+TRANSPORT_RETRY_WINDOW_S = 20.0
+_TRANSPORT_RETRY_BASE_DELAY_S = 0.5
+_TRANSPORT_RETRY_MAX_DELAY_S = 2.0
+# +/-25% on every delay. The guests of one fleet usually share one network path,
+# so without jitter a path blip synchronises every client's retries onto the same
+# instants -- the opposite of what a transient congestion or route-convergence
+# event needs.
+_TRANSPORT_RETRY_JITTER_FRACTION = 0.25
+
+
+def transport_retry_delay(
+    verdict: TransportVerdict,
+    *,
+    failed_attempt: int,
+    remaining_s: float | None = None,
+    attempts: int = TRANSPORT_RETRY_ATTEMPTS,
+    jitter: Callable[[], float] = random.random,
+) -> float | None:
+    """Seconds to wait before re-sending, or None when no retry is permitted.
+
+    THE GATE IS THE CLASSIFIER, NOT THE CALLER. ``verdict`` is what
+    ``guest_loss.classify_transport_failure`` returned for the failure that just
+    happened, and only ``DELIVERY_NOT_SENT`` schedules a retry -- that verdict
+    means POSITIVE evidence the connection was never established, so nothing
+    reached the guest. Every verdict meaning "sent" or "unknown" (a read
+    timeout, a reset or abort after the write, a 5xx, a redirect) returns None
+    here however the caller feels about it. There is deliberately no boolean
+    argument that could bypass this distinction: the only way to obtain a
+    retryable verdict is to classify a failure, and the classifier has no third
+    "probably not sent".
+
+    ``failed_attempt`` is the 1-based ordinal of the attempt that just failed.
+    ``None`` at or past ``attempts`` is the terminal answer, so the caller's loop
+    ends exactly where this bound says it does.
+
+    ``remaining_s`` is what is left of the caller's wall-clock retry window. A
+    delay that would not fit inside it returns None: the window, not the attempt
+    count, is what stops a retrying statement from spending minutes. ``None``
+    means "no wall-clock window in force" and leaves the attempt cap alone.
+
+    Jitter is applied AFTER the exponential cap, so a delay can exceed
+    ``_TRANSPORT_RETRY_MAX_DELAY_S`` by at most the jitter fraction -- a fraction
+    of a second, which is not the bound that matters here.
+    """
+
+    if verdict.delivery != DELIVERY_NOT_SENT:
+        return None
+    used = max(failed_attempt, 1)
+    if used >= attempts:
+        return None
+    delay = min(
+        _TRANSPORT_RETRY_MAX_DELAY_S,
+        _TRANSPORT_RETRY_BASE_DELAY_S * (2 ** (used - 1)),
+    )
+    # Clamp the sample so a caller-supplied generator cannot produce a negative
+    # or absurd delay -- and reject a non-finite one outright, because a NaN
+    # would propagate through ``min``/``max`` into ``time.sleep``: this function
+    # owns the bound, not its caller.
+    sample = float(jitter())
+    if not math.isfinite(sample):
+        sample = 0.5
+    sample = min(max(sample, 0.0), 1.0)
+    delay *= 1.0 + _TRANSPORT_RETRY_JITTER_FRACTION * (2.0 * sample - 1.0)
+    if remaining_s is not None and delay >= remaining_s:
+        return None
+    return delay
+
 
 # Budgeted cost of delivering ONE character through the guest's X11 synthetic
 # key path, with pyautogui's default (zero) inter-key interval.
