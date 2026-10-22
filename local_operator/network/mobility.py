@@ -1813,7 +1813,16 @@ def _destination_move(
         # in a period cannot produce ".." when the sentence appends its own.
         if cause.endswith("."):
             cause = cause[:-1]
-        for clause in ("; nothing was changed", "; nothing has changed"):
+        for clause in (
+            "; nothing was changed",
+            "; nothing has changed",
+            # ``LinkTransport.ask``'s "the peer answered something this build does
+            # not understand" / "answered with nothing this build can read" pair
+            # joins the same claim with a COMMA, and those are real producer
+            # sentences a destination composes its notice over (R5-1).
+            ", so nothing was changed",
+            ", so nothing has changed",
+        ):
             if cause.endswith(clause):
                 cause = cause[: -len(clause)]
                 break

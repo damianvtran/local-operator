@@ -33,6 +33,7 @@ be the thing under test.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -113,6 +114,34 @@ def _lose_the_second_fetch(
 
     monkeypatch.setattr(mobility.LinkTransport, "ask", losing_copy_ask)
     return fetches, real_ask
+
+
+class _Replies:
+    """A peer link that returns one canned reply, for raising the transport's own Moved."""
+
+    def __init__(self, reply: dict[str, Any]) -> None:
+        self.reply = reply
+
+    def request(self, request: dict[str, Any], *, timeout: float | None = None) -> Any:
+        return self.reply
+
+
+def _transport_refusal_message(reply: dict[str, Any]) -> str:
+    """The REAL sentence ``LinkTransport.ask`` raises for this ack shape (R5-1).
+
+    Driving the transport rather than typing its paragraph here is what keeps the
+    cell pinned to the producer: if the module's wording changes, this helper hands
+    the new sentence to the copy-failure path, and the sentence asserts below move
+    with it instead of passing on an invented string.
+    """
+    server = SimpleNamespace(
+        _next_relay_req=lambda: "req-1",
+        slow_request_timeout=lambda op: 1.0,
+    )
+    transport = mobility.LinkTransport(cast(Any, server), cast(Any, _Replies(reply)), SESSION)
+    with pytest.raises(mobility.Moved) as raised:
+        transport.ask({"op": "net_sync", "phase": "fetch"})
+    return str(raised.value.message)
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +344,58 @@ def test_a_peer_supplied_unreachable_cause_is_not_reworded_as_silence(
     ), message
     assert "stopped answering" not in message, message
     assert "nothing was changed" not in message, message
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [{"op": "bogus"}, {"op": "ack", "detail": "unreadable"}],
+    ids=["unexpected-frame", "unreadable-detail"],
+)
+def test_an_answered_unreachable_keeps_the_producers_wording(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, reply: dict[str, Any]
+) -> None:
+    """R5-1: the transport's OTHER two unreachable sentences use a comma clause.
+
+    ``LinkTransport.ask`` composes both as "... , so nothing was changed". The
+    stripper must know that spelling too, or the stacked notice repeats "nothing was
+    changed" inside the pause/restart sentence. The producer's cause itself is kept.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    producer = _transport_refusal_message(reply)
+    assert producer.startswith("the peer answered"), producer
+    stripped = producer.removesuffix(", so nothing was changed").removesuffix(
+        ", so nothing has changed"
+    )
+    fetches, _ = _lose_the_second_fetch(monkeypatch, message=producer)
+
+    failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert fetches["n"] == 2, fetches
+    assert failed["ok"] is False and failed["code"] == "unreachable", failed
+    message = str(failed["message"])
+    assert message.startswith(f"{stripped}. "), message
+    assert "nothing was changed" not in message, message
+    assert "nothing has changed" not in message, message
+    assert "stopped answering" not in message, message
+
+
+def test_a_period_ending_peer_cause_does_not_double_the_period(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-2: the cause's own full stop is not repeated by the composed sentence."""
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    _lose_the_second_fetch(monkeypatch, message="the plan was rejected.")
+
+    failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    message = str(failed["message"])
+    dest = str(server_b._own_label())  # noqa: SLF001
+    assert message.startswith(f"the plan was rejected. {dest} discarded"), message
+    assert ".." not in message, message
 
 
 # ---------------------------------------------------------------------------
