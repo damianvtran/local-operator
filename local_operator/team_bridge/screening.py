@@ -539,7 +539,11 @@ def parse_verdict(reply: str) -> tuple[str, tuple[str, ...], str, str] | None:
     text = reply[:-1] if reply.endswith("\n") else reply
     if "\r" in text:
         return None
-    lines = text.split("\n")
+    # Trailing spaces/tabs per line are tolerated, nothing else (live E2E on
+    # local-operator-ui #1314): chat models end lines with a markdown hard break
+    # ("VERDICT: deliver␠␠"), which carries no content but held every real
+    # screen as ``parse_failed``. Leading text, extra lines and CR stay refused.
+    lines = [line.rstrip(" \t") for line in text.split("\n")]
     if len(lines) != 2:
         return None
     verdict_match = _VERDICT_LINE.match(lines[0])
