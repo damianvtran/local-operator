@@ -1792,14 +1792,36 @@ def _destination_move(
         _roll_back_destination(server, session_id, staging)
         dest = str(server._own_label())  # noqa: SLF001
         holder = owner_name or owner_device or "the source"
+        if dest == holder:
+            # NAMES ARE NOT UNIQUE (m1): two members can share one, and the
+            # sentence's whole job is to say which device discarded a copy and
+            # which one still holds the only one.
+            dest = f"{dest} (this move's destination)"
+            holder = f"{holder} (the source)"
+        if keep:
+            # A COPY LEAVES THE SOURCE RUNNING AND JOURNALS NOTHING (U8), so
+            # "paused" and "restart" would be false: there is no handoff to
+            # unpick, and the source must not be told to stop its conversation.
+            sentence = (
+                f"{refusal.message}. {dest} discarded its partial copy; {holder} "
+                "still has the conversation and was not paused (a copy leaves it "
+                "running). Run the copy again."
+            )
+        else:
+            # U9: the restart is spelled with the DEVICE IT RUNS ON first, so a
+            # reader does not run a local command expecting it to act remotely.
+            sentence = (
+                f"{refusal.message}. {dest} discarded its partial copy; {holder} "
+                "still has the conversation, paused for this move. On "
+                f"{holder}, restart the relay (`lop network restart`), then run "
+                "the move again."
+            )
         return (
             None,
             _move_refusal(
                 session_id,
                 refusal.code or "unreachable",
-                f"{refusal.message}. {dest} discarded its partial copy; {holder} "
-                "still has the conversation, paused for this move. Restart the relay "
-                f"on {holder} (`lop network restart`), then run the move again.",
+                sentence,
                 phase_reached="prepared",
                 changed=False,
             ),
@@ -3546,8 +3568,8 @@ def _source_prepare(
                 "message": (
                     "a handoff of that conversation is already in progress on "
                     f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    "changed; if the other device has stopped answering, restart the "
-                    f"relay on {holder} (`lop network restart`) and try the move again"
+                    f"changed. On {holder}, restart the relay (`lop network restart`), "
+                    "then try the move again."
                 ),
                 "session_id": session_id,
             }

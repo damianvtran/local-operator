@@ -407,7 +407,9 @@ _MOVE_REFUSALS: tuple[tuple[str, str, str | None, bool, str], ...] = (
         "the copy did not verify; it was rolled back",
         "handing_off",
         False,
-        " You are back on sess1 — it did not move.",
+        # U7: a refusal that REACHED a phase carries the producer's sentence and
+        # no placement tail — the copy failure's own wording owns the state now.
+        "",
     ),
     (
         "relay_unavailable",
@@ -1622,6 +1624,52 @@ async def test_a_late_failed_recall_is_readable_after_the_remote_reopen(
             "Could not move ux-session: pixel-8 did not answer. Nothing moved; you are "
             "still in the conversation on pixel-8." in shown
         ), shown
+        assert opened == ["ux-session"], opened
+
+
+@pytest.mark.asyncio
+async def test_a_reached_copy_failure_keeps_the_producers_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U7: once a phase was reached, the producer's paused/restart sentence IS the notice.
+
+    A copy failure has a state and a remedy the generic "did not answer / Nothing
+    moved" fallback cannot know: the copy was discarded, the source still holds the
+    conversation paused, and its relay has to be restarted. The reopen still runs,
+    and the notice must not replace that with the late-failed-recall wording.
+    """
+    opened = _patch_the_peer(monkeypatch)
+    producer = (
+        "cloud-node-1 stopped answering during the copy. device-b discarded its "
+        "partial copy; device-a still has the conversation, paused for this move. "
+        "On device-a, restart the relay (`lop network restart`), then run the move again."
+    )
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "unreachable",
+            "message": producer,
+            "session_id": session_id,
+            "phase_reached": "prepared",
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(_OwnedRemote()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move --to local")
+        for _ in range(80):
+            await pilot.pause()
+            if any("paused for this move" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert "paused for this move" in shown, shown
+        assert "restart the relay" in shown, shown
+        assert "did not answer" not in shown, shown
+        assert "Nothing moved" not in shown, shown
+        assert "it did not move" not in shown, shown
         assert opened == ["ux-session"], opened
 
 
