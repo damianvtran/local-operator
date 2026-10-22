@@ -477,13 +477,20 @@ async def _images_admitted(
             access=access,
         )
     except BridgeRefusal as failure:
-        if failure.http_status == 404:
+        if _is_not_found(failure):
             return False
         raise
     return True
 
 
 def _is_not_found(failure: BridgeRefusal) -> bool:
+    """THE one "the hub has no such fetchable attachment" predicate (R2-05).
+
+    D1 answers every miss with a uniform 404 ``attachment_not_found``; the
+    code is checked too so a proxy that rewrites the status cannot turn a
+    closed route into a retryable failure in one branch and not the other.
+    """
+
     return failure.http_status == 404 or failure.code == "attachment_not_found"
 
 
@@ -670,7 +677,9 @@ async def handle_conversation_available(
         attachments_note: str | None = None
         #: Set when a retry finds the verdict already concluded (R1-01):
         #: ``images_admitted`` / ``text_admitted`` deliver the card,
-        #: ``rejected`` delivers the unadmitted card — none re-screens.
+        #: ``rejected`` (our receipt says reject) and ``unadmitted`` (no local
+        #: receipt, hub grants no images) deliver the unadmitted card — none
+        #: re-screens.
         recovery: str | None = None
         if descriptors:
             metadata = replace(metadata, attachments=len(descriptors))
@@ -709,16 +718,18 @@ async def handle_conversation_available(
                         # could not prove an image admit for (above).
                         if prior is None:
                             # Nothing local to trust — e.g. the store was
-                            # reset after the admit. The hub's own context
-                            # predicate is the last authority; else hold.
+                            # reset after the verdict. The hub's own context
+                            # predicate is the authority for the images; when
+                            # it is closed too (a hub reject or a text-only
+                            # admission), the safe outcome is the METADATA
+                            # card (R2-04): it carries no body and no image,
+                            # the hub still gates both, and holding here
+                            # would only spend the retry budget until the
+                            # wake is dropped.
                             if await _images_admitted(client, ref, owner, access, descriptors):
                                 recovery = "images_admitted"
                             else:
-                                return {
-                                    "action": "hold",
-                                    "message_id": message_id,
-                                    "code": "attachments_admission_unknown",
-                                }
+                                recovery = "unadmitted"
                         elif prior.get("verdict") == "reject":
                             recovery = "rejected"
                         else:
@@ -742,11 +753,13 @@ async def handle_conversation_available(
                 owner, metadata, session_id=designation, config_dir=config_dir
             )
             terminal = True
-            if recovery == "rejected":
+            if recovery in ("rejected", "unadmitted"):
                 return {
                     "action": "delivered_unadmitted",
                     "message_id": message_id,
-                    "code": "screening_bounce",
+                    "code": (
+                        "screening_bounce" if recovery == "rejected" else "admission_unverified"
+                    ),
                     "session": designation,
                     "detail": detail,
                 }
