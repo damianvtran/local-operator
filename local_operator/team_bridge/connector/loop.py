@@ -130,6 +130,39 @@ def _conversation_hold_ref(value: str) -> ConversationFeedRef | None:
     return parse_conversation_ref_value(raw)
 
 
+def _release_engaged_holds(store: Any, owner: Any, config_dir: Path, *, now: float) -> None:
+    """Re-drive ``open_chief_of_staff`` holds the moment their reason is gone.
+
+    WHY (review of local-operator-ui #1325): that hold is released by the owner
+    SENDING their chief of staff a message — a user turn on disk, written by
+    another process. No event reaches the connector when it happens, so the
+    held message waited out the rest of its doubling backoff (60 s → 1 h), and
+    the owner's "send it a message" notice stayed up that long after they did.
+
+    So each pass checks the one local fact that releases it — cheap: a single
+    indexed count first, and the transcript probe only when such holds exist.
+    When ``engagement_hold`` now answers ``""`` (a durable turn exists, or the
+    accepted consent allows engagement), those holds are made due NOW and the
+    retry below re-drives them in this same pass. Every other hold code keeps
+    its ordinary backoff. Best-effort: a failure leaves the backoff in charge.
+    """
+
+    from local_operator.team_bridge.connector import wake as _wake
+    from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
+    from local_operator.team_bridge.store import StoreRefused
+
+    try:
+        if store.hold_count_readonly(owner, HOLD_OPEN_CHIEF_OF_STAFF) <= 0:
+            return
+        designation = store.designated_session_for(owner)
+        # Through the module, so the spine and this check read ONE rule.
+        if designation is None or _wake.engagement_hold(designation, config_dir):
+            return
+        store.make_holds_due(owner, HOLD_OPEN_CHIEF_OF_STAFF, now=now)
+    except (StoreRefused, OSError):
+        return
+
+
 async def retry_due_holds(
     owner: Any,
     *,
@@ -167,6 +200,7 @@ async def retry_due_holds(
     from local_operator.team_bridge.store import Store, StoreRefused
 
     store = Store(config_dir)
+    _release_engaged_holds(store, owner, config_dir, now=_time.time())
     due = store.due_screening_holds(owner, now=_time.time(), limit=limit)
     outcomes: list[dict[str, Any]] = []
     for row in due:

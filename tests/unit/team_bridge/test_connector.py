@@ -1368,3 +1368,49 @@ def test_pair_holds_count_in_the_owner_surface(tmp_path) -> None:
     store = Store(tmp_path)
     store.persist_hold(owner, "bmsg_pair01", "open_chief_of_staff", retry_at=time.time() + 60)
     assert store.hold_count_readonly(owner, "open_chief_of_staff") == 1
+
+
+def test_a_held_message_is_redriven_on_the_next_pass_once_the_owner_messages_the_cos(
+    tmp_path, monkeypatch
+) -> None:
+    """Review of local-operator-ui #1325: an ``open_chief_of_staff`` hold whose
+    reason is gone (the owner sent their chief of staff a message) must be
+    re-driven on the NEXT pass, not after the rest of its doubling backoff (up
+    to an hour). Every other hold code keeps its backoff."""
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    store = Store(tmp_path)
+    later = time.time() + 3000
+    store.persist_hold(owner, "bmsg_cos001", "open_chief_of_staff", retry_at=later)
+    store.persist_hold(owner, "bmsg_other1", "provider_error", retry_at=later)
+    driven: list[str] = []
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        driven.append(message_id)
+        store.delete_hold(owner_, message_id)
+        return {"action": "woken", "message_id": message_id}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+    def one_pass() -> None:
+        asyncio.run(
+            loop_mod.retry_due_holds(
+                owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+            )
+        )
+
+    # Not yet messaged: the hold keeps waiting (no re-drive, backoff intact).
+    one_pass()
+    assert driven == []
+    waiting = store.screening_hold(owner, "bmsg_cos001")
+    assert waiting is not None and waiting["retry_at"] == later
+
+    # The owner sends one message: the very next pass re-drives it.
+    _engage_transcript(tmp_path)
+    one_pass()
+    assert driven == ["bmsg_cos001"]
+    # The unrelated hold is still on its own backoff.
+    other = store.screening_hold(owner, "bmsg_other1")
+    assert other is not None and other["retry_at"] == later
+    loop_mod._RETRY_ATTEMPTS.clear()

@@ -3860,6 +3860,28 @@ class Store:
             )
             return bool(deleted.rowcount)
 
+    def make_holds_due(self, owner: OwnerSnapshot, hold_code: str, *, now: float) -> int:
+        """Bring every NOT-YET-DUE hold with ``hold_code`` forward to ``now``.
+
+        For a hold whose release is a LOCAL fact the caller has just observed
+        (F8: the owner sent their chief of staff a message), so the message is
+        re-driven on this pass instead of after the rest of its doubling
+        backoff (up to an hour). Only rows already scheduled in the future
+        move; nothing is created, and other codes are untouched. Live-owner
+        fenced. Returns how many rows moved.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            updated = conn.execute(
+                "UPDATE screening_holds SET retry_at = ? "
+                "WHERE owner_key = ? AND hold_code = ? AND retry_at > ?",
+                (float(now), _owner_key(owner), hold_code, float(now)),
+            )
+            return int(updated.rowcount)
+
     def advance_hold_retry(self, owner: OwnerSnapshot, message_id: str, *, retry_at: float) -> bool:
         """Re-schedule ONE still-held message's next attempt (H4 backoff).
 
