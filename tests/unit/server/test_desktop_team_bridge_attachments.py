@@ -320,7 +320,7 @@ def test_scheduled_create_never_forwards_an_explicit_null_attachment_ids(proxy):
 # -- access-log redaction (QA #1314 Q2) ------------------------------------------
 
 
-def _access_record(path: str) -> logging.LogRecord:
+def _access_record(path: str, method: str = "GET") -> logging.LogRecord:
     # The exact shape uvicorn's access logger emits (h11_impl / httptools_impl).
     return logging.LogRecord(
         "uvicorn.access",
@@ -328,7 +328,7 @@ def _access_record(path: str) -> logging.LogRecord:
         __file__,
         1,
         '%s - "%s %s HTTP/%s" %d',
-        ("127.0.0.1:5000", "GET", path, "1.1", 200),
+        ("127.0.0.1:5000", method, path, "1.1", 200),
         None,
     )
 
@@ -363,9 +363,10 @@ def test_access_log_line_carries_no_attachment_message_or_conversation_ids(
 
     access = logging.getLogger("uvicorn.access")
     assert routes._ACCESS_LOG_REDACTION in access.filters  # installed on import
-    record = _access_record(path)
-    record.args = (record.args[0], method, *record.args[2:])
-    assert access.filters and all(f.filter(record) for f in access.filters)
+    record = _access_record(path, method)
+    # The redaction filter is the record rewriter under test; other filters a
+    # test session may attach are not, and need not be ``logging.Filter``s.
+    assert routes._ACCESS_LOG_REDACTION.filter(record)
     line = record.getMessage()
     assert expected in line and line.startswith(f'127.0.0.1:5000 - "{method} ')
     for prefix in ("batt_", "bcmsg_", "bcv_"):
