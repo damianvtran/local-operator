@@ -9,11 +9,13 @@ import threading
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from textual._types import MessageTarget
+from textual.timer import Timer
 
 from tests.loop_callback_spans import CallbackSpans
-from textual.timer import Timer
 from tests.unit.test_tui_responsiveness import StallRecorder
 
 
@@ -365,8 +367,8 @@ def test_tick_on_another_thread_does_not_stamp_the_loop_span() -> None:
 
     try:
         with CallbackSpans(loop) as spans:
-            timer = Timer(Target(), 0.5, callback=lambda: None)
-            timer._callback_spans_label = "other_thread_timer:OtherApp.tick @ x.py:1"
+            timer = Timer(cast(MessageTarget, Target()), 0.5, callback=lambda: None)
+            setattr(timer, "_callback_spans_label", "other_thread_timer:OtherApp.tick @ x.py:1")
             before = spans._tick_serial
 
             def tick_elsewhere() -> None:
