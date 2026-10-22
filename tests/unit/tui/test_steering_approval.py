@@ -807,6 +807,28 @@ async def test_ctrl_c_twice_exits_and_offers_the_resume_command(
         assert any("the session can be resumed" in row for row in rows(app))
         assert not any("--resume" in row for row in rows(app))
 
+        # RE-ARM THE LADDER IMMEDIATELY BEFORE THE SECOND PRESS, so the press
+        # lands INSIDE the window rather than wherever the runner got to.
+        #
+        # The ladder compares two real ``time.monotonic()`` readings against
+        # :data:`DOUBLE_INTERRUPT_WINDOW_S` (1.5 s), and everything above is
+        # unbounded on a loaded machine: ``pilot.pause()`` waits for the app to
+        # go idle, then three separate ``rows(app)`` calls each re-render the
+        # frame. Measured on this host, the quiet gap is 0.216 s — but 1.6 s of
+        # a stalled event loop turns the second press into a FIRST press and
+        # leaves the app running, which is exactly the failure CI caught
+        # (run 39838493282, 3.12 shard 3: ``assert not app.is_running`` got
+        # ``True``, the cell taking 2.48 s against ~1.2 s for its siblings).
+        #
+        # Re-stamping keeps what the cell is actually about — two presses inside
+        # the window leave — instead of betting on the runner's speed. Nothing
+        # about the window is weakened: the assertion below pins that the FIRST
+        # press armed it, and its value plus the "outside the window is a fresh
+        # interrupt" half stay pinned by
+        # ``test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit``, which
+        # ages this same stamp past the window instead of sleeping for it.
+        assert app._last_interrupt_at, "the first press did not arm the exit ladder"
+        app._last_interrupt_at = time.monotonic()
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert not app.is_running

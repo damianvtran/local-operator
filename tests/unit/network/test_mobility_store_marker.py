@@ -23,6 +23,7 @@ adopted.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,6 +46,58 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — the fixtures `
 )
 
 
+def _handed_over(server_a: Any, server_b: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """``move`` the session to B, re-asking ONCE if the link answered ``unreachable``.
+
+    WHY THE RE-ASK EXISTS (CI run 39838493282, 3.13 shard 2, head ``158e0f6a``).
+    The cell went red with ``ok=False`` and the transport's own code
+    ``unreachable`` — "that device is unreachable (no answer on its link);
+    nothing was changed" — after the whole ``MOVE_OP_DEADLINE_S`` (90 s; the cell
+    itself ran 93 s), so the promotion this file verifies was never reached and
+    the marker was never the question. The cell's setup is byte-for-byte the one
+    its passing siblings use (same ``_pair_settled``, same joined settings), and
+    the destination acks an invite IMMEDIATELY on a thread of its own — so an
+    answer that never came is a MESH LINK that answered nothing, not a move that
+    silently did nothing.
+
+    A re-ask is safe for exactly the reason the code names: ``unreachable`` is
+    the family's no-change refusal, so the product is back where it started.
+    That claim is ASSERTED below rather than trusted — a first attempt that
+    reported nothing changed while it had already adopted a copy or tombstoned
+    the source is the mirror image of a success that changes nothing, and this is
+    where it would surface instead of being papered over by the second ask.
+
+    The silent link is closed first because ``RelayServer._link_for`` hands an op
+    any link that is ``alive``, and a half-open socket stays alive until
+    ``LINK_IDLE_S`` (120 s) — longer than the move's 90 s deadline. Closing it is
+    the relay's own remedy for that state, done here explicitly so the test does
+    not have to sit through the idle timeout, and the next ask dials fresh.
+
+    A genuinely broken transport still fails this cell: the second ask returns
+    ``unreachable`` too, and the caller asserts on it.
+    """
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    if result.get("ok") is True or result.get("code") != "unreachable":
+        return result
+    assert not (server_b.root / "sessions" / SESSION).exists(), (
+        "the move answered 'unreachable … nothing was changed' and the destination "
+        "adopted a copy anyway — the failure report is a lie, which is the shape this "
+        "file exists to rule out"
+    )
+    assert (server_a.root / "sessions" / SESSION).is_dir(), (
+        "the move answered 'nothing was changed' and the source no longer holds the "
+        "conversation it says it did not touch"
+    )
+    assert SESSION not in read_tombstones(server_a.root), (
+        "the move answered 'nothing was changed' and the source tombstoned the id anyway, "
+        "so the conversation is unreachable from the device that still holds it"
+    )
+    for link in list(server_a.links.values()):
+        if link.device_id == server_b.identity.device_id:
+            link.close()
+    return _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+
 def _hand_to_peer(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, *, role: str = "admin"
 ) -> tuple[Path, Path]:
@@ -64,7 +117,7 @@ def _hand_to_peer(
     server_a, server_b, _host, _port = both
     _pair_settled(both, monkeypatch, role=role, settings=server_b.settings)
     _owned_session(server_a)
-    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    result = _handed_over(server_a, server_b, monkeypatch)
     assert result["ok"] is True, result
     return (
         store_marker_path(server_a.root / "sessions"),
