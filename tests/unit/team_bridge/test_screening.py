@@ -1872,3 +1872,158 @@ def test_live_identity_refuses_logout_and_same_row_switch(tmp_path) -> None:
     auth.delete_credential(row.id)
     with pytest.raises(StoreRefused):
         _asyncio.run(_scheduler._verify_live_identity(owner, auth, tmp_path))
+
+
+def _consent_status(owner: OwnerSnapshot, consent: dict[str, Any]) -> dict[str, Any]:
+    """A lawful status DTO whose ``consent`` block is the case under test."""
+
+    from local_operator.team_bridge.client import SCREENING_TEMPLATE_V1
+
+    return {
+        "api_version": "1",
+        "available": True,
+        "tenants": [
+            {
+                "tenant_id": owner.tenant_id,
+                "tenant_name": "Org",
+                "eligible": True,
+                "endpoint": {"id": owner.endpoint_id, "label": "e", "state": "active"},
+                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+            }
+        ],
+        "guidance": {"version": "bridge-guidance-v1", "text": "g"},
+        "screening": {"version": SCREENING_VERSION_V1, "template": SCREENING_TEMPLATE_V1},
+        "consent": consent,
+    }
+
+
+def test_v1_receipt_screens_while_the_hub_serves_v2_with_an_accepted_set(
+    tmp_path, monkeypatch
+) -> None:
+    """agent-server PR #156: the hub serves bridge_consent_v2 for NEW consents and
+    keeps v1 valid, advertising both in ``consent.accepted_versions``. A member
+    whose committed receipt is v1 must keep screening (not ``policy_stale``)
+    through the SHIPPED verified-fetch cycle, and the minted capture must stay
+    reusable under the same law."""
+
+    import asyncio as _asyncio
+    import time as _time
+
+    from local_operator.team_bridge import scheduler as _scheduler
+
+    store, owner = _setup(tmp_path)  # committed receipt: bridge_consent_v1
+    (tmp_path / "config.yml").write_text("values:\n  hosting: openai\n  model_name: gpt-5.4\n")
+    raw = _consent_status(
+        owner,
+        {
+            "version": "bridge_consent_v2",
+            "text": "v2 consent",
+            "accepted_versions": ["bridge_consent_v1", "bridge_consent_v2"],
+        },
+    )
+
+    law = _scheduler._normalize_accepted_status(raw, owner, store)
+    assert law.consent_served_version == "bridge_consent_v2"
+    assert law.consent_accepted_versions == ("bridge_consent_v1", "bridge_consent_v2")
+
+    verified = _scheduler.VerifiedStatus(_scheduler._VERIFIED_TOKEN, raw)
+
+    fetches: list[int] = []
+
+    async def fetch():
+        fetches.append(1)
+        return verified
+
+    async def drive():
+        return await _scheduler.run_screening_cycle(
+            config_dir=tmp_path,
+            owner=owner,
+            items=[],
+            auth_store=None,
+            status_fetcher=fetch,
+        )
+
+    _asyncio.run(drive())  # no policy_stale: the v1 receipt is current
+    floor = store.text_floor(owner, "consent")
+    assert floor is not None and floor[0] == "bridge_consent_v2", "the served text was accepted"
+    assert fetches == [1]
+
+    # REUSE (review round 1, MINOR): the capture minted on this path is judged
+    # against the floor it advanced (served v2 + its sha), so the reuse check
+    # passes and no second status read happens. Live identity is the only
+    # external check left on reuse; it is stubbed to the owner it was minted for.
+    capture = _scheduler.AcceptedCapture(
+        _scheduler._CAPTURE_TOKEN,
+        version=law.version,
+        template_hash=law.template_hash,
+        owner_frame=_scheduler._full_owner_frame(owner),
+        captured_at=_time.time(),
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        hub=owner.canonical_base_url,
+        owner_generation=owner.enrollment_generation,
+        consent_version="bridge_consent_v1",
+        consent_ref="ref-1",
+        consent_served_version=law.consent_served_version,
+        consent_accepted_versions=law.consent_accepted_versions,
+        guidance_version=law.guidance_version,
+        guidance_sha=law.guidance_sha,
+        consent_sha=law.consent_sha,
+        source="sdk-verified",
+    )
+
+    async def live_ok(*_args, **_kwargs):
+        return None
+
+    async def reuse():
+        return await _scheduler.run_screening_cycle(
+            config_dir=tmp_path,
+            owner=owner,
+            items=[],
+            auth_store=None,
+            accepted_capture=capture,
+            status_fetcher=fetch,
+        )
+
+    monkeypatch.setattr(_scheduler, "_verify_live_identity", live_ok)
+    _asyncio.run(reuse())
+    assert fetches == [1], "a lawful v1-receipt capture is reused, not re-fetched"
+
+
+def test_consent_currency_fails_closed_outside_the_accepted_set(tmp_path) -> None:
+    """Exact membership only, never ordering: every arm below holds a v1
+    receipt against a served v2 and must refuse ``policy_stale`` without
+    advancing any floor."""
+
+    from local_operator.team_bridge import scheduler as _scheduler
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    for accepted in (
+        None,  # an older hub: no set, so the exact served-version rule holds
+        [],
+        ["bridge_consent_v2"],  # v1 no longer accepted
+        ["bridge_consent_v1"],  # a set that omits the version it serves grants nothing
+        ["bridge_consent_v0", "bridge_consent_v2"],
+        ["BRIDGE_CONSENT_V1", "bridge_consent_v2"],
+        ["bridge_consent_v1 ", "bridge_consent_v2"],
+        "bridge_consent_v1,bridge_consent_v2",  # not a list
+        ["bridge_consent_v1", 2],  # malformed member poisons the whole set
+    ):
+        consent: dict[str, Any] = {"version": "bridge_consent_v2", "text": "v2 consent"}
+        if accepted is not None:
+            consent["accepted_versions"] = accepted
+        with pytest.raises(StoreRefused) as caught:
+            _scheduler._normalize_accepted_status(_consent_status(owner, consent), owner, store)
+        assert caught.value.code == "policy_stale", accepted
+
+    # An unknown receipt version is refused even when the served set lists others,
+    # and a later-looking version is not accepted by ordering.
+    for receipt in ("bridge_consent_v3", "bridge_consent_v10", ""):
+        assert not _scheduler._consent_receipt_is_current(
+            receipt, "bridge_consent_v2", ("bridge_consent_v1", "bridge_consent_v2")
+        )
+    assert _scheduler._consent_receipt_is_current(
+        "bridge_consent_v1", "bridge_consent_v2", ("bridge_consent_v1", "bridge_consent_v2")
+    )
+    assert store.text_floor(owner, "consent") is None
