@@ -2249,6 +2249,14 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
                 }
             )
     role = message.role
+    if not parts and role == "user":
+        # Backfilled, not left as ``"content": ""``: an openai-compat route
+        # that forwards to Claude (OpenRouter, Radient) translates the empty
+        # string into the same blank text block Anthropic refuses the whole
+        # request over, and skipping the turn would change the role sequence.
+        # Same placeholder, same reason as the Responses wire below; see
+        # ``EMPTY_USER_TEXT``.
+        return {"role": role, "content": EMPTY_USER_TEXT}
     if plain_only:
         return {"role": role, "content": "".join(p["text"] for p in parts)}
     return {"role": role, "content": parts}
@@ -2357,7 +2365,7 @@ def _messages_to_openai_responses(
             # A user turn with nothing to say is backfilled, not skipped, for
             # the same reason the Anthropic wire backfills it (see
             # ``EMPTY_USER_TEXT``) and the same reason Google's builder does
-            # (``parts or [{"text": ""}]``): the turn occupies a role, so
+            # (``parts or [{"text": EMPTY_USER_TEXT}]``): the turn occupies a role, so
             # dropping it changes the role sequence. It became reachable when
             # ``Message.user`` stopped emitting an empty text block (#2460) —
             # the message now renders zero blocks where it used to render one
@@ -4850,7 +4858,14 @@ class GoogleClient:
             if _is_empty_assistant(message):
                 continue
             role = "user" if message.role == "user" else "model"
-            parts: list[dict[str, Any]] = [{"text": message.text}] if message.text else []
+            # Blank text is dropped, the rule ``AnthropicClient._message_blocks``
+            # and both OpenAI wires follow: ``if message.text`` let a
+            # whitespace-only text beside an image ship as ``{"text": "  \n"}``.
+            # Tested on the JOINED text rather than per block so a message with
+            # real text keeps the exact part it always had (inner whitespace
+            # blocks included) and only a turn with nothing to read loses it.
+            text = message.text
+            parts: list[dict[str, Any]] = [{"text": text}] if text.strip() else []
             for block in message.content:
                 if isinstance(block, ImageContent):
                     parts.append(
@@ -4914,7 +4929,10 @@ class GoogleClient:
                 last_tool_result = True
                 continue
             if parts or message.role == "user":
-                contents.append({"role": role, "parts": parts or [{"text": ""}]})
+                # An empty user turn keeps its role but never a blank part: see
+                # ``EMPTY_USER_TEXT`` (``[{"text": ""}]`` was the old filler,
+                # and an empty part is what every other wire stopped sending).
+                contents.append({"role": role, "parts": parts or [{"text": EMPTY_USER_TEXT}]})
 
         boundary_tokens = _google_user_boundary(contents, native=True)
         request = bind_native_context(

@@ -104,10 +104,13 @@ def wrap_aside_turns(turns: Sequence[Message]) -> list[Message]:
         return list(turns)
     if _carries_instruction(last):
         return list(turns)
-    # ``Message.user`` puts the text block first and attachments after it, so the
-    # wrapped text replaces position 0 and any pixels ride along untouched.
+    # The wrapped text LEADS and every non-text block rides along in order.
+    # Not ``content[1:]``: since #2460 an image-only turn has no text block at
+    # position 0, and slicing it off silently dropped the first image.
+    # ``last.text`` already joins every text block into the question.
+    attachments = [block for block in last.content if not isinstance(block, TextContent)]
     wrapped = last.model_copy(
-        update={"content": [TextContent(text=_compose(last.text)), *last.content[1:]]}
+        update={"content": [TextContent(text=_compose(last.text)), *attachments]}
     )
     return [*turns[:-1], wrapped]
 

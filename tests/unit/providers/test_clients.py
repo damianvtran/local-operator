@@ -4706,14 +4706,15 @@ def test_openai_wires_still_backfill_a_content_less_user_turn() -> None:
     """M1's other half: dropping blank parts must not remove the shape a
     genuinely content-less turn depends on.
 
-    With every part dropped, ``parts`` is empty and each wire falls back to the
-    shape it already had — the chat wire joins its parts into a single string,
-    and the Responses wire keeps a user item because a request cannot drop its
-    own subject (see ``EMPTY_USER_TEXT`` for why that is a backfill and not a
-    skip).
+    With every part dropped, ``parts`` is empty and both wires keep a user turn
+    because a request cannot drop its own subject (see ``EMPTY_USER_TEXT`` for
+    why that is a backfill and not a skip). The chat wire used to join zero
+    parts into ``"content": ""``, which an openai-compat route forwarding to
+    Claude (OpenRouter, Radient) turns into the very blank block Anthropic
+    refuses — so it backfills the placeholder like the Responses wire.
     """
     empty = Message(role="user", content=[])
-    assert _message_to_openai(empty) == {"role": "user", "content": ""}
+    assert _message_to_openai(empty) == {"role": "user", "content": EMPTY_USER_TEXT}
     assert _messages_to_openai_responses([empty]) == [
         {"role": "user", "content": [{"type": "input_text", "text": EMPTY_USER_TEXT}]}
     ]
