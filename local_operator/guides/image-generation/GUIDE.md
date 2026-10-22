@@ -215,6 +215,23 @@ If this session already holds MCP tools that generate images, call them
 directly for their providers — `generate_image` never proxies MCP tools, and
 it does not know about them.
 
+## Naming the result
+
+`filename` sets the attachment's display name — the Library row, the caption
+label and the session-file entry — from a short lowercase hyphenated stem, no
+extension:
+
+```json
+{"prompt":"A red fox in snow, painterly","filename":"red-fox-in-snow"}
+```
+
+Omitted, the stem derives from the prompt (`A red fox in snow, painterly` →
+`red-fox-in-snow-painterly`). The extension always follows the bytes the
+provider returned (`image/webp` → `.webp`), never the stem. A stem is a label,
+not a path: separators and `..` are sanitised away, and the file materialises
+under the session's `scratchpad/generated/`; two different images with one
+name never overwrite — the second gets a short digest suffix.
+
 ## Saving to disk
 
 Attachments ARE the delivery: the image is rendered by the user's surfaces

@@ -56,12 +56,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import mimetypes
-import re
 from typing import Any, Callable
 
 from pydantic import ValidationError
 
+from local_operator.artifacts.naming import media_filename
 from local_operator.artifacts.progress import ProgressFn
 from local_operator.audiogen import AudioRoute
 from local_operator.audiogen import availability as audio_availability
@@ -437,6 +436,10 @@ def _spawn_settlement(
         # revision means the same thing as the row it supersedes.
         "units": _spend_units(spec)[0],
         "unit": _spend_units(spec)[1],
+        # The REQUEST names a late-settled artifact too: the settle task runs
+        # after this turn is gone, so it must carry what the asset IS, not
+        # depend on the turn's state. The tool and model here are provenance.
+        "prompt": spec.text,
     }
     journal = context.journal_audio_settle if context is not None else None
     record_spend = context.record_channel_spend if context is not None else None
@@ -624,7 +627,7 @@ async def _execute_audio(
     signal: AbortSignal | None,
     on_update: Callable[[AgentToolUpdate], None] | None,
     context: ToolContext | None,
-    artifact_name: str | None = None,
+    filename_hint: str | None = None,
     cancel_as_result: bool = False,
 ) -> ToolResult:
     """Resolve → cascade → the frozen attachment result, for either direction.
@@ -802,7 +805,7 @@ async def _execute_audio(
             details=details,
         )
 
-    result = _generated_result(tool_call_id, spec, outcome, handle, name=artifact_name)
+    result = _generated_result(tool_call_id, spec, outcome, handle, filename_hint=filename_hint)
     if cancel_as_result and result.details is not None:
         result.details["cost"] = handle.cost or {
             "amount_usd": outcome.cost_usd,
@@ -858,7 +861,12 @@ async def execute_generate_voiceover(
         model=params.model,
     )
     return await _execute_audio(
-        tool_call_id, spec, signal=signal, on_update=on_update, context=context
+        tool_call_id,
+        spec,
+        signal=signal,
+        on_update=on_update,
+        context=context,
+        filename_hint=params.filename,
     )
 
 
@@ -889,23 +897,18 @@ async def execute_generate_sound_effect(
         model=params.model,
     )
     return await _execute_audio(
-        tool_call_id, spec, signal=signal, on_update=on_update, context=context
+        tool_call_id,
+        spec,
+        signal=signal,
+        on_update=on_update,
+        context=context,
+        filename_hint=params.filename,
     )
 
 
 # Leave headroom inside the tool's 240s bound for two best-effort stop receipts.
 # A slow 50-item batch is partial delivery, never 50 independently renewed budgets.
 SOUND_BATCH_TIMEOUT_S = 225.0
-
-
-def _sound_name(prompt: str, explicit: str | None) -> str:
-    # Names are display handles, not paths. Preserve duplicates as distinct rows:
-    # content-addressed storage may dedupe bytes, but never the user's requests.
-    value = (explicit if explicit is not None else prompt).strip()
-    value = re.sub(r"[^\w .-]+", "-", value, flags=re.UNICODE).strip(" .-")
-    if len(value) > 100:
-        value = value[:99].rstrip(" .-") + "…"
-    return value or "sound-effect"
 
 
 async def _execute_sound_batch(
@@ -925,7 +928,13 @@ async def _execute_sound_batch(
     from local_operator.harness.types import AttachmentContent
 
     sounds = params.sounds or []
-    names = [_sound_name(item.prompt, item.name) for item in sounds]
+    # Provisional handles for progress BEFORE any bytes exist (the extension is
+    # unknown until the provider answers; ``.mp3`` is this lane's default).
+    # The registered artifact's own name replaces it in the final row/caption.
+    names = [
+        media_filename(item.prompt, None, suggested=item.name, kind="audio") for item in sounds
+    ]
+    hints = [item.name for item in sounds]
     results: list[ToolResult | None] = [None] * len(sounds)
     started: set[int] = set()
     queue = iter(enumerate(sounds))
@@ -982,7 +991,7 @@ async def _execute_sound_batch(
                     signal=stop,
                     on_update=lambda update: progress(index, update),
                     context=context,
-                    artifact_name=names[index],
+                    filename_hint=hints[index],
                     cancel_as_result=True,
                 )
             except asyncio.CancelledError:
@@ -1068,7 +1077,9 @@ async def _execute_sound_batch(
         row = {
             **{key: value for key, value in details.items() if key != "artifacts"},
             **attached,
-            "name": names[index],
+            # The artifact's OWN registered name wins: it carries the provider's
+            # real extension. ``names`` is the pre-generation provisional.
+            "name": attached.get("name") or names[index],
             "status": status,
             "started": index in started,
             "request_id": details.get("request_id")
@@ -1093,7 +1104,7 @@ async def _execute_sound_batch(
         artifacts.append(row)
         attachments.extend(blocks)
         captions.append(
-            f"{index + 1}/{len(sounds)} {names[index]}: {status}" + (f" — {error}" if error else "")
+            f"{index + 1}/{len(sounds)} {row['name']}: {status}" + (f" — {error}" if error else "")
         )
     known_costs = [row["cost_usd"] for row in artifacts if row["cost_usd"] is not None]
     total = sum(known_costs) if known_costs else None
@@ -1144,14 +1155,6 @@ async def _execute_sound_batch(
 # ---------------------------------------------------------------------------
 # Result shaping
 # ---------------------------------------------------------------------------
-
-
-def _artifact_name(model: str, content_type: str, index: int) -> str:
-    """A short human handle ("gradient-voiceover-01.mp3"); NEVER a filesystem path."""
-    slug = "".join(ch if ch.isalnum() else "-" for ch in (model or "audio"))
-    slug = "-".join(part for part in slug.split("-") if part)[:40] or "audio"
-    ext = mimetypes.guess_extension((content_type or "").split(";")[0].strip()) or ".mp3"
-    return f"{slug}-{index:02d}{ext}"
 
 
 def _duration_text(duration_s: float | None) -> str:
@@ -1206,7 +1209,7 @@ def _generated_result(
     outcome: Any,
     handle: audio_rungs.CancelHandle,
     *,
-    name: str | None = None,
+    filename_hint: str | None = None,
 ) -> ToolResult:
     """Register the audio and shape the frozen result (caption FIRST)."""
     from local_operator.session.attachments import artifact_details, cache_media
@@ -1222,10 +1225,15 @@ def _generated_result(
                 asset.data,
                 asset.content_type or "application/octet-stream",
                 kind="audio",
-                name=(
-                    name
-                    if name is not None
-                    else _artifact_name(outcome.model, asset.content_type, index)
+                # The REQUEST names the artifact (the spoken text for a
+                # voiceover, the prompt for a sound), never the model template:
+                # two different requests must not land on one identical name.
+                name=media_filename(
+                    spec.text,
+                    asset.content_type,
+                    suggested=filename_hint,
+                    kind="audio",
+                    index=index,
                 ),
                 source_url=asset.source_url or None,
                 duration_s=asset.duration_s,

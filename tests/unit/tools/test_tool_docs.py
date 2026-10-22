@@ -313,7 +313,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # 918 -> 935 (2026-10-11, round-1 remediation F2): the cost sentence no
     # longer lumps OpenAI with the never-reporting rungs — an OpenAI edit
     # shows an estimated figure when the response carries usage.
-    "generate_image": 931,
+    # 931 -> 975 (media artifact naming): the new ``filename`` stem field's
+    # teaching description renders in the parameter table. The sanitising and
+    # collision rules live in the image guide, so the wire keeps one sentence.
+    "generate_image": 975,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
     # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
     # what it costs, the estimate rules and the honest cancel paragraphs.
@@ -325,7 +328,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # fields and caps names at 100 chars: final render is 494 (+7 from 487).
     # Both measurements use render_tool_doc + count_text_tokens in this test's
     # canonical isolated arm, not a copied or guessed token allowance.
-    "generate_sound_effect": 494,
+    # 494 -> 568 (media artifact naming): the new ``filename`` field for the
+    # single form and the ``name`` field re-described as that item's filename
+    # stem. Load-bearing naming discovery; the guide holds the rules.
+    "generate_sound_effect": 568,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -335,12 +341,16 @@ MEASURED_TOKENS: dict[str, int] = {
     # now the contract §2.3 string verbatim (the shipped wording stated the
     # same fact twice); re-measured deliberately, and it is the ONLY entry
     # this remediation moved.
-    "generate_video": 790,
+    # 790 -> 833 (media artifact naming): the ``filename`` stem field's
+    # teaching description; the destination/collision rules live in the guide.
+    "generate_video": 833,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_voiceover`` doc
     # — the three rungs and the failover rule, cost and estimates, the
     # language-on-flash limit (no pronunciation dictionaries), MP3-only and
     # the honest cancel paragraphs.
-    "generate_voiceover": 628,
+    # 628 -> 668 (media artifact naming): the ``filename`` stem field's
+    # teaching description renders in the parameter table.
+    "generate_voiceover": 668,
     "glob": 87,
     "grep": 333,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six

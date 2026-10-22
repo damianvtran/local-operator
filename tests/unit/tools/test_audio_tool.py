@@ -17,6 +17,7 @@ import pytest
 from pydantic import SecretStr
 
 from local_operator.artifacts import ArtifactKind, JobAttempt, JobOutcome
+from local_operator.artifacts.naming import media_filename
 from local_operator.audiogen import AudioRoute
 from local_operator.audiogen import availability as audio_availability
 from local_operator.audiogen import pricing
@@ -131,6 +132,7 @@ def test_the_voiceover_schema_is_the_frozen_one():
         "accent",
         "instructions",
         "model",
+        "filename",
     }
     assert schema["required"] == ["text"]
     assert properties["text"]["maxLength"] == 10_000
@@ -161,6 +163,7 @@ def test_the_sound_effect_schema_is_the_frozen_one():
         "loop",
         "prompt_influence",
         "model",
+        "filename",
     }
     assert _string_arm(properties["prompt"])["maxLength"] == 600
     assert _string_arm(properties["duration_s"])["minimum"] == 0.5
@@ -280,6 +283,7 @@ async def test_the_result_registers_once_and_shapes_the_frozen_caption(monkeypat
     assert "billed" in caption.text and "$0.042" in caption.text
     assert isinstance(block, AttachmentContent)
     assert block.kind == "audio"
+    assert block.name == "hello-there.mp3", "the REQUEST names the asset, not the model"
     assert block.duration_s == 12.5
     assert block.attachment and len(block.attachment) == 32
     details = _details(result)
@@ -338,10 +342,21 @@ async def test_a_sound_effect_ledger_row_counts_seconds(monkeypatch, tmp_path):
     outcome = _outcome(route=AudioRoute.ELEVENLABS, model="eleven_text_to_sound_v2")
     _fake_cascade(monkeypatch, outcome)
     result = await audio_tool.execute_generate_sound_effect(
-        "call-3", {"prompt": "a clap", "duration_s": 4}, None, None, _context(tmp_path, spent)
+        "call-3",
+        {
+            "prompt": "a clap",
+            "duration_s": 4,
+            "filename": "Bird Chirping Sound Effect",
+        },
+        None,
+        None,
+        _context(tmp_path, spent),
     )
     assert not result.is_error
     assert "sound effect" in _text(result)
+    assert [b.name for b in result.content if isinstance(b, AttachmentContent)] == [
+        "bird-chirping-sound-effect.mp3"
+    ], "an explicit filename wins and is display-safe"
     assert spent[0].unit == "seconds" and spent[0].units == 4.0
 
 
@@ -375,6 +390,9 @@ async def test_a_sub_second_byok_effect_row_counts_one_started_second(monkeypatc
     )
     assert not result.is_error
     assert "Cost $0.002 " in _text(result)
+    assert [b.name for b in result.content if isinstance(b, AttachmentContent)] == [
+        "single-clap.mp3"
+    ], "omitted, the name derives from the prompt"
     row = spent[0]
     assert row.units == 1.0 and row.unit == "seconds"
     assert row.amount_micro == 2000
@@ -1100,14 +1118,14 @@ def test_batch_envelope_refused_before_approval(args):
     assert audio_tool._refuse_sound_effect_args(args, frozenset())
 
 
-def test_batch_duration_reaches_provider_and_names_are_display_safe():
+def test_batch_names_are_filename_stems_with_a_real_extension():
     params = audio_tool.GenerateSoundEffectParams.model_validate(
         {"sounds": [{"prompt": " bad / sound ", "duration_s": 31}]}
     )
     assert params.sounds and params.sounds[0].duration_s == 31
-    assert audio_tool._sound_name(" bad / sound ", None) == "bad - sound"
-    assert audio_tool._sound_name("anything", "../") == "sound-effect"
-    assert audio_tool._sound_name("anything", " named ") == "named"
+    assert media_filename(" bad / sound ", None, kind="audio") == "bad-sound.mp3"
+    assert media_filename("anything", None, suggested="../", kind="audio") == "anything.mp3"
+    assert media_filename("anything", None, suggested=" named ", kind="audio") == "named.mp3"
 
 
 def test_batch_approval_is_one_summed_estimate(monkeypatch):
@@ -1157,7 +1175,11 @@ async def test_batch_ten_named_attachments_cost_and_max_two(monkeypatch):
     assert peak == 2
     blocks = [b for b in result.content if isinstance(b, AttachmentContent)]
     assert len(blocks) == 10
-    assert [b.name for b in blocks][:3] == ["duplicate", "duplicate", "sound-2"]
+    assert [b.name for b in blocks][:3] == [
+        "duplicate.mp3",
+        "duplicate.mp3",
+        "sound-2.mp3",
+    ]
     details = _details(result)
     assert details["completed"] == 10 and details["failed"] == details["cancelled"] == 0
     assert details["cost_usd"] == pytest.approx(0.02)
@@ -1173,7 +1195,7 @@ async def test_batch_ten_named_attachments_cost_and_max_two(monkeypatch):
         }
         assert row["error"] is None
         assert row["duration_s"] == 0.5 and row["format"] == "mp3"
-    assert "1/10 duplicate: completed" in _text(result)
+    assert "1/10 duplicate.mp3: completed" in _text(result)
     assert any(
         "10/10 sound-9" in b.text for u in updates for b in u.content if isinstance(b, TextContent)
     )
@@ -1424,7 +1446,7 @@ async def test_batch_cache_refusal_is_isolated_and_all_refused_errors(monkeypatc
 
     def cache(*args, **kwargs):
         registered.append(kwargs["name"])
-        if refuse_all or kwargs["name"] == "sound-0":
+        if refuse_all or kwargs["name"] == "sound-0.mp3":
             return None
         return original(*args, **kwargs)
 
@@ -1589,9 +1611,11 @@ def test_batch_names_and_limit_are_explicitly_bounded():
     assert refusal and "100" in refusal
     refusal = audio_tool._refuse_sound_effect_args({"sounds": [base] * 51}, frozenset())
     assert refusal and "50" in refusal
-    assert not audio_tool._sound_name("x" * 99 + " -tail", None).endswith((" ", ".", "-"))
-    shortened = audio_tool._sound_name("x" * 101, None)
-    assert len(shortened) == 100 and shortened.endswith("…")
+    # The stem cap is shared with every other lane: 60 chars at a word
+    # boundary, a single overlong word hard-cut, never a trailing separator.
+    assert media_filename("x" * 99 + " -tail", None, kind="audio") == "x" * 60 + ".mp3"
+    capped = media_filename("word " * 40, None, kind="audio")
+    assert len(capped.removesuffix(".mp3")) <= 60 and not capped.startswith("-")
     description = audio_tool.GenerateSoundEffectParams.model_json_schema()["description"]
     assert "prompt + duration_s" in description and "never both" in description
 
@@ -1615,9 +1639,12 @@ async def test_batch_unknown_total_has_no_basis(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content_type,expected", [("audio/wav", "wav"), ("audio/unknown", None)])
+@pytest.mark.parametrize(
+    "content_type,expected,expected_ext",
+    [("audio/wav", "wav", "wav"), ("audio/unknown", None, "mp3")],
+)
 async def test_batch_identical_bytes_keep_names_ids_and_actual_format(
-    monkeypatch, content_type, expected
+    monkeypatch, content_type, expected, expected_ext
 ):
     from dataclasses import replace
 
@@ -1642,8 +1669,14 @@ async def test_batch_identical_bytes_keep_names_ids_and_actual_format(
     rows = _details(result)["artifacts"]
     blocks = [block for block in result.content if isinstance(block, AttachmentContent)]
     assert len(rows) == len(blocks) == 2
-    assert [row["name"] for row in rows] == ["First", "Second"]
+    assert [row["name"] for row in rows] == [
+        f"first.{expected_ext}",
+        f"second.{expected_ext}",
+    ]
     assert [row["request_id"] for row in rows] == ["First", "Second"]
     assert rows[0]["digest"] == rows[1]["digest"]
     assert [row["format"] for row in rows] == [expected, expected]
-    assert [block.name for block in blocks] == ["First", "Second"]
+    assert [block.name for block in blocks] == [
+        f"first.{expected_ext}",
+        f"second.{expected_ext}",
+    ]

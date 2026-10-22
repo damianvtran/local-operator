@@ -125,6 +125,14 @@ class GenerateVoiceoverParams(BaseModel):
     model: str | None = Field(
         default=None, description="Provider model id; its default when omitted."
     )
+    filename: str | None = Field(
+        default=None,
+        max_length=120,
+        description=(
+            "Filename stem: a short lowercase hyphenated description of the request, "
+            "no extension (e.g. `welcome-message`); omit to derive it from the prompt."
+        ),
+    )
 
 
 class SoundEffectRequest(BaseModel):
@@ -132,7 +140,14 @@ class SoundEffectRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = Field(default=None, max_length=100)
+    name: str | None = Field(
+        default=None,
+        max_length=100,
+        description=(
+            "This item's filename stem, lowercase hyphenated, no extension "
+            "(e.g. `bird-chirping-sound-effect`); defaults to the prompt."
+        ),
+    )
     prompt: str = Field(min_length=1, max_length=SOUND_EFFECT_PROMPT_MAX_CHARS)
     # Batch duration bounds belong to the provider: rejecting a single item's
     # duration here would discard every valid sibling before the paid call.
@@ -162,6 +177,14 @@ class GenerateSoundEffectParams(BaseModel):
     )
     model: str | None = Field(
         default=None, description="Provider model id; its default when omitted."
+    )
+    filename: str | None = Field(
+        default=None,
+        max_length=120,
+        description=(
+            "Single form's filename stem, lowercase hyphenated, no extension "
+            "(e.g. `bird-chirping-sound-effect`); omit to derive it from the prompt."
+        ),
     )
 
     sounds: list[SoundEffectRequest] | None = Field(

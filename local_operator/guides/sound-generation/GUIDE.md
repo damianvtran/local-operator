@@ -32,10 +32,10 @@ Supply either `sounds` OR the single `prompt` + `duration_s`, never both.
 One write-tier approval shows the item count and summed **estimated** spend
 when every item is priceable, or a known subtotal and unpriced-item count;
 Radient's per-item billed receipts remain authoritative. `loop`,
-`prompt_influence`, and `model` apply to the whole batch. Names default from
-trimmed, display-safe prompts (at most 100 characters, with an ellipsis when
-shortened); explicit names are
-bounded to 100 characters. Duplicate names remain distinct requests.
+`prompt_influence`, and `model` apply to the whole batch. Each item's `name`
+is that item's filename stem (see [Naming the result](#naming-the-result));
+omitted, it derives from the item's prompt. Duplicate names remain distinct
+requests.
 Each successful clip carries its name in the caption, attachment and session
 file entry. A provider rejection belongs to that item, not its valid siblings.
 
@@ -139,6 +139,25 @@ server, and the receipt says what the server said:
 Nothing is resumed after a stop: call again for a fresh generation. Retrying
 while the same job may still be running can pay twice — the receipt tells you
 which case you are in.
+
+## Naming the result
+
+`filename` (voiceover, and the single sound-effect form) sets the audio's
+display name — the Library row, the caption label and the session-file entry —
+from a short lowercase hyphenated stem, no extension:
+
+```json
+{"text":"Welcome back — the build finished.","filename":"welcome-message"}
+```
+
+Omitted, the stem derives from the request (the spoken text for a voiceover,
+the prompt for a sound effect): `A kettle whistling` → `kettle-whistling`. The
+extension always follows the returned bytes (`audio/wav` → `.wav`), never the
+stem. A stem is a label, not a path: separators and `..` are sanitised away,
+and the file materialises under the session's `scratchpad/generated/`; two
+different clips with one name never overwrite — the second gets a short digest
+suffix. A clip that arrives after a best-effort cancel is named from its prompt
+too, so it lands in the Library beside its siblings.
 
 ## The result
 

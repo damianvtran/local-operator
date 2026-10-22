@@ -83,7 +83,9 @@ async def test_success_path_records_cancel_wake_and_text(
 
     monkeypatch.setattr(video_jobs, "run_video_cascade", fake_cascade)
     monkeypatch.setattr(
-        video_jobs, "_register_video_assets", lambda assets, model: (["d" * 32], [], [])
+        video_jobs,
+        "_register_video_assets",
+        lambda assets, prompt, filename=None: (["d" * 32], [], []),
     )
 
     async def fake_journal(record: dict[str, Any]) -> None:
