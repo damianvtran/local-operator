@@ -15,16 +15,26 @@ from local_operator.i18n.keys import tui_authoring
 def test_authoring_catalogue_is_complete_and_renderable(locale: str) -> None:
     source = catalogues.load_catalogue("en", "tui.authoring")
     translated = catalogues.load_catalogue(locale, "tui.authoring")
-    assert len(source) == 41
+    # 41 at S2 (which added scope_conversation); 46 at S4, whose five promote
+    # keys are translated in every carried locale in the same slice.
+    assert len(source) == 46
     assert set(translated) == set(source)
     for key, value in translated.items():
         assert value
-        rendered = runtime.render_message(value, {"name": "writer", "reason": "test"}, locale)
+        rendered = runtime.render_message(
+            value,
+            {"name": "writer", "reason": "test", "command": "/agent promote", "names": "one"},
+            locale,
+        )
         assert rendered
         assert "{name}" not in rendered
         assert "{reason}" not in rendered
         function = getattr(tui_authoring, key.removeprefix("tui.authoring."))
-        params = {key: "test" for key in ("name", "reason") if "{" + key + "}" in value}
+        params = {
+            key: "test"
+            for key in ("name", "reason", "command", "names")
+            if "{" + key + "}" in value
+        }
         assert function(**params).code == key
 
 
