@@ -1,4 +1,6 @@
 import json
+import math
+import os
 import re
 import time
 import unicodedata
@@ -507,12 +509,74 @@ PREVIEW_ACCEPT_HEADER = "X-Radient-Accept-Unresolved"
 #: target it is only meaningful for -- never in the document -- and only on a COMMIT: a preview
 #: route refuses it, because consent is confirmed after the diff is seen.
 MODERATION_ALLOWANCE_PARAM = "moderation_allowance"
-#: How long a preview request may take. The server's own worst case is the transform call's 25 s
-#: attempt plus transport slack (≈50 s, p2p3 §2.5), so 60 s is that envelope plus margin. The
-#: COMMIT calls keep their deliberate no-timeout stance (see ``publish_agent_instruction_set``):
-#: a preview is non-mutating and can simply be re-run, while a commit the caller abandoned may
-#: still be landing on the hub.
-PREVIEW_TIMEOUT_SECONDS = 60.0
+#: The lowest budget a preview may be given. The server's documented worst case is the
+#: transform call's 25 s attempt plus transport slack (≈50 s, p2p3 §2.5), so a shorter
+#: client budget can only abandon calls the hub was about to answer. A configured value
+#: below this is clamped UP to it rather than honoured.
+PREVIEW_TIMEOUT_FLOOR_SECONDS = 60.0
+#: The preview budget when nothing overrides it. Deliberately well above the envelope above:
+#: that envelope priced one fixed 25 s transform attempt, and a full team document no longer
+#: fits it -- reported 2026-10-22 from ``lop teams push --org <tenant> <team>`` against the
+#: radientdev tenant, where the hub's generalizer completed but took minutes and the 60 s
+#: client bound reported the generic "Could not preview the team publication" instead of the
+#: preview. A preview is non-mutating, so waiting costs the caller a slot rather than a
+#: duplicate write.
+PREVIEW_TIMEOUT_DEFAULT_SECONDS = 300.0
+#: The environment variable that raises (or, down to the floor, lowers) the budget.
+#: ``LOCAL_OPERATOR_``-prefixed like the other runtime knobs (``LOCAL_OPERATOR_MCP_TIMEOUT_MS``)
+#: and read per call, because ``lop`` runs from a uv-tool install where an import-time value
+#: would need a rebuild to change -- exactly what this knob exists to avoid.
+PREVIEW_TIMEOUT_ENV = "LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS"
+
+
+def resolve_preview_timeout_seconds() -> float:
+    """The preview budget for one call, resolved at CALL time.
+
+    Precedence: ``LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS`` > the default. A parsed
+    value below :data:`PREVIEW_TIMEOUT_FLOOR_SECONDS` is clamped up to it (see the floor's
+    comment for why). A value that is not a positive finite number -- a typo like ``5m``,
+    an empty export -- falls back to the default rather than failing a paid command on an
+    environment variable; the effective budget is named in the timeout error, so a typo
+    surfaces there instead of silently changing nothing.
+
+    Returns:
+        float: How many seconds this preview may take.
+    """
+    raw = os.environ.get(PREVIEW_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return PREVIEW_TIMEOUT_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return PREVIEW_TIMEOUT_DEFAULT_SECONDS
+    if not math.isfinite(seconds) or seconds <= 0:
+        return PREVIEW_TIMEOUT_DEFAULT_SECONDS
+    return max(seconds, PREVIEW_TIMEOUT_FLOOR_SECONDS)
+
+
+def preview_timeout_error(budget: float) -> APIError:
+    """The error a preview that exhausted its budget raises.
+
+    WHY IT IS NOT THE FALLBACK MESSAGE: "Could not preview the team publication" is
+    indistinguishable from a refusal, a 500 or a dead socket, and the only useful next
+    step -- wait longer -- is a setting the caller cannot guess. The message therefore
+    names the variable and a concrete larger value. The budget reported is the one
+    actually used, i.e. after any clamp, so a variable set below the floor reports the
+    floor rather than the value that was ignored.
+
+    Args:
+        budget: The effective budget in seconds that the request exceeded.
+
+    Returns:
+        APIError: ``code="preview_timeout"``, no status (the request never got one).
+    """
+    suggested = max(budget * 2, PREVIEW_TIMEOUT_DEFAULT_SECONDS)
+    return APIError(
+        f"Preview exceeded {budget:g} s; raise {PREVIEW_TIMEOUT_ENV} to {suggested:g} "
+        "and re-run (the hub's transform can take minutes on a full document).",
+        status_code=None,
+        code="preview_timeout",
+    )
 
 
 def _is_an_error_envelope(response: requests.Response) -> bool:
@@ -1104,9 +1168,16 @@ class RadientClient:
         inside the document would be a 422 rather than a mechanism.
 
         WHY THE TIMEOUT: a preview is a paid, NON-mutating model call; unlike a
-        publish, nothing lands if the caller gives up, so this side may bound
-        itself (:data:`PREVIEW_TIMEOUT_SECONDS`). Commits keep their no-timeout
-        stance.
+        publish, nothing lands if the caller gives up, so this side may bound itself.
+        The budget is resolved per call (:func:`resolve_preview_timeout_seconds`,
+        ``LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS``) over
+        :data:`PREVIEW_TIMEOUT_DEFAULT_SECONDS`, because the transform is not a fixed
+        cost: the original 60 s figure priced one 25 s attempt, and a team document
+        big enough for the generalizer to walk takes minutes, so a client-side cut-off
+        discards a preview the hub completed. Running out raises
+        :func:`preview_timeout_error`, which names the variable and a larger budget --
+        never the generic fallback. Commits keep their no-timeout stance: a commit the
+        caller abandoned may still be landing on the hub.
 
         WHY NO REDIRECTS: same rule as every org call (S-2 of the security
         review) — a redirect to another origin would carry the credential with it;
@@ -1122,6 +1193,7 @@ class RadientClient:
             "preview_version": PREVIEW_ENVELOPE_VERSION,
             "document": dict(document),
         }
+        budget = resolve_preview_timeout_seconds()
         try:
             response = requests.request(
                 method,
@@ -1129,11 +1201,16 @@ class RadientClient:
                 headers=headers,
                 json=envelope,
                 params=params,
-                timeout=PREVIEW_TIMEOUT_SECONDS,
+                timeout=budget,
                 allow_redirects=False,
             )
             response.raise_for_status()
             self._refuse_redirect(response)
+        except requests.exceptions.Timeout as e:
+            # Ahead of the generic arm below: a timeout has no response, so that arm
+            # can only answer with the fallback message, which tells the caller
+            # nothing about the one thing they can do.
+            raise preview_timeout_error(budget) from e
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,
