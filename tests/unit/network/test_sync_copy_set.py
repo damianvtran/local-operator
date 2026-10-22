@@ -80,6 +80,7 @@ def _entry_owners() -> dict[str, str]:
         TRANSCRIPT_FILENAME,
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
+    from local_operator.session.runtime.journal import EXIT_RECORD_NAME, RUN_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
@@ -105,6 +106,8 @@ def _entry_owners() -> dict[str, str]:
         TURN_JOURNAL_NAME: "session.runtime.registry",
         STOP_MARKER_NAME: "session.runtime.registry",
         SIGNAL_RECEIPT_NAME: "session.runtime.registry",
+        EXIT_RECORD_NAME: "session.runtime.journal",
+        RUN_RECORD_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
         DESKTOP_MARKER_NAME: "session.retention",
@@ -279,10 +282,25 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/network/mobility.py": (
+        1,
+        "``DROPPED_ROLES_DIRNAME`` ('dropped-session-roles'): the DEVICE-LEVEL stash a "
+        "``--drop-session-roles`` move puts a conversation's role/team definitions in "
+        "before the commit deletes the session directory. Deliberately a sibling of "
+        "``sessions/``, never an entry inside one: the copy set must not carry it, no "
+        "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
     "local_operator/paths.py": (
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
+    ),
+    "local_operator/remote_compute/config.py": (
+        2,
+        "``_ALABEL_PREFIX`` ('xn--') and ``_LOOPBACK_NAME`` ('localhost') are "
+        "URL-host vocabulary for validating the remote-compute API override — a "
+        "punycode label prefix and the loopback host name — not filesystem paths, "
+        "so nothing on disk travels or stays behind",
     ),
     "local_operator/network/credentials/mcp_state.py": (
         2,
@@ -378,6 +396,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "update-operation records for this INSTALLROOT — machine-local recovery "
         "state bound to one install, exactly as untransportable as the lock and "
         "the attempt file beside it.",
+    ),
+    "local_operator/procname.py": (
+        1,
+        "``_SOURCE_MARKER`` ('source'): the sidecar a published runtime image "
+        "carries inside ``<stable root>/runtime/<build key>/``, naming the "
+        "interpreter it was cloned from. It is install-level state about ONE "
+        "interpreter build, beside the published image under the lop install root "
+        "and outside any session directory; a session travelling between devices "
+        "carries neither the image nor its marker",
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
@@ -563,10 +590,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        4,
+        5,
         "the cleanup log, the value-hold index and the last-cleanup record (all at the "
-        "sessions root) and the store marker that gates removal: none of them is a file "
-        "a session directory holds",
+        "sessions root), the store marker that gates removal, and ``HANDED_AWAY_DIRNAME`` "
+        "— the ``<config>/network/handed-away/`` quarantine a committed mesh move renames "
+        "its directory into. That last one is a CONFIG-LEVEL directory: it is where a "
+        "session tree goes to stop being one, so it can never be an entry of a session "
+        "directory, and none of the five is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
         5,

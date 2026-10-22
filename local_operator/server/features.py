@@ -7,13 +7,15 @@ runtimes and imports this function to answer the same question the desktop
 renderer answers over the wire. ONE map for every reader -- a second copy
 would drift the way every restated rule does.
 
-The ``references`` import stays INSIDE :func:`feature_flags`, and that is
+The ``references`` import stays INSIDE :func:`live_feature_flags`, and that is
 load-bearing rather than stylistic: ``local_operator.references`` reaches
 ``local_operator.tools.builtin`` (~160 ms), and a module-scope import here
 would put that back on every ``lop serve`` startup before the first request --
 the server-shape guard in ``tests/unit/test_import_graph.py`` fails outright
 on it. Deferred, the cost is paid once per process, on the first caller, and
-the surface it serves is cold negotiation, not a hot path.
+the surface it serves is cold negotiation, not a hot path. The build facts live
+beside it in :func:`static_feature_flags`, which a caller may cache precisely
+because it reads no switch.
 """
 
 from __future__ import annotations
@@ -31,15 +33,28 @@ def feature_flags() -> dict[str, Any]:
 
     A pure function of PROCESS state -- no request, no session, no arguments --
     which is what lets a non-HTTP surface import it and read exactly what the
-    route publishes: ``references`` follows its kill switch, everything else is
-    a build fact.
-    """
-    # IMPORTED HERE, NOT AT MODULE SCOPE -- see the module docstring. The
-    # precedents the guard names are ``routes.desktop_profiles`` (imports
-    # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
-    # ``tunnels.report`` per request).
-    from local_operator.references import at_references_enabled
+    route publishes.
 
+    TWO HALVES, and the split is load-bearing: :func:`static_feature_flags` is
+    every BUILD fact and may be memoised for the life of a process;
+    :func:`live_feature_flags` is every key whose PRESENCE is a runtime fact and
+    must be re-read on each call. A caller that memoised the MERGED map keeps
+    advertising a switch that has since been turned off -- for
+    ``remote_compute`` that switch is the consent gate for sending work off the
+    device, so the stale direction is the dangerous one.
+    """
+    return {**static_feature_flags(), **live_feature_flags()}
+
+
+def static_feature_flags() -> dict[str, Any]:
+    """Every BUILD fact in the map: what this backend can do, not what it is set to.
+
+    SAFE TO MEMOISE, and that is the contract its callers rely on (the mobile
+    daemon caches this dict for the life of the process): nothing here reads
+    config, the environment or a kill switch, so the answer cannot change
+    without a restart. :func:`live_feature_flags` is the disjoint other half --
+    no key appears in both -- and must never be memoised.
+    """
     return {
         "auth": 1,
         "settings": 1,
@@ -85,6 +100,12 @@ def feature_flags() -> dict[str, Any]:
         # working surface because a newer one is missing.
         "skill_catalogue": 1,
         "profile_catalogue": 1,
+        # THE SCOPE FACT ON PROFILE/TEAM ROWS (LOH-9 S2). Its own key, by the rule
+        # stated below: nothing existing is withheld, and a renderer that reads it
+        # knows it may send ``session_id`` to a picker route and paint a badge for
+        # a conversation-scoped row. A client that predates it keeps the fields it
+        # already parsed.
+        "profile_scope": 1,
         "team_catalogue": 1,
         # Agent Hub update availability: GET /v1/desktop/hub/updates (a store read,
         # no network) plus check/apply/apply-all/retry. A renderer gates the
@@ -684,71 +705,6 @@ def feature_flags() -> dict[str, Any]:
         # nothing.
         "peers": 1,
         "session_transfer": 1,
-        # ``@path`` in an ordinary submitted message, which
-        # :meth:`Session.prompt` expands into an
-        # ``<operator-references>`` block before the model sees the turn
-        # (`references.expand_references`; `prompt` is the single
-        # expansion site EVERY NON-ASIDE SURFACE reaches — the CLI,
-        # headless runs, the server, the scheduler, the mobile service and
-        # every subagent — and `references.py`'s docstring counts the
-        # other expanding caller, the TUI's aside worker, beside it).
-        #
-        # WHAT THIS KEY DOES NOT COVER, stated because a client that
-        # assumed otherwise would paint a chip over literal text: this
-        # server's send route takes ``mode: "prompt" | "steer"``, and a
-        # STEER bypasses `prompt` — :meth:`Session.steer` queues the
-        # message and expands nothing. `session/session.py` lists the
-        # three entry paths that predate the feature and leave an `@path`
-        # as inert prose: `steer`, a wake delivery, and an aside FORK —
-        # and that last one is true only of the adopted ROW, because the
-        # TUI's own aside worker expands the text it hands the model
-        # (`tui/app.py`'s `_expand_references` is that call, and
-        # `references.py` names it as one of the TWO expanding callers).
-        # So the key means "this backend expands a reference in a
-        # PROMPT", never "in any text a client sends", and a composer
-        # that can send either must withhold the affordance for the
-        # steer — which is what the shipped one does, `!busy` beside
-        # this gate.
-        #
-        # THIS IS THE WRITER THE RENDERER HAS BEEN WAITING FOR. The app
-        # ships the `@` picker, the inline chips and the composer tip,
-        # and withholds all three until a backend advertises this key —
-        # so on every backend older than this line the affordance is
-        # dark BY DESIGN, `@path` stays the plain text such a backend
-        # sends, and the composer says why. The key is the whole switch;
-        # nothing else about the app changed to light it up.
-        #
-        # CONDITIONAL, and it is the only key in this map whose PRESENCE
-        # is a runtime fact rather than a build fact.
-        # ``LOCAL_OPERATOR_AT_REFERENCES``
-        # (:data:`local_operator.references.AT_REFERENCES_ENV`) is a kill
-        # switch read per call, so a process told not to expand must not
-        # advertise a picker that paints chips for an expansion it will
-        # not perform: a client that believed the key would show the
-        # user a reference the model never receives, which is the one
-        # lie this gate exists to prevent. That variable has exactly ONE
-        # reader, :func:`~local_operator.references.at_references_enabled`,
-        # which is called here rather than re-read, so this payload and
-        # the expansion THIS PROCESS performs cannot disagree.
-        #
-        # AND THAT LAST CLAUSE IS SCOPED TO THIS PROCESS, which is a real
-        # boundary rather than a hedge: a turn is admitted over a socket
-        # to whichever process OWNS the session, and a runtime's
-        # environment is the snapshot it was spawned with. So a daemon
-        # whose switch is on can advertise the key while an owner engaged
-        # from a shell that exported the switch off sends the literal
-        # `@path`. No value read here can fix that, and it needs no new
-        # handling: the owner's behaviour is the same absent-key
-        # behaviour a client already implements, and the case that
-        # matters — every backend older than this line — is decided by
-        # presence alone.
-        #
-        # ITS OWN KEY rather than a bump, by the rule `session_search`
-        # states above: the composer renders perfectly well without it —
-        # an unexpanded `@path` is prose the model reads as prose — so
-        # gating that working composer on a newer version would take a
-        # surface away to advertise nothing. A client that does not see
-        # the key must send the draft as typed and offer no affordance.
         # The PROJECT primitive (`/v1/desktop/projects*`, the ``project``
         # tool and ``/project``). ONE key gating both the affordance and
         # the reads: the Projects tab, its CRUD dialogs and the
@@ -975,5 +931,116 @@ def feature_flags() -> dict[str, Any]:
         # mid-turn adopt control only when this key is present, so an older
         # backend keeps today's disabled state.
         "aside_adopt_queue": 1,
+        # REMOTE COMPUTE (preview): the affordance that offers to run work on
+        # Radient-hosted compute. CONDITIONAL, because unlike every build fact
+        # above this one must not be advertised while it is switched off: the
+        # bit is what a renderer gates its remote destination on, and a client
+        # that saw it on an install whose owner has not opted in would offer to
+        # send that owner's work off the device. It follows the LIVE setting
+        # (``remote_compute.is_enabled`` reads ``config.yml`` per call, the way
+        # ``references`` follows its kill switch), so disabling withdraws the
+        # affordance at the next negotiation, not the next restart.
+        # Absent ⇒ no remote destination and no request to build — the
+    }
+
+
+def live_feature_flags() -> dict[str, Any]:
+    """The keys whose PRESENCE is a live runtime fact, resolved on EVERY call.
+
+    The imports stay INSIDE this function, not at module scope -- see the
+    module docstring: ``local_operator.references`` reaches ``tools.builtin``
+    (~160 ms), and deferring it keeps that off ``lop serve`` startup. Each
+    reader is the single owner of its switch and is CALLED rather than re-read,
+    so this map and the behaviour of THIS process cannot disagree.
+
+    Never memoise the result: a caller that pinned it would keep advertising a
+    feature after its switch was turned off.
+    """
+    # IMPORTED HERE, NOT AT MODULE SCOPE -- see the module docstring. The
+    # precedents the guard names are ``routes.desktop_profiles`` (imports
+    # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
+    # ``tunnels.report`` per request).
+    from local_operator.references import at_references_enabled
+    from local_operator.remote_compute import is_enabled as remote_compute_enabled
+
+    return {
+        # REMOTE COMPUTE (preview): the affordance that offers to run work on
+        # Radient-hosted compute. CONDITIONAL, because unlike every build fact
+        # above this one must not be advertised while it is switched off: the
+        # bit is what a renderer gates its remote destination on, and a client
+        # that saw it on an install whose owner has not opted in would offer to
+        # send that owner's work off the device. It follows the LIVE setting
+        # (``remote_compute.is_enabled`` reads ``config.yml`` per call, the way
+        # ``references`` follows its kill switch), so disabling withdraws the
+        # affordance at the next negotiation, not the next restart.
+        # Absent ⇒ no remote destination and no request to build — the
+        # pre-feature state, not a degraded one.
+        **({"remote_compute": 1} if remote_compute_enabled() else {}),
+        # ``@path`` in an ordinary submitted message, which
+        # :meth:`Session.prompt` expands into an
+        # ``<operator-references>`` block before the model sees the turn
+        # (`references.expand_references`; `prompt` is the single
+        # expansion site EVERY NON-ASIDE SURFACE reaches — the CLI,
+        # headless runs, the server, the scheduler, the mobile service and
+        # every subagent — and `references.py`'s docstring counts the
+        # other expanding caller, the TUI's aside worker, beside it).
+        #
+        # WHAT THIS KEY DOES NOT COVER, stated because a client that
+        # assumed otherwise would paint a chip over literal text: this
+        # server's send route takes ``mode: "prompt" | "steer"``, and a
+        # STEER bypasses `prompt` — :meth:`Session.steer` queues the
+        # message and expands nothing. `session/session.py` lists the
+        # three entry paths that predate the feature and leave an `@path`
+        # as inert prose: `steer`, a wake delivery, and an aside FORK —
+        # and that last one is true only of the adopted ROW, because the
+        # TUI's own aside worker expands the text it hands the model
+        # (`tui/app.py`'s `_expand_references` is that call, and
+        # `references.py` names it as one of the TWO expanding callers).
+        # So the key means "this backend expands a reference in a
+        # PROMPT", never "in any text a client sends", and a composer
+        # that can send either must withhold the affordance for the
+        # steer — which is what the shipped one does, `!busy` beside
+        # this gate.
+        #
+        # THIS IS THE WRITER THE RENDERER HAS BEEN WAITING FOR. The app
+        # ships the `@` picker, the inline chips and the composer tip,
+        # and withholds all three until a backend advertises this key —
+        # so on every backend older than this line the affordance is
+        # dark BY DESIGN, `@path` stays the plain text such a backend
+        # sends, and the composer says why. The key is the whole switch;
+        # nothing else about the app changed to light it up.
+        #
+        # CONDITIONAL, and — beside ``remote_compute`` above — one of the
+        # two keys in this map whose PRESENCE is a runtime fact rather than
+        # a build fact.
+        # ``LOCAL_OPERATOR_AT_REFERENCES``
+        # (:data:`local_operator.references.AT_REFERENCES_ENV`) is a kill
+        # switch read per call, so a process told not to expand must not
+        # advertise a picker that paints chips for an expansion it will
+        # not perform: a client that believed the key would show the
+        # user a reference the model never receives, which is the one
+        # lie this gate exists to prevent. That variable has exactly ONE
+        # reader, :func:`~local_operator.references.at_references_enabled`,
+        # which is called here rather than re-read, so this payload and
+        # the expansion THIS PROCESS performs cannot disagree.
+        #
+        # AND THAT LAST CLAUSE IS SCOPED TO THIS PROCESS, which is a real
+        # boundary rather than a hedge: a turn is admitted over a socket
+        # to whichever process OWNS the session, and a runtime's
+        # environment is the snapshot it was spawned with. So a daemon
+        # whose switch is on can advertise the key while an owner engaged
+        # from a shell that exported the switch off sends the literal
+        # `@path`. No value read here can fix that, and it needs no new
+        # handling: the owner's behaviour is the same absent-key
+        # behaviour a client already implements, and the case that
+        # matters — every backend older than this line — is decided by
+        # presence alone.
+        #
+        # ITS OWN KEY rather than a bump, by the rule `session_search`
+        # states above: the composer renders perfectly well without it —
+        # an unexpanded `@path` is prose the model reads as prose — so
+        # gating that working composer on a newer version would take a
+        # surface away to advertise nothing. A client that does not see
+        # the key must send the draft as typed and offer no affordance.
         **({"references": 1} if at_references_enabled() else {}),
     }

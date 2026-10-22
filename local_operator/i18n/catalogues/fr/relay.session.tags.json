@@ -1,0 +1,21 @@
+{
+  "relay.session.tags.action": "Tags…",
+  "relay.session.tags.sheet_title": "tags",
+  "relay.session.tags.loading": "chargement…",
+  "relay.session.tags.empty": "aucune catégorie de tags pour l’instant",
+  "relay.session.tags.empty_hint": "créez-en une dans l’application de bureau ou le terminal",
+  "relay.session.tags.load_error": "Impossible de charger le catalogue de tags.",
+  "relay.session.tags.retry": "réessayer",
+  "relay.session.tags.limit_hint": "{count} tags, c’est le maximum qu’une conversation peut contenir — retirez-en un pour en ajouter un autre.",
+  "relay.session.tags.primary": "principal",
+  "relay.session.tags.make_primary": "faire de {name} le tag principal",
+  "relay.session.tags.more": "{count, plural, one {# tag de plus} many {# de tags de plus} other {# tags de plus}}",
+  "relay.session.tags.missing": "absent du catalogue",
+  "relay.session.tags.saving": "enregistrement…",
+  "relay.session.tags.save_error": "Impossible d’enregistrer les tags",
+  "relay.session.tags.remove_all": "retirer tous les tags",
+  "relay.session.tags.remove_all_confirm": "retirer tous les tags ?",
+  "relay.session.tags.cancel": "annuler",
+  "relay.session.tags.done": "terminé",
+  "relay.session.tags.pin_and_tags_hint": "touchez et maintenez une ligne pour l’épingler ou la taguer"
+}

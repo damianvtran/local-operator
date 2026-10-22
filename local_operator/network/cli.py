@@ -1473,7 +1473,14 @@ def _cmd_show(args: argparse.Namespace) -> int:
     payload["rotations"] = dict(record.rotations)
     payload["members_digest"] = members_digest_of(record)
     payload["invites"] = [
-        {"invite_id": invite.invite_id, "state": invite.state, "role": invite.role}
+        {
+            "invite_id": invite.invite_id,
+            # Same split as the relay's ``net_show``: stored ``state``, display
+            # ``listed_state``.
+            "state": invite.state,
+            "listed_state": invite.listed_state(time.time()),
+            "role": invite.role,
+        }
         for invite in record.invites
     ]
     return _emit(args, {"ok": True, **payload}, _show_lines(payload))
@@ -1506,7 +1513,10 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
             f"{', '.join(member['capabilities'])}{suspect}"
         )
     for invite in payload.get("invites") or []:
-        lines.append(f"  invite {invite['invite_id']}  {invite['role']}  {invite['state']}")
+        # ``listed_state`` when the payload carries it; a relay on an older build
+        # sends only ``state``.
+        shown = invite.get("listed_state") or invite["state"]
+        lines.append(f"  invite {invite['invite_id']}  {invite['role']}  {shown}")
     return lines
 
 
@@ -3167,8 +3177,11 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         or None,
         device_id=args.device,
     )
+    # Same rule as the relay's mint: dead entries go with the write that adds one.
+    expired = store.prune_invites(record)
     record.invites.append(minted.record)
     store.save(record)
+    store.forget_invite_tokens(expired)
     path = store.save_invite_token(minted.record.invite_id, minted.token)
     _audit(
         "invite_minted",
@@ -6586,6 +6599,16 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             model_choice = {"provider": provider, "model_id": model_id}
         else:
             model_choice = None
+        if model_choice is not None and effort:
+            # THE LEVEL RIDES THE MODEL CHOICE (QA round 1, Q1 on #2754). The
+            # frame-level ``effort`` below is applied only through
+            # ``resolve_create_identity`` into ``identity.birth``, which a
+            # ``--team``-only create never reaches, so ``--effort max`` was dropped
+            # and the runtime ran its seed. The choice is what every create path
+            # applies (``relay._set_model_on``), under both spellings: an owner on
+            # 0.84.7 or earlier reads only ``effort``. The frame-level key stays,
+            # because the identity path still reads it when no model is named.
+            model_choice = {**model_choice, "reasoning_effort": effort, "effort": effort}
         # THE SAVED MODE SUPPLIES THE IMPLIED REQUEST (remote-onboarding §6
         # defect 2, the create half): a device whose ``tool_approval_mode``
         # resolves ``auto`` asks for an unattended session when it asks a peer
@@ -7690,6 +7713,20 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 "remedies": ["run `lop network start` on this device"],
             }
         )
+    # SUPERVISION CONFLICTS (2026-10-21): a second relay unit, a foreign port holder,
+    # or a unit pinned to one build — each made the node "running" and unreachable
+    # or stale at once, and nothing here named it. Supervision-class rows: they
+    # degrade the verdict without claiming the link itself failed.
+    for conflict in relay_mod.foreign_supervision():
+        checks.append(
+            {
+                "check": "supervision",
+                "code": conflict["code"],
+                "ok": False,
+                "detail": conflict["detail"],
+                "remedies": list(conflict["remedies"]),
+            }
+        )
     for check in checks:
         check["class"] = (
             "payload"
@@ -7790,9 +7827,21 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 "— run the named login on this device"
             )
         elif supervision_failures:
-            lines.append(
-                "note: relay restart-on-boot needs repair — run `lop network start` on this device"
-            )
+            conflict_remedies = [
+                str(remedy)
+                for check in checks
+                if check.get("check") == "supervision" and check.get("code") and not check["ok"]
+                for remedy in check.get("remedies") or []
+            ]
+            if conflict_remedies:
+                # A conflict's remedy is not `lop network start` (that is what the
+                # node ran while its system unit crash-looped); say the real one.
+                lines.append("note: relay supervision conflict — " + "; ".join(conflict_remedies))
+            else:
+                lines.append(
+                    "note: relay restart-on-boot needs repair — run `lop network start` on "
+                    "this device"
+                )
     return _emit(args, answer, lines)
 
 

@@ -358,6 +358,9 @@ from local_operator.video.records import VIDEO_JOB_CUSTOM_TYPE
 if TYPE_CHECKING:
     # Type-only: the session must never pull the MCP stack in at import time.
     # It only holds the manager the composition root hands it.
+    # Type-only: the consent intent is a harness value, held without being
+    # constructed here.
+    from local_operator.harness.types import DurableWriteIntent
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
@@ -2980,6 +2983,20 @@ class Session:
         cwd: str | None = None,
         skill_resolver: Callable[[str], str | None] | None = None,
         request_approval: "ApprovalGate | None" = None,
+        #: THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may write a
+        #: CONVERSATION-scoped role or team unaided; changing the ACCOUNT store
+        #: is the user's decision. No host installs a seam yet — the TUI's
+        #: approval card is satisfied by its session-scoped "approve all" latch
+        #: without showing the specific intent, so wiring this to that card
+        #: would let a blanket shortcut authorize account-wide writes. ``None``
+        #: refuses every tool-issued account write, and the refusal names the
+        #: user surfaces (desktop editor / TUI form / CLI) plus the
+        #: conversation-only retry. Declared here so a host that CAN show an
+        #: intent-specific, non-rememberable confirmation has one place to
+        #: install it.
+        authorize_durable_write: (
+            Callable[["DurableWriteIntent"], Awaitable[str | None]] | None
+        ) = None,
         goal_state: GoalState | None = None,
         #: The variables surface behind list_variables/read_variable. Held by
         #: the SESSION because ``_build_tool_context`` is rebuilt every turn:
@@ -3803,6 +3820,7 @@ class Session:
             skill_resolver, lambda: self._tools, on_tool_read=self._activate_on_tool_doc
         )
         self._request_approval = request_approval
+        self._authorize_durable_write = authorize_durable_write
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
         # terminal can draw a picker, so the hook arrives from
@@ -4375,6 +4393,18 @@ class Session:
         # Error text from the run just ended, journalled as a session incident
         # once persistence finishes (see _run_turn / journal_incident).
         self._pending_incident: str | None = None
+        #: ``provider/model`` of the model that actually produced that error, as
+        #: ``AgentEndEvent.failing_model`` carried it. Set beside
+        #: ``_pending_incident`` and cleared with it. Empty means UNKNOWN, and
+        #: the incident then keeps the old behaviour of naming the session's
+        #: selected model — which is right for every failure that the serving
+        #: model itself produced, and wrong only in the case this field exists
+        #: to fix.
+        self._pending_incident_model: str = ""
+        #: The selector the turn started from, when ``_pending_incident_model``
+        #: was reached by failover. Carried for the incident's own sentence; see
+        #: ``incidents.Incident.failover_from``.
+        self._pending_incident_failover_from: str = ""
         #: Journal notices (model switch / session incident) whose LIVE append
         #: arrived while a turn owned the message list. They are already on
         #: disk; only the live splice is parked, because appending one between
@@ -12039,12 +12069,33 @@ class Session:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
         return queue.decline(ask_id, by=by)
 
-    def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
-        """Remove a timed-out ask from the view. Injects nothing, ever."""
+    def dismiss_ask(
+        self, ask_id: str, *, by: str = "unknown", reason: str | None = None
+    ) -> dict[str, Any]:
+        """Put an ask away from the view. Starts no turn, ever.
+
+        An OPEN ask is accepted only while :meth:`ask_agent_running` is False (D6).
+        """
         queue = self.ask_queue()
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
-        return queue.dismiss(ask_id, by=by)
+        return queue.dismiss(ask_id, by=by, reason=reason)
+
+    def ask_agent_running(self) -> bool:
+        """Whether agent work may be running — the D6 gate for dismissing an OPEN ask.
+
+        The session is STOPPED (so not running) when the operator's stop is pending
+        and no turn is in flight: ``_abort_requested`` is set by :meth:`abort`
+        (sticky across the continuation gap, cleared only by a fresh prompt or
+        non-residue arrival — ``prompt()`` and ``_prompt_messages``), and
+        ``_is_streaming`` / ``_turn_lock`` are the turn itself. A pending abort with
+        a turn still unwinding is NOT stopped yet. Anything else — idle, mid-turn —
+        is running: an idle runtime can begin a turn at any moment, so only the
+        stopped state is a stable "no work is running".
+        """
+        if self._abort_requested and not self._is_streaming and not self._turn_lock.locked():
+            return False
+        return True
 
     def withdraw_ask(
         self,
@@ -16208,7 +16259,17 @@ class Session:
             return False
         return all(
             isinstance(message, CustomMessage)
-            and message.custom_type in _STOPPED_WORK_RESIDUE_TYPES
+            and (
+                message.custom_type in _STOPPED_WORK_RESIDUE_TYPES
+                # D2 (design §15): the receipt of the operator tidying an ask is not
+                # a new instruction, so it must not clear the stop and restart work.
+                # A decline stays fresh intent (it hands the decision back).
+                or (
+                    message.custom_type == ASK_RESPONSE_MESSAGE_TYPE
+                    and isinstance(message.details, dict)
+                    and message.details.get("status") == "dismissed"
+                )
+            )
             for message in initial
         )
 
@@ -16980,6 +17041,13 @@ class Session:
                 redact_tool_result=(
                     self._redact_tool_result_text if self._variables is not None else None
                 ),
+                # Tool-call ARGUMENTS take a separate, higher-confidence pass: they
+                # are code the harness executes and the model reads back, so a
+                # name-driven guess must not rewrite them (session 6ccea512c372).
+                # Wired from the same store; None only when there is no store.
+                redact_tool_arguments=(
+                    self._redact_tool_arguments_text if self._variables is not None else None
+                ),
                 # Tool-call outcomes into the shared ledger, so /session can
                 # report this model's tool-call validity. Supplied as a closure
                 # for the same reason redact_tool_result is: the harness has no
@@ -17082,6 +17150,10 @@ class Session:
                             # model (this session or a resumed one) must see
                             # the failure, not just the UI.
                             self._pending_incident = event.error
+                            self._pending_incident_model = getattr(event, "failing_model", "") or ""
+                            self._pending_incident_failover_from = (
+                                getattr(event, "failover_from", "") or ""
+                            )
                         self._abort_requested = True
                         self._continuation_queue.clear()
                         self._held_end = None
@@ -17193,9 +17265,23 @@ class Session:
                 self._subagent_comms.notify_detail_persisted(self._job_id)
 
             pending_incident = self._pending_incident
+            pending_incident_model = self._pending_incident_model
+            pending_incident_from = self._pending_incident_failover_from
             self._pending_incident = None
+            self._pending_incident_model = ""
+            self._pending_incident_failover_from = ""
             if pending_incident:
-                await self.journal_incident(pending_incident)
+                # Split here rather than pass the pair down: ``journal_incident``
+                # speaks ``provider``/``model`` because that is what
+                # ``Incident.render`` prints, and an unknown selector must stay
+                # unknown (both empty) rather than become a half-filled pair.
+                failing_provider, _, failing_model_id = pending_incident_model.partition("/")
+                await self.journal_incident(
+                    pending_incident,
+                    provider=failing_provider,
+                    model=failing_model_id,
+                    failover_from=pending_incident_from,
+                )
 
             await self._refresh_context_metadata()
             await self._maybe_compact()
@@ -18017,6 +18103,10 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
+            # The host's consent seam for tool-issued ACCOUNT writes. Held on
+            # the session because this context is rebuilt every turn; ``None``
+            # is a refusal, never a permission (see the constructor field).
+            authorize_durable_write=self._authorize_durable_write,
             ask_user=self._ask_user,
             # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path
             # (the flag is off, or no host installed an ask surface), which is
@@ -18176,6 +18266,17 @@ class Session:
         # team, cycle, depth cap) raises here before any model is priced or
         # job registered (BEN-7-D1/D2/D3).
         target = resolve_launch_target(agent, self)
+        # MEMORY ADMISSION (memory_guard.admission_check): a child session is
+        # resident work in THIS process — its transcript, its tool commands, its
+        # browser — and a small node OOM-killed its own mesh relay by adding such
+        # work one launch at a time. Refused with the sentence rather than queued:
+        # the delegating model can wait, finish other work, or do the slice itself,
+        # and a queue would hide the pressure from the one reader who can act on it.
+        from local_operator import memory_guard
+
+        admission = memory_guard.admission_check("a subagent")
+        if not admission.admitted:
+            raise RuntimeError(admission.reason)
         if model is not None and model != "inherit":
             from local_operator.harness.subagent import model_may_choose_tier
 
@@ -18604,7 +18705,16 @@ class Session:
         if parked:
             self._context.messages.extend(parked)
 
-    async def journal_incident(self, raw: str, *, token: str = "", rendered: str = "") -> None:
+    async def journal_incident(
+        self,
+        raw: str,
+        *,
+        token: str = "",
+        rendered: str = "",
+        provider: str = "",
+        model: str = "",
+        failover_from: str = "",
+    ) -> None:
         """Persist and surface WHY the session last failed.
 
         The failover cascade rotates credentials and models and its notices
@@ -18623,6 +18733,17 @@ class Session:
         ``incidents.CUT_OFF_CAUSES`` and must not be pushed back through the
         substring rules. ``token`` rides in ``details`` so the same orphaned
         run is narrated at most once (see ``_journal_cut_off_once``).
+
+        ``provider``/``model`` are WHICH MODEL PRODUCED ``raw``, and default to
+        the session's selected model — the old unconditional behaviour, correct
+        for every failure the serving model itself raised. They are passed
+        only by the pending-incident flush, from the attribution the failover
+        stamped on the error, and that is the whole fix for a refusal by a
+        FALLBACK being reported against the model the user selected: an
+        exhausted Anthropic quota handed the turn to OpenAI, OpenAI answered
+        with a ``cyber_policy`` content filter, and the incident named
+        Anthropic — a provider that had not been reached and had nothing to
+        fix.
 
         Holds ``_journal_lock`` across the persist-then-append pair so a
         notice fired immediately after cannot overtake it: this method awaits a
@@ -18662,7 +18783,22 @@ class Session:
 
         if self._disposed or not raw:
             return
-        text = rendered or format_incident_message(raw, self._model.provider, self._model.model_id)
+        failing_provider = provider or self._model.provider
+        failing_model_id = model or self._model.model_id
+        # THE SELECTION, stated by the one object that owns it. The failover
+        # walk stamps ``failover_from`` when a hop IT made switched target; a
+        # route the session had already moved onto before the walk started is
+        # invisible to the driver, so the selection half would otherwise be
+        # missing from exactly the report that needs it. Empty when the two
+        # agree — head and sentence would then say the same model twice.
+        selected = f"{self._model.provider}/{self._model.model_id}"
+        failing = f"{failing_provider}/{failing_model_id}"
+        text = rendered or format_incident_message(
+            raw,
+            failing_provider,
+            failing_model_id,
+            failover_from or (selected if selected != failing else ""),
+        )
         if not rendered:
             # THE DESKTOP/SSE COPY of the Radient usage-limit remedy. The
             # incident text is what the desktop renders as its
@@ -18875,6 +19011,25 @@ class Session:
         # shows nothing after a restart. Mirrors the transient model-switch
         # split (``_is_persistable_message``).
         self._append_or_park_journal(message)
+
+    def _redact_tool_arguments_text(self, text: str) -> str:
+        """``LoopConfig.redact_tool_arguments``. Mask, never register.
+
+        :meth:`VariableStore.redact_arguments` runs the exact-value pass and then
+        the shape pass with a value-level confidence floor. Nothing it matches is
+        promoted to a session redaction: arguments are CODE, the least trustworthy
+        place to decide a value is a credential, and registration is what turned one
+        false positive into a session-wide rewrite (session 6ccea512c372).
+
+        No report is filed either. The incident path for a shape hit is a TOOL
+        RESULT — that is where a credential the session never knew about actually
+        reaches the model — and the result pass reports it with the tool and label.
+        A hit here is masked for containment only.
+        """
+        # The caller wires this only when a store exists (see the LoopConfig site),
+        # so the empty case keeps the loop's fallback to ``redact_tool_result``.
+        assert self._variables is not None
+        return self._variables.redact_arguments(text)
 
     def _redact_tool_result_text(self, text: str) -> str:
         """``LoopConfig.redact_tool_result``. Mask, then REPORT what was masked.

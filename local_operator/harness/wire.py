@@ -70,16 +70,14 @@ logger = logging.getLogger("local_operator.harness.wire")
 #:   bounded here is the same order of magnitude as the one the reconnect seed
 #:   already ships per turn.
 #: - It is 4x under the socket's own 1 MiB line (``_MAX_LINE_BYTES``), which
-#:   covers every turn of ordinary size. It does NOT follow that the relay's
-#:   terminal ``relay_frame_or_degraded`` stage stops firing for conversation
-#:   frames: this budget bounds CONTENT, and a frame's SKELETON — one entry per
-#:   message with its id, role and ``tool_call_id`` — is not elidable, so a
-#:   many-row turn crosses the line regardless. Measured on 500-char results:
-#:   at 1,400 rows (2,801 messages) the socket line is 1,043,682 B and fits,
-#:   and at 1,500 rows (3,001 messages) it is 1,117,282 B and does not — the
-#:   fitter then replaces the WHOLE frame with a notice and the viewer, which
-#:   gets none of the messages, recovers that state from ``frontend_sync`` and
-#:   durable history, exactly as the notice says.
+#:   covers every turn of ordinary size. This budget bounds CONTENT, and a
+#:   frame's SKELETON — one entry per message with its id, role and
+#:   ``tool_call_id`` — is not content-elidable, so a many-row turn used to
+#:   cross the line regardless: measured on 500-char results, 1,400 rows
+#:   (2,801 messages) made a 1,043,682 B line and fit, while 1,500 rows
+#:   (3,001 messages) made 1,117,282 B and did not. Since ``AGENT_END_MESSAGE_TAIL_MAX``
+#:   that skeleton is bounded too, so the terminal ``relay_frame_or_degraded``
+#:   stage no longer fires for a conversation frame of any depth.
 #: - It is ~18x under the 4 MiB ``bufio.Scanner`` buffer an external supervisor
 #:   reads ``lop exec --json`` with, which is the reader whose failure this
 #:   bound exists to prevent — and it leaves that reader three orders of
@@ -102,6 +100,23 @@ AGENT_END_FRAME_BUDGET_BYTES = 256 * 1024
 #: are the ones a viewer is most likely still looking at, and a row beyond the
 #: cap loses its content but never its identity, outcome or receipt.
 AGENT_END_PREVIEW_ROWS_MAX = 100
+
+#: How many of the NEWEST messages survive the LAST-RESORT tail stage.
+#:
+#: WHY this exists at all: the per-row stages bound what one message COSTS, and
+#: ``AGENT_END_PREVIEW_ROWS_MAX`` bounds how many TOOL rows keep a preview — but
+#: neither bounds the message SKELETON, and the skeleton is what made a deep
+#: turn cross the socket line (the measurement in the budget docstring above).
+#: That frame was then replaced wholesale by a passive notice, so the viewer
+#: lost the whole ``agent_end`` — the turn never settled, and its composer
+#: waited forever on an acknowledgement carried by the same stream.
+#:
+#: 24 is "a screenful of the newest conversation": the live viewer already
+#: streamed every row as it arrived, and the durable transcript holds the whole
+#: turn, so the tail only has to keep what a reader is looking at when the end
+#: lands. The newest-first ordering is the one ``AGENT_END_PREVIEW_ROWS_MAX``
+#: already uses, for the same reason.
+AGENT_END_MESSAGE_TAIL_MAX = 24
 
 #: One elided tool row's whole content. Three facts, because a reader has to be
 #: able to tell three things apart: that something was cut (elided), how much
@@ -167,25 +182,56 @@ def bound_agent_end_for_wire(
        text blocks, and only then are oversized strings truncated with the SSE
        transport's own ``STREAM_TRUNCATION_MARKER``. Reaching this stage is
        logged, with the size, so the next offender is named rather than guessed.
-    5. Never raises and never mutates its argument: any failure returns the
+    5. Still over budget -> the message SKELETON is the remaining cost, because
+       no stage above can bound the number of messages. ``messages`` is replaced
+       with the newest ``AGENT_END_MESSAGE_TAIL_MAX`` rows, and TWO additive
+       integer scalars say so — ``messages_total`` and ``messages_omitted`` —
+       plus ``usage_aggregate`` (an OBJECT, present only when an omitted row
+       carried a usage receipt): the folded receipts of everything dropped (the
+       TUI sums ``event.messages`` for its cost band, so dropping rows without
+       it would undercount the turn). The two elision counters are then
+       recomputed against the RETAINED rows only: a row that is no longer in the
+       frame is reported by ``messages_omitted``, not as a row whose content was
+       cut.
+    6. Never raises and never mutates its argument: any failure returns the
        input unchanged. Fail-OPEN is the right direction for a size bound —
        ``transcript._externalize_attachments`` and
        ``server._reference_image_payloads`` both keep the inline payload when
        their own store refuses; fail-closed belongs to redaction, not to a
        frame budget.
 
-    Three additive scalars are set on the bounded payload, and they are two
-    counters rather than one because the two things they count are different:
-    ``elided_tool_rows`` (rows elided IN WHOLE — each carries the marker naming
-    its transcript entry) and ``clipped_tool_rows`` (rows that kept a preview and
-    lost part of their content — text clipped to ``…``, or a block replaced by
-    the dropped-block marker). A single counter named for the
-    first left a consumer reading ``0`` next to a multi-kilobyte
-    ``elided_bytes``, which is the one reading that must not happen. The third
-    is ``elided_bytes``, what this bound removed, computed LAST so it cannot
-    understate what an earlier stage took. They are payload keys rather than
-    model fields: ``AgentEvent`` is ``extra="allow"``, so no protocol version
-    changes and older and newer readers both keep working.
+    SIX additive payload keys describe a bounded frame, in two groups, and each
+    counts a DIFFERENT thing — which is why the row counters are two numbers and
+    not one:
+
+    Always set (the content stages):
+    * ``elided_tool_rows`` — tool rows elided IN WHOLE that are STILL IN the
+      frame, each carrying the marker naming its transcript entry;
+    * ``clipped_tool_rows`` — retained tool rows that kept a preview and lost
+      part of their content (text clipped to ``…``, or a block replaced by the
+      dropped-block marker);
+    * ``elided_bytes`` — the byte delta between the input frame and this one,
+      computed LAST so it cannot understate what an earlier stage took. It
+      INCLUDES rows the tail stage dropped WHOLE, which neither row counter
+      counts: a dropped row is reported by ``messages_omitted``. So the row
+      counters answer "what can I see was cut", and this one answers "how much
+      is gone from the conversation".
+
+    Set only by the tail stage, which is the only stage that changes the
+    message COUNT:
+    * ``messages_total`` / ``messages_omitted`` — integer scalars;
+    * ``usage_aggregate`` — an object, present only when an omitted row carried
+      a usage receipt.
+
+    The row counters are two numbers rather than one because a clipped row lost
+    content just as surely as an elided one, and a single counter named for
+    either left a consumer reading ``0`` next to a multi-kilobyte
+    ``elided_bytes`` — the one reading that must not happen. Before the tail
+    stage existed, ``elided_bytes`` and the row counters described the same
+    messages; the distinction is stated explicitly here because they no longer
+    do. They are payload keys rather than model fields: ``AgentEvent`` is
+    ``extra="allow"``, so no protocol version changes and older and newer
+    readers both keep working.
 
     ``elided_bytes`` is this bound's own arithmetic, measured against the
     payload it was handed. A transport that clips afterwards is not counted —
@@ -259,8 +305,10 @@ def _bound_agent_end(
     ]
     elided_rows = 0
     clipped_rows = 0
+    elided_positions: frozenset[int] = frozenset()
+    clipped_positions: frozenset[int] = frozenset()
     if row_positions:
-        elided_rows, clipped_rows = _elide_tool_rows(
+        elided_rows, clipped_rows, elided_positions, clipped_positions = _elide_tool_rows(
             frame,
             bounded_messages,
             row_positions,
@@ -280,11 +328,126 @@ def _bound_agent_end(
         )
     if _frame_bytes(frame) > cap_bytes:
         _truncate_oversized_strings(frame, cap_bytes, total=total)
+    if _frame_bytes(frame) > cap_bytes:
+        # Read the list from the FRAME, not ``bounded_messages``:
+        # ``_truncate_oversized_strings`` rebuilds it on its own walk, so the
+        # local name above is stale by this point. The tail stage is the only
+        # one that changes the message COUNT, and it reports what it removed
+        # in scalars of its own instead of leaving a smaller list unexplained.
+        kept, total_count = _retain_newest_messages(frame, frame["messages"], cap_bytes=cap_bytes)
+        if len(kept) < total_count:
+            # The counters describe CONTENT CUT FROM THE FRAME, and a dropped row
+            # is no longer in the frame at all — it is reported by
+            # ``messages_omitted``. Keeping a dropped row's count here would
+            # name a row the reader cannot find, which is the same dishonesty
+            # the honest markers exist to prevent.
+            first_retained = total_count - len(kept)
+            elided_rows = sum(1 for index in elided_positions if index >= first_retained)
+            clipped_rows = sum(1 for index in clipped_positions if index >= first_retained)
 
     frame["elided_tool_rows"] = elided_rows
     frame["clipped_tool_rows"] = clipped_rows
     frame["elided_bytes"] = max(0, total - _frame_bytes(frame))
     return frame
+
+
+def _retain_newest_messages(
+    frame: dict[str, Any], messages: list[Any], *, cap_bytes: int
+) -> tuple[list[Any], int]:
+    """Keep the newest ``AGENT_END_MESSAGE_TAIL_MAX`` messages and say so.
+
+    RETURNS ``(kept, total)``. The frame is rewritten in place with the tail and
+    the additive scalars, and with ``usage_aggregate`` when any dropped row
+    carried a receipt.
+
+    WHY IT HALVES RATHER THAN SHIPPING 24 BLIND. 24 rows of ORDINARY content is
+    far under a quarter of the budget, but the newest row is exactly the one a
+    long turn ends on — often a compaction summary or a large final assistant
+    block — and a synthetic call can put anything there. Halving gives at most
+    five re-measurements on a path that only runs when a frame is already over
+    the line, and ends at a single row that the earlier stages have bounded.
+    """
+    total = len(messages)
+    if total <= 1:
+        return list(messages), total
+    tail = min(AGENT_END_MESSAGE_TAIL_MAX, total)
+    while True:
+        dropped = messages[: total - tail]
+        kept = list(messages[total - tail :])
+        candidate = dict(frame)
+        candidate["messages"] = kept
+        candidate["messages_total"] = total
+        candidate["messages_omitted"] = total - tail
+        aggregate = _usage_aggregate(dropped)
+        if aggregate is not None:
+            candidate["usage_aggregate"] = aggregate
+        if _frame_bytes(candidate) <= cap_bytes or tail <= 1:
+            frame.clear()
+            frame.update(candidate)
+            return kept, total
+        tail = max(1, tail // 2)
+
+
+def _usage_aggregate(rows: list[Any]) -> dict[str, Any] | None:
+    """One folded receipt for every usage the tail stage drops, or ``None``.
+
+    WHY THIS IS NOT OPTIONAL. ``EventController._handle_agent_end`` sums
+    ``event.messages[*].usage`` to paint the status band, and a REMOTE viewer
+    only ever sees what this encoder emits. Dropping rows without folding their
+    receipts would quietly undercount a long turn — the band would show a
+    smaller bill than the session actually incurred, with nothing on the frame
+    saying why.
+
+    The shape is the one the band already builds for itself: summed token
+    buckets (so every call is counted exactly once), ``context_tokens`` from the
+    newest receipt that reports one, and ``cost_components`` FOLDED by the
+    session's own ``_folded_components`` rather than capped or summed by hand.
+    Folding is what keeps two orders of pricing equal — see that function for
+    the reported/estimated split and the per-receipt floors it normalises — and
+    it is bounded by the distinct serving identities in the turn, not by the
+    number of calls, so this aggregate stays a few hundred bytes even when it
+    stands in for thousands of receipts.
+    """
+    from local_operator.harness.types import Usage
+    from local_operator.session.frontend_state import _folded_components
+
+    usages = [
+        row["usage"] for row in rows if isinstance(row, dict) and isinstance(row.get("usage"), dict)
+    ]
+    if not usages:
+        return None
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    context_tokens: int | None = None
+    parsed: list[Any] = []
+    for raw in usages:
+        try:
+            usage = Usage.model_validate(raw)
+        except Exception:  # noqa: BLE001 — a malformed receipt must not fail the bound
+            continue
+        parsed.append(usage)
+        for field in totals:
+            totals[field] += int(getattr(usage, field, 0) or 0)
+        if usage.context_tokens is not None:
+            context_tokens = usage.context_tokens
+    if not parsed:
+        return None
+    components = [component.model_dump(mode="json") for component in _folded_components(parsed)]
+    aggregate: dict[str, Any] = {**totals, "cost_components": components}
+    if context_tokens is not None:
+        aggregate["context_tokens"] = context_tokens
+    bases = {
+        str(component.get("billing_basis"))
+        for component in components
+        if component.get("billing_basis")
+    }
+    if len(bases) == 1:
+        aggregate["billing_basis"] = bases.pop()
+    return aggregate
 
 
 def _spendable_share(
@@ -349,8 +512,14 @@ def _elide_tool_rows(
     cap_bytes: int,
     floor_chars: int,
     bound_row: Any,
-) -> tuple[int, int]:
-    """Spend the tool-row share, returning (rows elided in whole, rows clipped).
+) -> tuple[int, int, frozenset[int], frozenset[int]]:
+    """Spend the tool-row share, returning the two counts and the rows they name.
+
+    The POSITIONS travel with the counts because a later stage (the message
+    tail) can drop rows, and a counter for a row that is no longer in the frame
+    is a lie the reader cannot check: it names content that is not there rather
+    than content that was cut. ``_bound_agent_end`` intersects these sets with
+    the retained suffix instead of re-deriving them from the marker text.
 
     The NEWEST ``AGENT_END_PREVIEW_ROWS_MAX`` rows keep a preview and the older
     ones are elided in whole — the same ordering, for the same reason, as the
@@ -371,6 +540,7 @@ def _elide_tool_rows(
     """
     preview_count = max(0, len(positions) - AGENT_END_PREVIEW_ROWS_MAX)
     elided = 0
+    elided_positions: set[int] = set()
     for index in positions[:preview_count]:
         row = copy.deepcopy(messages[index])
         messages[index] = row
@@ -387,14 +557,16 @@ def _elide_tool_rows(
         # takes both.
         row.pop("provider_payload", None)
         elided += 1
+        elided_positions.add(index)
 
     previews = positions[preview_count:]
     if not previews:
-        return elided, 0
+        return elided, 0, frozenset(elided_positions), frozenset()
     share = _spendable_share(
         frame, messages, previews, cap_bytes=cap_bytes, floor_chars=floor_chars
     )
     clipped = 0
+    clipped_positions: set[int] = set()
     for index in previews:
         row = copy.deepcopy(messages[index])
         messages[index] = row
@@ -411,7 +583,8 @@ def _elide_tool_rows(
             provider_payload["details"] = row.pop("details", None)
         if _content_shape(row) < before:
             clipped += 1
-    return elided, clipped
+            clipped_positions.add(index)
+    return elided, clipped, frozenset(elided_positions), frozenset(clipped_positions)
 
 
 def _content_shape(row: dict[str, Any]) -> tuple[int, int]:
@@ -544,6 +717,7 @@ def _tool_label(row: dict[str, Any]) -> str:
 
 __all__ = [
     "AGENT_END_FRAME_BUDGET_BYTES",
+    "AGENT_END_MESSAGE_TAIL_MAX",
     "AGENT_END_PREVIEW_ROWS_MAX",
     "bound_agent_end_for_wire",
 ]

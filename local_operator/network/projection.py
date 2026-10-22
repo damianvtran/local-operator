@@ -223,6 +223,23 @@ class PeerFacts:
     age_s: float = 0.0
 
 
+def _binding_name(binding: Any, key: str) -> str:
+    """One name out of a peer row's ``binding`` block, or ``""`` (no claim).
+
+    The block is a PEER's claim and is read defensively, the way every other
+    federated field is: an absent block (a build older than the key), a block
+    that is not an object, or a name that is not a non-empty string all land on
+    ``""``. Bounded at 256 characters because a name is display text and a peer
+    is not trusted to keep it short (team and profile names are far shorter).
+    """
+    if not isinstance(binding, dict):
+        return ""
+    value = binding.get(key)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:256]
+
+
 @dataclass(frozen=True)
 class PeerRow:
     """One of a peer's session rows, RE-ADDRESSED at our relay.
@@ -281,6 +298,14 @@ class PeerRow:
     placement: SessionPlacement = field(default_factory=local_placement)
     origin: dict[str, Any] = field(default_factory=dict)
     archived: bool | None = None
+    #: The team / agent the session is attached to ON THE PEER (its own
+    #: ``attachment.json``, stamped by ``relay._row_binding``). ``""`` is NO
+    #: CLAIM: a peer whose build predates the ``binding`` key omits it, and that
+    #: must read as "unknown" — the same null a local unattached row publishes —
+    #: never as a guessed team. Carried so the origin's sidebar can draw the
+    #: team badge on a remote row exactly as on a local one.
+    team: str = ""
+    agent: str = ""
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -392,6 +417,8 @@ class PeerRow:
             placement=SessionPlacement.from_json(data.get("placement")),
             origin=dict(data["origin"]) if isinstance(data.get("origin"), dict) else {},
             archived=(bool(data["archived"]) if isinstance(data.get("archived"), bool) else None),
+            team=_binding_name(data.get("binding"), "team"),
+            agent=_binding_name(data.get("binding"), "agent"),
         )
 
     def to_row_json(self) -> dict[str, Any]:
@@ -425,6 +452,7 @@ class PeerRow:
             "placement": self.placement.to_json(),
             "origin": dict(self.origin) or None,
             "last_synced_at": None,
+            "binding": {"agent": self.agent or None, "team": self.team or None},
         }
 
 

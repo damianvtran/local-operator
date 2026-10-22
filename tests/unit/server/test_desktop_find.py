@@ -567,3 +567,69 @@ async def test_ready_publication_wait_does_not_hide_a_missing_seed(harness, quer
     await _seed(harness.root, session_id, [Message.user("unrelated fixture")])
     with pytest.raises(AssertionError, match=f"ready index missing requested {query} hit"):
         await _published_find_result(harness, session_id, q=query)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("append_after_upgrade", [False, True])
+async def test_find_rebuilds_v7_notice_documents_on_upgrade(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, append_after_upgrade: bool
+) -> None:
+    """An actual old-rule cache must not offer jumps to now-invisible notices.
+
+    Build version 7 from a real transcript under its pre-notice-filter predicate,
+    not an invented cache shape. Then simulate an upgrade with the identical
+    journal (or an appended tail, which would otherwise retain the stale prefix).
+    Only derived state is rebuilt: genuine find hits and raw diagnostic bytes
+    survive. The HTTP route is the consumer that exposed the stale cache.
+    """
+    import json
+
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.rows import is_ask_gate_divert_row, is_hidden_tool_row
+
+    session_id = await harness.create_session()
+    question = Message.user("upgradeprobe genuine question")
+    notice = CustomMessage(
+        custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "upgradeprobe legacy notice diagnostic"},
+    )
+    answer = Message.assistant("upgradeprobe genuine answer")
+    # A later user turn freezes the earlier notice-containing prefix. This
+    # also exercises incremental upgrades, not only a warm unchanged cache.
+    tail = Message.user("ongoing real task")
+    await _seed(harness.root, session_id, [question, notice, answer, tail])
+
+    def old_rule(entry: dict[str, Any]) -> bool:
+        return is_hidden_tool_row(entry) or is_ask_gate_divert_row(entry)
+
+    with monkeypatch.context() as old:
+        old.setattr(transcript_index, "TRANSCRIPT_INDEX_VERSION", 7)
+        old.setattr(transcript_index, "_row_is_invisible", old_rule)
+        before = transcript_index.refresh_index(harness.root, session_id)
+        assert before is not None
+        assert {doc.id for doc in before.messages} == {question.id, notice.id, answer.id, tail.id}
+        cache = transcript_index.index_path(harness.root, session_id)
+        assert json.loads(cache.read_text())["version"] == 7
+    transcript_index._reset_for_tests()
+    transcript_find._reset_for_tests()
+    if append_after_upgrade:
+        await _seed(harness.root, session_id, [Message.user("ordinary appended work")])
+    journal = harness.root / "sessions" / session_id / "transcript.jsonl"
+    raw_before = journal.read_bytes()
+
+    async with asyncio.timeout(30):
+        while True:
+            response = await _find(harness, session_id, q="upgradeprobe")
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            # Even the optional building answer must not leak stale-version docs.
+            assert notice.id not in {hit["id"] for hit in result["hits"]}, result
+            if result["state"] != "building":
+                break
+            await asyncio.sleep(0)
+    assert result["state"] == "ready", result
+    assert {hit["id"] for hit in result["hits"]} == {question.id, answer.id}, result
+    assert json.loads(cache.read_text())["version"] == transcript_index.TRANSCRIPT_INDEX_VERSION
+    assert journal.read_bytes() == raw_before
+    assert b"upgradeprobe legacy notice diagnostic" in raw_before

@@ -98,6 +98,7 @@ from local_operator.paths import config_dir
 # `local_operator.resume` is deliberately tiny (pathlib only): importing the
 # session factory here for the same constant dragged the harness and asyncio
 # onto the CLI startup path, which test_import_graph exists to prevent.
+from local_operator.remote_compute.arguments import add_remote_arguments, wants_remote
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
@@ -1399,6 +1400,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(_sh.move_queue().envelope(locale=help_locale)["text"]),
     )
+    # THE ROLE-DEFINITION GATE'S OPT-OUT (LOH-9 S2). A conversation with session
+    # roles refuses a move by default because v1 does not carry them; this flag is
+    # the explicit "move it anyway, stash the definitions on this device" — never
+    # silent, because the move's receipt and its refusal name the count and path.
+    #
+    # NO `help=` STRING, DELIBERATELY. Every key in ``cli.sessions_help`` is
+    # already recorded as missing for four ACTIVE locales (es/hi/ru/vi); a new
+    # English key would GROW that coverage allowance, which the shrink-only gate
+    # forbids, and translating the 48-key namespace for four locales is a review
+    # wave of its own. The flag is still listed by argparse and its consequences
+    # are stated by the refusal and the receipt, so the gap is the one-line
+    # description only (disclosed in the LOH-9 S2 PR).
+    move_parser.add_argument("--drop-session-roles", action="store_true")
     move_parser.add_argument(
         "--cancel-queued",
         metavar="SESSION",
@@ -2079,6 +2093,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=(_eh.supervisor_fd().envelope(locale=help_locale)["text"]),
     )
+    # Tier-1 remote compute (``lop exec --remote``). Registered from its own
+    # module because the flag set is also the classification the refusal reads:
+    # keeping the parser and the "what does this flag mean remotely" table
+    # together is what stops the two from disagreeing.
+    add_remote_arguments(exec_parser, help_locale=help_locale)
 
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
@@ -6029,6 +6048,12 @@ _REMOTE_ROW_FILL: dict[str, Any] = {
     "subagents_running": None,
     "subagents_queued": None,
     "last_activity_s": None,
+    # THE EXIT RECORD'S THREE READINGS. A remote catalogue row does not carry
+    # them, so the fill keeps the merged list ONE shape: absent is null, exactly
+    # as this table treats every other fact a peer cannot report.
+    "stopped_at_s": None,
+    "stop_reason": "",
+    "stop_requested": None,
     "completion_kind": "",
     "completion_reason": "",
     "leaving": "",
@@ -6462,7 +6487,7 @@ def _carry_lines(result: dict[str, Any]) -> list[str]:
     if not isinstance(carry, dict):
         return []
     lines: list[str] = []
-    for key in ("running_notice", "notice", "monitors_notice"):
+    for key in ("running_notice", "notice", "monitors_notice", "session_roles_notice"):
         text = carry.get(key)
         if isinstance(text, str) and text:
             lines.append(text)
@@ -6509,36 +6534,66 @@ def _sessions_move_words(
         # pre-safe-point reading).
         queue = result["queue"]
         phase = str(result.get("phase") or queue.get("phase") or "queued")
+        # A queued DROP still owes the user its stash promise (QA round 2): the
+        # same carry line the finished move prints, from the record-backed carry.
+        stay_lines = _carry_lines(result)
         to_block_q = result.get("to_device") or {}
         # The caller's own `to` (what they typed) beats an opaque device id, and
         # a product phrase beats both: a raw id means nothing to a person (D9).
         target = str(to_block_q.get("name") or to or "another device")
+        # THE SENTENCE MUST NOT READ AS A COMPLETED MOVE (docs/design/
+        # mesh-move-outcome.md, "Why this exists" item 1): a queued receipt is a
+        # durable INTENT, and several surfaces rendered "queued" as "Moved" — the
+        # reported failure was a move that announced itself and changed nothing. The
+        # raw phase token stays on the record (`--json`); the sentence says where the
+        # move really is, and only ``resumed`` speaks about arrival.
         notes = {
-            "queued": ("waiting for a safe point", "queued"),
+            "queued": "It is waiting for a safe point before it starts.",
             "finishing": (
-                "waiting for the current step to finish (a pending approval holds this up)",
-                "queued",
+                "It is waiting for the current step to finish (a pending approval "
+                "holds this up)."
             ),
-            "paused": ("the move has started", "running"),
-            "copying": ("the move has started", "running"),
-            "resumed": (f"it has arrived on {target}", "arrived"),
+            "paused": "",
+            "copying": "",
+            "resumed": "",
         }
-        note, shape = notes.get(phase, ("", "queued"))
+        note = notes.get(phase, "")
+        if phase in ("resumed",):
+            shape = "arrived"
+        elif phase in ("paused", "copying"):
+            shape = "running"
+        else:
+            shape = "queued"
         head = f"Queued a move of {session_id} to {target}"
-        head += f" — {note}." if note else "."
+        if shape == "running":
+            # THE COPY STARTED, so the cancel hint would be a lie: from ``paused``
+            # on, ``move_queue.cancel`` answers ``too_late``.
+            head += f" — the copy has started (phase: {phase})."
+        elif shape == "queued":
+            head += f" — nothing has moved yet (phase: {phase})."
+        else:
+            head += "."
         if shape == "arrived":
-            return [head, "It is no longer running on this device."]
+            return [
+                head,
+                f"It has arrived on {target}.",
+                "It is no longer running on this device.",
+                *stay_lines,
+            ]
         if shape == "running":
             return [
                 head,
                 f"It can no longer be cancelled; the conversation continues on {target}.",
+                *stay_lines,
             ]
         return [
             head,
+            *([note] if note else []),
             "Windows open on it are told first and get a moment to follow; any that "
             f"can't will be disconnected, and the conversation continues on {target}.",
             f"Cancel the queued move before it starts with "
             f"`lop sessions move --cancel-queued {session_id}`.",
+            *stay_lines,
         ]
 
     to_block = result.get("to_device") or {}
@@ -6574,6 +6629,20 @@ def _sessions_move_words(
         engage_lines = [
             f"{target} was asked to start it as soon as it lands; that device's own "
             "listing is where it shows."
+        ]
+    from local_operator.network import mobility as mobility_mod
+
+    if mobility_mod.move_receipt_state(result) != "completed":
+        # THE SAME RULE, WITHOUT A QUEUE BLOCK: an in-progress receipt is a handoff
+        # whose commit has not landed yet, and no surface may call that "Moved".
+        # NOT "QUEUED" EITHER (QA round 1, Q-3): no producer reaches here through the
+        # queue (that receipt carries a ``queue`` block and is worded above), so the
+        # mechanism word would name the wrong thing — this is a handoff that started
+        # and has not finished.
+        return [
+            f"The move of {session_id} to {target} is still in progress "
+            f"(phase: {result.get('phase') or 'in_progress'}); nothing has landed yet.",
+            "Run this verb again to finish it.",
         ]
     if result.get("mode") == "keep":
         return [
@@ -6667,6 +6736,9 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
         # off, the same contract the parser's default gives it.
         queue=bool(getattr(args, "queue", False)),
+        # ``bool(...)`` so a hand-rolled Namespace without the attribute gets the
+        # protective default (the source refuses; nothing is dropped silently).
+        drop_session_roles=bool(getattr(args, "drop_session_roles", False)),
     )
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
@@ -7206,6 +7278,13 @@ def sessions_command(args: argparse.Namespace) -> int:
     )
     if show_stored:
         header += f" {'LAST_ACTIVE':>11}"
+        # STOPPED rides beside LAST_ACTIVE on the same gate: a stored session has
+        # no uptime, so when it LAST MOVED and when it LAST STOPPED are the two
+        # clocks a reader can actually use. The reason cell follows, because the
+        # age alone cannot separate "it idled out" from "I stopped it" — the
+        # question the 2026-09-30 sweep left unanswered (see ``stop_requested``).
+        header += f" {'STOPPED':>11}"
+        header += f" {'STOP_REASON':<{STOP_REASON_COLUMN_WIDTH}}"
     if show_why:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
@@ -7274,6 +7353,24 @@ def sessions_command(args: argparse.Namespace) -> int:
             stamp = row["last_activity_s"]
             age = "—" if stamp is None else _format_duration(max(0.0, now - stamp))
             line += f" {age:>11}"
+            # A REAL AGE FROM THE EXIT RECORD, and "—" where there is none. The
+            # two are different sentences and the column must not blur them: a
+            # SIGKILLed runtime writes no record, and printing the transcript's
+            # mtime here would invent a departure nobody observed.
+            stopped = row.get("stopped_at_s")
+            stopped_age = (
+                "—" if stopped is None else _format_duration(max(0.0, now - float(stopped)))
+            )
+            line += f" {stopped_age:>11}"
+            # THE REASON, fitted and marked by the same helpers WHY uses — not
+            # character slicing, which is what runs a wide-glyph row into its
+            # neighbour. Only a stored row can carry one; a live row's cell is
+            # blank because nothing has stopped to report.
+            if stored:
+                said = _clamp_reason_cell(row.get("stop_reason") or "—", STOP_REASON_COLUMN_WIDTH)
+            else:
+                said = ""
+            line += f" {_pad_cell(said, STOP_REASON_COLUMN_WIDTH)}"
         if show_why:
             cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
             # `:<{WHY_COLUMN_WIDTH}` would pad this by CHARACTERS and hand a
@@ -9320,6 +9417,21 @@ def _live_state_supersedes_outcome(row: dict[str, Any]) -> bool:
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.
 WHY_COLUMN_WIDTH = 48
+
+
+#: Width of `lop sessions`' trailing STOP_REASON column, in display CELLS.
+#:
+#: THE SECOND HALF of the STOPPED pair. The age column says WHEN the runtime's own
+#: exit path ran; this one says WHY, in the runtime's words (``idle-exit``,
+#: ``retiring for 0.85.0``, ``SIGTERM``). Both are gated on stored rows exactly
+#: like LAST_ACTIVE, because both are facts only a stopped runtime can report.
+#:
+#: Wide enough that every policy reason a runtime produces fits uncut —
+#: ``retiring for 0.85.0@abc1234`` is the long shape at 27 cells — and a longer
+#: one (the probe-unreadable idle exit appends its evidence) is MARKED by
+#: ``_clamp_reason_cell`` rather than silently sliced, because the cell's purpose
+#: is to answer a question and a plausible-looking cut answers it wrongly.
+STOP_REASON_COLUMN_WIDTH = 28
 
 
 #: Width of `lop sessions`' trailing LEAVING column, in display CELLS.
@@ -15585,6 +15697,51 @@ def _seed_sync_command(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _reject_extra_positionals(parser: Any, args: Any) -> None:
+    """Refuse a second positional on ``exec``; ``parser.error`` exits.
+
+    ONE HOME, TWO CALLERS. The positional trap is that a title reads as a second
+    prompt, so ``lop exec "Some Title" "do the work"`` would otherwise silently
+    treat the title as the prompt and run under the wrong brief. The remote
+    dispatch needs the same refusal — it now runs BEFORE the exec branch — and
+    duplicating the wording would let the two paths describe the rule differently.
+    """
+    # `args.command` is never None here: the catch-all `extra` only receives
+    # positionals that follow a first one.
+    extras = getattr(args, "extra", None) or []
+    if not extras:
+        return
+    quoted = [repr(part) for part in (args.command, *extras)]
+    received = (
+        ", ".join(quoted[:-1]) + f" and {quoted[-1]}" if len(quoted) > 2 else " and ".join(quoted)
+    )
+    # Exactly two positionals is the common shape — a title mistaken for the
+    # prompt — and can be repaired with a concrete command. Three or more cannot:
+    # a `--name <title> <prompt>` example would silently DROP the tail, handing
+    # the caller a valid command that runs a different brief than the one they
+    # composed. Those get the rule instead of a misleading example.
+    if len(quoted) == 2:
+        hint = (
+            "The first positional is the prompt, not a title. To name the run, "
+            "pass the title via --name:\n"
+            # shlex.quote, not repr: the suggestion is composed to be pasted into
+            # a shell, and repr's escaping is Python's, not the shell's (a title
+            # like `O'Brien's audit` renders differently under each).
+            f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
+        )
+    else:
+        hint = (
+            "The first positional is the prompt, not a title: pass the title via "
+            "--name, and quote the prompt as the ONE positional — the extra "
+            "positionals are not consumed.\n"
+        )
+    parser.error(
+        f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
+        f"{received}.\n{hint}"
+        "(--workstream is a flag — it publishes the run and takes no value.)"
+    )
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -15629,6 +15786,22 @@ def main() -> int:
         )
         if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
             setup_cross_platform_environment()
+
+        # REMOTE COMPUTE IS DISPATCHED BEFORE `--resume` IS RESOLVED. A remote
+        # invocation is not a session: `--remote --resume x` has to get the
+        # named local-only refusal (it is in LOCAL_ONLY_FLAGS), and it must not
+        # read or backfill the session store — the branch below classifies
+        # pre-existing sessions and stamps title sidecars, which are writes this
+        # command has no business making. `wants_remote` also covers the
+        # flags whose only meaning is remote, so a bare `--remote-status` reaches
+        # the same refusals instead of a local run that ignores it. The heavy
+        # module (client, httpx, exec_mode) is imported HERE, never at the top of
+        # this file.
+        if getattr(args, "subcommand", None) == "exec" and wants_remote(args):
+            _reject_extra_positionals(parser, args)
+            from local_operator.remote_compute.cli import remote_command
+
+            return remote_command(args)
 
         # Resolve `--resume` HERE, before anything is started. Left to the
         # session factory it surfaces inside the TUI as "session failed to
@@ -16251,48 +16424,13 @@ def main() -> int:
             print("usage: lop install {status, prune, migrate}", file=sys.stderr)
             return 1
         elif args.subcommand == "exec":
-            # Refuse a second positional BEFORE anything else in the branch. The
-            # trap is that a title reads as a second prompt, so
-            # `lop exec "Some Title" "do the work"` would otherwise silently
-            # treat the title as the prompt and run under the wrong brief.
-            # `--workstream` is the flag that publishes a run and takes no value,
-            # which is exactly why the title cannot be passed positionally.
-            # `args.command` is never None here: the catch-all `extra` only
-            # receives positionals that follow a first one.
-            extras = getattr(args, "extra", None) or []
-            if extras:
-                quoted = [repr(part) for part in (args.command, *extras)]
-                received = (
-                    ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
-                    if len(quoted) > 2
-                    else " and ".join(quoted)
-                )
-                # Exactly two positionals is the common shape — a title mistaken
-                # for the prompt — and can be repaired with a concrete command.
-                # Three or more cannot: a `--name <title> <prompt>` example would
-                # silently DROP the tail, handing the caller a valid command that
-                # runs a different brief than the one they composed. Those get the
-                # rule instead of a misleading example.
-                if len(quoted) == 2:
-                    hint = (
-                        "The first positional is the prompt, not a title. To name the run, "
-                        "pass the title via --name:\n"
-                        # shlex.quote, not repr: the suggestion is composed to be pasted
-                        # into a shell, and repr's escaping is Python's, not the shell's
-                        # (a title like `O'Brien's audit` renders differently under each).
-                        f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
-                    )
-                else:
-                    hint = (
-                        "The first positional is the prompt, not a title: pass the title via "
-                        "--name, and quote the prompt as the ONE positional — the extra "
-                        "positionals are not consumed.\n"
-                    )
-                parser.error(
-                    f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
-                    f"{received}.\n{hint}"
-                    "(--workstream is a flag — it publishes the run and takes no value.)"
-                )
+            # The positional refusal lives in one helper because the remote
+            # dispatch above needs it too; see `_reject_extra_positionals`.
+            # Remote invocations never reach this branch: they are dispatched
+            # above, before `--resume` is resolved, and the predicate there is
+            # the same `wants_remote` — one site, so a remote refusal cannot be
+            # described one way early and another late.
+            _reject_extra_positionals(parser, args)
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
             # handling matches the legacy pre-run behavior.

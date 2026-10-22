@@ -201,3 +201,21 @@ def test_mode_probe_owner_and_viewer() -> None:
     # A facade that cannot say, and a bare object: False, never a raise.
     assert queued_ask_engine_live(SimpleNamespace()) is False
     assert queued_ask_engine_live(object()) is False
+
+
+def test_a_dismissal_receipt_names_who_which_surface_and_why():
+    from local_operator.harness.rows import ask_response_notice
+
+    text, kind = ask_response_notice(
+        {
+            "status": "dismissed",
+            "ask_id": "a-1",
+            "reason": "answered_in_chat",
+            "by": {"surface": "remote"},
+        }
+    )
+    assert text == "Dismissed by you (phone) — settled in chat (ask a-1)"
+    assert kind == "info"
+    assert "Answered" not in text
+    bare, _ = ask_response_notice({"status": "dismissed", "ask_id": "a-1"})
+    assert bare == "Dismissed by you — no longer needed (ask a-1)"

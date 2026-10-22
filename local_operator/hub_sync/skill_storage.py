@@ -97,8 +97,16 @@ class ManagedSkillStorage:
         if not path.exists():
             return None
         if not path.is_dir():
+            # A FILE is a different fact from an unowned skill directory (the
+            # ``apply`` refusal), and it carries the same ``alias-occupied``
+            # category the publish preview reports: the client keys on the code
+            # rather than on words inside the sentence (D1), and the storage
+            # layer cannot know which operation -- pull, publish, update or
+            # unpull -- sent it here.
             raise LinkError(
-                "origin-conflict", "managed alias is occupied by another local artifact"
+                "alias-occupied",
+                f"a file named {alias!r} is already in the skills folder; "
+                "move it somewhere else, then try again",
             )
         document = SkillDocument.from_directory(path)
         if document.name != alias:
@@ -273,7 +281,17 @@ class ManagedSkillStorage:
                 or current_record.local_alias != alias
                 or current_record.identity != identity
             ):
-                raise LinkError("origin-conflict", "refusing to overwrite an unknown local skill")
+                # Reached by pull, publish AND update: name the standing fact
+                # and the remedy every one of them shares. Do NOT name "pull"
+                # here -- update arrives through the same chokepoint. The code
+                # is ``alias-occupied``, not ``origin-conflict``: a name
+                # collision is not a lineage conflict, and the desktop keys its
+                # "that alias is already used" copy on the category.
+                raise LinkError(
+                    "alias-occupied",
+                    f"a skill named {alias!r} already exists on this machine outside the hub; "
+                    "move it elsewhere or give it a different name, then try again",
+                )
             before = current.fingerprint if current is not None else None
             if before != expected_fingerprint:
                 raise LinkError("local-concurrent-edit", "managed skill changed before integration")
@@ -424,8 +442,13 @@ class ManagedSkillStorage:
                 # already reports, not a state this route may paper over.
                 raise LinkError("local-concurrent-edit", "managed skill is missing locally")
             if not destination.is_dir():
+                # Same fact and same code as ``_document``: a file holds the
+                # name, so recovery reuses that category and sentence rather
+                # than the skill one.
                 raise LinkError(
-                    "origin-conflict", "managed alias is occupied by another local artifact"
+                    "alias-occupied",
+                    f"a file named {alias!r} is already in the skills folder; "
+                    "move it somewhere else, then try again",
                 )
             operation = uuid.uuid4().hex
             tombstone = self._tombstone(local_id, operation)

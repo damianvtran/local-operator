@@ -971,7 +971,7 @@ async def test_live_progress_never_schedules_the_roster_writer(tmp_path, monkeyp
     # coalescing regression. Batching is asserted by the count below.
     await wait_for(lambda: bool(updates), timeout=0.25)
     assert len(updates) == 1
-    assert updates[0].changes["jobs"][0]["latest_details"] == {"progress": "boundary 59"}
+    assert updates[0].job_deltas["upserted"][0]["latest_details"] == {"progress": "boundary 59"}
     subscription.unsubscribe()
 
     # Settlement remains durable even though progress is not. A fresh task must

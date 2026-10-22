@@ -68,7 +68,7 @@ from textual.events import (
     Resize,
     TextSelected,
 )
-from textual.geometry import Size
+from textual.geometry import Region, Size
 
 # Aliased: `Message` in this module is the harness's conversation message.
 from textual.message import Message as TextualMessage
@@ -3751,6 +3751,15 @@ class _AttachBehindSend:
 
 RESIZE_REFIT_DELAY_S = 0.05
 
+#: How often, and for how long, `_watch_overlay_ground` re-checks the dock's
+#: arranged region after a terminal resize. The arrange lands after the resize
+#: event (measured 4-70 ms here, later under fleet load), and a height-only
+#: resize sends no later dock event at all, so the settle is observed rather
+#: than assumed. 1.5 s is ~20x the local worst case and still short enough that
+#: a dead poll ends inside one interaction.
+RESIZE_SETTLE_POLL_S = 0.016
+RESIZE_SETTLE_WINDOW_S = 1.5
+
 #: How often, and for how long, to re-check ``sessions/last-cleanup.json``
 #: after adoption. The startup cleanup pass is dispatched at session
 #: construction and waits ``session_factory._STORE_MAINTENANCE_IDLE_DELAY_SECONDS``
@@ -4531,6 +4540,113 @@ def _is_bridge_ask_row(row: Any) -> bool:
         if str(question.get("question_id") or "").strip():
             return True
     return False
+
+
+def _carry_dict(result: dict[str, Any]) -> dict[str, Any]:
+    """``result["carry"]`` as a mapping, whatever a peer's frame put there.
+
+    The carry block is optional and produced by the remote side, so a malformed
+    one must read as "no carry" rather than crash a receipt's rendering (LOH-9
+    S2, M4 — the stash notice rides this block).
+    """
+    raw = result.get("carry")
+    return raw if isinstance(raw, dict) else {}
+
+
+#: The product words for a move's phase on an IN-PROGRESS receipt (UX round 1,
+#: U3). A raw contract token is a protocol spelling, not something a person can
+#: read: the receipt said "still in progress (handing_off)" and the user had no
+#: way to know that meant the handoff was finishing. Every phase a move can
+#: report has a gloss here, and the fallback is a plain sentence rather than an
+#: empty parenthesis, so no path can leak `prepared`/`handing_off` to a screen.
+_MOVE_IN_PROGRESS_GLOSS: dict[str, str] = {
+    "prepared": "preparing the handoff",
+    "handing_off": "finishing the handoff",
+    "committed": "waiting for the destination to adopt it",
+    "done": "waiting for the destination to adopt it",
+}
+
+
+def _move_hand_over_sentence(session_id: str, devices: Sequence[str], *, leaving: bool) -> str:
+    """The ONE sentence for "a device stayed silent, so nothing was handed over".
+
+    WHY A COMPOSER RATHER THAN THREE F-STRINGS (``docs/design/mesh-move-outcome.md``,
+    clause 2). The move's pre-check learns the same fact from three different
+    reads — a known holder that stopped answering, a resolution read where
+    devices did not reply, and an offload whose typed destination is silent —
+    and the operator's reported experience was a move that looked like it had
+    started when it had not. One situation gets one sentence, the rule
+    ``session.remote_open``'s composers already follow; two spellings would let
+    one surface keep a fix the other lost.
+
+    ``leaving`` decides the tail and nothing else: when the request would have
+    left the session the true statement is that the user is still in it, and
+    for a move of ANOTHER session the true one is that the session is still
+    where it was. Saying "you are still in it" there would address a screen the
+    user is not looking at.
+    """
+    from local_operator.resume import UNNAMED_DEVICE
+
+    names = [name or UNNAMED_DEVICE for name in devices]
+    if len(names) == 1:
+        who = f"{names[0]} is not answering"
+    else:
+        who = f"{', '.join(names[:-1])} and {names[-1]} are not answering"
+    tail = "you are still in it" if leaving else "it is still here"
+    return f"{who} right now, so {session_id} could not be handed over. Nothing changed; {tail}."
+
+
+def _offload_target_refusal(
+    typed: str, session_id: str, root: Path, *, leaving: bool
+) -> str | None:
+    """The refusal for an offload whose typed destination peer is not answering.
+
+    WHY THE PEER IS RESOLVED FROM WHAT THE USER TYPED. ``--to`` names a device;
+    the move's own destination resolution belongs to the CLI, so this only has
+    to answer "is the peer I am about to leave for known to be silent". It
+    resolves the same vocabulary ``/new remote`` offers (``known_peers``: the
+    name, or the full id), and a token it cannot resolve is NEVER a refusal —
+    the CLI owns that answer, and inventing one here would refuse spellings the
+    relay accepts.
+
+    THE SILENCE IS THE SIDEBAR'S OWN READ (``read_listing``), not a second
+    fan-out: the relay reports a member that did not answer as an unanswered
+    peer with no rows, which is exactly the fact this needs. A peer that
+    answered — with or without sessions — is absent from that list and the move
+    proceeds; a failed read is not evidence of silence either, so it also
+    proceeds and lets the CLI answer.
+
+    ``ttl_s=0`` BECAUSE A PRE-CHECK IS A CLAIM ABOUT NOW (agent review round 1,
+    R1-4). The cache is right for the sidebar, which repaints a list it knows is
+    a few seconds old, and wrong here: a peer that answered since the last poll
+    would be refused by a stale silence, and the recall pre-check already forces
+    a fresh read (``remote_row_and_silence`` on a miss) — the two halves of one
+    command must be equally fresh or a device behaves differently depending on
+    the direction of the move. The failed-read arm is unchanged: no answer is
+    not evidence of absence.
+
+    Blocking: the listing read fans out to the mesh, so callers run this off the
+    loop.
+    """
+    from local_operator.network.peers import known_peers
+    from local_operator.session.peer_rows import read_listing
+
+    try:
+        peers = known_peers(root)
+    except Exception:  # noqa: BLE001 — an unreadable store is not a reachability claim
+        return None
+    match = next((peer for peer in peers if typed in (peer.name, peer.device_id)), None)
+    if match is None or not match.device_id:
+        return None
+    try:
+        _, unanswered = read_listing(root, ttl_s=0)
+    except Exception:  # noqa: BLE001 — a failed read is not evidence of silence
+        return None
+    if not any(peer.device_id == match.device_id for peer in unanswered):
+        return None
+    return _move_hand_over_sentence(
+        session_id, [match.name or match.device_id[:8]], leaving=leaving
+    )
 
 
 class OperatorApp(App[None]):
@@ -5694,6 +5810,26 @@ class OperatorApp(App[None]):
         # Unlike a destination-scoped switch receipt, a completed create must
         # remain discoverable wherever the user navigated while it was copying.
         self._pending_fork_outcome: tuple[str, NoticeKind] | None = None
+        #: A move's outcome that has to be READ IN THE SESSION IT NAMES, not in
+        #: the one on screen when the CLI answers: ``(text, kind, target_id)``.
+        #:
+        #: WHY. A refusal or a queued receipt that is followed by "reopen where
+        #: it lives" is emitted into the fresh local conversation the leave just
+        #: created, and the reopen replaces that transcript a moment later —
+        #: measured on the real app, the final screen held only "opened <id> on
+        #: <peer>", so a queued, cancellable move was indistinguishable from one
+        #: that never started (UX round 1, U2). Posting is deferred to the
+        #: transition seams instead, once ``_conversation_id()`` is the id here.
+        #:
+        #: THE TARGET ID ABOARD is what makes a carry undeliverable rather than
+        #: freshly wrong on a later adoption: the BODY is destination-scoped and a
+        #: seam that landed elsewhere never posts it. The FALLBACK is the one body
+        #: that may land anywhere, because the reopen it was waiting on can fail
+        #: and take an ACCEPTED outcome off the screen with it (UX round 2, U2-1);
+        #: it names no current conversation and claims no completion, so it is true
+        #: wherever the user is left. Single-use either way: the first seam that
+        #: sees the carry posts one of the two and clears it.
+        self._move_notice_carry: tuple[str, NoticeKind, str, str] | None = None
         #: A ``/aida <request>`` typed BEFORE her conversation is on screen:
         #: ``(session_id, text, attachments)``, spent by ``_submit_aida_prompt``
         #: at the same adoption seams as the boot prompt and dropped — rather
@@ -18050,6 +18186,14 @@ class OperatorApp(App[None]):
                 outcome, self._pending_fork_outcome = self._pending_fork_outcome, None
                 if outcome is not None:
                     self._notice(*outcome)
+                # THE MOVE'S OUTCOME IS READABLE HERE (U2). A move refusal or
+                # queued receipt that owed the user a reopen is carried, not
+                # painted, and this is the seam every transition ends at — after
+                # adoption, after a local swap, and (by clearing) after a reopen
+                # that failed. Draining only when no sidebar navigation is in
+                # flight keeps a navigation's own done callback as that path's
+                # single owner; two drains would race one latch.
+                self._drain_move_notice_carry()
                 # If the settled session has an authoritative EMPTY roster, retire
                 # the one-row transition reserve now. Waiting for another keystroke
                 # would leave a blank/loading hole indefinitely after a refused
@@ -18895,6 +19039,14 @@ class OperatorApp(App[None]):
             await self._preflight_usage(remote)
         finally:
             self._swapping_session = False
+        # THE REMOTE REOPEN IS ON SCREEN NOW, so a move outcome that was carried
+        # across it can be read (U2). This is the mesh path a recall's reopen
+        # takes (`_open_session_or_refuse` → `_open_remote_session`), and the
+        # measured failure was that adoption replaced the transcript AFTER the
+        # receipt had been painted into the one it replaced. ``_adopt_session``
+        # above has already made ``remote`` current, so the drain's id check is
+        # the assertion that this text belongs to THIS conversation.
+        self._drain_move_notice_carry()
 
     # -- archive and delete --------------------------------------------------
 
@@ -19955,24 +20107,21 @@ class OperatorApp(App[None]):
         except Exception:
             return []
         choices: list[ArgumentChoice] = []
+        # ONE ROW PER NAME (agent/QA round 1, Q-5). The composite lists session
+        # rows first, so a tolerated race (an account team created after a
+        # session team of the same name, or a name that is an alias in one store)
+        # keeps the row in force and drops the shadowed one — the rule the agent
+        # picker already applied. Aliases are deliberately NOT merged: two
+        # different names are two different keys to type.
+        seen_names: set[str] = set()
         for team in teams:
-            # ``member_count()``, never ``len(members) + 1`` (D2). The old
-            # arithmetic assumed the manager is not itself on the roster, which
-            # is false for real teams — two of the three on the reference
-            # machine list their manager as a member, so the picker reported 8
-            # roles for a 7-role team. It also collapsed a ``reviewer x2`` slot
-            # to one, understating the roster the user assembled.
-            #
-            # This is the count `org_chart.py` and `lop teams` already use, and
-            # the chart is TWO KEYSTROKES from this row — a picker that
-            # disagrees with the boxes it opens is worse than one that says
-            # nothing.
-            # Defensive access kept from the original: this list is built from
-            # whatever the session's registry yields, and a reduced double
-            # without the method must degrade to a row rather than break the
-            # picker mid-keystroke.
-            counter = getattr(team, "member_count", None)
-            slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
+            key = str(getattr(team, "name", "") or "").strip().casefold()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            # The COUNT is assembled by ``_team_facts`` (D2): ``member_count()``,
+            # never ``len(members) + 1``, the same number `org_chart.py`, the
+            # listing and `lop teams` paint.
             description = (getattr(team, "description", "") or "").strip() or "no description"
             # FROZEN display rule (D2): only a CHOSEN-and-different label earns
             # the description prefix (``enrichment_label``) -- a derived
@@ -20023,7 +20172,7 @@ class OperatorApp(App[None]):
                     # away in the listing and the chart; the description is the
                     # only thing telling the user which team this IS.
                     aliases=aliases,
-                    detail=f"{slots} {'member' if slots == 1 else 'members'}",
+                    detail=self._team_facts(team),
                 )
             )
         return choices
@@ -20391,6 +20540,55 @@ class OperatorApp(App[None]):
         )
         return rows
 
+    def _team_facts(self, team: Any, registry: Any = None, *, led_by: bool = False) -> str:
+        """The facts line EVERY team surface paints: roster size, then scope.
+
+        ONE assembly for the local listing, the argument picker and the block a
+        follower receives over the wire. They used to build the same sentence in
+        three places — the wire twin even hardcoded English beside the keyed local
+        row — so the scope token would have been a fourth spelling to drift.
+        ``registry`` is passed where the caller already proved it answers
+        ``list_teams``; otherwise the session's own registry is read, which is the
+        same one the rows came from.
+        """
+        from local_operator.profile_scope import row_scope
+
+        # Defensive access kept from the original: a doubled registry method is
+        # typed ``object`` through ``getattr``, and the annotation states the one
+        # contract this line needs (a count), so a reduced double still degrades
+        # to a row instead of breaking the picker mid-keystroke.
+        counter: Callable[[], int] | None = getattr(team, "member_count", None)
+        slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
+        parts: list[str] = []
+        if led_by:
+            from local_operator.i18n.keys import tui_app as app_keys
+
+            parts.append(
+                _t(
+                    app_keys.skills_led_by(
+                        manager=str(getattr(team, "manager", "") or ""),
+                        count=slots,
+                        shown=str(slots),
+                    )
+                )
+            )
+        else:
+            # "MEMBERS", never "roles" (R6): the count comes from member_count(),
+            # which excludes the manager, and every sibling surface says members.
+            parts.append(f"{slots} {'member' if slots == 1 else 'members'}")
+        if registry is None:
+            registry = self._team_registry()
+        # Only a CONVERSATION row is marked: the account is the default a reader
+        # already assumes, and marking every global row would rewrite every
+        # existing listing. Plain registries (desktop account routes) answer
+        # "global", so no token appears there.
+        if row_scope(registry, team) == "session":
+            from local_operator.i18n.keys import tui_authoring as author_keys
+            from local_operator.i18n.text import tr
+
+            parts.append(tr("tui.authoring")(author_keys.scope_conversation()))
+        return " · ".join(parts)
+
     def _team_list_block(self, teams: list[Any]) -> RichBlock:
         """A structured roster list for bare ``/team``.
 
@@ -20408,29 +20606,18 @@ class OperatorApp(App[None]):
         body = Style(color=theme_mod.semantic_color("dim"))
         rows: list[Any] = [Text(_t(_x.skills_teams_heading()), style=section)]
         for team in teams:
-            # ``member_count()`` for the D2 reason the picker documents: the
-            # manager is often ON the roster, so `len(members) + 1` overcounts,
-            # and a multi-count slot was collapsed to one. The listing, the
-            # picker and the org chart must agree.
-            slots = team.member_count()
             # The shared display rule, bounded for this row (N1): a long
             # custom label ellipsizes so the KEY keeps its place on the line
             # -- `/team <name>` and the footer both address by the key, so the
             # row must show what to type.
             display = self._team_listing_form(team)
             rows.append(Padding(Text(display, style=heading), (0, 0, 0, 2)))
-            # "members", matching the number (R6) — see the picker's note. This
-            # row names the manager separately ("Led by <manager> · N
-            # members"), so calling the roster count "roles" also double-counted
-            # him in the reader's head.
+            # "members", matching the number (R6) — see the picker's note. The
+            # shared helper names the manager separately ("Led by <manager> · N
+            # members") and appends the scope token for a conversation row in the
+            # same order the picker and the wire twin paint it.
             rows.append(
-                Padding(
-                    Text(
-                        _t(_x.skills_led_by(manager=team.manager, count=slots, shown=str(slots))),
-                        style=body,
-                    ),
-                    (0, 0, 0, 4),
-                )
+                Padding(Text(self._team_facts(team, led_by=True), style=body), (0, 0, 0, 4))
             )
             summary = (team.description or "").strip()
             if summary:
@@ -23245,6 +23432,66 @@ class OperatorApp(App[None]):
         # cards over whatever the band settled to, which is the order those two
         # already depend on.
         self.call_after_refresh(self._refresh_band)
+        # The cards' ground lives in the dock, whose arranged region is only
+        # readable after this handler returns. Watch it settle rather than
+        # guessing a delay; see `_watch_overlay_ground`.
+        self._watch_overlay_ground()
+
+    #: The short-lived watcher armed by `on_resize`, if one is running.
+    _ground_watch_timer: object | None = None
+
+    def _watch_overlay_ground(self) -> None:
+        """Re-fit the overlay cards as soon as the dock's arranged ground moves.
+
+        The cards are hosted in ``width: auto`` containers and are never resized
+        by the terminal, so they measure their ground from the DOCK's region
+        (``overlay.rows_above_dock``). That region is assigned by the screen's
+        arrange pass, which runs AFTER ``App.on_resize``: measuring from the
+        resize handler reads the PREVIOUS frame's dock. Measured on the goal
+        card at 100x40 -> 80x12, the handler and the 50 ms debounce both read
+        ``rows_above_dock == 29`` (then 33) on a 12-row screen, kept the card's
+        9-row height and its gutter, and left it over the composer at row 6
+        until an unrelated pass re-measured ~0.7 s later — the recorded CI
+        signature ``card bottom 22 covers the composer at 6``.
+
+        A HEIGHT-ONLY resize is why an event on the dock cannot be the seam (QA
+        round 1, Q-1): the bottom-docked composer keeps its size (75x5 across
+        100x40 -> 100x12) and only moves; Textual's one ``Resize`` arrives
+        before the arrange and no later one is sent. Nor is a message posted
+        from that arrange delivered — measured, the queue drained with the
+        handler never called. So this WATCHES the arranged ground for a bounded
+        window after the resize and re-measures on a change. The window covers
+        the arrange (measured 4-70 ms locally, longer under load); a drag-resize
+        restarts it, and it stops itself so no poll survives a settled screen
+        for longer than ``RESIZE_SETTLE_WINDOW_S``.
+
+        The re-measure does not move the dock, so a settled screen produces no
+        further report: the watcher is a bounded settle check, not a poll loop.
+        """
+        timer = self._ground_watch_timer
+        if timer is not None:
+            timer.stop()  # type: ignore[attr-defined]
+        last = self._dock_ground()
+        deadline = time.monotonic() + RESIZE_SETTLE_WINDOW_S
+
+        def tick() -> None:
+            nonlocal last
+            ground = self._dock_ground()
+            if ground is not None and ground != last:
+                last = ground
+                self._sync_overlay_layout(force=True)
+            if time.monotonic() >= deadline:
+                timer.stop()  # type: ignore[attr-defined]
+                self._ground_watch_timer = None
+
+        self._ground_watch_timer = timer = self.set_interval(RESIZE_SETTLE_POLL_S, tick)
+
+    def _dock_ground(self) -> tuple[Size, Region] | None:
+        """The terminal size and the docked composer's box, if there is one."""
+        try:
+            return (self.size, self.screen.query_one("#input-shell").region)
+        except Exception:  # noqa: BLE001 - a stripped harness or a modal screen
+            return None
 
     def _sync_subagent_compact_layout(self, screen_height: int) -> None:
         """Keep narrow detail pages useful by yielding secondary dock rows."""
@@ -34527,6 +34774,12 @@ class OperatorApp(App[None]):
         reopened where it now lives: attached-remote for ``--to <peer>``, local
         for ``--to local``.
 
+        THE TARGET IS READ BEFORE THAT LEAVE (design clause 2, ``docs/design/
+        mesh-move-outcome.md``): a recall from a device that is not answering,
+        or an offload to one, is refused while the user is still in the session
+        — see ``_move_target_refusal`` — because leaving first and asking after
+        is exactly the reported defect.
+
         ``--queue`` IS THE TWO GUARDS' OWN REMEDY (design §5.4): a turn in
         flight and a viewer parked elsewhere are exactly the blockers the queued
         move waits out — the merged queue path records the intent durably and
@@ -34574,12 +34827,66 @@ class OperatorApp(App[None]):
                 "error",
             )
             return
+        # WHERE THE CONVERSATION IS NOW, captured before the leave disposes the
+        # only session that can answer (UX round 1, U2): the queued and failed
+        # recall sentences must say the user is still on the peer, and after
+        # ``_leave_for_move`` this window is on a fresh local conversation with
+        # no way back to that fact. Empty for a local session.
+        home_facts = self._remote_owner_facts() if leaving else None
+        home_label = (home_facts[2] or home_facts[1]) if home_facts is not None else ""
         self._move_in_flight = True
-        phase_notice = NoticeBlock(self._move_phase_text(target_id, request, []), "info")
-        self._append_block(phase_notice, ends_empty_state=False)
+        # THE CHECK IS NEITHER INSTANT NOR SILENT (UX round 1, U1). The target
+        # read fans out to the mesh and can hold the worker for the full probe
+        # budget, and before this row existed the screen was an ordinary
+        # composer with no sign anything was under way — the one state a user is
+        # most likely to retry blind. Appended SYNCHRONOUSLY, before the worker
+        # can yield, so the very first frame after Enter carries it.
+        # `note`, not `info` (agent review round 2, R2-3 / design D2-1): this is
+        # prose the user reads while the fan-out holds the worker, and `info`'s
+        # `dim` token measures 3.77:1 on light paper, under the 4.5:1 AA floor;
+        # `note`'s muted ink is 7.18:1 there — the same measurement that moved the
+        # phase row two lines below.
+        checking_notice = self._system_notice_block(
+            f"checking whether {request.to} can take {target_id}…", "note"
+        )
+        # BUILT, NOT PAINTED: the phase row is a claim that the move has started,
+        # and nothing may claim that before the target answered (design clause 2,
+        # ``docs/design/mesh-move-outcome.md``) — ``_move_target_refusal`` runs
+        # first, and only its ``None`` appends this row.
+        # `note`, not `info` (design round 1, D1): the phase line is prose a user
+        # reads, and `info`'s dim token measures 3.77:1 on light paper, under the
+        # 4.5:1 AA floor; `note`'s muted ink is 7.18:1 there.
+        phase_notice = NoticeBlock(self._move_phase_text(target_id, request, []), "note")
+
+        def drop_checking() -> None:
+            # Guarded like the phase row's own restatement: a refusal that
+            # arrived after the transcript was replaced has nothing to remove.
+            if checking_notice.is_attached:
+                self._transcript_view().remove_block(checking_notice)
 
         async def run() -> None:
             try:
+                try:
+                    refusal = await self._move_target_refusal(target_id, request, leaving=leaving)
+                except Exception:  # noqa: BLE001 — a failed check is not a refusal
+                    # THE CHECK IS AN HONESTY GUARD, NOT THE AUTHORITY: the CLI
+                    # resolves and refuses the destination itself, so an
+                    # unexpected failure here must not turn /move into a silent
+                    # no-op. Proceeding hands the answer to the code that owns
+                    # it, the same way an unanswered read does.
+                    logger.debug("could not pre-check the move's target", exc_info=True)
+                    refusal = None
+                if refusal is not None:
+                    # ONE NOTICE AND NOTHING ELSE: the check row is withdrawn
+                    # with the claim it made (the session was not left and the
+                    # CLI was never run), and the refusal replaces it in place.
+                    drop_checking()
+                    self._system_notice(refusal, "warning")
+                    return
+                # WITHDRAWN BEFORE THE LEAVE: the check row belongs to the
+                # transcript the leave is about to replace (U1), so leaving it
+                # mounted would paint "checking …" into a session that is gone.
+                drop_checking()
                 if leaving:
                     # DETACH FIRST: the move cannot retire a runtime this viewer
                     # is attached to. `/new`'s own transition is the one that
@@ -34587,16 +34894,25 @@ class OperatorApp(App[None]):
                     # runtime back — never a remote one, see
                     # `_retire_unused_runtime`).
                     await self._leave_for_move()
+                # APPENDED AFTER THE LEAVE, into the transcript the user is
+                # actually looking at, and kept for the whole pending request
+                # (U1). The earlier order appended it to the OLD transcript,
+                # which the leave then removed: the user waited on an empty new
+                # conversation with no line saying the request was in flight.
+                self._append_block(phase_notice, ends_empty_state=False)
                 result = await asyncio.to_thread(
                     run_session_move,
                     target_id,
                     request.to,
                     keep=request.keep,
                     queue=request.queue,
+                    drop_session_roles=request.drop_session_roles,
                 )
             finally:
                 self._move_in_flight = False
-            self._publish_move_result(target_id, request, result, phase_notice, left=leaving)
+            self._publish_move_result(
+                target_id, request, result, phase_notice, left=leaving, home=home_label
+            )
 
         self.run_worker(run(), thread=False, group="session-move", exit_on_error=False)
 
@@ -34607,14 +34923,84 @@ class OperatorApp(App[None]):
         self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
         await self._reload_session()
 
+    async def _move_target_refusal(
+        self, session_id: str, request: "MoveTo", *, leaving: bool
+    ) -> str | None:
+        """The sentence refusing a move before the session is left, or ``None``.
+
+        WHY THE TARGET IS ASKED BEFORE ANYTHING MOVES (design clause 2). The old
+        order — paint "moving", leave the session, then ask — is the operator's
+        reported experience: a recall from a peer that had stopped answering said
+        it was moving, left the session, and put them back on the same remote
+        conversation behind a notice that was easy to miss. A move never leaves
+        until the first step has been accepted, so this reads the target FIRST
+        and a refusal leaves the screen exactly where it was.
+
+        THE READS ARE THE SIDEBAR'S OWN (``remote_row_and_silence`` for a recall,
+        ``_offload_target_refusal`` for a typed peer) and both fan out to the
+        mesh, so they run through ``asyncio.to_thread`` and the frame stays live
+        while the peers are asked. The local half is free: a session this device
+        holds is answered from its directory, and the zero-peer case never dials.
+
+        ONLY AN ANSWERED TARGET REFUSES. A local session is not a recall (its
+        read answers ``(None, ())``, exactly like an id nobody holds), a typed
+        peer this device cannot resolve is the CLI's answer to give, and a failed
+        read is not evidence of absence — each of those proceeds, so the CLI's
+        own refusal vocabulary stays the one the user reads.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session import remote_open
+
+        root = config_dir()
+        if request.to != "local":
+            return await asyncio.to_thread(
+                _offload_target_refusal, request.to, session_id, root, leaving=leaving
+            )
+        row, unanswered = await asyncio.to_thread(
+            remote_open.remote_row_and_silence, session_id, root
+        )
+        if row is not None:
+            # A KNOWN HOLDER: the one sentence the pick uses for this state, so a
+            # recall is refused in the words the rest of the surface already says.
+            if row.reachable:
+                return None
+            return remote_open.unreachable_peer_sentence(session_id, row)
+        if unanswered:
+            return _move_hand_over_sentence(
+                session_id, [peer.name for peer in unanswered], leaving=leaving
+            )
+        if (root / "sessions" / session_id).is_dir():
+            # THIS DEVICE HOLDS IT — not a recall at all. The read above cannot
+            # tell a local directory from an id nobody holds (both answer
+            # ``(None, ())``), and refusing a session the user can see with "no
+            # device holds it" would be false; the CLI answers ``already_local``
+            # when the request runs.
+            return None
+        return f"No device that answered holds {session_id}; nothing changed."
+
     def _move_phase_text(self, session_id: str, request: "MoveTo", phases: list[str]) -> str:
-        """The live phase line: where the move is, in the contract's own order."""
+        """The live phase line: where the move is, in the contract's own order.
+
+        THE VERB IS THE HONESTY, not decoration. Before the first phase arrives
+        nothing has started — the CLI has not accepted the request yet — so an
+        empty-phase line says the request is being MADE ("requesting"), never
+        that a move is under way (design clause 2; the operator saw "moving"
+        over a move that had not begun). Once a phase is present the move exists
+        and the line says so, in the same present-continuous tense the step marks
+        read against.
+        """
         steps = []
         for phase in MOVE_PHASE_ORDER:
             mark = "✓" if phase in phases else "·"
             steps.append(f"{mark} {phase.replace('_', ' ')}")
+        marks = "  ".join(steps)
+        if not phases:
+            return (
+                f"requesting a move of {session_id} to {request.to} — "
+                f"waiting for {request.to} to accept  {marks}"
+            )
         verb = "copying" if request.keep else "moving"
-        return f"{verb} {session_id} to {request.to} — " + "  ".join(steps)
+        return f"{verb} {session_id} to {request.to} — {marks}"
 
     def _publish_move_result(
         self,
@@ -34624,6 +35010,7 @@ class OperatorApp(App[None]):
         phase_notice: NoticeBlock,
         *,
         left: bool = False,
+        home: str = "",
     ) -> None:
         """Restate the phase row as the receipt, then reopen the session where it lives.
 
@@ -34634,12 +35021,40 @@ class OperatorApp(App[None]):
         and the way back (without one, the user is dropped onto an empty local
         session by a command that reported nothing happened). On a success it is
         already implied; the reopen is the same one either way.
+
+        ``home`` is the device the conversation was on when the request started
+        (empty for a local session). It is read BEFORE the leave, because the
+        sentences that owe the user "you are still on <device>" are published
+        AFTER a reopen that has already replaced the only session that could
+        answer.
+
+        THE OUTCOME IS CARRIED, NOT PAINTED, whenever a reopen follows (U2):
+        this function still runs while the screen shows the fresh local
+        conversation the leave created, and the navigation below replaces that
+        transcript. ``_carry_move_notice`` hands the sentence to
+        ``_reopen_where_the_session_lives``'s transition seams, which post it
+        once the session it names is the current one.
         """
         phases = [str(item.get("phase") or "") for item in result.get("phases") or ()]
         if not result.get("ok"):
             reached = str(result.get("phase_reached") or "")
             changed = bool(result.get("changed"))
-            if left and changed:
+            code = str(result.get("code") or "")
+            if code == "duplicate":
+                # BOTH DEVICES LIST IT (clause 1's refusal), so the placement is
+                # ambiguous rather than failed: reopening "where it lives" would
+                # pick one of the two copies arbitrarily. The user stays on the
+                # screen the leave already put them on — the fresh local session —
+                # and the producer's own message says the rest, so no tail claims
+                # a way back this branch deliberately does not take.
+                tail = ""
+            elif left and code == "unconfirmed":
+                # AN UNCONFIRMED COMMIT IS NOT "YOU ARE BACK ON IT": for a recall
+                # the source may already have handed the id away and this device's
+                # verified copy is the one the producer's message names. The branch
+                # below keeps the user on the local copy and says so.
+                tail = ""
+            elif left and changed:
                 # THE HALF-COMMITTED CASE, where round 1's sentence was simply
                 # false. ``changed=True`` means the contract says the move already
                 # DID something — the CLI's own message for the
@@ -34652,7 +35067,7 @@ class OperatorApp(App[None]):
                     f" You are back on {session_id}; this move may already have gone "
                     "through, so check before asking again."
                 )
-            elif left:
+            elif left and not reached:
                 # THE USER WAS MOVED OFF THE SESSION TO GET HERE. Saying
                 # "Nothing changed" would be a lie about a screen the user can
                 # see, and the caller would be left on a fresh local session with
@@ -34660,18 +35075,124 @@ class OperatorApp(App[None]):
                 # names the way back this method then takes. Order matters in the
                 # sentence: the refusal, then the truth about the local state.
                 tail = f" You are back on {session_id} — it did not move."
+            elif left:
+                # A PHASE WAS REACHED (U7): the producer's sentence already names
+                # the state and the one action (the copy paused, which relay to
+                # restart), so this tail would repeat or contradict it. The reopen
+                # still runs below; only the claim about the screen is dropped.
+                # It rests on the producer's
+                # ``changed=bool(reached and reached != "prepared")`` invariant: a
+                # reached, not-changed refusal is a paused handoff, and the
+                # producer's own sentence owns that state.
+                tail = ""
             elif changed:
+                tail = ""
+            elif reached:
+                # D2: a refusal that reached a phase ends on the producer's action
+                # ("run the move again", "run the copy again"), so the generic
+                # "Nothing changed." tail would state a second, lesser fact after
+                # it — and can contradict the discarded copy the sentence names.
                 tail = ""
             else:
                 tail = " Nothing changed."
             message = str(result.get("message") or "the move was refused")
             text = f"Could not move {session_id}: {message}.{tail}".replace("..", ".")
-            if str(result.get("code") or "") == "viewed_elsewhere":
+            if left and code == "unreachable" and not changed and home and not reached:
+                # THE LATE FAILED RECALL, in the design's own words (UX round 1,
+                # U2): the pre-check saw the peer, then it stopped answering. The
+                # ``tail`` above would say "You are back on …" as a second
+                # sentence; this one names the device, its silence and where the
+                # composer still points in one breath, which is the fact the user
+                # needs after the reopen puts them back in it.
+                #
+                # GATED ON ``not reached`` (U7): once the move reached a phase the
+                # producer knows more than this fallback does — for a copy failure
+                # it says the copy was discarded, the source still holds the
+                # conversation paused, and which relay to restart — and replacing
+                # that with "did not answer / Nothing moved" both hides the remedy
+                # and asserts the source never got involved.
+                text = (
+                    f"Could not move {session_id}: {home} did not answer. Nothing moved; "
+                    f"you are still in the conversation on {home}."
+                )
+            if code == "unconfirmed":
+                # THE LOST-COMMIT-REPLY CASE (review round 1, R1-2 / QA Q-1). The
+                # producer's sentence already says the verified copy is kept and
+                # that a retry is unsafe; what it cannot know is which conversation
+                # this window is showing. For a recall that is the fresh local
+                # session (where the copy will land); for an offload the peer may
+                # already hold it, so the reopen below is allowed to find it.
+                if request.to == "local":
+                    text += (
+                        " This window is on a new local conversation; the verified copy is "
+                        "held here and will finish when the other device answers."
+                    )
+                else:
+                    text += (
+                        " The move may already have completed on the other device; it will "
+                        "finish when that device answers."
+                    )
+            if code == "duplicate" and left:
+                # U3: "copy here" means this device's committed copy, while the
+                # composer the user is now typing into belongs to the fresh local
+                # conversation the leave created. Naming that gap is the difference
+                # between a considered refusal and a screen whose input target is a
+                # guess — and the cleanup that will settle the two copies is named,
+                # so "wait" has a finish line.
+                text += (
+                    f" This window is now on a new local conversation, not either copy of "
+                    f"{session_id}. Wait for cleanup to finish before reopening {session_id}."
+                )
+            if code == "viewed_elsewhere":
                 # THE BLOCKER A WAIT CANNOT CLEAR (``mobility``'s taxonomy split,
                 # design §5.4): seen in another window or app, the queue is the
                 # route that works — the producer's own sentence says "queue the
                 # move", and this line carries the spelling THIS surface runs.
                 text += f" To queue it from here: /move {session_id} --to {request.to} --queue."
+            # THE FALLBACK (UX round 2, U2-1). Every sentence above assumes the
+            # reopen below LANDS — "you are back on …", "you are still in the
+            # conversation on …" — and the seam that would make that true can fail:
+            # the peer link can drop while opening, and then the accepted outcome
+            # vanishes from the only screen the user has left (measured: the final
+            # frame held only "could not open … link dropped"). This is the same
+            # sentence with the PLACEMENT CLAIM REMOVED, so it is true on whichever
+            # conversation the failed reopen leaves current. It never says a move
+            # completed: `changed` only widens it to "check where it is now", which
+            # is exactly the state a half-committed handoff leaves behind.
+            if reached and not changed:
+                # U11, GATED ON ``not changed`` (R4-1): a reached+changed handoff
+                # may already have committed — the source may have deleted its copy
+                # — so "it is still there" would be the same false placement claim
+                # this branch exists to avoid. The `elif changed` below keeps its
+                # own "check where it is now" wording for that state. For a paused
+                # handoff the producer already stated the state and the action;
+                # appending "did not answer / Nothing moved" would hide the remedy
+                # on the only notice the user has left. Only the placement-neutral
+                # fact that this window could not get back is added; `home` is
+                # named when a reopen had a peer to name.
+                fallback = (
+                    f"Could not move {session_id}: {message}. This window could not "
+                    f"reopen the conversation{' on ' + home if home else ''}; it is "
+                    "still there."
+                )
+            elif left and code == "unreachable" and not changed and home:
+                fallback = (
+                    f"Could not move {session_id}: {home} did not answer. Nothing moved. "
+                    f"This window could not reopen the conversation on {home}; it is still "
+                    "there."
+                )
+            elif changed:
+                fallback = (
+                    f"Could not move {session_id}: {message}. This window could not reopen "
+                    f"the conversation {session_id}; check where it is now before asking "
+                    "again."
+                )
+            else:
+                fallback = (
+                    f"Could not move {session_id}: {message}. Nothing changed. This window "
+                    f"could not reopen the conversation {session_id}."
+                )
+            fallback = fallback.replace("..", ".")
             if reached in MOVE_PHASE_ORDER:
                 # A PARTIAL MOVE KEEPS ITS PHASE ROW: which step it reached is
                 # the fact the user needs to know what state the two devices are in.
@@ -34682,8 +35203,9 @@ class OperatorApp(App[None]):
                 # four empty steps painted red beside it only repeats "nothing
                 # happened" in a second, louder register (seen in the frame).
                 self._transcript_view().remove_block(phase_notice)
-            self._system_notice(text, "error")
-            if left:
+            if left and not (
+                code == "duplicate" or (code == "unconfirmed" and request.to == "local")
+            ):
                 # THE WAY BACK, and the reason the sentence above is true: every
                 # refusal that arrives AFTER the leave (``busy``,
                 # ``digest_mismatch``, ``relay_unavailable``,
@@ -34691,8 +35213,17 @@ class OperatorApp(App[None]):
                 # with ``changed=True``) has already left the session, and none of
                 # them moves it. Reopening where it LIVES is the one answer that
                 # covers both placements the pick knows: a peer's id opens
-                # attached-remote, a local id resumes.
+                # attached-remote, a local id resumes. ``duplicate`` is the one
+                # exception, for the reason its own branch states.
+                #
+                # THE SENTENCE TRAVELS WITH IT (U2): posted here it would be painted
+                # onto the fresh local transcript the reopen is about to replace, and
+                # the measured result was a final screen holding only "opened … on
+                # …". The carry posts it from the transition that lands the session.
+                self._carry_move_notice(text, "error", session_id, fallback)
                 self._reopen_where_the_session_lives(session_id)
+            else:
+                self._system_notice(text, "error")
             return
         if isinstance(result.get("queue"), dict):
             # THE QUEUED RECEIPT (design §5.4): a success, but nothing has moved
@@ -34725,9 +35256,18 @@ class OperatorApp(App[None]):
             head += f" — {note}." if note else "."
             if phase == "resumed":
                 text = head + " It is no longer running on this device."
+                fallback = (
+                    f"Queued a move of {session_id} to {target}. It has arrived on {target}. "
+                    f"This window could not reopen the conversation {session_id}."
+                )
             elif phase in ("paused", "copying"):
                 text = head + (
                     f" It can no longer be cancelled; the conversation continues on {target}."
+                )
+                fallback = (
+                    f"Queued a move of {session_id} to {target} — the move has started and "
+                    "can no longer be cancelled. This window could not reopen the "
+                    f"conversation {session_id}."
                 )
             else:
                 # THE CANCEL CLAUSE NAMES A PRODUCT ACTION, NEVER A TERMINAL
@@ -34742,6 +35282,48 @@ class OperatorApp(App[None]):
                     f"{target}. It can still be cancelled before it starts — ask Local Operator "
                     "to cancel the queued move."
                 )
+                # THE QUEUE'S FALLBACK (UX round 2, U2-1): still queued, so it can
+                # still be cancelled — the same two facts the sentence above states,
+                # with no claim about which conversation this window ended up on.
+                fallback = (
+                    f"Queued a move of {session_id} to {target}. Nothing has moved yet. This "
+                    f"window could not reopen the conversation {session_id}; the move is "
+                    "still queued — ask Local Operator to cancel the queued move before it "
+                    "starts."
+                )
+            if left and phase == "queued" and request.to == "local" and home:
+                # THE QUEUED RECALL, in the design's own words (UX round 1, U2,
+                # exact copy). "waiting for a safe point" and "continues on <this
+                # device>" are both true, but after the reopen the screen is the
+                # PEER's conversation again: the one fact the sentence must state
+                # is where the user still is, or the durable answer to "did my
+                # move happen?" is a frame they have to catch (measured: the
+                # final screen held only "opened <id> on <peer>").
+                text = (
+                    f"Queued a move of {session_id} to this device. Nothing has moved yet; "
+                    f"you are still on {home}. Ask Local Operator to cancel the queued move "
+                    "before it starts. Windows open on it are told first and get a moment to "
+                    "follow; any that can't will be disconnected, and the conversation "
+                    f"continues on {target}."
+                )
+                # The same receipt with the "you are still on <peer>" claim dropped:
+                # after a FAILED reopen that sentence would name a conversation this
+                # window is not in.
+                fallback = (
+                    f"Queued a move of {session_id} to this device. Nothing has moved yet. "
+                    f"This window could not reopen the conversation on {home}; the move is "
+                    "still queued — ask Local Operator to cancel the queued move before it "
+                    "starts."
+                )
+            # WHAT STAYED BEHIND (agent review round 1, M4): the queued receipt
+            # carries the same stash promise the run will honour; a TUI that did
+            # not print it left the user with no statement about their roles.
+            carry = _carry_dict(result)
+            stay_note = str(carry.get("session_roles_notice") or "")
+            if stay_note:
+                # The notice is already a full sentence (it ends with its
+                # recovery clause); adding a period produced ".." (round 3, U13).
+                text += f" {stay_note}"
             if phase_notice.is_attached:
                 self._transcript_view().remove_block(phase_notice)
             # `note`, not `info` (design review round 1, D2): these are multi-line
@@ -34750,17 +35332,53 @@ class OperatorApp(App[None]):
             # paper, under the 4.5:1 AA floor. `note` rides `muted` (7.18:1
             # light, 8.62:1 dark), which is what transcript.py's docstring names
             # for a receipt the user is actively reading.
-            self._system_notice(text, "note")
             if left:
                 # THE QUEUED REQUEST STILL LEFT THE SESSION, and the conversation
                 # has NOT moved — reopen where it lives, the same way back every
                 # refusal after a leave owes; the safe point's announce-then-
                 # proceed path is what hands the conversation over later.
+                #
+                # AND THE RECEIPT SURVIVES THE REOPEN (U2): posting it here would
+                # paint it on the fresh local transcript the navigation replaces
+                # next. The carry posts it from the transition that lands the
+                # session, so the cancellation guidance is on the final screen.
+                self._carry_move_notice(text, "note", session_id, fallback)
                 self._reopen_where_the_session_lives(session_id)
+            else:
+                self._system_notice(text, "note")
             return
-        phase_notice.restate(self._move_phase_text(session_id, request, phases), "info")
+        phase_notice.restate(self._move_phase_text(session_id, request, phases), "note")
         to_block = result.get("to_device") or {}
         target = str(to_block.get("name") or to_block.get("device_id") or request.to)
+        phase = str(result.get("phase") or "")
+        # COMPLETION IS A STATE THE PRODUCER VERIFIED, NEVER AN ACKNOWLEDGEMENT
+        # (design clause 1 and the Surfaces section), and it is read through the
+        # ONE function every surface reads it through (agent review round 1, N1):
+        # a local `state` read plus a phase gate agreed with the CLI only for as
+        # long as nobody changed either vocabulary. ``ok: true`` only means the
+        # request was accepted; a committed handoff whose destination has not
+        # promoted yet is IN PROGRESS, and the conversation is not there to
+        # reopen.
+        from local_operator.network import mobility
+
+        if mobility.move_receipt_state(result) != "completed":
+            # NOTHING HAS LANDED, so nothing may say it has: an in-progress
+            # receipt names the step IN PRODUCT WORDS (UX round 1, U3) and leaves
+            # the user where they are. After a leave that is the fresh local
+            # session, and the composer there sends to a conversation that is not
+            # the one being moved — which is why the receipt says so instead of
+            # letting focus imply the answer.
+            gloss = _MOVE_IN_PROGRESS_GLOSS.get(phase, "waiting for the handoff to finish")
+            text = f"The move of {session_id} to {target} is still in progress — {gloss}."
+            if left:
+                text += (
+                    f" This window is on a new local conversation; {session_id} is not "
+                    "ready to reopen yet."
+                )
+            else:
+                text += " It has not landed there yet."
+            self._system_notice(text, "note")
+            return
         new_id = str(result.get("new_session_id") or session_id)
         if result.get("mode") == "keep":
             receipt = f"Copied {session_id} to {target} as {new_id}; the original is untouched."
@@ -34773,14 +35391,95 @@ class OperatorApp(App[None]):
             )
         else:
             receipt = f"Moved {session_id} to {target}. It runs there now."
-        self._system_notice(receipt, "info")
-        if str(result.get("phase") or "") not in ("committed", "done"):
-            return
-        # REOPEN WHERE IT LIVES. The sidebar's pick path already knows both
-        # answers: a peer's id opens attached-remote (`_open_session_or_refuse`),
-        # a local id resumes. The peer cache is dropped first so the pick does
-        # not answer from a listing taken before the move committed.
+        # THE STASH NOTICE ON A FINISHED MOVE (M4): the CLI printed this from
+        # ``_carry_lines``; the TUI read only the phase row, so a drop move was
+        # silent about where its definitions went.
+        carry = _carry_dict(result)
+        stay_note = str(carry.get("session_roles_notice") or "")
+        if stay_note:
+            # No appended period: the notice carries its own (round 3, U13).
+            receipt += f" {stay_note}"
+        # `note`, not `info` (round 3, U10): the queued receipt for the same
+        # request rides `note`'s muted ink, and a finished move should not look
+        # like a different class of event than the queue it came through.
+        self._system_notice(receipt, "note")
+        # REOPEN WHERE IT LIVES, and only now that the state gate above proved
+        # it landed. The sidebar's pick path already knows both answers: a peer's
+        # id opens attached-remote (`_open_session_or_refuse`), a local id
+        # resumes. The peer cache is dropped first so the pick does not answer
+        # from a listing taken before the move committed.
         self._reopen_where_the_session_lives(new_id)
+
+    def _carry_move_notice(
+        self, body: str, kind: NoticeKind, target_id: str, fallback: str = ""
+    ) -> None:
+        """Latch a move outcome that has to be read in ``target_id``'s session.
+
+        THE REOPEN OWNS THE TRANSCRIPT. ``_reopen_where_the_session_lives`` runs
+        a session transition, and a transition REPLACES the transcript: the
+        session a leave just created is disposed and the reopened one is
+        replayed from its source. Posting the outcome before that makes it a
+        frame the user has to catch — measured on the real app, the final screen
+        held only "opened <id> on <peer>" (UX round 1, U2). So the text is
+        latched here and posted by
+        :meth:`_drain_move_notice_carry` from the transition that lands the
+        session, where the current session is finally the one it describes.
+
+        Single-use and destination-scoped: the target id rides with the text,
+        and the BODY is posted only where the current session matches it. A
+        latch that outlived a failed reopen would otherwise fire into the next
+        conversation the user opened, which is worse than a lost receipt because
+        it would be false about the screen it landed on.
+
+        ``fallback`` is what keeps that rule from also losing an ACCEPTED
+        operation (UX round 2, U2-1). When the reopen itself fails — the peer
+        link drops mid-open, the source is gone, a newer navigation supersedes
+        this one — the destination never becomes current, so the body is
+        undeliverable by construction, and dropping it left the final screen
+        with nothing but "could not open …. link dropped". The fallback is the
+        same outcome with every placement claim removed (it names no current
+        conversation and never says a move completed), so it is true on whichever
+        conversation the failed reopen leaves current. An empty fallback keeps
+        the old drop: a refusal whose wording cannot be made placement-neutral
+        is better lost than posted false.
+        """
+        self._move_notice_carry = (body, kind, target_id, fallback)
+
+    def _drain_move_notice_carry(self) -> None:
+        """Post a carried move outcome once: the body in its session, else the fallback.
+
+        Called from every seam a reopen can finish at — see
+        :meth:`_reopen_where_the_session_lives`. The BODY is destination-scoped:
+        a transition can land on a DIFFERENT session (the open failed and the
+        user stayed where they were, a newer navigation superseded this one, a
+        local id had no source to resume), and a receipt about a move of
+        ``ux-session`` has no business appearing over anything else. The FALLBACK
+        is precisely for that mismatch: the move was accepted (or refused after
+        the leave), and the screen the user is left on is the only place that
+        fact can still be said. Posting it there is not a stale-navigation leak —
+        it asserts nothing about where the user is.
+        """
+        carried, self._move_notice_carry = self._move_notice_carry, None
+        if carried is None:
+            return
+        body, kind, target_id, fallback = carried
+        if self._conversation_id() == target_id:
+            self._system_notice(body, kind)
+        elif fallback:
+            self._system_notice(fallback, kind)
+
+    def _carry_notice_after_navigation(self, _task: asyncio.Task[None]) -> None:
+        """Done-callback for a LOCAL reopen: settle the carry it was waiting on.
+
+        The sidebar's own navigation is the seam for a session that lives on
+        this device (a parked source, or one resumed from its directory), and
+        its commit swaps the transcript before the task completes. Draining
+        after the callback — not inside the commit — also means a CANCELLED or
+        failed navigation settles the carry the same bounded-once way the other
+        seams do: the body only where the navigation landed on it, the fallback
+        (see :meth:`_drain_move_notice_carry`) where it did not.
+        """
+        self._drain_move_notice_carry()
 
     def _reopen_where_the_session_lives(self, session_id: str) -> None:
         """Switch to ``session_id`` by sidebar navigation — the ONE way back.
@@ -34795,11 +35494,31 @@ class OperatorApp(App[None]):
         ``clear_cache()`` first, and for the reason the success path always did:
         the pick answers from the peer listing, and a listing taken before the
         move is exactly the stale one this is recovering from.
+
+        TWO KINDS OF REOPEN, TWO SEAMS FOR THE CARRIED RECEIPT (U2). A peer's id
+        goes through ``_open_session_or_refuse`` and returns ``None`` here: its
+        transition ends at ``_adopt_built_viewer``/``_finish_session_transition``,
+        which drain the carry. A local id returns the sidebar's navigation task,
+        whose commit swaps the transcript before the task completes — so the
+        carry is drained by a done callback. Both are single-use; whichever seam
+        lands the session posts, and the other finds nothing left.
         """
         from local_operator.session.peer_rows import clear_cache
 
         clear_cache()
-        self._select_sidebar_session(session_id)
+        task = self._select_sidebar_session(session_id)
+        if task is not None:
+            if self._move_notice_carry is not None:
+                task.add_done_callback(self._carry_notice_after_navigation)
+        elif self._move_notice_carry is not None and not self._session_transition_pending:
+            # THE PICK ANSWERED WITH A SENTENCE AND STARTED NOTHING (an
+            # unreachable peer, U27's refusal): there is no transition coming to
+            # deliver into. Settle it here rather than let it outlive the move:
+            # the body needs the target's transcript, which this window never
+            # reached, so what lands is the fallback — the accepted outcome said
+            # on the conversation the user is actually looking at (UX round 2,
+            # U2-1, the shape that used to vanish entirely).
+            self._drain_move_notice_carry()
 
     def _apply_move(self, raw: str, notice: NoticeFn) -> None:
         """Validate ``raw`` and move the session to it, or say why not.
@@ -37783,9 +38502,18 @@ class OperatorApp(App[None]):
             page.receipt(translate(keys.registry_missing()))
             return
         try:
+            from local_operator.profile_scope import scope_store
+
             fields = TeamEditFields(**plan.changes)
+            # A NEW TEAM FROM THIS FORM IS THE USER'S OWN ACT, so it lands in the
+            # account store (design §3.4) — the TUI may hold a composite, and the
+            # default scope there would otherwise make the team conversation-only.
+            # An EDIT follows the row's owner instead: the listing shows session
+            # rows too, and redirecting an edit into the account would mint a
+            # duplicate rather than change the row the user opened.
+            store = scope_store(registry, "global")
             if team_id is None:
-                registry.create_team(fields)
+                store.create_team(fields)
             else:
                 registry.update_team(
                     team_id,
@@ -37945,7 +38673,15 @@ class OperatorApp(App[None]):
             payload = {"op": "create" if creating else "update", "name": draft.name, **plan.changes}
             params = AgentParams(**payload)
             write_profile(
-                registry, params, creating=creating, expected_definition_revision=revision
+                registry,
+                params,
+                creating=creating,
+                # The form is the user's own act: a new profile is saved for
+                # every conversation, and an edit follows the row's owner (the
+                # shared writer resolves it). A composite registry must not turn
+                # this save into a conversation-only row by defaulting session.
+                scope="global",
+                expected_definition_revision=revision,
             )
         except DefinitionRevisionMismatch:
             page.receipt(translate(keys.revision_changed()))
@@ -54796,8 +55532,7 @@ class OperatorApp(App[None]):
             items = [
                 (
                     self._team_listing_form(team),
-                    f"Led by {team.manager} · {team.member_count()} "
-                    f"{'member' if team.member_count() == 1 else 'members'}",
+                    self._team_facts(team, registry, led_by=True),
                     (team.description or "").strip(),
                 )
                 for team in teams

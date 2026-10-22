@@ -107,6 +107,11 @@ SENTINELS: dict[str, Any] = {
     # fallback — silently unreadable, exactly the drop class this guard exists
     # for.
     "bridge_runtime": object(),
+    # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2) is a host-owned capability, not
+    # a value: dropped on the way to the executor, a tool that CAN ask the user
+    # would silently refuse every account write, and the only visible symptom
+    # would be a role that unexpectedly stays conversation-scoped.
+    "authorize_durable_write": lambda intent: None,
     # The confinement root backs every local tool's enforcement points (shell
     # spawn, path readers). Dropped on the way to the executor, a session the
     # caller confined would run its UNCONFINED default -- shell on the host,
