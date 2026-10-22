@@ -2036,13 +2036,15 @@ class Store:
         — and would replay the hub's whole retained feed (up to 7 days),
         screening and waking every message again.
 
-        HOW THE TWO CASES ARE TOLD APART: by asking the hub at the moment THIS
-        machine commits the enrolment (``TeamBridgeClient._seed_feed_cursor``,
-        a no-cursor read that the hub answers with its CURRENT head). A
-        brand-new endpoint's head is 0, so the seed is 0 and its first message
-        (seq 1) is delivered — F2 holds. A re-used endpoint's head is N, so
-        this machine starts at N: what arrived before it enrolled is in the
-        inbox (the hub's source of truth), not replayed as wakes.
+        HOW THE TWO CASES ARE TOLD APART: by asking the hub for its CURRENT
+        head just BEFORE this machine's enable write
+        (``TeamBridgeClient._pre_enable_head``, a no-cursor read). A brand-new
+        endpoint does not exist yet, so there is no head and the cursor stays
+        0 — its first message (seq 1) is delivered (F2). A re-used endpoint
+        answers N, so this machine starts at N: what arrived earlier is in the
+        inbox (the hub's source of truth), not replayed as wakes. Reading it
+        BEFORE the write (review R2-1) means a message that lands after the
+        enable always carries a seq above the seed and is never skipped.
 
         Applied ONLY while the row is still the untouched commit default
         (``feed_seq = 0``, no refs recorded): it never lowers or moves a cursor

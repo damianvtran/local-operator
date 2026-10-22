@@ -99,6 +99,10 @@ SUPPORTED_API_VERSION = 1
 #: name bytes nobody rendered).
 TEXT_CAP_BYTES = 2048
 
+#: Bound on the pre-enable feed-head read (review R2-2): the user's enable
+#: never waits longer than this on it; past it the seed falls back to cursor 0.
+SEED_HEAD_TIMEOUT_S = 3.0
+
 CONSENT_VERSION_V1 = "bridge_consent_v1"
 SCREENING_VERSION_V1 = "bridge-screen-v1"
 GUIDANCE_VERSION_V1 = "bridge-guidance-v1"
@@ -1293,6 +1297,12 @@ class TeamBridgeClient:
             body["label"] = label
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
+        # R2-1: the seed position is read BEFORE the write (see _pre_enable_head).
+        head = (
+            await self._pre_enable_head(tenant_id=tenant_id, access=access)
+            if state == "active" and consent_version and tenant_id
+            else None
+        )
         result = await self._send("PUT", "/messaging/settings", body=body, access=access)
         await self._commit_explicit_enable(
             state=state,
@@ -1300,6 +1310,7 @@ class TeamBridgeClient:
             consent_version=consent_version,
             result=result,
             access=access,
+            head=head,
         )
         return result
 
@@ -1311,6 +1322,7 @@ class TeamBridgeClient:
         consent_version: str | None,
         result: Mapping[str, Any],
         access: OAuthAccess | None,
+        head: int | None = None,
     ) -> None:
         """Commit the native receipt for THIS user's explicit settings enable.
 
@@ -1367,20 +1379,59 @@ class TeamBridgeClient:
             )
         except Exception:  # noqa: BLE001 - the server-side enable already succeeded
             return
-        if committed:
-            await self._seed_feed_cursor(tenant_id=tenant_id, access=access)
+        if committed and head is not None:
+            self._seed_feed_cursor(head)
 
-    async def _seed_feed_cursor(self, *, tenant_id: str, access: OAuthAccess) -> None:
-        """Start this machine's feed cursor at the hub's head (review R1-2).
+    async def _pre_enable_head(self, *, tenant_id: str, access: OAuthAccess | None) -> int | None:
+        """The hub's feed head for this account, read BEFORE the enable write.
 
-        A no-cursor ``/messaging/events`` read is the hub's own "where is now"
-        answer (a resync arm carrying the CURRENT cursor, no events). Seeded
-        right after THIS machine commits the enrolment, it separates the two
-        cases F2 conflated: a brand-new endpoint's head is 0, so its first
-        message still arrives; a previously used endpoint (another machine, a
-        reinstall, a wiped store) starts at its head instead of replaying up
-        to 7 days of retained feed as fresh wakes. Best-effort: on any failure
-        the cursor stays 0, the pre-R1-2 behaviour (a replay, never a loss).
+        WHY BEFORE (review R2-1). The seed (R1-2) starts a never-polled store
+        at the hub's head so a previously used endpoint does not replay up to
+        7 days of feed as fresh wakes. Read AFTER the PUT, a message landing
+        between the write and the read sat at or below the seeded cursor and
+        was never woken. Read before, any message that arrives once the
+        endpoint is enabled carries a HIGHER seq than the seed, so nothing is
+        skipped; at worst a message sent just before the read is replayed
+        (at-least-once, never lost).
+
+        HOW THE CASES SEPARATE. A brand-new endpoint does not exist yet, so the
+        hub refuses this read: no head, the cursor stays 0, and its first
+        message (seq 1) arrives (F2). A used endpoint (another machine, a
+        reinstall, a wiped store) answers its current head.
+
+        BOUNDED (review R2-2): the user's enable must not wait on it, so the
+        read is capped at :data:`SEED_HEAD_TIMEOUT_S`. A timeout, a refusal or
+        any failure answers ``None`` — the F2-safe cursor 0. Only asked when
+        this machine has no committed owner, i.e. when a commit can follow.
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None:
+            return None
+        try:
+            from local_operator.team_bridge.store import Store
+
+            if Store(config_dir).committed_owner_count() != 0:
+                return None
+            answer = await asyncio.wait_for(
+                self.events(tenant_id=tenant_id, access=access), timeout=SEED_HEAD_TIMEOUT_S
+            )
+        except Exception:  # noqa: BLE001 - no head is the F2-safe default (cursor 0)
+            return None
+        cursor = answer.get("cursor") if isinstance(answer, Mapping) else None
+        if isinstance(cursor, bool) or not isinstance(cursor, (int, str)):
+            return None
+        try:
+            return int(cursor)
+        except ValueError:
+            return None
+
+    def _seed_feed_cursor(self, head: int) -> None:
+        """Write the pre-enable head into the freshly committed store (R1-2/R2-1).
+
+        ``Store.seed_feed_cursor`` applies it only while the row is still the
+        untouched commit default, so it never moves a cursor a poll advanced.
+        Best-effort: a failure keeps cursor 0 (a replay, never a loss).
         """
 
         config_dir = self._config_dir
@@ -1390,14 +1441,10 @@ class TeamBridgeClient:
             from local_operator.team_bridge.store import Store
             from local_operator.team_bridge.types import feed_seq as _feed_seq
 
-            result = await self.events(tenant_id=tenant_id, access=access)
-            cursor = result.get("cursor") if isinstance(result, Mapping) else None
-            if cursor is None:
-                return
             store = Store(config_dir)
             owner = store.active_owner()
             if owner is not None:
-                store.seed_feed_cursor(owner, _feed_seq(cursor))
+                store.seed_feed_cursor(owner, _feed_seq(head))
         except Exception:  # noqa: BLE001 - a seed failure keeps the safe default (replay)
             return
 
