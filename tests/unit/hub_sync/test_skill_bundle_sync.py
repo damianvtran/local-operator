@@ -524,3 +524,50 @@ def test_the_push_upload_hook_refuses_a_locally_edited_tree(tmp_path: Path) -> N
     assert caught.value.code == "bundle-local-changes"
     assert remote.uploads == []
 
+
+# -- ``lop skills push``: the manual republish -----------------------------------------
+
+
+def test_the_cli_push_uploads_the_new_archive_then_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The operator's evidence: modify a file, push, and the hub gets the new tree."""
+
+    from local_operator import cli
+    from local_operator.hub_sync.skill_bundle import bundle_manifest_from_directory
+    from tests.unit.hub_sync.test_push import FakeTransport
+
+    root, base, _built, remote = _rig(tmp_path)
+    ctx = _ctx(root, remote)
+    result = _install(ctx, base, confirm=True)
+    record = prov.read_baseline(root, "skill", result["link"]["local_id"])
+    assert record is not None and record.identity is not None
+    svc.record_server_capabilities(
+        ctx, {"revision_cas": 1, "skills": 1, "skill_bundles": 1}, source=base
+    )
+    # Local edit -> the check's manifest for this tree is NEW.
+    (root / "skills" / NAME / "references" / "guide.md").write_text("v2\n", encoding="utf-8")
+    newer = bundle_manifest_from_directory(root / "skills" / NAME)
+    assert newer.bundle.hash != _built.bundle.hash
+    transport = FakeTransport(accepted=newer.to_json())
+
+    monkeypatch.setattr(
+        "local_operator.hub_sync.service.build_clients_sync", lambda _cm: (lambda _t: remote, "ok")
+    )
+    monkeypatch.setattr(
+        "local_operator.hub_sync.service.push_transport", lambda _ctx, _rec: (transport, None)
+    )
+
+    code = cli.skills_command(
+        __import__("argparse").Namespace(
+            skills_command="push", name=NAME, yes=True, json=True
+        ),
+        root,
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0, captured.out + captured.err
+    assert len(remote.uploads) == 1
+    assert hashlib.sha256(remote.uploads[0]).hexdigest() == newer.bundle.hash
+    assert transport.commit_calls[0]["document"]["bundle"]["hash"] == newer.bundle.hash
+    assert transport.preview_calls == []
