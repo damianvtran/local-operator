@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.asks import policy, store
+from local_operator.asks import policy, render, store
 from local_operator.asks.queue import AskQueue
 
 BASE = 1_700_000_000_000
@@ -253,12 +253,66 @@ def test_an_expired_ask_says_so_rather_than_being_silently_dropped(tmp_path: Pat
     assert "expired" in outcome["error"]
 
 
-def test_only_a_timed_out_ask_can_be_dismissed(tmp_path: Path):
+def test_an_open_ask_on_a_running_session_cannot_be_dismissed(tmp_path: Path):
+    """D6 (design §15): the live door refuses an OPEN ask unless the session is
+    stopped, and writes nothing. FakeSession has no ``ask_agent_running``, which
+    the queue reads as running (fail closed)."""
     queue = _queue(tmp_path, FakeSession())
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
     outcome = queue.dismiss(ask_id)
-    assert outcome["ok"] is False
-    assert "still open" in outcome["error"]
+    assert outcome == {"ok": False, "error": render.DISMISS_AGENT_RUNNING}
+    assert "reply in chat" in outcome["error"]
+    assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
+
+
+def test_an_open_ask_on_a_stopped_session_is_dismissed_and_owes_a_response(tmp_path: Path):
+    session = FakeSession()
+    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.dismiss(ask_id, by="phone", reason="answered_in_chat")["ok"] is True
+    events = store.read_events(queue.session_dir)
+    assert events[-1]["reason"] == "answered_in_chat"
+    assert events[-1]["by"] == {"surface": "phone"}
+    assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
+    (message,) = session.batches[0]
+    assert message.id == store.response_row_id(ask_id)
+    assert message.details["status"] == "dismissed"
+    assert message.details["reason"] == "answered_in_chat"
+    assert message.details["by"] == {"surface": "phone"}
+    record = queue._find(ask_id, queue._now())
+    assert record is not None
+    assert "settled in the conversation" in render.response_text(record)
+
+
+def test_a_timed_out_ask_is_dismissible_on_a_running_session(tmp_path: Path):
+    """Timed-out behaviour is unchanged on every door."""
+    queue = _queue(tmp_path, FakeSession(), now=BASE)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 200_000
+    assert queue.dismiss(ask_id, by="terminal")["ok"] is True
+
+
+def test_an_unknown_dismiss_reason_is_refused_and_writes_nothing(tmp_path: Path):
+    session = FakeSession()
+    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.dismiss(ask_id, reason="because") == {
+        "ok": False,
+        "error": render.DISMISS_BAD_REASON,
+    }
+    assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
+
+
+def test_a_bridge_request_stays_timed_out_only_even_when_stopped(tmp_path: Path):
+    session = FakeSession()
+    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
+    queue = _queue(tmp_path, session)
+    questions = _questions()
+    questions[0]["question_id"] = "q-bridge-1"
+    ask_id = queue.enqueue(questions, None)["details"]["ask_id"]
+    assert queue.dismiss(ask_id) == {"ok": False, "error": render.DISMISS_BRIDGE_OPEN}
 
 
 def test_a_repeat_dismissal_says_the_ask_is_already_dismissed(tmp_path: Path):
@@ -564,8 +618,10 @@ def test_a_declined_ask_writes_the_response_row(tmp_path: Path):
 
 
 def test_a_dismissed_ask_injects_nothing(tmp_path: Path):
-    """AMENDED 2026-10-16 (fork A, §14): this cell now pins the case the old
-    sentence is still true for — the deadline notice was ALREADY delivered.
+    """AMENDED 2026-10-16 (fork A, §14), NARROWED 2026-10-19 (§15): this cell pins
+    the POST-DEADLINE case the old sentence is still true for — the deadline notice
+    was ALREADY delivered. A dismissal stamped before the deadline owes a response
+    row instead (the cells below).
 
     Before the fork, ANY dismissal injected nothing, so this passed by asserting
     the whole rule. The rule narrowed rather than disappeared: a dismissal whose

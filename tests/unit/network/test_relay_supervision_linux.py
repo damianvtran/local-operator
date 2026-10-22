@@ -1476,3 +1476,142 @@ def test_enabled_unit_start_uses_its_symlink_without_reenabling(linux_host, monk
     monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
     assert relay._service_action_systemd("start")["persistent"]
     assert calls == [("start", relay.SYSTEMD_UNIT)]
+
+
+# Host hardening (2026-10-21, cloud-node-1) -------------------------------
+
+
+def test_render_systemd_carries_the_relay_oom_score_adjust(tmp_path: Path) -> None:
+    """The relay asks the OOM killer to pick almost anything else first.
+
+    A 2 GB node OOM-killed its own relay (oom_score_adj 0, anon-rss 266 MB) while
+    session work survived, which took every session there off the mesh.
+    """
+    text = relay.render_systemd(4097)
+    assert f"OOMScoreAdjust={relay.RELAY_OOM_SCORE_ADJUST}\n" in text
+    assert relay.RELAY_OOM_SCORE_ADJUST < 0 < 300
+    # Inside [Service], beside the other execution directives.
+    service = text.split("[Service]\n", 1)[1].split("[Install]", 1)[0]
+    assert "OOMScoreAdjust=" in service
+
+
+def test_other_daemons_render_byte_identically_without_oom_adjust() -> None:
+    """The parameter is opt-in: no unit that predates it gains the line."""
+    text = supervisors.render_systemd_unit(description="x", exec_start="/bin/true")
+    assert "OOMScoreAdjust" not in text
+
+
+def test_refresh_unit_migrates_a_pre_oom_unit(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed unit without the line is rewritten to gain it, no restart."""
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    legacy = relay.render_systemd().replace(f"OOMScoreAdjust={relay.RELAY_OOM_SCORE_ADJUST}\n", "")
+    assert "OOMScoreAdjust" not in legacy
+    unit.write_text(legacy, encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",)], calls
+    assert unit.read_text(encoding="utf-8") == relay.render_systemd()
+    assert outcome.kind == "current", outcome
+
+
+def test_refresh_unit_repoints_a_generation_pinned_unit_to_the_shim(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A unit pinned to ``generations/<old>/…/python3`` is this install's to move.
+
+    Measured on cloud-node-1: ExecStart named 0.82.3's interpreter while current
+    was 0.84.4, and the shim-only guard declined it as "not addressable" forever.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    generations = tmp_path / "lop" / "generations"
+    old_python = generations / "20261001T000000Z-0.82.3" / "venv" / "bin" / "python3"
+    old_python.parent.mkdir(parents=True)
+    old_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(update_mod, "generations_dir", lambda: generations)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    shim = str(_fake_shim(tmp_path))
+    pinned = relay.render_systemd().replace(shim, str(old_python))
+    assert str(old_python) in pinned
+    unit.write_text(pinned, encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert unit.read_text(encoding="utf-8") == relay.render_systemd()
+    assert shim in unit.read_text(encoding="utf-8")
+    assert calls[0] == ("daemon-reload",), calls
+    assert outcome.kind in ("current", "restarted"), outcome
+
+
+def test_foreign_system_unit_is_named_with_its_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-made system unit running ``lop network serve`` is a named conflict."""
+    system = tmp_path / "etc-systemd-system"
+    system.mkdir()
+    (system / "lop-net-relay.service").write_text(
+        "[Service]\nExecStart=/home/ubuntu/.local/bin/lop network serve\n", encoding="utf-8"
+    )
+    (system / "unrelated.service").write_text(
+        "[Service]\nExecStart=/usr/bin/nginx\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(relay, "SYSTEM_UNIT_DIRS", (str(system),))
+    monkeypatch.setattr(relay, "_port_holder_pids", lambda port: [])
+    monkeypatch.setattr(relay, "_unit_image", lambda: None)
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+
+    found = relay.foreign_supervision(4097)
+
+    assert [row["code"] for row in found] == ["system_unit"], found
+    assert "lop-net-relay.service" in found[0]["detail"]
+    assert "systemctl disable --now lop-net-relay.service" in found[0]["remedies"][0]
+
+
+def test_foreign_port_holder_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Something other than the managed pid on the relay port is a conflict."""
+    monkeypatch.setattr(relay, "SYSTEM_UNIT_DIRS", ())
+    monkeypatch.setattr(relay, "_port_holder_pids", lambda port: [111, 222])
+    monkeypatch.setattr(relay, "_managed_service_pid", lambda: 111)
+    monkeypatch.setattr(relay, "_pid_cmdline", lambda pid: "python3 -m http.server 4097")
+    monkeypatch.setattr(relay, "_unit_image", lambda: None)
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+
+    found = relay.foreign_supervision(4097)
+
+    assert [row["code"] for row in found] == ["port_holder"], found
+    assert "pid 222" in found[0]["detail"] and "stop pid 222" in found[0]["remedies"][0]
+
+
+def test_install_warns_about_a_foreign_system_unit_before_writing(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = tmp_path / "sys"
+    system.mkdir()
+    (system / "lop-net-relay.service").write_text(
+        "[Service]\nExecStart=/usr/bin/python3 -m local_operator.network.relay\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(relay, "SYSTEM_UNIT_DIRS", (str(system),))
+    monkeypatch.setattr(relay, "_port_holder_pids", lambda port: [])
+    _no_systemctl(monkeypatch)
+
+    result = relay.install(4097, dry_run=True)
+
+    assert result["ok"] is True
+    assert any("lop-net-relay.service" in step for step in result["steps"]), result
+    assert result["conflicts"][0]["code"] == "system_unit"

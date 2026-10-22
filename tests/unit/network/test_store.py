@@ -452,3 +452,71 @@ def test_match_networks_prefers_the_id_then_the_name() -> None:
     assert store.match_networks(records, "home") == [first, second]
     assert store.match_networks(records, "lab") == [third]
     assert store.match_networks(records, "missing") == []
+
+
+# ---------------------------------------------------------------------------
+# The invite sweep (2026-10-21: 24 dead "minted" rows on one record)
+# ---------------------------------------------------------------------------
+
+HOUR = 60 * 60.0
+
+
+def test_prune_invites_drops_only_rows_dead_by_their_own_expiry_and_past_retention(
+    root: Path,
+) -> None:
+    now = 2_000_000_000.0
+    record = _record()
+    record.invites = [
+        # The measured shape: minted, 10-minute TTL, 400 hours ago. Dead.
+        types.InviteRecord(invite_id="dead", minted_at=now - 400 * HOUR, ttl_s=600.0),
+        # Expired but inside the retention window: kept for the audit of a recent try.
+        types.InviteRecord(invite_id="recent", minted_at=now - 2 * HOUR, ttl_s=600.0),
+        # A long-lived invite minted past the retention window but STILL redeemable:
+        # the old minted_at-only rule would have deleted a live token.
+        types.InviteRecord(invite_id="long", minted_at=now - 30 * HOUR, ttl_s=48 * HOUR),
+        # Redeemed recently: its ceremony may still be finishing.
+        types.InviteRecord(
+            invite_id="redeemed",
+            minted_at=now - 30 * HOUR,
+            ttl_s=600.0,
+            state="redeemed",
+            redeemed_at=now - HOUR,
+        ),
+    ]
+    dropped = store.prune_invites(record, now=now)
+    assert [invite.invite_id for invite in dropped] == ["dead"]
+    assert [invite.invite_id for invite in record.invites] == ["recent", "long", "redeemed"]
+
+
+def test_sweep_invites_rewrites_only_records_it_changed_and_forgets_their_tokens(
+    root: Path,
+) -> None:
+    now = 2_000_000_000.0
+    dirty = _record()
+    dirty.invites = [
+        types.InviteRecord(invite_id="deadinvite", minted_at=now - 400 * HOUR, ttl_s=600.0),
+        types.InviteRecord(invite_id="liveinvite", minted_at=now - 60.0, ttl_s=600.0),
+    ]
+    store.save(dirty, root)
+    clean = _record(network_id="n_" + "f" * 24, name="clean")
+    clean.invites = [types.InviteRecord(invite_id="fresh", minted_at=now - 60.0, ttl_s=600.0)]
+    store.save(clean, root)
+    store.save_invite_token("deadinvite", "tok-dead", root)
+    store.save_invite_token("liveinvite", "tok-live", root)
+    clean_sequence = store.load(clean.network_id, root).sequence
+
+    assert store.sweep_invites(root, now=now) == 1
+    assert [i.invite_id for i in store.load(NETWORK, root).invites] == ["liveinvite"]
+    assert not store.invite_path("deadinvite", root).exists()
+    assert store.invite_path("liveinvite", root).exists()
+    # Nothing to drop means no write: the relay's own writers are not raced for nothing.
+    assert store.load(clean.network_id, root).sequence == clean_sequence
+
+
+def test_a_dead_minted_invite_lists_as_expired_without_changing_its_state() -> None:
+    invite = types.InviteRecord(invite_id="x", minted_at=1000.0, ttl_s=600.0)
+    assert invite.listed_state(1000.0 + 599) == "minted"
+    assert invite.listed_state(1000.0 + 601) == "expired"
+    assert invite.state == "minted"
+    consumed = types.InviteRecord(invite_id="y", minted_at=1000.0, ttl_s=600.0, state="consumed")
+    assert consumed.listed_state(1_000_000.0) == "consumed"

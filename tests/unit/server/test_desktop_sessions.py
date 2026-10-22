@@ -10037,3 +10037,57 @@ def test_real_mp3_waveform_http_writes_and_serves_sidecar(tmp_path, monkeypatch,
         monkeypatch.setattr(app.state, "desktop_sessions", DesktopSessions(tmp_path))
         assert client.get(path, headers={"Authorization": "Bearer token"}).json() == payload
     assert pool.bridges == {}, "waveform recovery must not start a session owner"
+
+
+@pytest.mark.asyncio
+async def test_history_projects_out_binding_notice_spam_but_keeps_audit(tmp_path: Path) -> None:
+    """Old desktop clients receive no notice rows; durable diagnostics are untouched."""
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage, Message
+    from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
+
+    transcript = Transcript(tmp_path / "sessions" / "s1")
+    await transcript.append_message(Message.user("visible question"))
+    await transcript.append_custom(
+        SESSION_BINDING_CUSTOM_TYPE, {"provider": "stub", "credential_id": 1}
+    )
+    for _ in range(8):
+        await transcript.append_message(
+            CustomMessage(
+                custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+                attribution="system",
+                details={"text": "legacy credential notice spam"},
+            )
+        )
+    raw_before = transcript.path.read_bytes()
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    for open_frame in (False, True):
+        page = await bridge.history(open_frame=open_frame)
+        wire = json.dumps(page["entries"])
+        assert "visible question" in wire
+        assert "legacy credential notice spam" not in wire
+        assert SESSION_BINDING_NOTICE_MESSAGE_TYPE not in wire
+        if not open_frame:
+            assert SESSION_BINDING_CUSTOM_TYPE in wire, "audit metadata is not a notice"
+    assert transcript.path.read_bytes() == raw_before
+    assert b"legacy credential notice spam" in raw_before, "diagnostics stay in the journal"
+
+
+@pytest.mark.asyncio
+async def test_a_local_row_answers_its_binding_once(draft_api) -> None:
+    """A local row names its team in ``binding`` and nowhere else.
+
+    Review round 1, R1 on #2754: ``SessionRow`` gained ``team``/``agent`` to
+    carry a PEER row's binding, and the local projection copies the row via
+    ``_asdict()``. Every local row then published ``"team": ""`` beside
+    ``"binding": {"team": "lopdev"}``, two answers to one question.
+    """
+    client, root = draft_api
+    _bound_session(root, "chat0000001", team="lopdev")
+
+    answer = await client.get("/v1/desktop/sessions?limit=3")
+
+    assert answer.status_code == 200, answer.text
+    (row,) = answer.json()["result"]["sessions"]
+    assert row["binding"] == {"agent": None, "team": "lopdev"}
+    assert "team" not in row and "agent" not in row, sorted(row)
