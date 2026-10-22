@@ -1338,3 +1338,218 @@ def test_a_publish_preview_reason_is_a_sentence_not_a_code(
     assert "cannot publish: no-credential" not in out
     assert "this machine has no hub credential" in out
     assert "lop login radient" in out
+
+
+# -- round 3: org JSON, replay wording, refusals, reinstall hygiene --------------------
+
+
+def test_an_org_json_pull_does_not_demand_a_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D18: the JSON query is a PUBLIC gate; an org row installs on membership."""
+
+    root, _base, built, client = _rig(tmp_path, visibility="org", tenant_id="t1")
+
+    code = _cli_pull(monkeypatch, root, client, public=False, org="t1", json=True, yes=False)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert "confirmation_required" not in payload
+    assert tree_hash_of(root / "skills" / NAME) == built.tree_hash
+
+
+def test_a_replay_says_already_installed_and_shows_the_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D19: a plain pull of a linked bundle must not claim an install."""
+
+    root, base, built, remote = _rig(tmp_path)
+    ctx = _ctx(root, remote)
+    _install(ctx, base, confirm=True)
+    capsys.readouterr()
+
+    code = _cli_pull(monkeypatch, root, remote, json=False, yes=True)
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "already installed; no change" in out
+    assert "installed '" not in out and "installed pdf" not in out
+    assert PUBLISHER["account_id"] in out
+    assert "confirmed archive sha256:" in out
+
+
+def test_sync_and_status_name_the_reinstall_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D17: the human surfaces carry the next action, not just the JSON."""
+
+    from argparse import Namespace
+
+    from local_operator import cli
+
+    root, base, _built, remote, _record = _install_then_republish(tmp_path)
+    newer = build_bundle(_authored(tmp_path, body="# Other owner\n"))
+    document = _manifest_document(newer)
+    document["published_by"] = {"account_id": "acct-other", "name": "Mallory"}
+    remote.document = document
+    remote.data = newer.data
+    monkeypatch.setattr(
+        "local_operator.hub_sync.service.build_clients_sync",
+        lambda _cm: (lambda _t: remote, "ok"),
+    )
+
+    code = cli.skills_command(
+        Namespace(skills_command="sync", name=None, check=False, json=False, yes=True),
+        root,
+    )
+    sync_out = capsys.readouterr().out
+
+    assert code == 0
+    assert "bundle-publisher-changed" in sync_out
+    assert "--reinstall" in sync_out
+
+    code = cli.skills_command(Namespace(skills_command="status", json=False), root)
+    status_out = capsys.readouterr().out
+
+    assert code == 0
+    assert "--reinstall" in status_out
+
+
+def test_a_push_refusal_is_json_under_json_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """r3-m4: lineage refusals answer in the mode the caller asked for."""
+
+    from argparse import Namespace
+
+    from local_operator import cli
+
+    root, base, _built, remote = _rig(tmp_path)
+    ctx = _ctx(root, remote)
+    result = _install(ctx, base, confirm=True)
+    record = prov.read_baseline(root, "skill", result["link"]["local_id"])
+    assert record is not None
+    # ``write_baseline`` deliberately refuses to LOWER lineage for legacy
+    # helpers, so the seeding branch is reached through the recorded-by fact.
+    prov.write_baseline(root, replace(record, recorded_by=prov.UNKNOWN_BASELINE))
+    # A DIFFERING remote keeps the check from ADOPTING the unknown baseline
+    # (L == R is adopted by design), so the seeding branch is what answers.
+    newer = build_bundle(_authored(tmp_path, body="# Moved\n"))
+    remote.document = _manifest_document(newer)
+    remote.data = newer.data
+    monkeypatch.setattr(
+        "local_operator.hub_sync.service.build_clients_sync",
+        lambda _cm: (lambda _t: remote, "ok"),
+    )
+
+    code = cli.skills_command(
+        Namespace(skills_command="push", name=NAME, yes=True, json=True), root
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["code"] == "lineage-not-clean"
+    assert payload["error"]
+
+
+def test_a_reinstall_refuses_an_invalid_local_tree_before_the_download(
+    tmp_path: Path,
+) -> None:
+    """r3-m1: a local safe-mode refusal names the LOCAL copy, and fetches nothing."""
+
+    root, base, built, remote = _rig(tmp_path)
+    ctx = _ctx(root, remote)
+    result = _install(ctx, base, confirm=True)
+    local_id = result["link"]["local_id"]
+    script = root / "skills" / NAME / "scripts" / "run.sh"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+    remote.downloads.clear()
+    downloads_root = root / "hub" / "downloads"
+
+    with pytest.raises(LinkError) as caught:
+        svc.install_skill(
+            ctx,
+            hub_source=base,
+            hub_id=HUB_ID,
+            visibility="public",
+            tenant_id=None,
+            alias=NAME,
+            confirm_publisher_id=PUBLISHER["account_id"],
+            confirm_bundle_hash=built.bundle.hash,
+            reinstall=True,
+        )
+
+    assert caught.value.code == "reinstall-local-invalid"
+    assert "local copy" in str(caught.value)
+    assert "publish again" not in str(caught.value)
+    assert remote.downloads == []
+    assert not downloads_root.exists() or not any(downloads_root.iterdir())
+    assert local_id
+
+
+def test_a_reinstall_clears_the_stale_outbound_receipt(tmp_path: Path) -> None:
+    """r3-m5: new bytes under a new consent must not keep the old ancestry."""
+
+    root, base, built, remote = _rig(tmp_path)
+    ctx = _ctx(root, remote)
+    result = _install(ctx, base, confirm=True)
+    local_id = result["link"]["local_id"]
+    record = prov.read_baseline(root, "skill", local_id)
+    assert record is not None
+    from local_operator.hub_sync.push import receipt_for
+
+    proven = dict(record.fields)
+    prov.write_baseline(
+        root,
+        replace(
+            record,
+            outbound=receipt_for(
+                "skill", proven, proven, revision=record.remote_revision, operation_id=None
+            ),
+        ),
+    )
+
+    svc.install_skill(
+        ctx,
+        hub_source=base,
+        hub_id=HUB_ID,
+        visibility="public",
+        tenant_id=None,
+        alias=NAME,
+        confirm_publisher_id=PUBLISHER["account_id"],
+        confirm_bundle_hash=built.bundle.hash,
+        reinstall=True,
+    )
+
+    refreshed = prov.read_baseline(root, "skill", local_id)
+    assert refreshed is not None
+    assert refreshed.outbound is not None
+    # The refreshed receipt describes EXACTLY the bytes this reinstall left, so
+    # the next push has a truthful ancestor instead of the old conflict.
+    assert refreshed.outbound.accepted_fields == dict(refreshed.fields)
+    assert refreshed.outbound.input_fingerprint == refreshed.fingerprint
+
+
+def test_an_embedded_quote_in_a_publisher_name_cannot_fabricate_an_id() -> None:
+    """r3-m3: the quoted display name must not be able to close its segment."""
+
+    from local_operator import cli
+
+    lines = cli._bundle_lines(
+        {
+            "file_count": 1,
+            "size": 1,
+            "uncompressed_size": 1,
+            "hash": "a" * 64,
+            "tree_hash": "b" * 64,
+        },
+        publisher={"id": "acct-9", "name": 'Eve") (acct-9'},
+    )
+
+    rendered = "\n".join(lines)
+    assert 'Eve\\") (acct-9' in rendered
+    # Exactly ONE escaped quote: the embedded one. The two segment delimiters
+    # are unescaped; nothing else can close the parenthetical early.
+    assert rendered.count('\\"') == 1

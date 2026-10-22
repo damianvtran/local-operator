@@ -2924,6 +2924,18 @@ def _bundle_of(canonical: Mapping[str, Any]) -> Any | None:
     return SkillBundleManifest.from_json(dict(canonical))
 
 
+def _refreshed_receipt(existing: Any, canonical: Mapping[str, Any], revision: str) -> Any:
+    """The receipt a reinstall leaves: the bytes now installed, as ancestry."""
+
+    if existing is None:
+        return None
+    from local_operator.hub_sync.push import receipt_for
+
+    return receipt_for(
+        "skill", dict(canonical), dict(canonical), revision=revision, operation_id=None
+    )
+
+
 def _bundle_summary(manifest: Any) -> dict[str, Any]:
     """The wire-shaped bundle facts a preview/install answer reports."""
 
@@ -3547,6 +3559,18 @@ def install_skill(
                 remote_revision=revision,
                 lineage="clean",
                 bundle_confirmation=pinned,
+                # The prior receipt's accepted fields describe the PREVIOUS
+                # ancestry; keeping it makes the next push refuse
+                # ``bundle-conflict`` against a baseline it no longer matches
+                # (round-3 r3-m5). ``write_baseline`` deliberately preserves a
+                # current receipt, so it is REFRESHED instead: after a
+                # reinstall the hub row and the installed tree are the same
+                # bytes, which is exactly the agreement a receipt records.
+                outbound=(
+                    _refreshed_receipt(resuming_absent.outbound, canonical, revision)
+                    if reinstall
+                    else resuming_absent.outbound
+                ),
             )
         else:
             baseline = replace(baseline, legacy_subscribe_hint=subscribe)
@@ -3694,6 +3718,32 @@ def install_skill(
                     ManagedBundleStorage,
                 )
 
+                # A reinstall replaces content the operator explicitly asked to
+                # replace; its precondition is the tree on disk NOW (read under
+                # the storage's own lock a moment later), never None -- which
+                # only a genuinely absent destination can satisfy.
+                #
+                # THE LOCAL TREE IS VALIDATED BEFORE THE DOWNLOAD (round-3
+                # r3-m1): an unsafe local copy (exec bit, symlink, empty file) is
+                # the operator's to fix, so it must not fetch 25 MB first and
+                # must not be described as a bad ARCHIVE.
+                install_before: str | None = None
+                if reinstall:
+                    destination = ManagedBundleStorage(ctx.config_dir).path(alias)
+                    if destination.is_dir():
+                        from local_operator.hub_sync.skill_document import (
+                            SkillValidationError,
+                        )
+
+                        try:
+                            install_before = tree_hash_of(destination)
+                        except SkillValidationError as error:
+                            raise LinkError(
+                                "reinstall-local-invalid",
+                                "the local copy cannot be re-read safely "
+                                f"({error}); fix or remove {destination}, or unpull the "
+                                "link, then reinstall",
+                            ) from None
                 archive = _download_bundle_archive(
                     ctx,
                     resolved.client,
@@ -3701,15 +3751,6 @@ def install_skill(
                     bundle,
                     bearer=resolved.identity.visibility == "org",
                 )
-                # A reinstall replaces content the operator explicitly asked to
-                # replace; its precondition is the tree on disk NOW (read under
-                # the storage's own lock a moment later), never None -- which
-                # only a genuinely absent destination can satisfy.
-                install_before: str | None = None
-                if reinstall:
-                    destination = ManagedBundleStorage(ctx.config_dir).path(alias)
-                    if destination.is_dir():
-                        install_before = tree_hash_of(destination)
                 try:
                     transaction = ManagedBundleStorage(ctx.config_dir).apply(
                         identity,
