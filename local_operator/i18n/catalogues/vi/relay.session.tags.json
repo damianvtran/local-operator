@@ -1,0 +1,21 @@
+{
+  "relay.session.tags.action": "Nhãn…",
+  "relay.session.tags.sheet_title": "nhãn",
+  "relay.session.tags.loading": "đang tải…",
+  "relay.session.tags.empty": "chưa có nhãn nào",
+  "relay.session.tags.empty_hint": "tạo một nhãn trong ứng dụng desktop hoặc terminal",
+  "relay.session.tags.load_error": "Không thể tải danh mục nhãn.",
+  "relay.session.tags.retry": "thử lại",
+  "relay.session.tags.limit_hint": "Mỗi cuộc trò chuyện mang tối đa {count} nhãn — bỏ một nhãn để thêm nhãn khác.",
+  "relay.session.tags.primary": "chính",
+  "relay.session.tags.make_primary": "đặt {name} làm nhãn chính",
+  "relay.session.tags.more": "{count, plural, other {# nhãn nữa}}",
+  "relay.session.tags.missing": "không có trong danh mục",
+  "relay.session.tags.saving": "đang lưu…",
+  "relay.session.tags.save_error": "Không thể lưu nhãn",
+  "relay.session.tags.remove_all": "bỏ tất cả nhãn",
+  "relay.session.tags.remove_all_confirm": "bỏ tất cả nhãn?",
+  "relay.session.tags.cancel": "hủy",
+  "relay.session.tags.done": "xong",
+  "relay.session.tags.pin_and_tags_hint": "chạm và giữ một mục để ghim hoặc gắn nhãn"
+}

@@ -715,6 +715,12 @@ def _stored_lines(
     dead session, so they keep the empty defaults the renderer turns into ``—``.
     ``last_activity_s`` carries the transcript mtime in their place.
 
+    ``stopped_at_s``/``stop_reason``/``stop_requested`` are the runtime's OWN exit
+    record (``journal.read_exit_record``), read for each row this listing shows.
+    They answer the question a bare ``stored`` could not — when did it stop, and
+    did anybody ask — and they stay empty when there is no record, because a
+    SIGKILLed runtime writes none and "unknown" is the honest answer.
+
     Best-effort, never a gate: a store that cannot be read yields no stored rows
     rather than failing a listing whose first job is the LIVE fleet.
 
@@ -734,6 +740,7 @@ def _stored_lines(
     would make the search cost track the whole store rather than the answer.
     """
     from local_operator.resume import recent_session_rows
+    from local_operator.session.runtime import journal
 
     resolved = STORED_SESSIONS_DEFAULT_LIMIT if limit is None else limit
     try:
@@ -758,6 +765,32 @@ def _stored_lines(
         # output the operator reads to decide what to send where.
         if session_id in live_ids:
             continue
+        # THE SESSION'S OWN ACCOUNT OF ITS LAST DEPARTURE, read here because this
+        # is the only place that knows the row stayed STORED — and read ONE SMALL
+        # FILE PER ROW ACTUALLY LISTED, never a scan: the candidate set is already
+        # capped by ``recent_session_rows`` (or by the outcome filter) before this
+        # loop, and a store-wide walk here would make a listing's cost track the
+        # store's history rather than the page the caller asked for. A row whose
+        # runtime was SIGKILLed has no record, and the three fields stay
+        # ``None``/""/``None`` so the table can print "unknown" instead of a
+        # time nobody observed.
+        directory = root / "sessions" / session_id
+        exit_record = journal.read_exit_record(directory)
+        # THE RECORD MUST BELONG TO THE RUN THAT DIED (review round 1, MAJOR-1).
+        # A session can exit cleanly (run A leaves a record), be resumed, and have
+        # run B killed — and A's record is still on disk, naming A's pid and A's
+        # time. Surfacing it would report a clean ``idle-exit`` for a run nobody
+        # has an exit record for, which is the wrong-history direction this whole
+        # change exists to stop. The run record is written at every boot and
+        # removed only by that run's own clean exit, so a run key that DISAGREES
+        # with the exit record means the latest run never reported leaving:
+        # unknown, exactly like a session with no record at all.
+        if exit_record is not None:
+            run_record = journal.read_run_record(directory)
+            if run_record is not None and not run_record.covers_run(
+                exit_record.pid, exit_record.started_at
+            ):
+                exit_record = None
         lines.append(
             SessionLine(
                 pid=0,
@@ -765,6 +798,9 @@ def _stored_lines(
                 session_id=session_id,
                 conversation_name=name,
                 last_activity_s=mtime,
+                stopped_at_s=exit_record.at if exit_record is not None else None,
+                stop_reason=exit_record.reason if exit_record is not None else "",
+                stop_requested=exit_record.requested if exit_record is not None else None,
             )
         )
     return lines
@@ -958,6 +994,18 @@ def session_rows(
             # ...and fenced the same way here, so the two surfaces cannot disagree
             # about a dead pid's leftover dump (design review round 2, D8).
             "stall_held": line.stall_held,
+            # THE EXIT RECORD'S THREE READINGS, appended at the END for the same
+            # append-only reason every key above states — the established key order
+            # is a published contract and this EXTENDS it. They are the durable
+            # answer to "when did it stop, why, and did anybody ask", which a stored
+            # row could not give before: ``last_activity_s`` is the transcript's
+            # own clock, not the runtime's departure, and the two differ by the
+            # whole idle window. ``stopped_at_s``/``stop_requested`` are ``None``
+            # and ``stop_reason`` is "" when no exit record attests to a departure
+            # (a SIGKILLed runtime writes none) — never a fabricated time.
+            "stopped_at_s": line.stopped_at_s,
+            "stop_reason": line.stop_reason,
+            "stop_requested": line.stop_requested,
         }
         for line, stamp in zip(lines, _stamps(lines, root), strict=True)
     ]

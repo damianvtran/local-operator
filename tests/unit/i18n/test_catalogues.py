@@ -75,6 +75,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # The tier-1 remote-compute CLI copy is its own English-only namespace,
+        # the `wire.host_speed` shape: `lop exec --remote` adds keys to `wire.exec`,
+        # which fr/hi/vi CARRY, and an English edit to a carried namespace
+        # invalidates that locale's ledger row and unships the whole locale.
+        "wire.remote_compute",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -86,6 +91,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     # not a stub or an exemption from the exact namespace contract.
     assert catalogues.load_catalogue("en", "wire.errors.sdk_spec") != {}
     assert catalogues.load_catalogue("en", "wire.exec") != {}
+    assert catalogues.load_catalogue("en", "wire.remote_compute") != {}
     # Approved source namespace, not a prefix-wide wildcard. Mutation controls
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
@@ -157,14 +163,21 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # `tui.team_authoring` after its independent 35-key audit passed. P4a adds
     # `tui.viewer` after its independent audit and keyboard-hint audit refresh.
     # The wire.memory slice adds the independently audited `wire.memory`
-    # namespace, whose ledger row is what un-ships it.
+    # namespace, whose ledger row is what un-ships it. The LOH-11 relay-web
+    # tag slice adds `relay.session.tags` on the same terms: one audited
+    # namespace with its own fresh ledger row. The remote-compute wave (S3e)
+    # adds `cli.exec_remote_help` and `wire.remote_compute`, each carried only
+    # once its independent audit row passed against the current en bytes.
     locale = "hi"
     namespaces = (
+        "cli.exec_remote_help",
+        "relay.session.tags",
         "tui.authoring",
         "tui.projects_edit",
         "tui.review",
         "tui.schedule",
         "tui.status",
+        "tui.tags",
         "tui.team_authoring",
         "tui.transcript",
         "tui.viewer",
@@ -175,6 +188,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "wire.incidents",
         "wire.memory",
         "wire.notices",
+        "wire.remote_compute",
         "wire.settings",
         "wire.slash",
     )
@@ -262,3 +276,26 @@ def test_context_sidecar_is_not_a_namespace_and_reads_when_present(
     assert catalogues.context("en", "demo") == sidecar
     # Absent sidecar is a valid state ({}), not an error.
     assert catalogues.context("en", "missing") == {}
+
+
+def test_the_bundle_identity_covers_the_eager_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A namespace moving between eager and deferred must change the ETag.
+
+    Reproduces review round 1 MAJOR-1: the hash once digested only
+    ``(namespace, file sha)`` pairs, so making ``wire.settings`` eager took the
+    served message count from 335 to 1139 while the ETag stayed
+    ``a6785c3f…``. A client holding that ETag revalidated to 304, skipped
+    re-registration, and kept the newly eager namespace English indefinitely.
+    """
+    deferred = catalogues.wire_bundle("en")
+    monkeypatch.setattr(catalogues, "DEFERRED_NAMESPACES", {})
+    eager = catalogues.wire_bundle("en")
+
+    assert len(eager["messages"]) > len(deferred["messages"])
+    assert len(eager["messages"]) - len(deferred["messages"]) == len(
+        catalogues.load_catalogue("en", "wire.settings")
+    )
+    # Identical file bytes, different split: the identity must still differ.
+    assert eager["content_sha256"] != deferred["content_sha256"]

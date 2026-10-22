@@ -21,12 +21,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, NewType
+from urllib.parse import quote, unquote
 
 __all__ = [
     "CONVERSATION_ID_PATTERN",
     "SCREENING_CATEGORIES",
     "ACK_TARGETS",
     "AckTarget",
+    "ConversationFeedRef",
     "FeedSeq",
     "InboxCursor",
     "InboxPage",
@@ -36,6 +38,8 @@ __all__ = [
     "TeamBridgeTypeError",
     "feed_seq",
     "inbox_cursor",
+    "is_conversation_message_id",
+    "parse_conversation_ref_value",
     "project_events_batch",
     "project_inbox_page",
     "project_message_ref",
@@ -47,6 +51,18 @@ __all__ = [
 #: second copy is a drift risk, not a style choice. Kept here (not in the
 #: route module) because this module has no httpx/server imports.
 CONVERSATION_ID_PATTERN = r"^bcv_[0-9a-z]{8,64}$"
+
+#: The conversation-message id family (``bcmsg_`` + lowercase base36), and the
+#: kind token the feed ref uses to carry a conversation delivery. Both are
+#: shared by the projection and the parser so a ref cannot be written in one
+#: spelling and read in another.
+_CONVERSATION_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{1,64}$")
+CONVERSATION_FEED_KIND = "conversation_id"
+CONVERSATION_FEED_TYPE = "message_available"
+#: Bound on the card labels the feed may carry (the same 200 the server uses
+#: for a display label). Kept here because the ref is persisted, not just
+#: rendered.
+_CONVERSATION_CARD_LABEL_MAX = 200
 
 
 #: §6.2's closed ack states for ONE recipient advancing their own delivery:
@@ -65,7 +81,10 @@ _EVENT_TYPES = (
     "request_revoked",
     "request_expired",
 )
-#: The only subject-ref kinds a feed event may carry (bridge.go BridgeEventIDs).
+#: The pair subject-ref kinds a feed event may carry (bridge.go
+#: BridgeEventIDs). Conversation deliveries are projected SEPARATELY below:
+#: their subject is a conversation message plus the member's mention bit, not
+#: a pair message the inbox can resolve.
 _EVENT_ID_KINDS = ("message_id", "request_id", "thread_id")
 #: The frozen §7.2 delivery-state set, defined ONCE at its source.
 DELIVERY_STATES = ("unread", "read", "working", "done", "blocked")
@@ -253,6 +272,141 @@ def _require_id(value: Any, where: str) -> str:
 
 def _optional_id(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+@dataclass(frozen=True)
+class ConversationFeedRef:
+    """One conversation-delivery signal from the feed — refs, mention and card labels.
+
+    The conversation lane does not share the pair lane's ``message_id``-only
+    ref: a card needs the conversation it belongs to, the message's position in
+    that conversation, whether this endpoint was mentioned, and — for an
+    agent-only membership that cannot read the person-gated conversation view —
+    the server-resolved display labels. ``conversation_name``/``sender_label``/
+    ``sender_kind`` are optional so pair-shaped legacy rows still parse; when
+    absent the handler falls back to the person-gated view.
+
+    The encoded form is what :class:`~...store.Store` persists in
+    ``feed_refs`` — one opaque string, exactly like the existing pair refs, so
+    the once-only durable consumption path needs no schema change. Labels are
+    percent-encoded so a name containing ``/`` (or anything else) cannot split
+    the ref.
+    """
+
+    conversation_id: str
+    message_id: str
+    conversation_seq: int
+    mention: bool
+    conversation_name: str | None = None
+    sender_label: str | None = None
+    sender_kind: str | None = None
+
+    def has_card_metadata(self) -> bool:
+        """Whether the feed supplied enough provenance to render without a human read."""
+
+        return bool(self.sender_label and self.sender_kind)
+
+    def validated(self) -> "ConversationFeedRef":
+        """Refuse a ref the parser could not read back (never guess)."""
+
+        if re.fullmatch(CONVERSATION_ID_PATTERN, self.conversation_id) is None:
+            raise TeamBridgeTypeError("conversation_id is not a bcv_ id")
+        if _CONVERSATION_MESSAGE_ID.fullmatch(self.message_id) is None:
+            raise TeamBridgeTypeError("message_id is not a bcmsg_ id")
+        if (
+            not isinstance(self.conversation_seq, int)
+            or isinstance(self.conversation_seq, bool)
+            or self.conversation_seq < 1
+        ):
+            raise TeamBridgeTypeError("conversation_seq must be a positive integer")
+        if not isinstance(self.mention, bool):
+            raise TeamBridgeTypeError("mention must be a boolean")
+        card_fields = (self.conversation_name, self.sender_label, self.sender_kind)
+        if any(value is not None for value in card_fields):
+            # All-or-nothing for the SENDER half: a label without a kind (or
+            # vice versa) cannot render a dynamic header, so it is malformed
+            # rather than a reason to trust the person-gated view.
+            if not isinstance(self.sender_label, str) or not self.sender_label.strip():
+                raise TeamBridgeTypeError("sender_label is required with card metadata")
+            if self.sender_kind not in ("human", "agent"):
+                raise TeamBridgeTypeError("sender_kind must be human or agent")
+            if self.conversation_name is not None and not isinstance(self.conversation_name, str):
+                raise TeamBridgeTypeError("conversation_name must be a string")
+            for value in card_fields:
+                if value is not None and len(value) > _CONVERSATION_CARD_LABEL_MAX:
+                    raise TeamBridgeTypeError("card label exceeds its bound")
+        return self
+
+    def encode(self) -> str:
+        """The ONE persisted ref spelling, shared with :func:`parse_conversation_ref_value`."""
+
+        base = (
+            f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+            f"{self.conversation_id}/{self.message_id}/{self.conversation_seq}/"
+            f"{1 if self.mention else 0}"
+        )
+        if not any(
+            value is not None
+            for value in (self.conversation_name, self.sender_label, self.sender_kind)
+        ):
+            return base
+        name = quote(self.conversation_name or "", safe="")
+        label = quote(self.sender_label or "", safe="")
+        return f"{base}/{name}/{label}/{self.sender_kind or ''}"
+
+
+def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
+    """Decode a conversation feed ref value; ``None`` means malformed (skip, never guess).
+
+    Four parts is the original ref (no card metadata); seven is the additive
+    form carrying the server-resolved name/label/kind. Anything else is
+    malformed, including a partial metadata tuple.
+    """
+
+    if not isinstance(value, str):
+        return None
+    parts = value.split("/")
+    if len(parts) not in (4, 7):
+        return None
+    conversation_id, message_id, seq_text, mention_text = parts[:4]
+    if _CANONICAL_DECIMAL.fullmatch(seq_text) is None:
+        return None
+    if mention_text not in ("0", "1"):
+        return None
+    name = label = kind = None
+    if len(parts) == 7:
+        encoded_name, encoded_label, kind = parts[4:]
+        if (
+            len(encoded_name) > _CONVERSATION_CARD_LABEL_MAX * 12
+            or len(encoded_label) > _CONVERSATION_CARD_LABEL_MAX * 12
+        ):
+            return None
+        name = unquote(encoded_name)
+        label = unquote(encoded_label)
+    try:
+        return ConversationFeedRef(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            conversation_seq=int(seq_text),
+            mention=mention_text == "1",
+            conversation_name=name,
+            sender_label=label,
+            sender_kind=kind,
+        ).validated()
+    except TeamBridgeTypeError:
+        return None
+
+
+def is_conversation_message_id(value: str) -> bool:
+    """Whether ``value`` is a BARE conversation-message id (``bcmsg_…``).
+
+    The connector's hold retry needs this distinction: a bare ``bcmsg_`` id
+    cannot name its conversation, so it must never be re-driven through the
+    pair spine (which would ask the hub for a pair message that does not
+    exist). Shares the ONE id grammar the ref validator uses.
+    """
+
+    return isinstance(value, str) and _CONVERSATION_MESSAGE_ID.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)
@@ -459,6 +613,59 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
         ids = raw.get("ids")
         if not isinstance(ids, Mapping):
             raise TeamBridgeTypeError(f"events[{index}].ids must be a mapping")
+        if "conversation_id" in ids:
+            # THE CONVERSATION SUBJECT (design D6). It is a distinct lane, not
+            # a pair message with extra keys: route it as its own ref so the
+            # connector can never hand it to the pair inbox reader. An empty
+            # value is malformed, never a fallback to the pair lane.
+            if event_type != CONVERSATION_FEED_TYPE:
+                raise TeamBridgeTypeError(
+                    f"events[{index}] carries conversation_id on {event_type!r}"
+                )
+            conversation_id = ids.get("conversation_id")
+            message_id = ids.get("message_id")
+            if not isinstance(conversation_id, str) or not isinstance(message_id, str):
+                raise TeamBridgeTypeError(f"events[{index}].ids conversation refs must be strings")
+            raw_seq = ids.get("conversation_seq")
+            if isinstance(raw_seq, bool) or not isinstance(raw_seq, (int, str)):
+                raise TeamBridgeTypeError(
+                    f"events[{index}].ids.conversation_seq must be an integer"
+                )
+            seq_text = str(raw_seq)
+            if _CANONICAL_DECIMAL.fullmatch(seq_text) is None:
+                raise TeamBridgeTypeError(
+                    f"events[{index}].ids.conversation_seq must be canonical decimal"
+                )
+            mention = ids.get("mention", False)
+            if not isinstance(mention, bool):
+                raise TeamBridgeTypeError(f"events[{index}].ids.mention must be a boolean")
+            # The server omits ``mention`` when false (Go's ``omitempty`` on a
+            # bool), so an absent bit is a NON-mention delivery, not a
+            # malformed one.
+            card_meta = {}
+            for field_name in ("conversation_name", "sender_label", "sender_kind"):
+                if field_name in ids:
+                    value = ids.get(field_name)
+                    if not isinstance(value, str):
+                        raise TeamBridgeTypeError(
+                            f"events[{index}].ids.{field_name} must be a string"
+                        )
+                    card_meta[field_name] = value
+            at = raw.get("at")
+            if not isinstance(at, str) or not at:
+                raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")
+            refs.append(
+                ConversationFeedRef(
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    conversation_seq=int(seq_text),
+                    mention=mention,
+                    **card_meta,
+                )
+                .validated()
+                .encode()
+            )
+            continue
         subject_kind: str | None = None
         subject: str | None = None
         for kind in _EVENT_ID_KINDS:

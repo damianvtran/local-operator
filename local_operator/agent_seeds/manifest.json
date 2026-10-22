@@ -62,14 +62,15 @@
       "label": "Coder",
       "description": "Implements one bounded slice of work end to end with the full toolset, then reports what changed and how it was verified.",
       "when_to_use": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
-      "version": "1.2.5",
+      "version": "1.3.0",
       "instructions_sha256": "f2da4166c78a9f9aa246631ffef9a9b5e5a96e9e3574ef8f337f9c697696fde7",
       "instructions_chars": 2185,
       "tools": null,
-      "effort": null,
+      "effort": "default",
       "delegate": false,
       "tags": [
         "role",
+        "effort:default",
         "class:reactive"
       ],
       "categories": [

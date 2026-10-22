@@ -1988,6 +1988,30 @@ def query_budget_title() -> Msg:
     return Msg("wire.settings.query_budget.title", {})
 
 
+def remote_compute_description() -> Msg:
+    return Msg("wire.settings.remote_compute.description", {})
+
+
+def remote_compute_title() -> Msg:
+    return Msg("wire.settings.remote_compute.title", {})
+
+
+def remote_compute_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.remote_compute_enabled.choice.false.description", {})
+
+
+def remote_compute_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.remote_compute_enabled.choice.true.description", {})
+
+
+def remote_compute_enabled_help() -> Msg:
+    return Msg("wire.settings.remote_compute_enabled.help", {})
+
+
+def remote_compute_enabled_label() -> Msg:
+    return Msg("wire.settings.remote_compute_enabled.label", {})
+
+
 def retired_description() -> Msg:
     return Msg("wire.settings.retired.description", {})
 

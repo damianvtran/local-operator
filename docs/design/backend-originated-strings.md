@@ -213,6 +213,65 @@ For SDK/concurrent roots prefer explicit scoped locale in human render adapters,
 not mutation of process-global locale per request. Retain startup's existing
 root-isolation-before-resolution ordering.
 
+### 4.1 Catalogue supply (implementation decision)
+
+§4 settles ownership; this subsection settles how a client receives the owned
+copy without fetching the whole locale, with the measurements the decision was
+taken on.
+
+**Numbers.** Excluding `.context.json` sidecars, the whole catalogue tree at
+this baseline is 78 files / 244,195 B in English, 48 / 178,112 B in French, and
+16 files for each of es/ru/vi (119,807 / 158,323 / 126,382 B) and 17 for
+hi (186,680 B); all eight
+supported locales together exceed 1 MB and grow by roughly 200 KB per locale.
+Those are ALL catalogues, including namespaces each client bundles itself.
+The desktop surface needs only the backend-owned `wire.*` set, which measures
+22 files / 116,849 B in English and 7 files / 100,257 B in French. One
+namespace dominates both: `wire.settings` is 80,658 B of the English wire set
+(69%) and 92,304 B of French (92%), and reaches 133,641 B in Hindi. A loader costed from
+the all-catalogue total is therefore pessimistic about the eager payload and
+blind to the one file that actually dominates it.
+
+**Decision: one per-locale eager bundle, `wire.*` only.**
+`GET /v1/i18n/catalogues/{locale}` serves every `wire.*` namespace of the
+requested locale flattened into one message map, with each namespace's
+committed-file hash, the bundle hash as `ETag`, and `304` revalidation. It is
+the same public negotiation data as the per-namespace route, with the same
+eligibility-before-disk rule. Client-owned namespaces are NOT served: serving
+`ui.*`/`tui.*`/`relay.*` to the desktop would make this repo a second source of
+truth for strings another client already ships. The active locale is fetched at
+startup; a locale switch fetches that locale; the client caches valid bundles
+persistently (two most recent locales).
+
+**`wire.settings` is deferred, not re-split.** Re-splitting the 804-key file
+into child namespaces would move already-audited translated content into new
+namespaces and invalidate the translation ledger's per-namespace
+`source_sha256` records. The file carries settings-registry labels/help that the
+desktop settings surface receives as plain `label`/`help` strings from
+`GET /v1/settings`; no desktop envelope identity uses the namespace (verified by
+`grep` over `.envelope()` producers). It is therefore listed in the bundle's
+`deferred` manifest and fetched on demand through the existing per-namespace
+route if a future surface needs it. Eager payload: 36,191 B English, 7,953 B
+French.
+
+**The size policy is a gate, not a measurement.**
+`tests/unit/i18n/test_catalogue_sizes.py` fails when (a) any eager `wire.*`
+namespace exceeds 32 KiB, (b) the deferred set is anything other than exactly
+`{wire.settings}` (with a recorded reason), (c) a deferred namespace exceeds
+160 KiB, or (d) a locale's total eager wire payload exceeds 64 KiB. A total
+budget alone is satisfied by many small files plus one monster; the per-file
+ceiling is what makes the next growth visible in review.
+
+**Failure, empty and RTL.** The bundle adds no failure behaviour: unreachable
+endpoint, 404 for an unshipped locale, or a `200` with an empty message map all
+leave the client with nothing registered, so a `wire.*` identity is unknown to
+the runtime and degrades to the envelope's own `text` (never a key). The payload
+carries NO direction metadata: direction is a UI paint concern, and
+`GET /v1/capabilities` already publishes `language_direction` for the resolved
+language. `zh-CN` and `ur` have zero catalogue files today and are not shipped;
+when they ship, their bundle is the same shape and their RTL layout comes from
+that existing capability field.
+
 ## 5. Do-not-key boundary
 
 | Content | Treatment |

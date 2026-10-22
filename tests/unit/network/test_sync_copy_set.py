@@ -80,6 +80,7 @@ def _entry_owners() -> dict[str, str]:
         TRANSCRIPT_FILENAME,
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
+    from local_operator.session.runtime.journal import EXIT_RECORD_NAME, RUN_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
@@ -105,6 +106,8 @@ def _entry_owners() -> dict[str, str]:
         TURN_JOURNAL_NAME: "session.runtime.registry",
         STOP_MARKER_NAME: "session.runtime.registry",
         SIGNAL_RECEIPT_NAME: "session.runtime.registry",
+        EXIT_RECORD_NAME: "session.runtime.journal",
+        RUN_RECORD_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
         DESKTOP_MARKER_NAME: "session.retention",
@@ -279,10 +282,33 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/network/mobility.py": (
+        1,
+        "``DROPPED_ROLES_DIRNAME`` ('dropped-session-roles'): the DEVICE-LEVEL stash a "
+        "``--drop-session-roles`` move puts a conversation's role/team definitions in "
+        "before the commit deletes the session directory. Deliberately a sibling of "
+        "``sessions/``, never an entry inside one: the copy set must not carry it, no "
+        "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
     "local_operator/paths.py": (
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
+    ),
+    "local_operator/remote_compute/config.py": (
+        2,
+        "``_ALABEL_PREFIX`` ('xn--') and ``_LOOPBACK_NAME`` ('localhost') are "
+        "URL-host vocabulary for validating the remote-compute API override — a "
+        "punycode label prefix and the loopback host name — not filesystem paths, "
+        "so nothing on disk travels or stays behind",
+    ),
+    "local_operator/network/credentials/mcp_state.py": (
+        2,
+        "``MCP_AUTH_FILENAME``/``MCP_AUTH_LOCK_FILENAME`` ('mcp_auth.json' and its "
+        "sidecar lock): the per-network durable credential EVIDENCE under "
+        "``<config>/network/credentials/<network_id>/``. Machine-local state about "
+        "which sign-in this device must recover, beside the placement document, "
+        "never an entry of a session directory and never copied to a peer",
     ),
     "local_operator/team_bridge/connector/lock.py": (
         1,
@@ -297,6 +323,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
         "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
+    ),
+    # The census document lives BESIDE the session directories (a store-level
+    # file), never inside one: it is the audit baseline, not conversation
+    # content, so a session travelling between devices carries none of it.
+    "local_operator/session/census.py": (
+        1,
+        "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
+        "beside the session directories, never an entry of a session",
     ),
     "local_operator/server/utils/local_tokens.py": (
         1,
@@ -362,6 +396,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "update-operation records for this INSTALLROOT — machine-local recovery "
         "state bound to one install, exactly as untransportable as the lock and "
         "the attempt file beside it.",
+    ),
+    "local_operator/procname.py": (
+        1,
+        "``_SOURCE_MARKER`` ('source'): the sidecar a published runtime image "
+        "carries inside ``<stable root>/runtime/<build key>/``, naming the "
+        "interpreter it was cloned from. It is install-level state about ONE "
+        "interpreter build, beside the published image under the lop install root "
+        "and outside any session directory; a session travelling between devices "
+        "carries neither the image nor its marker",
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
@@ -458,6 +501,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``MODULE_NAME`` (``local_operator.librarian``): a dotted MODULE name the "
         "control plane imports lazily, not a path or a session entry",
     ),
+    # The tag store is CONFIG-ROOT presentation state: ``<config>/tags/`` holds
+    # the registry and per-session assignments, and ``sidebar-tags.json`` sits
+    # beside ``config.yml`` as the grouping toggle. It is the TUI's own view
+    # data, never an entry a session directory holds, and a session moved to
+    # another device carries none of it.
+    "local_operator/tui/sidebar_tags.py": (
+        1,
+        "``TAG_GROUPS_FILE`` ('sidebar-tags.json'): the grouping toggle at the "
+        "CONFIG root beside config.yml, never an entry of a session directory",
+    ),
     # The Library's derived catalog and authoritative metadata live under the
     # CONFIG root too: the index is a discardable cache under
     # ``<config>/cache/library/`` and the metadata database is
@@ -537,9 +590,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        3,
-        "the cleanup log and last-cleanup record (sessions root) and the store marker "
-        "that gates removal: none of them is a file a session directory holds",
+        5,
+        "the cleanup log, the value-hold index and the last-cleanup record (all at the "
+        "sessions root), the store marker that gates removal, and ``HANDED_AWAY_DIRNAME`` "
+        "— the ``<config>/network/handed-away/`` quarantine a committed mesh move renames "
+        "its directory into. That last one is a CONFIG-LEVEL directory: it is where a "
+        "session tree goes to stop being one, so it can never be an entry of a session "
+        "directory, and none of the five is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
         5,
@@ -569,11 +626,27 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``sessions`` itself: the directory the entries live IN",
     ),
+    # The session-tag store's reserved DISPLAY label (``RESERVED_NAME``,
+    # ``"Untagged"``): the pseudo-category the UI shows for conversations no tag
+    # claims, and the one name a user may not assign. It is a candidate only
+    # because it matches the guard's NAME-suffix heuristic (the Aida
+    # ``DEFAULT_NAME`` precedent) — a label in the registry's vocabulary, never
+    # a file or directory inside a session. The store itself is at
+    # ``<config>/tags/``, beside ``sessions/``: its ``"tags"``/``"revision"``/
+    # ``"categories.json"`` segments are spelled inline, so they are not
+    # constants this derivation sees, and a move carries none of the store.
+    "local_operator/session/session_tags.py": (
+        1,
+        "``RESERVED_NAME`` ('Untagged'): the reserved tag DISPLAY NAME for the "
+        "untagged pseudo-category — a label in the registry's vocabulary, never "
+        "a path or an entry of a session directory",
+    ),
     "local_operator/asks/store.py": (
-        4,
+        5,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
         "directories the queue's paths are built UNDER, never entries of a session "
-        "directory. Plus the two row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``), "
+        "directory. Plus the three row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
+        "and ``ask-relay-``, the watcher's settle-note row), "
         "joined to a row id and never a bare filename. The third name constant in that "
         "module, ``ASKS_LOG_NAME`` "
         "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
@@ -595,10 +668,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
     "local_operator/i18n/catalogues.py": (
-        1,
+        2,
         "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
         "sidecar inside the packaged ``local_operator/i18n/catalogues/`` tree — package "
-        "data shipped with the wheel, never an entry of a session directory",
+        "data shipped with the wheel, never an entry of a session directory. "
+        "``WIRE_NAMESPACE_PREFIX`` (``wire.``): a namespace-SELECTOR prefix the "
+        "per-locale bundle route filters catalogue namespace ids with; it is never "
+        "joined to a path or used as a filename",
     ),
     "local_operator/network/audit.py": (
         1,

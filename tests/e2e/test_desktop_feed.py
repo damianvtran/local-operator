@@ -1706,6 +1706,7 @@ async def test_an_authored_profile_and_team_ring_the_authoring_doorbell(
                     instructions="Answer the question in one sentence.",
                 ),
                 creating=True,
+                scope="global",
             )
             assert (name, kind) == ("e2e-doorbell-role", "role"), (name, kind)
             assert (root / "agents").is_dir(), "the write did not create a profile row"

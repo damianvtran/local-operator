@@ -69,6 +69,7 @@ from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
+from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import (
@@ -152,6 +153,15 @@ try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
     # The new child keeps translated wire.settings source hashes unchanged.
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.account_policy"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+# The Hub defaults rows read their copy from their own English-only child: the
+# switch they describe governs BOTH agent and skill links, and that correction
+# must not move the already-audited ``wire.settings`` source hash the carried
+# locales are pinned to (the same reason as ``wire.aida_cadence`` above).
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.hub_defaults"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -811,6 +821,26 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.mesh_updates_title()),
         Scope.LIVE,
         _t(_ws.mesh_updates_description()),
+    ),
+    # PREVIEW, and its own section, LIVE — all three are decisions, not defaults.
+    #
+    # LIVE is honest: the switch is read from ``config.yml`` on every capability
+    # negotiation (``server.features.feature_flags`` ->
+    # ``remote_compute.is_enabled``), so an edit withdraws or shows the remote
+    # affordance at the next negotiation with no relaunch and no ``/new``.
+    #
+    # Its own section rather than a row under ``network``: scope is uniform
+    # within a section by construction, and every ``network.*`` key there is
+    # read once when the relay starts (that section's description says so).
+    # Filing a live switch under a "takes effect: new launch" header is exactly
+    # the painted lie this registry's split sections exist to prevent. It is
+    # also a different promise from the relay's: that section configures how
+    # peers reach this machine, this one says where the user's work may run.
+    Section(
+        "remote_compute",
+        _t(_ws.remote_compute_title()),
+        Scope.LIVE,
+        _t(_ws.remote_compute_description()),
     ),
     # The Aida keys. Scope LIVE, with the caveats stated in the description
     # rather than hidden behind a dishonest label: the pause flag is delivered
@@ -5012,14 +5042,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="hub.auto_update.agents",
         path=("hub", "auto_update", "agents"),
         section="hub",
-        label=_t(_ws.hub_auto_update_agents_label()),
+        label=_t(_hd.agents_label()),
         kind=Kind.BOOL,
         default=True,
         choices=_bool_choices(
-            _t(_ws.hub_auto_update_agents_choice_true_description()),
-            _t(_ws.hub_auto_update_agents_choice_false_description()),
+            _t(_hd.agents_on_description()),
+            _t(_hd.agents_off_description()),
         ),
-        help=_t(_ws.hub_auto_update_agents_help()),
+        help=_t(_hd.agents_help()),
     ),
     Setting(
         key="hub.auto_update.teams",
@@ -5570,8 +5600,8 @@ SETTINGS: tuple[Setting, ...] = (
     # to pin that the two cannot drift. Every path is a genuinely NESTED tuple;
     # the fail-closed normalisation of each value lives with the consumer, so an
     # ABSENT key reads the shipped default and a PRESENT but unparseable
-    # ``team_bridge.enabled`` reads OFF (the ON default performs a consent
-    # write) rather than crashing or consenting on a bad value.
+    # ``team_bridge.enabled`` reads OFF rather than crashing or consenting on a
+    # bad value.
     #
     # TWO ROWS, DELIBERATELY. ``team_bridge.onboarding`` is internal UI
     # bookkeeping (the one-time dialog's shown-flag) and is NOT registered: a
@@ -5588,13 +5618,14 @@ SETTINGS: tuple[Setting, ...] = (
         section="team_bridge",
         label=_t(_ws.team_bridge_enabled_label()),
         kind=Kind.BOOL,
-        # ON by default (opt-out): a signed-in account on an eligible Team plan
-        # gets agent messages without an opt-in dialog, and this row is where
-        # the machine turns it off. The literal is pinned to
+        # OFF by default during the consent hold: #2712 shipped the opt-out
+        # default ON, but no consent version with opt-out copy was served, so an
+        # absent key could lead to a consent write the member never saw. An
+        # explicit true is this machine's opt-in. The literal is pinned to
         # ``DEFAULT_TEAM_BRIDGE_ENABLED`` by ``_consumer_defaults()`` in
         # tests/unit/test_settings_io.py; the server half (eligibility, consent,
         # launch) still decides whether anything can run.
-        default=True,
+        default=False,
         help=_t(_ws.team_bridge_enabled_help()),
     ),
     Setting(
@@ -5649,6 +5680,31 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.asks_lapsed_visible_for_choice_7d_label()),
                 _t(_ws.asks_lapsed_visible_for_choice_7d_description()),
             ),
+        ),
+    ),
+    # -- remote compute -----------------------------------------------------
+    # The preview switch. OFF by default because turning it on moves the user's
+    # work to Radient-hosted compute: a preview that began switched on would
+    # send the first task off the machine before anyone asked for it. The real
+    # default lives beside the reader as ``DEFAULT_REMOTE_COMPUTE_ENABLED`` and
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins the two
+    # together.
+    #
+    # BOOL with the same choice descriptions every other switch carries: the row
+    # has to say what OFF means ("local only"), because a switch that names only
+    # its ON state leaves the user guessing whether remote work is refused or
+    # merely not offered.
+    Setting(
+        key="remote_compute.enabled",
+        path=("remote_compute", "enabled"),
+        section="remote_compute",
+        label=_t(_ws.remote_compute_enabled_label()),
+        kind=Kind.BOOL,
+        default=False,
+        help=_t(_ws.remote_compute_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.remote_compute_enabled_choice_true_description()),
+            _t(_ws.remote_compute_enabled_choice_false_description()),
         ),
     ),
 )

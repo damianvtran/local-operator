@@ -536,6 +536,11 @@ export type ChannelChip = {
 	    the chip carries the `included` marker so the money cannot be read as
 	    billed (design §5.1's collapse rule). */
 	subEquivalent: boolean;
+	/** Set only when two or more selected rows share this `label`: the row's own
+	    short serving identity (model, else provider, else unit), so three
+	    `image` chips are distinguishable without inventing a number or a name.
+	    Absent on unique labels, which need no qualifier. */
+	qualifier?: string;
 };
 
 export type ChannelBreakdown = {
@@ -581,19 +586,24 @@ export function channelBreakdown(state: PublishedSpendInput): ChannelBreakdown |
 	const published = state.spend_channels;
 	if (!published || typeof published !== "object") return null;
 	const rows = Array.isArray(published.rows) ? published.rows : [];
-	const chips: ChannelChip[] = selectChipRows(rows).map((row) => {
+	const selected = selectChipRows(rows).map((row) => {
 		const amount = row.amount_micro;
 		return {
-			label: row.channel === "inference" ? inferenceShortLabel(row) : String(row.channel),
-			text:
-				typeof amount === "number" && Number.isFinite(amount)
-					? formatUsd(amount)
-					: UNPRICEABLE_TEXT,
-			subEquivalent: isSubEquivalentBasis(row.basis),
+			row,
+			chip: {
+				label:
+					row.channel === "inference" ? inferenceShortLabel(row) : String(row.channel),
+				text:
+					typeof amount === "number" && Number.isFinite(amount)
+						? formatUsd(amount)
+						: UNPRICEABLE_TEXT,
+				subEquivalent: isSubEquivalentBasis(row.basis),
+			} satisfies ChannelChip,
 		};
 	});
+	qualifySharedLabels(selected);
 	return {
-		chips,
+		chips: selected.map((entry) => entry.chip),
 		hiddenCount: Math.max(0, rows.length - CHANNEL_CHIP_CAP),
 		untrackedNotice: published.tracked !== true && rung(published.knowledge) !== "exact",
 	};
@@ -617,6 +627,59 @@ function selectChipRows(rows: SpendChannelRow[]): SpendChannelRow[] {
 	const keptInference = inference.slice(0, Math.max(0, CHANNEL_CHIP_CAP - keptNamed.length));
 	const kept = new Set<SpendChannelRow>([...keptNamed, ...keptInference]);
 	return rows.filter((row) => kept.has(row));
+}
+
+/**
+ * Disambiguate a channel label shared by several selected rows.
+ *
+ * The operator's screen read `image $—  image $0.080  image $0.080`: one
+ * channel name repeated at three prices says nothing about WHICH call cost
+ * what. The rows themselves already carry the serving identity, so a repeated
+ * label gets its short model appended, then provider, then unit — the wire's
+ * own fields, in that order of usefulness. A candidate equal to the label is
+ * skipped (an inference chip is already the short model, so its duplicates
+ * fall through to provider) and money is never touched.
+ *
+ * WHEN NO CANDIDATE DISTINGUISHES THE GROUP, the first non-empty one is still
+ * used: two rows with identical model, provider and unit remain identical on
+ * screen. Inventing a suffix or a count would state something the wire does
+ * not, which is the one thing this breakdown must never do.
+ */
+function qualifySharedLabels(entries: { row: SpendChannelRow; chip: ChannelChip }[]): void {
+	const groups = new Map<string, { row: SpendChannelRow; chip: ChannelChip }[]>();
+	for (const entry of entries) {
+		const group = groups.get(entry.chip.label) ?? [];
+		group.push(entry);
+		groups.set(entry.chip.label, group);
+	}
+	for (const group of groups.values()) {
+		if (group.length < 2) continue;
+		const candidates = (entry: (typeof group)[number]) =>
+			[
+				shortIdentity(entry.row.model),
+				shortIdentity(entry.row.provider),
+				shortIdentity(entry.row.unit),
+			].filter((value): value is string => Boolean(value) && value !== entry.chip.label);
+		const rows = group.map(candidates);
+		/* The first position whose values are all present AND pairwise distinct
+		   is the narrowest qualifier that actually separates the rows. */
+		const position = [0, 1, 2].find((index) => {
+			const values = rows.map((row) => row[index]);
+			return values.every(Boolean) && new Set(values).size === values.length;
+		});
+		group.forEach((entry, index) => {
+			const qualifier = rows[index][position ?? 0];
+			if (qualifier) entry.chip.qualifier = qualifier;
+		});
+	}
+}
+
+/** The last path segment of a wire identity, so a model or a provider that
+    carries a namespace still reads as one short word. */
+function shortIdentity(value: string | undefined): string {
+	const text = typeof value === "string" ? value : "";
+	const slash = text.lastIndexOf("/");
+	return slash >= 0 && slash + 1 < text.length ? text.slice(slash + 1) : text;
 }
 
 /** The model half of an inference row's `provider/model` label, or a fallback

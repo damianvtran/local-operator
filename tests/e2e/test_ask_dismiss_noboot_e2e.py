@@ -72,7 +72,7 @@ BOUND_S = 120.0
 NO_BOOT_SETTLE_S = 5.0
 
 
-def _seed(headless_tui_env: Path, *, ask_id: str = ASK_ID) -> Path:
+def _seed(headless_tui_env: Path, *, ask_id: str = ASK_ID, lapsed: bool = True) -> Path:
     """A durable user session with one LAPSED queued ask and NO runtime.
 
     The transcript is seeded (not just the directory) because the relay's own gate
@@ -91,7 +91,7 @@ def _seed(headless_tui_env: Path, *, ask_id: str = ASK_ID) -> Path:
     row = {
         "ask_id": ask_id,
         "created_at": now - 3_600_000,
-        "expires_at": now - 60_000,
+        "expires_at": now - 60_000 if lapsed else now + 3_600_000,
         "timeout_s": 3600,
         "urgent": False,
         "status": "open",
@@ -115,7 +115,7 @@ def _seed(headless_tui_env: Path, *, ask_id: str = ASK_ID) -> Path:
             "ask_id": ask_id,
             "at": now - 3_600_000,
             "created_at": now - 3_600_000,
-            "expires_at": now - 60_000,
+            "expires_at": now - 60_000 if lapsed else now + 3_600_000,
             "timeout_s": 3600,
             "urgent": False,
             "tool_call_id": "",
@@ -358,3 +358,109 @@ def test_live_dismiss_delivers_the_owed_notice_and_one_turn(headless_tui_env: Pa
     finally:
         client.close()
         _reap()
+
+
+def _wake_ids(directory: Path) -> list[str]:
+    """The ids in the transcript's LATEST ``wake_schedules`` row."""
+    latest: list[str] = []
+    for row in _transcript_rows(directory):
+        payload = row.get("payload")
+        if isinstance(payload, dict) and payload.get("custom_type") == "wake_schedules":
+            latest = [str(item.get("id")) for item in payload["details"]["schedules"]]
+    return latest
+
+
+def test_cold_open_ask_dismiss_boots_nothing_and_next_boot_delivers(
+    headless_tui_env: Path,
+) -> None:
+    """D6 + D3 (design §15): an OPEN ask on a cold session is dismissible.
+
+    (1) nothing boots and no row is added; (2) the deadline wake row is gone, so
+    the supervisor cannot boot a runtime for it; (3) the dismissal is durable with
+    its reason; (4) the next real boot delivers ``ask-response-<id>`` carrying the
+    dismissal text — and NOT a deadline notice.
+    """
+    from local_operator.harness.wake import WakeSchedule
+
+    directory = _seed(headless_tui_env, lapsed=False)
+    wake_row = WakeSchedule(
+        id=ask_store.timeout_row_id(ASK_ID),
+        message="ask deadline",
+        next_due_at=int(time.time() * 1000) + 3_600_000,
+        created_at=int(time.time() * 1000),
+        kind="ask_timeout",
+        hidden=True,
+    ).model_dump()
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": "wake-entry-1",
+                    "ts": time.time(),
+                    "type": "custom",
+                    "payload": {
+                        "custom_type": "wake_schedules",
+                        "details": {"schedules": [wake_row]},
+                    },
+                }
+            )
+            + "\n"
+        )
+    assert _wake_ids(directory) == [ask_store.timeout_row_id(ASK_ID)]
+    before_ids = _row_ids(directory)
+    client = _client()
+    try:
+        with bounded(BOUND_S, "a cold open-ask dismissal boots nothing"):
+            reply = client.post(
+                f"/api/sessions/{SESSION}/command",
+                json={"op": "ask_dismiss", "ask_id": ASK_ID, "reason": "answered_in_chat"},
+            )
+            assert reply.status_code == 200, reply.text
+            assert reply.json() == {"ok": True, "detail": "dismissed"}
+
+        time.sleep(NO_BOOT_SETTLE_S)
+        record, owner = find_runtime_record(config_dir(), SESSION)
+        assert (record, owner) == (None, None), f"a cold dismissal booted {owner!r}"
+        assert _wake_ids(directory) == [], "the deadline wake row must go with the dismissal"
+        assert set(_row_ids(directory)) - set(before_ids) <= {
+            str(row.get("id")) for row in _transcript_rows(directory) if _is_wake_row(row)
+        }, "nothing but the wake-list rewrite may be appended"
+
+        events = ask_store.read_events(directory)
+        assert [event.get("kind") for event in events] == [
+            ask_store.EVENT_QUEUED,
+            ask_store.EVENT_DISMISSED,
+        ]
+        assert events[-1]["reason"] == "answered_in_chat"
+        entry = ask_store.read_entry(headless_tui_env, SESSION)
+        assert entry is not None
+        assert entry["asks"][0]["status"] == ask_store.STATUS_DISMISSED
+
+        async def reopen() -> str:
+            engaged, detail = await engage_session_client(config_dir(), SESSION, WarmErrand())
+            try:
+                return detail
+            finally:
+                engaged.close()
+
+        with bounded(BOUND_S, "the next boot delivers the dismissal row"):
+            asyncio.run(reopen())
+            row_id = ask_store.response_row_id(ASK_ID)
+            _wait_until(
+                lambda: row_id in _row_ids(directory),
+                timeout_s=60,
+                what="the owed dismissal response row to reach the transcript",
+            )
+        row = next(row for row in _transcript_rows(directory) if row.get("id") == row_id)
+        payload = json.dumps(row)
+        assert "settled in the conversation" in payload
+        assert '"status": "dismissed"' in payload
+        assert ask_store.timeout_row_id(ASK_ID) not in _row_ids(directory)
+    finally:
+        client.close()
+        _reap()
+
+
+def _is_wake_row(row: dict[str, object]) -> bool:
+    payload = row.get("payload")
+    return isinstance(payload, dict) and payload.get("custom_type") == "wake_schedules"

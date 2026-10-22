@@ -32,8 +32,21 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from local_operator.team_bridge.connector.wake import handle_message_available
+from local_operator.team_bridge.connector.conversation import (
+    handle_conversation_available,
+)
+from local_operator.team_bridge.connector.wake import (
+    handle_message_available,
+    parse_event_ref,
+)
 from local_operator.team_bridge.events import plan_feed_refs
+from local_operator.team_bridge.types import (
+    CONVERSATION_FEED_KIND,
+    ConversationFeedRef,
+    feed_seq,
+    is_conversation_message_id,
+    parse_conversation_ref_value,
+)
 
 #: Bounded exponential backoff between loop iterations after a FAILURE (a
 #: refused read, a transport error). A 204 timeout is NOT a failure — it
@@ -48,6 +61,23 @@ MAX_WALK_PAGES = 200
 #: Reissue delay after a 204 timeout. Small deliberately: the server held the
 #: request for the full wait window; a fresh poll is the contract's shape.
 REISSUE_DELAY_S = 0.2
+
+#: The server-side park of every connector read (§6.7: ``wait ≤ 30``). WHY:
+#: without it the hub answers a caught-up cursor at once, and the live E2E on
+#: local-operator-ui #1314 measured 124 reads in under 2 s, then 429s.
+EVENTS_WAIT_S = 25
+
+#: The floor between two iterations whose read came back AT ONCE (events,
+#: a resync arm, a hub that ignores ``wait``). The long poll is the primary
+#: pacing; this floor is what keeps a hub that never parks — a proxy that
+#: strips the query, a persistent resync answer — from turning the loop back
+#: into a storm. One second sits far inside the hub's 120/min poll bucket
+#: and costs a busy feed at most a second of latency per batch.
+MIN_ITERATION_S = 1.0
+
+#: Cap on a server-named ``Retry-After``: honour the hub's own wait, but a
+#: hostile or broken header must not park an always-on connector for hours.
+RETRY_AFTER_MAX_S = 300.0
 
 #: Held-item retry (§13.4 "retry with backoff"): base gap, cap, max attempts,
 #: and the batch bound per turn. The per-message counter lives in THIS process;
@@ -88,6 +118,51 @@ async def resync_walk(owner: Any, *, config_dir: Path, access: Any) -> dict[str,
     return {"pages": pages}
 
 
+def _conversation_hold_ref(value: str) -> ConversationFeedRef | None:
+    """A hold row that names a conversation delivery, or ``None`` for a pair item."""
+
+    parsed = parse_event_ref(value)
+    if parsed is None:
+        return None
+    event_type, kind, raw = parsed
+    if event_type != "message_available" or kind != CONVERSATION_FEED_KIND:
+        return None
+    return parse_conversation_ref_value(raw)
+
+
+def _release_engaged_holds(store: Any, owner: Any, config_dir: Path, *, now: float) -> None:
+    """Re-drive ``open_chief_of_staff`` holds the moment their reason is gone.
+
+    WHY (review of local-operator-ui #1325): that hold is released by the owner
+    SENDING their chief of staff a message — a user turn on disk, written by
+    another process. No event reaches the connector when it happens, so the
+    held message waited out the rest of its doubling backoff (60 s → 1 h), and
+    the owner's "send it a message" notice stayed up that long after they did.
+
+    So each pass checks the one local fact that releases it — cheap: a single
+    indexed count first, and the transcript probe only when such holds exist.
+    When ``engagement_hold`` now answers ``""`` (a durable turn exists, or the
+    accepted consent allows engagement), those holds are made due NOW and the
+    retry below re-drives them in this same pass. Every other hold code keeps
+    its ordinary backoff. Best-effort: a failure leaves the backoff in charge.
+    """
+
+    from local_operator.team_bridge.connector import wake as _wake
+    from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
+    from local_operator.team_bridge.store import StoreRefused
+
+    try:
+        if store.hold_count_readonly(owner, HOLD_OPEN_CHIEF_OF_STAFF) <= 0:
+            return
+        designation = store.designated_session_for(owner)
+        # Through the module, so the spine and this check read ONE rule.
+        if designation is None or _wake.engagement_hold(designation, config_dir):
+            return
+        store.make_holds_due(owner, HOLD_OPEN_CHIEF_OF_STAFF, now=now)
+    except (StoreRefused, OSError):
+        return
+
+
 async def retry_due_holds(
     owner: Any,
     *,
@@ -109,7 +184,10 @@ async def retry_due_holds(
     * held AGAIN — ``retry_at`` advances by a bounded doubling gap (60 s →
       3600 s cap; counter capped at RETRY_MAX_ATTEMPTS);
     * ``badge_only`` / ``claimed_elsewhere`` — the row is left for the next
-      due window or the other claimant.
+      due window or the other claimant;
+    * ``retired`` — the row cannot be re-driven (a bare ``bcmsg_`` duplicate
+      of a conversation hold, or a message the hub answers 404 for) and is
+      deleted, so it is never re-asked on every iteration.
 
     Fail-closed: this path can never deliver or ack a held item itself; the
     spine's own laws decide (and a hold still never wakes). ``CancelledError``
@@ -118,29 +196,91 @@ async def retry_due_holds(
 
     import time as _time
 
+    from local_operator.team_bridge.client import BridgeRefusal
     from local_operator.team_bridge.store import Store, StoreRefused
 
     store = Store(config_dir)
+    _release_engaged_holds(store, owner, config_dir, now=_time.time())
     due = store.due_screening_holds(owner, now=_time.time(), limit=limit)
     outcomes: list[dict[str, Any]] = []
     for row in due:
         message_id = row["message_id"]
-        outcome = await handle_message_available(
-            owner,
-            message_id,
-            config_dir=config_dir,
-            auth_store=auth_store,
-            access=access,
-            settings=settings,
-        )
+        if is_conversation_message_id(message_id):
+            # A BARE conversation-message id (live E2E F5). The screener writes
+            # its own hold (``provider_error``, ``policy_stale``, …) under the
+            # message id it screened, and for a conversation that is the
+            # ``bcmsg_`` id. That id cannot name the conversation again, and
+            # the pair spine asked the hub for a PAIR message that does not
+            # exist — raising on every iteration, before the poll, so the
+            # whole connector stalled. The re-drive authority is the loop's
+            # own row under the encoded feed ref (``_persist_hold_backoff``),
+            # which every conversation hold also writes; the bare row is a
+            # screening-side duplicate, so it is retired here, never re-driven.
+            try:
+                store.delete_hold(owner, message_id)
+            except StoreRefused:
+                pass  # fenced owner: the next live pass owns the row
+            _RETRY_ATTEMPTS.pop(message_id, None)
+            outcomes.append({"message_id": message_id, "action": "retired"})
+            continue
+        parsed = _conversation_hold_ref(message_id)
+        try:
+            if parsed is not None:
+                # A conversation hold is keyed by its encoded feed ref, because
+                # a bare message id cannot name the conversation again after a
+                # restart. Never hand it to the pair spine.
+                outcome = await handle_conversation_available(
+                    owner,
+                    parsed,
+                    config_dir=config_dir,
+                    auth_store=auth_store,
+                    access=access,
+                    settings=settings,
+                )
+            else:
+                outcome = await handle_message_available(
+                    owner,
+                    message_id,
+                    config_dir=config_dir,
+                    auth_store=auth_store,
+                    access=access,
+                    settings=settings,
+                )
+        except asyncio.CancelledError:
+            raise
+        except BridgeRefusal as refusal:
+            # BOUND (F5): one row's re-drive must never abort the pass — an
+            # escape here skips the poll for every later iteration. A message
+            # the hub says is gone (404; the hub's code is ``message_not_found``)
+            # is terminal: retire the row instead of re-asking forever.
+            # Anything else is held on the same backoff.
+            if refusal.http_status == 404:
+                try:
+                    store.delete_hold(owner, message_id)
+                except StoreRefused:
+                    pass
+                _RETRY_ATTEMPTS.pop(message_id, None)
+                outcomes.append({"message_id": message_id, "action": "retired"})
+                continue
+            outcome = {"action": "hold", "message_id": message_id, "code": refusal.code}
+        except Exception:  # noqa: BLE001 — one row never stops the connector
+            outcome = {"action": "hold", "message_id": message_id, "code": "retry_failed"}
         action = outcome.get("action")
-        if action in ("delivered", "bounce"):
+        if action in ("delivered", "bounce", "delivered_unadmitted", "skipped"):
             _RETRY_ATTEMPTS.pop(message_id, None)
         elif action == "hold":
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
+            new_code = str(outcome.get("code") or "")[:64]
             try:
-                store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
+                advanced = store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
+                if advanced and new_code and new_code != row["hold_code"]:
+                    # The row's code is what the owner sees (F8): a message
+                    # first held ``open_chief_of_staff`` and then held for a
+                    # NEW reason once the owner messaged the session must not
+                    # keep telling them to message it. Still conditional on the
+                    # row existing (``advanced``), so nothing is resurrected.
+                    store.persist_hold(owner, message_id, new_code, retry_at=_time.time() + gap)
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
             _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
@@ -201,8 +341,15 @@ async def run_iteration(
     )
     store = Store(config_dir)
     state = store.sync_state(owner)
-    after = state["feed_seq"] or None
-    batch = await _pull.events(owner, config_dir=config_dir, access=access, after=after)
+    # F2 (live E2E): the stored cursor is a ``FeedSeq`` and 0 is a POSITION —
+    # a fresh enrolment's. ``feed_seq or None`` turned it into "no cursor",
+    # which the hub answers with a resync at the CURRENT head, so the first
+    # message ever delivered to a fresh endpoint was skipped. Mint it through
+    # the typed constructor and send it as-is, 0 included.
+    after = feed_seq(state["feed_seq"])
+    batch = await _pull.events(
+        owner, config_dir=config_dir, access=access, after=after, wait=EVENTS_WAIT_S
+    )
     if batch is None:
         return {
             "events": 0,
@@ -232,6 +379,22 @@ async def run_iteration(
             # screening_holds schedule is the re-drive path now that refs are
             # consumed once-only, so a stuck delivery is never silently lost.
             _persist_hold_backoff(store, owner, message_id, str(outcome.get("code") or "hold"))
+    for conversation_ref in plan.conversation_deliveries:
+        # Conversation deliveries have their OWN card path; the pair inbox
+        # reader above must never see one.
+        outcome = await handle_conversation_available(
+            owner,
+            conversation_ref,
+            config_dir=config_dir,
+            auth_store=auth_store,
+            access=access,
+            settings=settings,
+        )
+        handled.append(outcome)
+        if outcome.get("action") == "hold":
+            _persist_hold_backoff(
+                store, owner, conversation_ref.encode(), str(outcome.get("code") or "hold")
+            )
     # TB-01: ONCE-ONLY consumption — the drained refs were just handled
     # (deliveries) or are state hints the drain itself consumes; deleting them
     # here is what stops the quadratic re-wake/ACK growth across polls and
@@ -270,8 +433,11 @@ async def run_forever(
     off (`BACKOFF_BASE_S` doubling to `BACKOFF_MAX_S`); a 204 resets it.
     """
 
+    import time as _time
+
     backoff = BACKOFF_BASE_S
     while stop is None or not stop.is_set():
+        started = _time.monotonic()
         try:
             access = await access_provider()
             summary = await run_iteration(
@@ -281,15 +447,58 @@ async def run_forever(
                 auth_store=auth_store,
                 settings=settings,
             )
+            backoff = BACKOFF_BASE_S
+            # F1 (live E2E): an answer used to re-poll IMMEDIATELY. Against a
+            # real hub that answered at once (resync arms, a caught-up cursor
+            # without ``wait``) it never yielded — 124 reads in under 2 s, then
+            # 429s. The long poll paces the ordinary case; this floor paces a
+            # hub that answers without parking, and it applies to a 204 as
+            # well as a 200 (review R1-1): a proxy that strips ``wait`` turns
+            # every caught-up poll into an INSTANT 204, which at the bare
+            # reissue delay was ~300 polls/min against the hub's 120/min.
+            floor = MIN_ITERATION_S - (_time.monotonic() - started)
             if summary.get("reissued"):
-                backoff = BACKOFF_BASE_S
-                await asyncio.sleep(REISSUE_DELAY_S)
-            else:
-                backoff = BACKOFF_BASE_S
+                floor = max(REISSUE_DELAY_S, floor)
+            await _pause(stop, floor)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as failure:
             # No content in the backoff path (privacy): the failure is
             # operational, and the next iteration re-tries the ordinary way.
-            await asyncio.sleep(backoff)
+            await _pause(stop, _failure_delay(failure, backoff))
             backoff = min(backoff * 2.0, BACKOFF_MAX_S)
+
+
+def _failure_delay(failure: BaseException, backoff: float) -> float:
+    """How long to wait after a failed iteration: the local backoff, or the
+    hub's own ``Retry-After`` when it names a longer one (bounded).
+
+    WHY: a 429 (the 120/min poll bucket, the ≤4-waiter census) carries the
+    wait the hub will enforce; re-polling sooner only earns another refusal
+    and keeps the bucket drained. Never SHORTER than the local backoff (the
+    doubling still bounds a flapping hub), never longer than the cap.
+    """
+
+    retry_after = getattr(failure, "retry_after_seconds", None)
+    if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool):
+        return max(backoff, min(float(retry_after), RETRY_AFTER_MAX_S))
+    return backoff
+
+
+async def _pause(stop: asyncio.Event | None, seconds: float) -> None:
+    """Sleep up to ``seconds``, waking early when ``stop`` is set.
+
+    A plain sleep would make a long Retry-After hold a shutdown for minutes.
+    """
+
+    if seconds <= 0:
+        # Still yield: a loop that never awaits starves every other task.
+        await asyncio.sleep(0)
+        return
+    if stop is None:
+        await asyncio.sleep(seconds)
+        return
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass

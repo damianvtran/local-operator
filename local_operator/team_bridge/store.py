@@ -1568,10 +1568,10 @@ class Store:
 
         WHY THIS EXISTS. ``active_owner()`` answers ``None`` for BOTH zero rows
         and an ambiguous store (two or more), and a writer cannot tell a fresh
-        machine from a corrupted one from that answer. The opt-out default's
-        local commit must refuse to ADD a row to an ambiguous store rather than
-        guessing — a write path is exactly where "None means fresh" would turn
-        ambiguity into a second owner.
+        machine from a corrupted one from that answer. The explicit settings
+        enable's local commit must refuse to ADD a row to an ambiguous store
+        rather than guessing — a write path is exactly where "None means fresh"
+        would turn ambiguity into a second owner.
         """
 
         with self._connect() as conn:
@@ -1624,6 +1624,58 @@ class Store:
             if not isinstance(ref, str) or not ref:
                 return None
             return {"consent_version": version, "consent_ref": ref}
+
+    def hold_count_readonly(self, owner: OwnerSnapshot, hold_code: str) -> int:
+        """How many messages for this live owner wait under ``hold_code`` (read-only).
+
+        A COUNT, never ids or content: the desktop status read uses it to tell
+        the owner that Team Bridge messages are waiting for them to send their
+        chief of staff a message (F8). Conversation (encoded-ref) and pair (bare pair id)
+        holds both count; the screener's bare ``bcmsg_`` duplicates are
+        excluded, so one message counts once. Fenced, absent or damaged reads
+        answer 0.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return 0
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return 0
+            # Conversation holds live under their encoded ref; PAIR holds under
+            # the bare pair message id (review R1-3). The only rows excluded are
+            # the screener's bare ``bcmsg_`` duplicates of a conversation hold,
+            # which the loop retires — counting them would double one message.
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM screening_holds "
+                "WHERE owner_key = ? AND hold_code = ? AND message_id NOT LIKE 'bcmsg\\_%' "
+                "ESCAPE '\\'",
+                (_owner_key(owner), hold_code),
+            ).fetchone()
+            return int(row["n"]) if row is not None else 0
+
+    def designated_session_for_readonly(self, owner: OwnerSnapshot) -> str | None:
+        """The designated CoS session id, read-only, under the same live fence.
+
+        The read-only twin of :meth:`designated_session_for`, for a caller that
+        must never create or migrate the store: the session runtime's peer gate
+        asks it (``team_bridge.engagement``) from inside a refusal branch, and a
+        session on a machine with no bridge store must leave none behind.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT designated_session FROM enrollments "
+                "WHERE owner_key = ? AND enrollment_generation = ?",
+                (_owner_key(owner), owner.enrollment_generation),
+            ).fetchone()
+            if row is None:
+                return None
+            value = row["designated_session"]
+            return value if isinstance(value, str) and value else None
 
     def screening_hold_readonly(
         self, owner: OwnerSnapshot, message_id: str
@@ -1973,6 +2025,47 @@ class Store:
                     "UPDATE sync SET feed_seq = ? WHERE owner_key = ?",
                     (int(cursor), _owner_key(owner)),
                 )
+
+    def seed_feed_cursor(self, owner: OwnerSnapshot, cursor: FeedSeq) -> bool:
+        """Start a NEVER-POLLED store at the hub's current feed head (review R1-2).
+
+        WHY. F2 sends the stored cursor as-is, 0 included, so a fresh endpoint's
+        first message is never skipped. But an endpoint is one per (tenant,
+        account) and survives disable, so a second machine, a reinstall or a
+        wiped store against an endpoint that was ALREADY used also starts at 0
+        — and would replay the hub's whole retained feed (up to 7 days),
+        screening and waking every message again.
+
+        HOW THE TWO CASES ARE TOLD APART: by asking the hub for its CURRENT
+        head just BEFORE this machine's enable write
+        (``TeamBridgeClient._pre_enable_head``, a no-cursor read). A brand-new
+        endpoint does not exist yet, so there is no head and the cursor stays
+        0 — its first message (seq 1) is delivered (F2). A re-used endpoint
+        answers N, so this machine starts at N: what arrived earlier is in the
+        inbox (the hub's source of truth), not replayed as wakes. Reading it
+        BEFORE the write (review R2-1) means a message that lands after the
+        enable always carries a seq above the seed and is never skipped.
+
+        Applied ONLY while the row is still the untouched commit default
+        (``feed_seq = 0``, no refs recorded): it never lowers or moves a cursor
+        a poll has already advanced. Returns whether it applied.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            key = _owner_key(owner)
+            if conn.execute(
+                "SELECT 1 FROM feed_refs WHERE owner_key = ? LIMIT 1", (key,)
+            ).fetchone():
+                return False
+            updated = conn.execute(
+                "UPDATE sync SET feed_seq = ? WHERE owner_key = ? AND feed_seq = 0 "
+                "AND pending_resync = 0",
+                (int(cursor), key),
+            ).rowcount
+            return bool(updated)
 
     def finish_resync(self, owner: OwnerSnapshot, snapshot_checkpoint: InboxCursor) -> None:
         """Complete ONLY when a walk actually reached a terminal page.
@@ -3747,6 +3840,49 @@ class Store:
                 ]
         except sqlite3.Error:
             return []
+
+    def delete_hold(self, owner: OwnerSnapshot, message_id: str) -> bool:
+        """Clear ONE hold that reached a terminal outcome.
+
+        The screening receipt commit already deletes the hold it owns; the
+        conversation delivery lane keys its hold by the encoded feed ref
+        (it must survive a restart to find the conversation again), so its
+        terminal outcomes need this one explicit clear. Live-owner fenced and
+        conditional on the row existing — a replay that already cleared it is
+        not an error.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            deleted = conn.execute(
+                "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                (_owner_key(owner), message_id),
+            )
+            return bool(deleted.rowcount)
+
+    def make_holds_due(self, owner: OwnerSnapshot, hold_code: str, *, now: float) -> int:
+        """Bring every NOT-YET-DUE hold with ``hold_code`` forward to ``now``.
+
+        For a hold whose release is a LOCAL fact the caller has just observed
+        (F8: the owner sent their chief of staff a message), so the message is
+        re-driven on this pass instead of after the rest of its doubling
+        backoff (up to an hour). Only rows already scheduled in the future
+        move; nothing is created, and other codes are untouched. Live-owner
+        fenced. Returns how many rows moved.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            updated = conn.execute(
+                "UPDATE screening_holds SET retry_at = ? "
+                "WHERE owner_key = ? AND hold_code = ? AND retry_at > ?",
+                (float(now), _owner_key(owner), hold_code, float(now)),
+            )
+            return int(updated.rowcount)
 
     def advance_hold_retry(self, owner: OwnerSnapshot, message_id: str, *, retry_at: float) -> bool:
         """Re-schedule ONE still-held message's next attempt (H4 backoff).

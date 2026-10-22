@@ -1310,6 +1310,16 @@ _FRONTEND_LOCAL_SLASHES = {
     # write. v2 is single-machine; serving the owner's project view over the
     # control protocol is a follow-up.
     "project",
+    # The tag store is THIS machine's: `config_dir()/tags` holds the registry and
+    # the per-session assignment files the sidebar's bucket map reads, exactly
+    # the argument `/archive` makes about `archived-sessions.json`. Routed to the
+    # runtime, a `/tag` write would land on the runtime host's config root while
+    # the picker and the sidebar beside it paint this one — and `/tags on|off`
+    # would persist a presentation mode governing a list this terminal draws.
+    # Both commands are frontend-local for the store they share, which is also
+    # what keeps them out of `serving.py::_slash_result`.
+    "tag",
+    "tags",
     # Memory inspection is this frontend's synced store, like /project. A
     # follower without registry identity can inspect only session/global; it
     # never guesses the remote owner's agent/team identity from a role name.
@@ -4156,6 +4166,17 @@ class FrontendUpdate(BaseModel):
     no ``degraded`` flag to ask about. That is silent drift from a different
     cause, which is a strictly worse failure than the loud one it replaces.
 
+    THE ROSTER HAS ITS OWN DELTA FORM: ``job_deltas``. ``changes["jobs"]`` is a
+    REPLACEMENT — the whole roster — and that is what a snapshot and an attach
+    seed carry, so an old follower that has never heard of ``job_deltas`` keeps
+    working against a new runtime. A live roster tick is a MERGE instead:
+    ``job_deltas.upserted`` carries only rows that changed or appeared, and
+    ``job_deltas.removed`` the ids that left, because a 185-row roster made a
+    383,608-byte delta on every 50 ms tick while one row had moved. An old
+    reader ignores the additive key and keeps its last snapshot, which is safe:
+    the next ``frontend_sync`` is authoritative. A new reader merges (see
+    ``FrontendStateStore.apply_update``).
+
     Refusing a malformed frame is NOT the same as tearing down the socket over
     a degraded one. The degrade path now labels its own frame, so the frame this
     validator rejects is one claiming to be a complete delta while carrying no
@@ -4172,8 +4193,27 @@ class FrontendUpdate(BaseModel):
     #: The runtime shed this delta's body to keep the line under the socket limit.
     #: Sequencing is still authoritative; the FIELDS are not, so a receiver must
     #: re-snapshot rather than treat the empty body as "nothing changed".
+    #:
+    #: A degraded frame also carries ``paused`` (additive), and the relay's notice
+    #: event adds ``action: "reload"``. ``paused`` says the stream is no longer
+    #: describing canonical state; it CLEARS on the next complete frame — a
+    #: ``frontend_sync`` (which carries the whole snapshot) or the next
+    #: non-degraded ``frontend_update`` — so no new frame op is needed for the
+    #: clear. A client that ignores both keys still behaves as it always did: it
+    #: re-syncs through the gap/degrade path.
     degraded: bool = False
     degraded_reason: str = ""
+    #: The per-ROW form of ``changes["jobs"]``: ``{"upserted": [row, ...],
+    #: "removed": [job_id, ...], "order": [job_id, ...], "roster_size": N}``.
+    #: Additive and optional; a frame may carry either form but not both
+    #: (``changes["jobs"]`` wins if it does, because a full roster is always the
+    #: more complete statement). ``order`` is present only when the id-keyed
+    #: merge cannot derive the roster order; ``roster_size`` is the divisor the
+    #: rows were bounded against, so a re-bounding consumer does not have to
+    #: rebuild the snapshot to count rows. Rows are the same bounded summaries a
+    #: snapshot row is, so all the roster bounds (text share, usage fold, launch
+    #: ids, elided facts) apply to every changed row here too.
+    job_deltas: dict[str, Any] = Field(default_factory=dict)
     job_trajectory_appends: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     # Jobs whose appended events are a REPLACEMENT, not a suffix. The runtime's
     # ``AsyncJob.trajectory`` evicts oldest past ``subagent.TRAJECTORY_CAP``, so
@@ -4182,6 +4222,46 @@ class FrontendUpdate(BaseModel):
     # while duplicating rows in its click-through view.
     job_trajectory_replacements: list[str] = Field(default_factory=list)
     job_todo_updates: dict[str, list[dict[str, Any]] | None] = Field(default_factory=dict)
+
+    @field_validator("job_deltas", mode="before")
+    @classmethod
+    def _job_deltas_wire(cls, value: Any) -> Any:
+        """Reject a malformed delta before it can be mistaken for an empty one.
+
+        Same reason the degradation flag is explicit: an empty delta means
+        "nothing moved" and is safe to apply, so a malformed one that coerced to
+        ``{}`` — or whose ``upserted``/``removed`` arms were the wrong SHAPE and
+        got filtered to nothing downstream — would consume a sequence and leave
+        the follower stale forever with a gap check that stays happy. Raising
+        here refuses the frame instead, and the receiver's gap path re-syncs —
+        the recovery the transport already has.
+
+        The check is structural, not semantic: each arm is validated for its
+        WIRE shape (a list of rows; lists of job-id strings; an integer) and
+        left otherwise opaque. A row's own fields are the reducer's business,
+        and every reader already treats an unknown extra key as ignorable.
+        """
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("job_deltas must be an object with 'upserted'/'removed'")
+        upserted = value.get("upserted")
+        if upserted is not None and not isinstance(upserted, list):
+            raise ValueError("job_deltas.upserted must be a list of roster rows")
+        for arm in ("removed", "order"):
+            ids = value.get(arm)
+            if ids is None:
+                continue
+            if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+                raise ValueError(f"job_deltas.{arm} must be a list of job ids")
+        roster_size = value.get("roster_size")
+        # ``bool`` is an ``int`` subclass, and a delta whose divisor is ``True``
+        # is a producer bug rather than a one-row roster.
+        if roster_size is not None and (
+            not isinstance(roster_size, int) or isinstance(roster_size, bool)
+        ):
+            raise ValueError("job_deltas.roster_size must be an integer")
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -5137,6 +5217,47 @@ def _fold_job_usage_in_place(job: dict[str, Any]) -> None:
         except Exception:  # noqa: BLE001 — odd accounting must not refuse an attach
             continue
         container[key] = [item.model_dump(mode="json") for item in folded]
+
+
+def bound_delta_rows_in_place(rows: list[Any], *, roster_size: int) -> None:
+    """Apply the roster bounds to the rows of a PER-ROW job delta.
+
+    ONE definition, because two routes build these rows: ``mutate`` (the
+    runtime's own live tick, which then relays them over the socket) and the
+    desktop bridge's ``_frontend`` (which republishes them to a renderer).
+
+    ``roster_size`` scopes the TEXT share, and ONLY that: ``text_share`` is
+    computed exactly as the attach snapshot computes it, off the same budget and
+    floor, so a child's live preview is the one its seed would show. On a
+    one-row delta that is a STRICTER share than dividing by one, never a looser
+    one.
+
+    The launch-prompt and launch-id budgets are PER-FRAME, deliberately: they
+    are frame budgets (``JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS`` and the launch
+    id twin), and a changed-row delta is a much smaller frame than the seed — so
+    a row the snapshot starves may keep its launch text on a live tick. That is
+    safe rather than inconsistent: both functions keep every KEY and replace
+    only TEXT (or a derivable id) with a documented placeholder, so
+    reconciliation and identity are untouched, and the seed remains the bounded
+    floor a reconnect lands on.
+
+    Order matters and is the snapshot's: collapsed-attempt prompts first (they
+    free budget without changing any row's shape), then the per-job receipt fold,
+    then free text, launch ids, and derivable facts.
+    """
+    if not rows:
+        return
+    _bound_launch_prompts_across_jobs(rows)
+    for summary in rows:
+        _fold_job_usage_in_place(summary)
+    text_share = max(JOB_TEXT_FLOOR_CHARS, JOB_TEXT_FRAME_BUDGET_CHARS // max(1, roster_size))
+    for summary in rows:
+        _bound_job_text_in_place(summary, share=text_share)
+    for summary in rows:
+        _elide_derivable_launch_id_in_place(summary)
+    _bound_launch_ids_across_jobs(rows)
+    for summary in rows:
+        _elide_row_facts_in_place(summary)
 
 
 def largest_frame_fields(frame: dict[str, Any], *, limit: int = 3) -> str:
@@ -6829,11 +6950,66 @@ class FrontendStateStore:
         #: The windows of the rows that go through validation, aligned with it.
         rebuilt_windows: list[_FrozenSequence] = []
         bodies: dict[str, dict[str, Any]] = {}
-        if "jobs" in update.changes:
+        # A per-ROW roster delta, as opposed to a full-roster replacement in
+        # ``changes["jobs"]``. ``changes["jobs"]`` still WINS when both arrive:
+        # a replacement is the more complete statement, and that is also the
+        # form every older runtime sends, so the legacy path stays byte-for-byte
+        # what it was.
+        job_delta = bool(update.job_deltas) and "jobs" not in update.changes
+        if "jobs" in update.changes or job_delta:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
             rebuilt = []
-            for received in update.changes["jobs"]:
+            if job_delta:
+                upserts = [
+                    row
+                    for row in (update.job_deltas.get("upserted") or [])
+                    if isinstance(row, Mapping)
+                ]
+                removed = {str(item) for item in (update.job_deltas.get("removed") or [])}
+                by_id = {str(row.get("id", "")): row for row in upserts}
+                sources: list[Any] = []
+                for job in self._state.jobs:
+                    if job.id in removed:
+                        continue
+                    row = by_id.pop(job.id, None)
+                    if row is None and (
+                        job.id in update.job_trajectory_appends
+                        or job.id in replacements
+                        or job.id in update.job_todo_updates
+                    ):
+                        # The reducer merges these three from OUTSIDE the row
+                        # body, so a carried row would silently drop them. Give
+                        # such a row its own last sent body and let the rebuild
+                        # path apply them, rather than inventing a fourth path.
+                        row = _job_summary(job)
+                    sources.append(job if row is None else row)
+                # New ids append in delta order, unless the sender had to say
+                # otherwise: see ``mutate``'s order arm. A receiver that gets
+                # ``order`` re-sequences below instead of guessing.
+                sources.extend(by_id.values())
+                order = update.job_deltas.get("order")
+                if isinstance(order, list) and order:
+                    indexed: dict[str, Any] = {}
+                    for source in sources:
+                        key = (
+                            source.id if isinstance(source, JobState) else str(source.get("id", ""))
+                        )
+                        indexed[key] = source
+                    sources = [
+                        indexed.pop(str(job_id)) for job_id in order if str(job_id) in indexed
+                    ] + list(indexed.values())
+            else:
+                sources = list(update.changes["jobs"])
+            for received in sources:
+                if isinstance(received, JobState):
+                    # CARRIED BY IDENTITY, and that is the delta path's win: no
+                    # deep copy, no pydantic pass, no window rebuild for a row
+                    # the runtime did not mention. ``windows`` still gets this
+                    # row's window because it is aligned with the ROSTER.
+                    plan.append(received)
+                    windows.append(cast(_FrozenSequence, received.trajectory))
+                    continue
                 job_id = str(received.get("id", "")) if isinstance(received, Mapping) else ""
                 prior = previous.get(job_id)
                 kept = self._reusable_job(job_id, prior, received, update)
@@ -6897,6 +7073,10 @@ class FrontendStateStore:
                 rebuilt_windows.append(window)
                 plan.append(len(rebuilt))
                 rebuilt.append(raw)
+            # The VALIDATION input for both forms: the legacy path installs it
+            # as the whole roster, the delta path validates these rows and then
+            # overrides ``normalized["jobs"]`` with the merged plan below. It is
+            # never installed as a replacement on the delta path.
             changes["jobs"] = rebuilt
             retained = {
                 job.id if isinstance(job, JobState) else str(rebuilt[job]["id"]) for job in plan
@@ -6929,8 +7109,7 @@ class FrontendStateStore:
             if name in FrontendSessionState.model_fields
         }
         normalized.update(patch.model_extra or {})
-        if windows:
-            # Install the frozen windows the loop above produced, by IDENTITY:
+        if windows or job_delta:
             # ``model_copy`` does not re-coerce (so the retained rows survive as
             # the objects they already were) and ``_freeze_value`` returns an
             # already-frozen window unchanged, which is what keeps the memo's
@@ -6965,11 +7144,19 @@ class FrontendStateStore:
         if windows:
             for job, window in zip(self._state.jobs, windows, strict=True):
                 self._follower_windows.remember(job.id, window)
-        if "jobs" in update.changes:
+        if "jobs" in update.changes or job_delta:
             # Same place and same reason as the window memo: only a body whose
             # row canonical state now HOLDS is recorded, paired with that row.
+            # A delta records the rows it rebuilt and KEEPS the record of every
+            # row it carried, but only while that record still points at the
+            # very object canonical state holds — an original row object that a
+            # later full-roster frame replaces must not linger here and be
+            # handed back as "unchanged" for a row that moved.
+            recorded = self._follower_job_bodies
             self._follower_job_bodies = {
-                job.id: (bodies[job.id], job) for job in self._state.jobs if job.id in bodies
+                job.id: ((bodies[job.id], job) if job.id in bodies else recorded[job.id])
+                for job in self._state.jobs
+                if job.id in bodies or (job.id in recorded and recorded[job.id][1] is job)
             }
         self._todo_sequences = todo_sequences
         for subscriber in subscribers:
@@ -7094,6 +7281,7 @@ class FrontendStateStore:
         trajectory_appends: dict[str, list[dict[str, Any]]] = {}
         trajectory_replacements: list[str] = []
         todo_updates: dict[str, list[dict[str, Any]] | None] = {}
+        job_deltas: dict[str, Any] = {}
         for key, value in changes.items():
             if key == "jobs":
                 # JobState equality walks the bounded trajectories without first
@@ -7119,11 +7307,27 @@ class FrontendStateStore:
                 wire_changes[key] = candidate
         if "jobs" in wire_changes:
             previous = {job.id: job for job in self._state.jobs}
+            # The ROSTER size, not the number of changed rows: ``text_share`` is
+            # the same value the attach snapshot divides by, and keeping the
+            # divisor identical is what makes a child's live preview byte-for-byte
+            # the one its seed showed. A delta whose rows are FEWER than the
+            # roster therefore spends at most what the snapshot spends.
+            roster_size = len(wire_changes["jobs"])
             summaries = []
+            seen: set[str] = set()
             for job in wire_changes["jobs"]:
                 job_id = job.id
+                seen.add(job_id)
                 trajectory = job.trajectory
                 prior = previous.get(job_id)
+                if prior is not None and (prior is job or prior == job):
+                    # NOTHING ABOUT THIS ROW MOVED. Skipping it is the whole
+                    # point of ``job_deltas``: a 185-row roster that ships every
+                    # row on every 50 ms tick measured 383,608 bytes for a
+                    # one-row change. The expensive per-row work below (the
+                    # trajectory prefix test, the deepcopy of appended rows, the
+                    # summary serialisation) is paid for changed rows only.
+                    continue
                 if prior is None or prior.todos != job.todos:
                     todo_updates[job_id] = job_todos_wire_value(job.todos)
                 old = prior.trajectory if prior is not None else []
@@ -7154,46 +7358,45 @@ class FrontendStateStore:
                     # fetch. Thaw at this wire boundary, just as snapshots do.
                     trajectory_appends[job_id] = [_wire_value(event) for event in appended]
                 summaries.append(_job_summary(job))
-            # Same roster-shared budget the attach snapshot applies, and applied
-            # here too because a delta re-serializes job rows by its own route:
-            # a bound placed only at the snapshot boundary holds for the first
-            # frame and leaks on every one after it.
-            _bound_launch_prompts_across_jobs(summaries)
-            # ...and the per-job RECEIPT fold, which lived only in
-            # ``sync_wire_payload`` and the durable checkpoint for exactly the
-            # reason above: a delta re-serializes job rows by its own route, so
-            # the fold has to run on this route too. Measured on the operator's
-            # machine (2026-09-26, session d81d04d3): 98 child sessions' ~18.5k
-            # provider calls ride each row's ``usage.cost_components``, and with
-            # a 224-row roster the UNFOLDED delta serialized ``changes.jobs`` at
-            # 4.3 MB -- every frame over the socket line, so the runtime
-            # degraded each one and the viewer re-synced from the snapshot in a
-            # loop, holding no live state at all. Folding is lossless for cost
-            # (see ``_folded_components``): receipts merge by serving identity,
-            # so the price and the token sums survive byte for byte.
-            for summary in summaries:
-                _fold_job_usage_in_place(summary)
-            # ...and the same is true of the per-ROW text bound, which lived only
-            # in ``sync_wire_payload``: a child whose ``result_text`` (or prompt,
-            # or error) was a whole transcript page rode out unbounded on every
-            # live delta while the reconnecting snapshot clipped it. Free text is
-            # the field that can be arbitrarily large on a row that is otherwise
-            # kilobytes, so it is the one that can put a delta over the socket
-            # line on its own. ``share`` is computed exactly as the snapshot
-            # computes it, off the same budget and floor, so a viewer cannot see
-            # two different previews of one child depending on whether it
-            # arrived live or in the seed.
-            text_share = max(
-                JOB_TEXT_FLOOR_CHARS, JOB_TEXT_FRAME_BUDGET_CHARS // max(1, len(summaries))
-            )
-            for summary in summaries:
-                _bound_job_text_in_place(summary, share=text_share)
-            for summary in summaries:
-                _elide_derivable_launch_id_in_place(summary)
-            _bound_launch_ids_across_jobs(summaries)
-            for summary in summaries:
-                _elide_row_facts_in_place(summary)
-            wire_changes["jobs"] = summaries
+            # Every roster bound (launch prompts, receipt fold, free text,
+            # launch ids, derivable facts) runs on these rows only — a delta
+            # re-serializes job rows by its own route, and a bound placed only at
+            # the snapshot boundary holds for the first frame and leaks on every
+            # one after it. The measurements that made each one load-bearing are
+            # on ``bound_delta_rows_in_place`` and the functions it calls.
+            bound_delta_rows_in_place(summaries, roster_size=roster_size)
+            # PER-ROW, not a replacement. ``changes["jobs"]`` stays reserved for
+            # the snapshot/seed path, where a replacement is exactly right and an
+            # old follower only understands that form. The roster ORDER is
+            # derived by the receiver's id-keyed merge whenever it can be, and
+            # spelled out only on the ticks where it cannot (see below).
+            candidate_order = [job.id for job in wire_changes["jobs"]]
+            del wire_changes["jobs"]
+            job_deltas["upserted"] = summaries
+            # The ROSTER SIZE the rows were bounded against, as a scalar. A
+            # consumer that re-bounds the rows (the desktop bridge does, for a
+            # renderer that may be several versions behind) needs the same
+            # divisor the producer used — and deriving it by rebuilding the
+            # whole snapshot per tick is the very cost this delta exists to
+            # remove. One int, so it is not worth a second frame shape.
+            job_deltas["roster_size"] = roster_size
+            removed = [job_id for job_id in previous if job_id not in seen]
+            if removed:
+                job_deltas["removed"] = removed
+            # ORDER IS SENT ONLY WHEN THE MERGE CANNOT DERIVE IT. A delta's
+            # natural merge order is "rows I already hold, unchanged, then new
+            # ids in arrival order", which is the roster order for every tick
+            # except one that re-adds a job in a position other than the end —
+            # a returning child, a moved row. Sending the id list on every tick
+            # would cost ~7 bytes per roster row (1.3 KB at 185 rows) for a fact
+            # the receiver can usually derive; sending it only on divergence
+            # keeps the common frame at changed-rows cost and still makes the
+            # follower's order exact when it cannot.
+            expected_order = [job_id for job_id in previous if job_id in seen] + [
+                job_id for job_id in candidate_order if job_id not in previous
+            ]
+            if candidate_order != expected_order:
+                job_deltas["order"] = candidate_order
         if "peer_cycle_display" in wire_changes:
             # A live delta bypasses the attach serializer. Bound its independent
             # wire copy too; normalized store/archive proof stays complete.
@@ -7247,6 +7450,7 @@ class FrontendStateStore:
             epoch=frozen.epoch,
             sequence=frozen.sequence,
             changes=wire_changes,
+            job_deltas=job_deltas,
             job_trajectory_appends=trajectory_appends,
             job_trajectory_replacements=trajectory_replacements,
             job_todo_updates=todo_updates,

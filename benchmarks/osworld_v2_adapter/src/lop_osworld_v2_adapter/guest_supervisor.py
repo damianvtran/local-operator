@@ -8,9 +8,11 @@ arrangements are explicitly left unchanged.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shlex
+import zlib
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Sequence
 
@@ -95,6 +97,42 @@ RESTART_GUEST_DEADLINE_S = 7.0
 #: it, so a stale file from an earlier restart cannot be read as this one.
 RESTART_RESULT_PATH = "/var/lib/lop-action-supervisor/restart-result.json"
 
+#: The restart script on disk. The host dispatches it with ``python3 -c``;
+#: the watchdog dispatches the SAME file with ``systemd-run ... --wait``, so
+#: the all-process restart has one implementation and two dispatchers.
+RESTART_SCRIPT_PATH = "/var/lib/lop-action-supervisor/restart.py"
+
+#: The guest-local watchdog: a SEPARATE unit, in its own cgroup, that can bring
+#: the action server back when the host cannot. The host's recovery channel is
+#: ``/execute`` on the action server itself, so it is unavailable exactly when
+#: the server is down; systemd's own restart policy covers the first three
+#: deaths (``StartLimitBurst=3``) and then leaves the unit ``failed`` for the
+#: rest of the hour. This unit is the path back that does not run through the
+#: thing that died.
+#:
+#: THE START LIMIT STAYS AT 3. Raising the burst would make a crash loop rarer
+#: and its diagnosis harder without giving the service a recovery path that
+#: survives it -- it only postpones the same wall. The honest fix is an
+#: independent actor that can ``reset-failed`` the wall away.
+WATCHDOG_UNIT = "lop-action-watchdog.service"
+WATCHDOG_RECORD_PATH = "/var/lib/lop-action-supervisor/watchdog.json"
+
+#: Bounds shared by the script and the host-side sanitizer. The interval is
+#: deliberately slower than systemd's ``RestartSec=1``: the watchdog must never
+#: race a restart systemd is already performing. The absent-listener grace is
+#: longer than a normal action-server start, so a slow boot is observed, never
+#: interrupted.
+WATCHDOG_INTERVAL_S = 10.0
+WATCHDOG_MIN_INTERVAL_S = 30.0
+WATCHDOG_WINDOW_S = 3600.0
+WATCHDOG_MAX_ATTEMPTS = 5
+#: A dispatch that provably changed nothing (``no-effect``) draws on a smaller
+#: budget than a real repair: a permanently broken unit must not spend a later
+#: real failure's five attempts. Mirrors ``MAX_INEFFECTIVE`` in the script.
+WATCHDOG_MAX_INEFFECTIVE = 2
+WATCHDOG_ABSENT_GRACE_S = 30.0
+WATCHDOG_EVENT_CAP = 8
+
 #: Positional contract between ``restart_service_argv`` and ``RESTART_SOURCE``.
 #: CPython's ``-c`` puts the command string where argv[0] would be and the
 #: first real argument at argv[1], so the script unpacks ``sys.argv[1:]`` in
@@ -131,10 +169,28 @@ class SupervisorOutputUnparseable(ValueError):
 
 @dataclass(frozen=True)
 class ReceiptResult:
-    """Only a complete verified read may authorize input on an existing binding."""
+    """Only a complete verified read may authorize input on an existing binding.
+
+    ``path_unreachable`` is set ONLY on an exhausted recovery whose every probe
+    failed with a connect-class transport verdict -- ``not_sent`` kind
+    ``connect_failed`` (no route), ``timeout`` (SYN never answered), ``dns``, or
+    ``refused`` (an RST: the host DID reach the guest and nothing was listening
+    on the action port). No probe established a connection, so no receipt could
+    be read and nothing was learned about the server's generation; ``refused``
+    is precisely the crash-restart window, which is why the flag is about the
+    ABSENCE OF A RECEIPT rather than about reachability in the abstract. It is a
+    separate axis from ``state`` because
+    it answers a different question -- ``read_failed`` says the receipt is
+    unknown, this says WHY -- and a caller may treat the two differently: a
+    receipt that could not be read over a live server keeps input blocked, while
+    a path that never connected is the transient case a bounded action attempt
+    under the transport classifier can resolve. It never weakens the rule below
+    on its own: the action attempt is still refused for any non-connect reason.
+    """
 
     state: Literal["new_restart", "verified_none", "read_failed"]
     recovery_exhausted: bool = False
+    path_unreachable: bool = False
 
 
 # ExecStopPost gets the old process's wait status BEFORE Restart replaces it.
@@ -176,6 +232,515 @@ try:
 except Exception:
     record['journal_tail_status'] = 'unavailable'
 persist()
+"""
+
+#: The guest-local recovery path. Runs as its own service in its own cgroup, so
+#: it is still alive when the target unit is ``failed`` and the host has no
+#: transport to dispatch a restart through.
+#:
+#: THE TRIGGER TABLE IS THE WHOLE DESIGN. ``systemctl start`` is a no-op on a
+#: unit that is already active, and ``reset-failed`` on a non-failed unit only
+#: clears bookkeeping, so an intervention aimed at an ``active`` unit would
+#: change nothing while spending an attempt and recording success -- false
+#: evidence, and a cap burned three times over before a real ``failed`` state
+#: arrives. Each state therefore gets exactly the action that can change it:
+#:
+#:   failed/inactive, with or without a listener
+#:                                -> verified all-process restart (attempt);
+#:                                   RESTART_SOURCE owns the reset, the
+#:                                   generation rebase, the kill and the start
+#:   active/activating/reloading/deactivating, with or without a listener
+#:                                -> NONE, whatever the probe said; observed as
+#:                                   ``unresponsive``/``no-listener`` only
+#:   any state, listener that answers -> none; observed as ``serving``
+#:   a state systemd will not report -> none; observed as ``unknown``
+#:
+#: ``ActiveState`` IS THE ONLY DESTRUCTIVE GATE, AND IT MUST BE. ``failed`` or
+#: ``inactive`` is systemd's own statement that no MainPID is left to serve; a
+#: unit it reports running still has one, and the all-process kill takes every
+#: member of its cgroup with it, not just that MainPID. A listener that does
+#: not answer while the unit is ``active`` is therefore a BUSY or wedged server,
+#: never a dead one: a 1280x720 screenshot or a long page load can outlast any
+#: probe, and a probe bound is a guess about scheduling, not evidence about
+#: life. Earlier revisions treated two consecutive silences as death and were
+#: measured killing healthy servers mid-episode -- the adapter's in-flight
+#: action then dies with a transport error and the episode is lost, so a missed
+#: repair (one episode) is always the cheaper error than a kill (every episode).
+#: The observation is still recorded, so a genuinely wedged-but-active server is
+#: visible in the host's evidence rather than silently indistinguishable from a
+#: healthy one.
+#:
+#: THE ACCEPTED COST, STATED SO IT IS NOT REDISCOVERED AS AN OVERSIGHT. A
+#: listener that accepts on the port and never answers, while ``ActiveState``
+#: stays ``active`` -- main.py alive, its worker hung, the socket still held --
+#: is now repaired by NEITHER side: this watchdog acts only on
+#: ``failed``/``inactive``, and the host's ``_restart_supervisor_unit`` runs only
+#: after a successful probe. That episode is lost. Acting on that state instead
+#: would kill the identical shape a busy-but-healthy server presents, which is
+#: the production failure this rule exists to stop, so the trade is one episode
+#: (hung) against every episode (killed). REVISIT ONLY WITH EVIDENCE THAT
+#: DISTINGUISHES THEM: a record showing ``last_observation: unresponsive`` with
+#: ``attempts: 0`` across many cycles WHILE the host separately sees the unit
+#: ``active`` for the same window -- hung, not slow. The discriminator then has
+#: to be the identity of the process holding the socket (a changed owner or
+#: start tick proves a restart; silence proves nothing), never a shorter probe:
+#: shortening it only moves which slow actions get mislabelled.
+#:
+#: THE VERDICT IS DERIVED FROM THE PAYLOAD, NEVER FROM A FIELD THE SCRIPT DOES
+#: NOT WRITE. ``RESTART_SOURCE`` reports observations (pids, start ticks,
+#: ancestry, receipt); only the host's ``restart_record`` turns them into a
+#: ``status``. This watchdog therefore applies the same rule guest-side --
+#: complete pre/post scans, post owners that postdate the kill and descend from
+#: the new MainPID, a postdating MainPID and a non-null receipt -- instead of
+#: reading a ``status`` key that does not exist.
+#:
+#: OBSERVATIONS ARE NOT ATTEMPTS. A state the watchdog cannot repair is
+#: recorded in ``last_observation`` (fixed words) without touching
+#: ``attempts``, so a dead-but-blocked server is distinguishable from a
+#: healthy one in the host's evidence instead of both reading ``attempts: 0``.
+#: A dispatch that provably changed nothing (``no-effect``) draws on a smaller
+#: budget (2/hour) than real repairs, so a permanently broken unit cannot
+#: starve a later real failure of its five attempts.
+#:
+#: RATE LIMITS. One intervention per ``MIN_INTERVAL_S`` (never race systemd's
+#: own ``RestartSec=1`` attempt), at most ``MAX_ATTEMPTS`` per rolling
+#: ``WINDOW_S`` -- the same hour systemd uses -- and at most
+#: ``MAX_INEFFECTIVE`` no-effect dispatches per window. ``capped`` is
+#: recomputed from the window every cycle, so it clears when the hour rolls.
+#:
+#: THE RECORD IS NUMBERS AND FIXED WORDS ONLY: no unit name, no argv, no
+#: environment, no guest text. Attempt ticks are monotonic microseconds, the
+#: same clock as systemd's ``*TimestampMonotonic`` properties. The event ring
+#: is bounded because the file is rewritten on every intervention. A process
+#: restart of the WATCHDOG seeds its counters from that same file: the unit's
+#: own ``Restart=always`` must not turn ``attempts`` back to zero and hand the
+#: crash loop a fresh cap. Monotonic stamps do not survive a BOOT, so a stamp
+#: in the future is ignored rather than trusted.
+#:
+#: FAIL-OPEN. A defect here must never fail an episode: every cycle is caught,
+#: the loop continues, and a record it cannot write is simply missing evidence.
+WATCHDOG_SOURCE = r"""
+import json, pathlib, socket, subprocess, sys, time
+
+unit, port, record_path, restart_script, result_path = (
+    sys.argv[1], int(sys.argv[2]), pathlib.Path(sys.argv[3]),
+    sys.argv[4], pathlib.Path(sys.argv[5]))
+INTERVAL_S = 10.0
+MIN_INTERVAL_S = 30.0
+WINDOW_S = 3600.0
+MAX_ATTEMPTS = 5
+MAX_INEFFECTIVE = 2
+ABSENT_GRACE_S = 30.0
+EVENT_CAP = 8
+#: The liveness probe's bound, and NOTHING ELSE. It stays under ``INTERVAL_S``
+#: so one cycle cannot push the next one late: both address families (v4, and
+#: v6 only when v4 is refused) fit inside a single interval. Five seconds is
+#: longer than a normal action but is NOT claimed to outlast every one -- a
+#: screenshot or page load that overruns it is recorded as ``unresponsive``,
+#: which is an OBSERVATION, so a mislabel costs evidence fidelity and nothing
+#: else. That is why it does not need to be generous.
+PROBE_TIMEOUT_S = 5.0
+RESTART_TIMEOUT_S = 15.0
+
+#: ``unresponsive`` is RETIRED as a trigger and retained in the vocabulary so
+#: an event ring written by an older watchdog still seeds; the cycle can no
+#: longer emit it from a silent probe. It is still recorded for a unit systemd
+#: reports as ``failed``/``inactive`` whose port is held by a socket that does
+#: not answer -- there the trigger word names the unit state, not the silence.
+TRIGGERS = ('failed', 'inactive', 'unresponsive')
+#: ``reset-failed+start`` is RETIRED but retained so an event ring written by
+#: an older watchdog still seeds; the cycle only ever issues ``verified-restart``.
+ACTIONS = ('reset-failed+start', 'verified-restart')
+OUTCOMES = ('started', 'start-failed', 'reset-failed-error', 'no-effect',
+            'restarted', 'restart-failed', 'throttled', 'capped')
+OBSERVATIONS = ('none', 'serving', 'no-listener', 'unresponsive', 'unknown')
+
+absent_since = None
+#: The throttle compares against the last DISPATCH's clock value, not the
+#: record's microsecond stamp: a legitimate intervention at monotonic 0 would
+#: otherwise read as "never attempted" and defeat the minimum interval.
+last_attempt = None
+recent = []
+ineffective = []
+state = {'attempts': 0, 'intervened': False, 'capped': False,
+         'last_attempt_us': 0, 'last_trigger': 'none',
+         'last_action': 'none', 'last_outcome': 'none',
+         'last_observation': 'none', 'events': []}
+
+def monotonic_us():
+    return int(time.monotonic() * 1000000)
+
+def run(*args):
+    subprocess.check_output(args, text=True, timeout=5)
+
+def listening():
+    for name in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            lines = pathlib.Path(name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4 or fields[3] != '0A':
+                continue
+            try:
+                if int(fields[1].rsplit(':', 1)[1], 16) == port:
+                    return True
+            except (IndexError, ValueError):
+                continue
+    return False
+
+def answers():
+    # A LISTEN socket is not a serving server, and an exit code is not proof of
+    # one either. The rule is deliberately one-sided: ANY complete HTTP status
+    # line means the server is answering (a 404/500 is still a live app, and
+    # this probe is not a health endpoint). Only silence -- connect refused, or
+    # no status line inside the bound -- is "unresponsive", and "unresponsive"
+    # is an OBSERVATION: it never dispatches anything by itself. Both families
+    # are tried because the scan above accepts a v6-only listener.
+    connection = None
+    for host in ('127.0.0.1', '::1'):
+        try:
+            connection = socket.create_connection((host, port), PROBE_TIMEOUT_S)
+            break
+        except OSError:
+            continue
+    if connection is None:
+        return False
+    try:
+        connection.sendall(b'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n')
+        response = b''
+        while b'\r\n' not in response and len(response) < 256:
+            chunk = connection.recv(64)
+            if not chunk:
+                break
+            response += chunk
+        return response.startswith(b'HTTP/')
+    except OSError:
+        return False
+    finally:
+        connection.close()
+
+def active_state():
+    output = subprocess.check_output(
+        ['systemctl', 'show', unit, '-p', 'ActiveState'], text=True, timeout=3)
+    for line in output.splitlines():
+        if line.startswith('ActiveState='):
+            return line[len('ActiveState='):].strip()
+    return 'unknown'
+
+def persist():
+    document = dict(state)
+    document['schema_version'] = 1
+    document['events'] = state['events'][-EVENT_CAP:]
+    tmp = record_path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(document))
+    tmp.replace(record_path)
+
+def seed():
+    # A restarted watchdog inherits the counters it already spent. Only this
+    # file's own fixed vocabulary is copied forward. A stamp in the FUTURE is
+    # dropped: CLOCK_MONOTONIC restarts at boot, so a record written before a
+    # reboot otherwise throttles every cycle until the wall clock catches up.
+    global last_attempt
+    try:
+        previous = json.loads(record_path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(previous, dict) or previous.get('schema_version') != 1:
+        return
+    now = time.monotonic()
+    events = previous.get('events')
+    if isinstance(events, list):
+        for event in events[-EVENT_CAP:]:
+            if not isinstance(event, dict):
+                continue
+            stamp, trigger = event.get('us'), event.get('trigger')
+            action, outcome = event.get('action'), event.get('outcome')
+            if (type(stamp) is not int or stamp <= 0 or trigger not in TRIGGERS
+                    or action not in ACTIONS or outcome not in OUTCOMES):
+                continue
+            age = now - stamp / 1000000.0
+            if age < 0:
+                continue
+            state['events'] = (state['events'] + [{
+                'us': stamp, 'trigger': trigger,
+                'action': action, 'outcome': outcome}])[-EVENT_CAP:]
+            if age < WINDOW_S:
+                recent.append(stamp / 1000000.0)
+                if outcome == 'no-effect':
+                    ineffective.append(stamp / 1000000.0)
+    recent.sort()
+    ineffective.sort()
+    if recent:
+        last_attempt = recent[-1]
+        state['last_attempt_us'] = int(recent[-1] * 1000000)
+    attempts = previous.get('attempts')
+    if type(attempts) is int and 0 <= attempts <= MAX_ATTEMPTS * 1000:
+        state['attempts'] = max(attempts, len(state['events']))
+    for key, allowed in (('last_trigger', TRIGGERS), ('last_action', ACTIONS),
+                         ('last_outcome', OUTCOMES),
+                         ('last_observation', OBSERVATIONS)):
+        value = previous.get(key)
+        if value in allowed:
+            state[key] = value
+    if state['last_attempt_us'] and not state['last_trigger'] == 'none':
+        state['intervened'] = True
+    state['capped'] = (len(recent) >= MAX_ATTEMPTS
+                       or len(ineffective) >= MAX_INEFFECTIVE)
+
+def postdated(owners, new_main, new_main_start, kill_ticks):
+    # The host's freshness rule, derived guest-side from the raw payload.
+    if kill_ticks <= 0 or new_main <= 0 or new_main_start < kill_ticks:
+        return False
+    for owner in owners:
+        if not isinstance(owner, dict):
+            return False
+        start = owner.get('start_ticks')
+        pid = owner.get('pid')
+        ancestors = owner.get('ancestors')
+        if type(pid) is not int or type(start) is not int:
+            return False
+        if start < kill_ticks or not isinstance(ancestors, list):
+            return False
+        if pid != new_main and new_main not in ancestors:
+            return False
+    return True
+
+def receipt_reconciles(receipt):
+    # The host's _receipt_records_value, restated guest-side. A REBASED
+    # generation (after reset-failed) has zero captures and zero records, so
+    # "records must not be empty" cannot be part of the rule; the counters and
+    # the timestamp relation are what prove the envelope belongs to the
+    # systemd generation the payload reports.
+    if not isinstance(receipt, dict) or receipt.get('schema_version') != 1:
+        return False
+    records = receipt.get('records')
+    if not isinstance(records, list):
+        return False
+    for key in ('baseline_nrestarts', 'captured_exits', 'systemd_nrestarts'):
+        if type(receipt.get(key)) is not int or receipt[key] < 0:
+            return False
+    for key in ('baseline_active_enter', 'systemd_active_enter'):
+        if type(receipt.get(key)) is not int or receipt[key] <= 0:
+            return False
+    captured = receipt['captured_exits']
+    if receipt['systemd_nrestarts'] - receipt['baseline_nrestarts'] != captured:
+        return False
+    if len(records) != min(captured, 4):
+        return False
+    if ((receipt['systemd_active_enter'] == receipt['baseline_active_enter'])
+            != (captured == 0)):
+        return False
+    return all(isinstance(record, dict) and type(record.get('restart')) is int
+               for record in records)
+
+def verified_verdict(verdict, token):
+    # The host's restart_record rule, applied to the script's raw payload.
+    # RESTART_SOURCE writes observations; ``status`` is a HOST-derived field.
+    # Reading one here would accept a key the producer never emits, so every
+    # real repair would read as a failure. This mirrors the derivation instead,
+    # with ONE deliberate difference: the receipt must exist and carry a
+    # generation, but its counters are the host's reconciliation against a
+    # LIVE systemd. reset-failed zeroes NRestarts, so after a start-limit
+    # recovery those counters can never reconcile; the watchdog's claim is
+    # about the SERVER (a new MainPID and a fresh listener), which is exactly
+    # the fact this path exists to establish.
+    if not isinstance(verdict, dict) or verdict.get('schema_version') != 1:
+        return False
+    if verdict.get('token') != token:
+        return False
+    if (verdict.get('pre_scan_complete') is not True
+            or verdict.get('post_scan_complete') is not True):
+        return False
+    pre = verdict.get('pre_restart_pids')
+    post = verdict.get('post_restart_pids')
+    owners = verdict.get('post_restart_owners')
+    if not isinstance(pre, list) or not isinstance(post, list) or not isinstance(owners, list):
+        return False
+    if verdict.get('pre_restart_count') != len(pre):
+        return False
+    if verdict.get('post_restart_count') != len(post):
+        return False
+    if not post or [owner.get('pid') if isinstance(owner, dict) else None
+                    for owner in owners] != post:
+        return False
+    new_main = verdict.get('new_main_pid')
+    new_main_start = verdict.get('new_main_start_ticks')
+    kill_ticks = verdict.get('kill_uptime_ticks')
+    if (type(new_main) is not int or type(new_main_start) is not int
+            or type(kill_ticks) is not int):
+        return False
+    if not postdated(owners, new_main, new_main_start, kill_ticks):
+        return False
+    # A NON-NULL, RECONCILED receipt. After a latched recovery the reset starts
+    # a new generation with no captures, so requiring a crash record here would
+    # report every successful revival as a failure -- the exact blocker this
+    # rule exists to prevent.
+    return receipt_reconciles(verdict.get('receipt'))
+
+def restart_status(verdict, token):
+    # The host's restart_record rule, applied to the script's raw payload, and
+    # returned as the watchdog's fixed outcome word. RESTART_SOURCE writes
+    # observations; ``status`` is a HOST-derived field, so reading one here
+    # would accept a key the producer never emits.
+    if not isinstance(verdict, dict) or verdict.get('schema_version') != 1:
+        return 'restart-failed'
+    if verdict.get('token') != token:
+        # A stale file from an earlier dispatch is not this dispatch's answer,
+        # whatever it says -- including about a refused reset.
+        return 'restart-failed'
+    if verdict.get('start_limit_cleared') is False:
+        # The latch was never cleared, so the start could not have been
+        # accepted: a distinct outcome from a restart that ran and failed.
+        return 'reset-failed-error'
+    if (verdict.get('pre_scan_complete') is not True
+            or verdict.get('post_scan_complete') is not True):
+        return 'restart-failed'
+    pre = verdict.get('pre_restart_pids')
+    post = verdict.get('post_restart_pids')
+    owners = verdict.get('post_restart_owners')
+    if not isinstance(pre, list) or not isinstance(post, list) or not isinstance(owners, list):
+        return 'restart-failed'
+    if verdict.get('pre_restart_count') != len(pre):
+        return 'restart-failed'
+    if verdict.get('post_restart_count') != len(post):
+        return 'restart-failed'
+    if [owner.get('pid') if isinstance(owner, dict) else None
+            for owner in owners] != post:
+        return 'restart-failed'
+    if not post:
+        # The journal completed and NOTHING listens: the start had no effect.
+        # This is the immediate-exit case; it must never read as a revival.
+        return 'no-effect'
+    new_main = verdict.get('new_main_pid')
+    new_main_start = verdict.get('new_main_start_ticks')
+    kill_ticks = verdict.get('kill_uptime_ticks')
+    if (type(new_main) is not int or type(new_main_start) is not int
+            or type(kill_ticks) is not int):
+        return 'restart-failed'
+    if not postdated(owners, new_main, new_main_start, kill_ticks):
+        return 'restart-failed'
+    if not receipt_reconciles(verdict.get('receipt')):
+        return 'restart-failed'
+    return 'restarted'
+
+def verified_restart():
+    token = monotonic_us()
+    try:
+        subprocess.check_output(
+            ['systemd-run', '--quiet', '--collect', '--wait',
+             '--unit=lop-watchdog-restart-%d' % token,
+             'python3', restart_script, unit, str(port),
+             str(result_path), str(token)],
+            text=True, timeout=RESTART_TIMEOUT_S)
+    except Exception:
+        # The dispatch may lose its exit status; the verdict FILE, token-scoped,
+        # is the only claim accepted either way.
+        pass
+    try:
+        verdict = json.loads(result_path.read_text())
+    except (OSError, ValueError):
+        return 'restart-failed'
+    return restart_status(verdict, token)
+
+def intervene(now, trigger):
+    global last_attempt
+    last_attempt = now
+    state['attempts'] += 1
+    recent.append(now)
+    # ONE dispatch for every repair. RESTART_SOURCE owns the whole sequence --
+    # scan, reset-failed, the generation rebase, kill, start, verification --
+    # so the reset accounting cannot drift from the start that needs it.
+    outcome = verified_restart()
+    if outcome == 'no-effect':
+        ineffective.append(now)
+    event = {'us': monotonic_us(), 'trigger': trigger,
+             'action': 'verified-restart', 'outcome': outcome}
+    state.update(intervened=True, last_attempt_us=event['us'],
+                 last_trigger=trigger, last_action='verified-restart',
+                 last_outcome=outcome,
+                 events=(state['events'] + [event])[-EVENT_CAP:])
+    state['capped'] = (len(recent) >= MAX_ATTEMPTS
+                       or len(ineffective) >= MAX_INEFFECTIVE)
+    persist()
+
+def suppressed(outcome):
+    if state['last_outcome'] == outcome:
+        return
+    state['last_outcome'] = outcome
+    persist()
+
+def observe(word):
+    if state['last_observation'] == word:
+        return
+    state['last_observation'] = word
+    persist()
+
+def cycle():
+    global absent_since
+    now = time.monotonic()
+    recent[:] = [stamp for stamp in recent if now - stamp < WINDOW_S]
+    ineffective[:] = [stamp for stamp in ineffective if now - stamp < WINDOW_S]
+    capped = (len(recent) >= MAX_ATTEMPTS
+              or len(ineffective) >= MAX_INEFFECTIVE)
+    if state['capped'] != capped:
+        state['capped'] = capped
+        persist()
+    if listening():
+        absent_since = None
+        if answers():
+            # A serving port is the whole healthy-path shortcut: no unit query,
+            # no verb, not even a state read.
+            observe('serving')
+            return
+        observe('unresponsive')
+        observed = active_state()
+        if observed not in ('failed', 'inactive'):
+            # THE UNIT IS STILL RUNNING, so the silence is the server's, not the
+            # process's: it is busy, or wedged with its work in flight. Killing
+            # it would destroy whatever the adapter is waiting on -- the exact
+            # failure this branch exists to avoid. Record and take no action.
+            return
+        trigger = 'unresponsive'
+    else:
+        observed = active_state()
+        if observed in ('failed', 'inactive'):
+            observe('no-listener')
+            trigger = observed
+        elif observed in ('active', 'activating', 'reloading', 'deactivating'):
+            # A slow boot is observed, never interrupted: ``start`` would be a
+            # no-op or a merge into systemd's own pending job.
+            if absent_since is None:
+                absent_since = now
+            if now - absent_since >= ABSENT_GRACE_S:
+                observe('no-listener')
+            return
+        else:
+            observe('unknown')
+            return
+    if capped:
+        suppressed('capped')
+        return
+    if last_attempt is not None and now - last_attempt < MIN_INTERVAL_S:
+        suppressed('throttled')
+        return
+    intervene(now, trigger)
+
+# One record before the first observation: "attempts: 0" is evidence the
+# watchdog is alive, and a missing file is NOT the same answer.
+try:
+    seed()
+    persist()
+except Exception:
+    pass
+
+while True:
+    try:
+        cycle()
+    except Exception:
+        pass
+    time.sleep(INTERVAL_S)
 """
 
 # Only the action server's private service is eligible. A shared user/session
@@ -335,30 +900,131 @@ hook = '+/usr/bin/python3 ' + str(capture) + ' ' + unit
 content = ('[Unit]\nStartLimitIntervalSec=3600\nStartLimitBurst=3\n'
            '[Service]\nRestart=always\nRestartSec=1\nKillMode=process\n'
            'ExecStopPost=' + hook + '\n')
+watchdog_path = pathlib.Path('/etc/systemd/system') / 'lop-action-watchdog.service'
+watchdog_script = root / 'watchdog.py'
+# The watchdog dispatches the SAME restart script the host uses (argv[4]), as
+# the same transient service. One implementation of the all-process restart,
+# two dispatchers: a bare ``start`` here would fail to bind beside a survivor.
+restart_script = root / 'restart.py'
+receipt = root / (unit + '.json')
 created = not path.exists()
-if not created:
-    if path.read_text() != content or capture.read_text() != sys.argv[1]:
-        raise RuntimeError('supervisor installation conflict')
-else:
-    if any(props.get(k) for k in ('ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost')):
-        raise RuntimeError('service hooks could mutate desktop state')
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if capture.exists() and capture.read_text() != sys.argv[1]:
-        raise RuntimeError('supervisor capture conflict')
-    capture.write_text(sys.argv[1])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('x') as out:
-        out.write(content)
+watchdog_created = not watchdog_path.exists()
+# Set only when THIS attempt issued the start: a unit that was already
+# running is not ours to stop, and one we started must not survive a refusal.
+watchdog_started = False
+# Every file THIS attempt created is removed again on a refusal, and only
+# those: a later install of a changed version must not trip over half of an
+# earlier refused one, and a pre-existing file is never ours to delete.
+capture_created = watchdog_script_created = restart_script_created = False
+receipt_created = False
+def rollback():
+    # Undo everything THIS attempt created, including a started watchdog.
+    # Called from BOTH creation and verification failures: a conflict while
+    # writing the drop-in or the watchdog leaves files behind even though no
+    # verification ever ran, and a later install of a changed version must not
+    # trip over them. Every step is best-effort: a rollback failure must not
+    # replace the refusal that caused it.
+    if watchdog_started:
+        for verb in ('disable', 'stop'):
+            try:
+                run('systemctl', verb, 'lop-action-watchdog.service')
+            except Exception:
+                pass
+        try:
+            left = dict(line.split('=', 1) for line in run('systemctl', 'show',
+                'lop-action-watchdog.service', '-p', 'ActiveState',
+                '-p', 'ControlGroup').splitlines())
+            if left.get('ActiveState') == 'active' or left.get('ControlGroup'):
+                run('systemctl', 'kill', '--kill-whom=all', 'lop-action-watchdog.service')
+        except Exception:
+            pass
+    removed = False
+    for owned in (
+        (capture_created, capture),
+        (watchdog_script_created, watchdog_script),
+        (restart_script_created, restart_script),
+        (receipt_created, receipt),
+    ):
+        if owned[0]:
+            try:
+                owned[1].unlink()
+                removed = True
+            except OSError:
+                pass
+    for owned_unit in ((created, path), (watchdog_created, watchdog_path)):
+        if owned_unit[0]:
+            try:
+                owned_unit[1].unlink()
+                removed = True
+            except OSError:
+                pass
+    # A refusal that never wrote anything must not touch the manager.
+    if removed:
+        try:
+            run('systemctl', 'daemon-reload')
+        except Exception:
+            pass
+
+try:
+    if not created:
+        if path.read_text() != content or capture.read_text() != sys.argv[1]:
+            raise RuntimeError('supervisor installation conflict')
+    else:
+        if any(props.get(k) for k in ('ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost')):
+            raise RuntimeError('service hooks could mutate desktop state')
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if capture.exists() and capture.read_text() != sys.argv[1]:
+            raise RuntimeError('supervisor capture conflict')
+        capture_created = not capture.exists()
+        capture.write_text(sys.argv[1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('x') as out:
+            out.write(content)
+    # THE WATCHDOG IS A SEPARATE UNIT, and that is the whole mechanism: it must
+    # outlive the unit it repairs, so it can never share its cgroup. ``Restart=always``
+    # is its own, and its start limit is DISABLED: this is the recovery of last
+    # resort, and a watchdog that latches ``failed`` is the one failure nothing
+    # else in the system can repair. Its restart cost is bounded by RestartSec.
+    watchdog_content = ('[Unit]\nDescription=Local Operator action-server watchdog\n'
+                        'StartLimitIntervalSec=0\n'
+                        '[Service]\nType=simple\n'
+                        'ExecStart=/usr/bin/python3 ' + str(watchdog_script) + ' '
+                        + unit + ' ' + str(port) + ' '
+                        + str(root / 'watchdog.json') + ' '
+                        + str(restart_script) + ' '
+                        + str(root / 'restart-result.json') + '\n'
+                        'Restart=always\nRestartSec=5\n'
+                        '[Install]\nWantedBy=multi-user.target\n')
+    if not watchdog_created:
+        if (watchdog_path.read_text() != watchdog_content
+                or watchdog_script.read_text() != sys.argv[3]
+                or restart_script.read_text() != sys.argv[4]):
+            raise RuntimeError('watchdog installation conflict')
+    else:
+        if watchdog_script.exists() and watchdog_script.read_text() != sys.argv[3]:
+            raise RuntimeError('watchdog script conflict')
+        if restart_script.exists() and restart_script.read_text() != sys.argv[4]:
+            raise RuntimeError('watchdog restart script conflict')
+        watchdog_script_created = not watchdog_script.exists()
+        restart_script_created = not restart_script.exists()
+        watchdog_script.write_text(sys.argv[3])
+        restart_script.write_text(sys.argv[4])
+        with watchdog_path.open('x') as out:
+            out.write(watchdog_content)
+except Exception:
+    rollback()
+    raise
 # An initialized empty envelope is distinct from a missing/corrupt receipt.
 # Never let a failed read become evidence that no restart happened.
 receipt = root / (unit + '.json')
 try:
     if not receipt.exists():
+        receipt_created = True
         with receipt.open('x') as out:
             json.dump({'schema_version': 1, 'records': [], 'captured_exits': 0,
                        'baseline_nrestarts': int(props['NRestarts']),
                        'baseline_active_enter': int(props['ActiveEnterTimestampMonotonic'])}, out)
-    if created:
+    if created or watchdog_created:
         run('systemctl', 'daemon-reload')
     effective = dict(line.split('=', 1) for line in run('systemctl', 'show', unit,
         '-p', 'Type', '-p', 'LoadState', '-p', 'Restart', '-p', 'KillMode',
@@ -390,14 +1056,35 @@ try:
             any(effective.get(k) for k in ('ReadOnlyPaths', 'InaccessiblePaths',
                                           'RootDirectory', 'RootImage'))):
         raise RuntimeError('service sandbox may block supervisor capture')
+    # THE WATCHDOG MUST PROVE IT IS NOT INSIDE THE UNIT IT REPAIRS. A unit that
+    # shares the server's cgroup dies with the server -- exactly the failure
+    # this mechanism exists to survive -- so a wrong placement is refused, not
+    # installed as decoration. A stopped watchdog is likewise repaired here:
+    # install is the only step that can still reach the guest to do it.
+    run('systemctl', 'enable', 'lop-action-watchdog.service')
+    run('systemctl', 'start', 'lop-action-watchdog.service')
+    watchdog_started = True
+    watchdog = dict(line.split('=', 1) for line in run('systemctl', 'show',
+        'lop-action-watchdog.service', '-p', 'LoadState', '-p', 'ActiveState',
+        '-p', 'ControlGroup').splitlines())
+    if watchdog.get('LoadState') != 'loaded':
+        raise RuntimeError('watchdog unit is not loaded')
+    if watchdog.get('ActiveState') != 'active':
+        raise RuntimeError('watchdog unit is not active')
+    watchdog_group = watchdog.get('ControlGroup', '')
+    if not watchdog_group:
+        raise RuntimeError('watchdog unit has no control group')
+    if (watchdog_group == control_group or
+            watchdog_group.startswith(control_group.rstrip('/') + '/')):
+        raise RuntimeError('watchdog unit shares the action-server cgroup')
 except Exception:
-    # Roll back only the drop-in this attempt created, never a pre-existing
+    # Roll back only what this attempt created, never a pre-existing
     # installation. Re-entry MUST verify effective config, not trust bytes.
-    if created:
-        path.unlink()
-        run('systemctl', 'daemon-reload')
+    rollback()
     raise
-print(json.dumps({'unit': unit, 'installed': True}))
+print(json.dumps({'unit': unit, 'installed': True,
+                  'watchdog': {'installed': True, 'status': 'active',
+                               'cgroup_distinct': True}}))
 """
 
 #: One explicit, all-process restart followed by a proved-fresh listener.
@@ -555,6 +1242,67 @@ def acceptable(pid, new_main, new_main_start):
         return False
     return pid == new_main or new_main in ancestors(ppid)
 
+def receipt_snapshot():
+    try:
+        value = json.loads(RECEIPT.read_text())
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+def write_receipt(value):
+    tmp = RECEIPT.with_suffix('.tmp')
+    tmp.write_text(json.dumps(value))
+    tmp.replace(RECEIPT)
+
+def active_enter():
+    try:
+        props = dict(line.split('=', 1) for line in run(
+            'systemctl', 'show', UNIT,
+            '-p', 'ActiveEnterTimestampMonotonic').splitlines())
+        return int(props['ActiveEnterTimestampMonotonic'])
+    except Exception:
+        return 0
+
+def rebase_receipt():
+    # reset-failed ZEROES NRestarts (measured on 255), while captured_exits
+    # keeps the crash count. The host reconciles
+    # ``systemd_nrestarts - baseline_nrestarts == captured_exits``; leaving the
+    # old accounting behind makes every later report a GenerationMismatch, and
+    # the host answers a mismatch by dropping the batch and rebinding -- a
+    # silent, permanent action blackout. The reset therefore starts a NEW
+    # generation atomically: counters and records are rebased in one
+    # write-and-replace, so no reader can see half of it.
+    value = receipt_snapshot()
+    if value is None:
+        return
+    try:
+        props = dict(line.split('=', 1) for line in run(
+            'systemctl', 'show', UNIT, '-p', 'NRestarts').splitlines())
+        baseline = int(props['NRestarts'])
+    except Exception:
+        baseline = 0
+    enter = active_enter()
+    value['schema_version'] = 1
+    value['records'] = []
+    value['captured_exits'] = 0
+    value['baseline_nrestarts'] = baseline
+    if enter > 0:
+        value['baseline_active_enter'] = enter
+    write_receipt(value)
+
+def rebase_active_enter():
+    # The start that followed the reset moved the activation stamp. The
+    # receipt rule ``(active_enter == baseline) == (captured == 0)`` then
+    # rejects the new generation until the baseline follows it. A capture that
+    # already wrote accounting owns the envelope: never overwrite it.
+    value = receipt_snapshot()
+    if value is None or value.get('captured_exits') != 0:
+        return
+    enter = active_enter()
+    if enter > 0 and enter != value.get('baseline_active_enter'):
+        value['baseline_active_enter'] = enter
+        write_receipt(value)
+
 # A result left by an earlier dispatch must not be read as this one.
 try:
     RESULT.unlink()
@@ -567,6 +1315,7 @@ except OSError:
 # process, which is why a non-vanishing OSError marks the scan incomplete and
 # this path refuses BEFORE the disruptive kill.
 pre, pre_complete = owners()
+start_limit_cleared = True
 kill_ticks = 0
 post = []
 post_complete = False
@@ -576,6 +1325,36 @@ new_main = 0
 new_main_start = 0
 receipt = None
 if pre_complete:
+    # CLEAR THE START-LIMIT LATCH BEFORE THE START, but ONLY on a failed unit.
+    # A unit that hit StartLimitBurst refuses `start` with "Start request
+    # repeated too quickly" and stays failed; reset-failed is the only
+    # operation that clears the latch and its rate-limit counters (measured on
+    # systemd 255). It goes AFTER the pre scan, so the evidence still names the
+    # holders, and BEFORE the kill, so the kill stamp still describes the
+    # signal that follows.
+    #
+    # THE CONDITION IS LOAD-BEARING TOO: reset-failed also zeroes NRestarts on
+    # a LIVE unit (measured), which would break the receipt invariant the host
+    # reconciles (systemd_nrestarts - baseline == captured_exits) on every
+    # ordinary host restart. A unit that is not failed has no latch to clear.
+    try:
+        props = dict(line.split('=', 1) for line in run(
+            'systemctl', 'show', UNIT, '-p', 'ActiveState').splitlines())
+        unit_state = props.get('ActiveState', '')
+    except Exception:
+        unit_state = ''
+    # ONLY ``failed``. QA measured on 255.4 that an inactive unit with
+    # survivors starts fine after this script's all-process kill empties the
+    # cgroup, so widening the gate had no observed justification -- and every
+    # reset zeroes NRestarts, discarding crash accounting the host may still
+    # reconcile. A live unit must never be reset.
+    if unit_state == 'failed':
+        try:
+            run('systemctl', 'reset-failed', UNIT)
+        except Exception:
+            start_limit_cleared = False
+        else:
+            rebase_receipt()
     # The stamp is taken IMMEDIATELY before the signal. Freshness is then a
     # start time at or after it, not merely a pid absent from the pre set: a
     # holder that forks a worker while dying produces a pid the pre scan could
@@ -595,6 +1374,8 @@ if pre_complete:
         run('systemctl', 'start', UNIT)
     except Exception:
         pass
+    if start_limit_cleared:
+        rebase_active_enter()
     # post_complete starts False: a loop that never runs must not claim a scan
     # it did not perform.
     post, post_complete = [], False
@@ -657,6 +1438,7 @@ payload = {
     'pre_restart_pids': pre[:8],
     'pre_restart_count': len(pre),
     'pre_scan_complete': pre_complete,
+    'start_limit_cleared': start_limit_cleared,
     'kill_uptime_ticks': kill_ticks,
     'post_restart_pids': post[:8],
     'post_restart_count': len(post),
@@ -919,8 +1701,95 @@ path = pathlib.Path('/var/lib/lop-action-supervisor') / (unit + '.json')
 history = json.loads(path.read_text())
 history['systemd_nrestarts'] = int(props['NRestarts'])
 history['systemd_active_enter'] = int(props['ActiveEnterTimestampMonotonic'])
+# The watchdog's own record rides in the SAME privileged read: a separate
+# command would add a round trip to every action, and the episode needs this
+# evidence precisely when the host is already reading the receipt.
+# A missing or corrupt record must never fail the receipt read -- the record is
+# additive evidence, and empty-because-absent is not the same as a read failure.
+watchdog_path = pathlib.Path('/var/lib/lop-action-supervisor') / 'watchdog.json'
+try:
+    watchdog_text = watchdog_path.read_text()
+except OSError:
+    # No file at all: the key is OMITTED, which the host reads as ``absent``.
+    pass
+else:
+    try:
+        history['watchdog'] = json.loads(watchdog_text)
+    except ValueError:
+        # A corrupt file is NOT an absent one; ``{}`` is a present-but-unusable
+        # document, which the host sanitizes to ``unparseable``.
+        history['watchdog'] = {}
 print(json.dumps(history))
 """
+
+
+#: The ONE install script that still rides in argv as literal text.
+#:
+#: ``/execute`` takes an argv list and no stdin, so the install's scripts can
+#: only reach the guest as argv strings -- and Linux caps ONE argv string at
+#: ``MAX_ARG_STRLEN`` (131072 bytes), failing the exec with ``E2BIG`` past it.
+#: The literal transport measured 135,579 bytes for a non-empty client password
+#: (the escalation ladder repeats the fragment once per sudo tier, and shell
+#: quoting inflates ~46 KB of source to ~68 KB per tier), so every episode
+#: built after #2739 recorded only ``HTTPError`` and never installed
+#: supervision: the provider persists the exception TYPE, never the guest's
+#: ``Argument list too long``.
+#:
+#: This driver decompresses the single payload element back into the positional
+#: contract ``INSTALL_SOURCE`` has always read -- argv[1] capture source, [2]
+#: port, [3] watchdog source, [4] restart source -- so nothing downstream of the
+#: transport changes.
+#:
+#: EVERY transport failure is the same fixed-vocabulary refusal, never a
+#: traceback: decode, inflate, parse and the payload's shape all happen inside
+#: one handler that prints ``install payload invalid``. A truncated base64
+#: element, a flipped character, a non-zlib stream, non-JSON text or the wrong
+#: arity otherwise exits rc=1 with empty stdout, and the host records THAT as
+#: "privilege escalation or installation command failed" -- a false diagnosis of
+#: a sudo problem, which this suite has already paid for once. The inflate is
+#: capped because the element itself is capped: deflate reaches ~1030:1, so a
+#: guest-accepted 131,072-byte argv could otherwise expand to ~135 MB before any
+#: check. The ceiling is a decision (20x the ~49 KB it actually carries), not an
+#: emergent property of the kernel limit.
+TRANSPORT_SOURCE = """\
+import base64, json, sys, zlib
+LIMIT = 1000000
+try:
+    raw = base64.b64decode(sys.argv[1])
+    payload = json.loads(zlib.decompressobj().decompress(raw, LIMIT).decode())
+    shaped = type(payload) is list and len(payload) == 4
+    if not shaped or not all(type(part) is str for part in payload):
+        raise ValueError('install payload shape')
+except Exception:
+    print(json.dumps({'installed': False, 'reason': 'install payload invalid'}))
+else:
+    sys.argv = [sys.argv[0], payload[1], sys.argv[2], payload[2], payload[3]]
+    try:
+        exec(payload[0])
+    except RuntimeError as error:
+        print(json.dumps({'installed': False, 'reason': str(error)}))
+    except Exception as error:
+        print(json.dumps({'installed': False, 'reason': type(error).__name__}))
+"""
+
+
+def _install_payload() -> str:
+    """The four install scripts as ONE zlib+base64 argv element.
+
+    zlib is stdlib in every python3 the guest can have; bz2 and lzma compress
+    this input a little better (18,148 bytes of argv against bz2's 16,164 and
+    lzma's 16,680) but are optional build features, and a missing codec here is
+    an ImportError in the guest, which the provider can only record as an install
+    refusal. The safe codec wins ~2 KB.
+
+    Built per call rather than cached at import: it is one zlib pass over ~49 KB,
+    measured 2.8 ms best-of-7 on this host (bz2 3.3 ms, lzma 6.0 ms; the same
+    ordering held at 10.2/17.7/23.2 ms under review load), invisible beside the
+    15 s install deadline. A cached constant would silently pin a stale copy of a
+    script a test monkeypatched.
+    """
+    batch = [INSTALL_SOURCE, CAPTURE_SOURCE, WATCHDOG_SOURCE, RESTART_SOURCE]
+    return base64.b64encode(zlib.compress(json.dumps(batch).encode(), 9)).decode("ascii")
 
 
 def _privileged_fragment(fragment: str, password: str) -> Sequence[str]:
@@ -937,14 +1806,13 @@ def install_command(password: str) -> Sequence[str]:
     # Report capability failures as successful command execution, so the sudo
     # ladder does not mistake an unsupported service for failed authentication.
     # RuntimeError messages above are fixed vocabulary, never guest-authored.
-    wrapper = (
-        "import json\ntry:\n    exec(" + repr(INSTALL_SOURCE) + ")\n"
-        "except RuntimeError as error:\n"
-        "    print(json.dumps({'installed': False, 'reason': str(error)}))\n"
-        "except Exception as error:\n"
-        "    print(json.dumps({'installed': False, 'reason': type(error).__name__}))\n"
-    )
-    return _privileged(wrapper, [CAPTURE_SOURCE, str(ACTION_SERVER_PORT)], password)
+    #
+    # The scripts travel COMPRESSED (see ``TRANSPORT_SOURCE`` and
+    # ``_install_payload``): ~18 KB of argv instead of ~68 KB per escalation tier,
+    # which is what keeps the largest single argv element far below
+    # ``MAX_ARG_STRLEN``. They are still data, never interpolated into a shell
+    # fragment, so no guest-authored text can join the command.
+    return _privileged(TRANSPORT_SOURCE, [_install_payload(), str(ACTION_SERVER_PORT)], password)
 
 
 def report_command(unit: str, password: str) -> Sequence[str]:
@@ -1522,6 +2390,132 @@ def _receipt_records_value(value: object) -> list[dict[str, Any]]:
     return records
 
 
+#: Fixed vocabulary for the watchdog record, restated host-side and kept in
+#: lockstep with the literals in ``WATCHDOG_SOURCE``. A guest that
+#: prints arbitrary text cannot smuggle it into the evidence through a field
+#: the adapter reads as an enum; anything outside these sets becomes neutral.
+#: ``unresponsive`` stays in the trigger set because guests that predate the
+#: ActiveState-only gate can still have written it; the shipped watchdog
+#: emits it only for a unit systemd reports as ``failed``/``inactive``.
+_WATCHDOG_TRIGGERS = frozenset({"none", "failed", "inactive", "unresponsive"})
+_WATCHDOG_ACTIONS = frozenset({"none", "reset-failed+start", "verified-restart"})
+_WATCHDOG_OUTCOMES = frozenset(
+    {
+        "none",
+        "started",
+        "start-failed",
+        "reset-failed-error",
+        "no-effect",
+        "restarted",
+        "restart-failed",
+        "throttled",
+        "capped",
+    }
+)
+#: Observations are NOT attempts: a state the watchdog cannot repair is
+#: recorded here without spending the cap, so a dead-but-blocked server is
+#: distinguishable from a healthy one instead of both reading ``attempts: 0``.
+_WATCHDOG_OBSERVATIONS = frozenset({"none", "serving", "no-listener", "unresponsive", "unknown"})
+#: ``_watchdog_count`` gates counters; ``_watchdog_ticks`` gates the monotonic
+#: stamps, whose natural range is microseconds since boot (a long-lived guest
+#: reaches 1e11), so they cannot share the counter bound.
+_MAX_WATCHDOG_COUNT = 1_000_000
+_MAX_WATCHDOG_TICKS = 1 << 62
+
+
+def empty_watchdog(status: str) -> dict[str, Any]:
+    """A watchdog record that says only how the READ fared.
+
+    ``absent`` (no record yet), ``unparseable`` (a record we cannot vouch for)
+    and ``withheld`` (a scrub refused it) stay distinct, so a missing record is
+    never read as "the watchdog never acted".
+    """
+
+    return {
+        "schema_version": 1,
+        "status": status,
+        "attempts": 0,
+        "intervened": False,
+        "capped": False,
+        "last_attempt_us": 0,
+        "last_trigger": "none",
+        "last_action": "none",
+        "last_outcome": "none",
+        "last_observation": "none",
+        "events": [],
+    }
+
+
+def _watchdog_count(value: object) -> int:
+    return value if type(value) is int and 0 <= value <= _MAX_WATCHDOG_COUNT else 0
+
+
+def _watchdog_ticks(value: object) -> int:
+    return value if type(value) is int and 0 <= value <= _MAX_WATCHDOG_TICKS else 0
+
+
+def _watchdog_word(value: object, vocabulary: frozenset[str]) -> str:
+    return value if isinstance(value, str) and value in vocabulary else "none"
+
+
+def _watchdog_value(value: object) -> dict[str, Any]:
+    """Sanitize one guest watchdog document; never raises.
+
+    Numbers are the only values carried through, plus the three fixed-vocabulary
+    words and the bounded event ring. Note what is absent by construction: unit
+    name, port, argv, environment or any other guest text.
+    """
+
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        # A JSON ``null`` is a RECORD THAT EXISTS but cannot be used; only a
+        # missing key means no record at all.
+        return empty_watchdog("unparseable")
+    events: list[dict[str, Any]] = []
+    raw_events = value.get("events")
+    if isinstance(raw_events, list):
+        for event in raw_events[-WATCHDOG_EVENT_CAP:]:
+            if not isinstance(event, dict):
+                continue
+            events.append(
+                {
+                    "us": _watchdog_ticks(event.get("us")),
+                    "trigger": _watchdog_word(event.get("trigger"), _WATCHDOG_TRIGGERS),
+                    "action": _watchdog_word(event.get("action"), _WATCHDOG_ACTIONS),
+                    "outcome": _watchdog_word(event.get("outcome"), _WATCHDOG_OUTCOMES),
+                }
+            )
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "attempts": _watchdog_count(value.get("attempts")),
+        "intervened": value.get("intervened") is True,
+        "capped": value.get("capped") is True,
+        "last_attempt_us": _watchdog_ticks(value.get("last_attempt_us")),
+        "last_trigger": _watchdog_word(value.get("last_trigger"), _WATCHDOG_TRIGGERS),
+        "last_action": _watchdog_word(value.get("last_action"), _WATCHDOG_ACTIONS),
+        "last_outcome": _watchdog_word(value.get("last_outcome"), _WATCHDOG_OUTCOMES),
+        "last_observation": _watchdog_word(value.get("last_observation"), _WATCHDOG_OBSERVATIONS),
+        "events": events,
+    }
+
+
+def receipt_report(output: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Both halves of ONE capture read: the records and the watchdog summary.
+
+    One parse, so the action path does not decode a large capture twice. The
+    receipt's own validation is untouched; the watchdog half is additive
+    evidence that authorizes nothing, so a malformed record can never fail a
+    recovery that the receipt itself proved.
+    """
+
+    value = parse_output(output, is_receipt_payload)
+    if not isinstance(value, dict):
+        raise ValueError("invalid supervisor receipt")
+    if "watchdog" not in value:
+        return _receipt_records_value(value), empty_watchdog("absent")
+    return _receipt_records_value(value), _watchdog_value(value["watchdog"])
+
+
 #: Every status a restart verification can report. Fixed vocabulary only: no
 #: guest text reaches the evidence or an exception through this field.
 RESTART_STATUSES = frozenset(
@@ -1708,9 +2702,10 @@ def restart_record(output: str) -> dict[str, Any]:
         raise ValueError("invalid restart kill stamp")
     try:
         records = _receipt_records_value(value.get("receipt"))
+        reconciled = True
         latest = records[-1]["restart"] if records else None
     except (ValueError, GenerationMismatch):
-        records, latest = [], None
+        records, latest, reconciled = [], None, False
     incomplete = (
         value["pre_scan_complete"] is not True
         or value["post_scan_complete"] is not True
@@ -1729,9 +2724,13 @@ def restart_record(output: str) -> dict[str, Any]:
         status = "verification_timeout"
     elif not fresh:
         status = "stale_listener"
-    elif latest is None:
+    elif not reconciled:
         status = "receipt_unavailable"
     else:
+        # A RECONCILED EMPTY GENERATION IS VALID: reset-failed starts one with
+        # captured_exits=0, and refusing it would reject exactly the latched
+        # recovery this path exists for. ``latest`` stays None, so the next
+        # report reads the empty record set as verified_none and never bounces.
         status = "verified"
     owner = post[0] if post else None
     return {
@@ -1760,3 +2759,26 @@ def installed_unit(output: str) -> str:
     if not isinstance(unit, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+\.service", unit):
         raise ValueError("invalid supervisor unit")
     return unit
+
+
+def watchdog_install_status(value: object) -> dict[str, Any] | None:
+    """The install's watchdog proof, accepted only in its exact fixed shape.
+
+    The guest refuses to install when its watchdog is not active or shares the
+    server's cgroup, so an ``installed: true`` payload should always carry
+    this. It is still re-derived host-side: a guest that omits or malforms the
+    proof yields ``None`` (no claim) instead of a fabricated success.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    watchdog = value.get("watchdog")
+    if not isinstance(watchdog, dict):
+        return None
+    if (
+        watchdog.get("installed") is not True
+        or watchdog.get("status") != "active"
+        or watchdog.get("cgroup_distinct") is not True
+    ):
+        return None
+    return {"installed": True, "status": "active", "cgroup_distinct": True}

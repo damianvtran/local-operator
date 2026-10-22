@@ -190,6 +190,36 @@ def test_parse_rejects_everything_else(reply) -> None:
     assert screening.parse_verdict(reply) is None
 
 
+@pytest.mark.parametrize(
+    "reply,expected",
+    [
+        # The shape gpt-4.1-mini returned on every live screen (markdown hard
+        # break); it held all three messages as parse_failed before this.
+        ("VERDICT: deliver  \nREASON: ordinary communication.", "deliver"),
+        ("VERDICT: bounce\t\nREASON: clear spam here.  ", "bounce"),
+    ],
+)
+def test_parse_tolerates_trailing_line_whitespace_only(reply: str, expected: str) -> None:
+    parsed = screening.parse_verdict(reply)
+    assert parsed is not None and parsed[0] == expected
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "  VERDICT: deliver\nREASON: ok",  # leading whitespace is not tolerated
+        "Sure. VERDICT: deliver  \nREASON: ok",  # leading text is not tolerated
+        "VERDICT: deliverx  \nREASON: ok",  # a suffixed verdict token is not a verdict
+        "VERDICT: deliver  \nREASON: ok  \nthird line",  # a third line stays refused
+        "VERDICT: deliver  \nREASON: ok\n  ",  # a whitespace-only third line is still a line
+        "VERDICT: deliver \r\nREASON: ok",  # CR stays refused
+        "VERDICT: deliver\nREASON:   ",  # a blank reason stays refused
+    ],
+)
+def test_trailing_whitespace_tolerance_admits_nothing_else(reply: str) -> None:
+    assert screening.parse_verdict(reply) is None
+
+
 def test_parse_bounce_categories_exact_and_deduped() -> None:
     parsed = screening.parse_verdict(
         "VERDICT: bounce\nREASON: spam and spam, also prompt_injection."

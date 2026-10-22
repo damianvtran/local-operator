@@ -162,6 +162,118 @@ def _gate(languages: list[dict[str, str]], allowance: dict[str, Any]) -> GateRes
     return GateResult(unlisted, stale, unknown)
 
 
+_CENSUS_PLACEHOLDERS = {
+    "reason": "<why this debt is accepted>",
+    "owner": "<owner accountable for the payoff>",
+    "payoff": "<ticket reference or ISO date>",
+}
+
+
+def _census_pairs(
+    result: GateResult, allowance: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+    """The ``pairs`` entries that make the allowance match the census, plus deletions.
+
+    An affected pair's target is what the gate computes now: the listed keys
+    minus the ones no longer missing, plus the ones not listed. Metadata is
+    carried over for an existing pair; a newly touched pair gets placeholders,
+    because ``reason``/``owner``/``payoff`` are reviewed decisions and must not
+    look pre-filled. A pair whose target is empty is returned for deletion: the
+    allowance schema rejects an empty ``missing`` list.
+    """
+    listed = _allowance_map(allowance)
+    existing = {(entry["locale"], entry["namespace"]): entry for entry in allowance["pairs"]}
+    unlisted: dict[tuple[str, str], set[str]] = {}
+    for locale, namespace, key in result.unlisted:
+        unlisted.setdefault((locale, namespace), set()).add(key)
+    stale: dict[tuple[str, str], set[str]] = {}
+    for locale, namespace, key in result.stale:
+        stale.setdefault((locale, namespace), set()).add(key)
+    entries: list[dict[str, Any]] = []
+    removals: list[tuple[str, str]] = []
+    for pair in sorted(set(unlisted) | set(stale)):
+        locale, namespace = pair
+        current = listed.get(pair, set())
+        target = (current - stale.get(pair, set())) | unlisted.get(pair, set())
+        if not target:
+            removals.append(pair)
+            continue
+        entry = existing.get(pair)
+        entries.append(
+            {
+                "locale": locale,
+                "namespace": namespace,
+                "reason": entry["reason"] if entry else _CENSUS_PLACEHOLDERS["reason"],
+                "owner": entry["owner"] if entry else _CENSUS_PLACEHOLDERS["owner"],
+                "payoff": entry["payoff"] if entry else _CENSUS_PLACEHOLDERS["payoff"],
+                "missing": sorted(target),
+            }
+        )
+    return entries, removals
+
+
+def _census_report(result: GateResult, allowance: dict[str, Any]) -> str:
+    """Explain a stale allowance key by key, with paste-ready ``pairs`` entries.
+
+    WHY: the allowance is a census snapshot of the tree that authored it. The
+    gate landed in 40db532c39 with such a snapshot; ``wire.memory.capture.
+    locators.label`` and ``.help`` landed on main while that branch was open,
+    so main went red and the next unrelated PR (#2655) inherited 14 unexplained
+    missing entries. Naming each key and printing the replacement JSON makes
+    that failure self-diagnosing and keeps the shrink-only allowance a reviewed
+    decision instead of auto-growing it.
+    """
+    if not (result.unlisted or result.stale or result.unknown):
+        return ""
+    lines = [
+        "i18n/coverage-allowance.json is stale against the current tree: "
+        f"{len(result.unlisted)} unlisted key(s), {len(result.stale)} "
+        f"no-longer-missing key(s), {len(result.unknown)} unknown pair(s).",
+        "",
+    ]
+    if result.unlisted:
+        lines.append("Missing from the allowance (add these key IDs):")
+        lines.extend(
+            f"  - `{key}` is missing from the {locale} `{namespace}` allowance and is not listed"
+            for locale, namespace, key in sorted(result.unlisted)
+        )
+        lines.append("")
+    if result.stale:
+        lines.append("Listed but no longer missing (remove these key IDs):")
+        lines.extend(
+            f"  - `{key}` is listed in the {locale} `{namespace}` allowance "
+            "but is no longer missing"
+            for locale, namespace, key in sorted(result.stale)
+        )
+        lines.append("")
+    if result.unknown:
+        lines.append("Unknown pairs (remove these entries):")
+        lines.extend(
+            f"  - {locale}/{namespace} is not a checked (locale, namespace) pair"
+            for locale, namespace in sorted(result.unknown)
+        )
+        lines.append("")
+    entries, removals = _census_pairs(result, allowance)
+    if entries:
+        lines.append(
+            "Paste these into the `pairs` array of i18n/coverage-allowance.json, "
+            "replacing an existing entry for the same (locale, namespace); metadata "
+            "is carried over, so replace any <...> placeholder before committing:"
+        )
+        lines.append(json.dumps(entries, indent=2, ensure_ascii=False))
+        lines.append("")
+    if removals:
+        lines.append(
+            "Delete these now-complete `pairs` entries entirely: "
+            + ", ".join(f"{locale}/{namespace}" for locale, namespace in removals)
+        )
+        lines.append("")
+    lines.append(
+        "The allowance is shrink-only: every added key needs a reviewed reason, owner and payoff."
+    )
+    return "\n".join(lines).rstrip()
+
+
 def test_manifest_is_schema_versioned_and_matches_the_runtime_list() -> None:
     languages = _languages(_json(MANIFEST))
     codes = [language["code"] for language in languages]
@@ -196,18 +308,12 @@ def test_every_manifest_language_has_a_style_guide() -> None:
 
 def test_every_missing_key_is_covered_by_the_shrink_only_allowance() -> None:
     languages = _languages(_json(MANIFEST))
-    result = _gate(languages, _json(ALLOWANCE))
-    assert not result.unlisted, (
-        "Untranslated (locale, namespace, key) entries are missing from "
-        f"i18n/coverage-allowance.json: {sorted(result.unlisted)}. Translate each key "
-        "into every language in i18n/languages.json, or record the debt with a reason."
-    )
-    assert not result.stale, (
-        "Allowance keys that are no longer missing must be removed: " f"{sorted(result.stale)}"
-    )
-    assert not result.unknown, (
-        "i18n/coverage-allowance.json names pairs that do not exist in the manifest "
-        f"or English catalogues: {sorted(result.unknown)}"
+    allowance = _json(ALLOWANCE)
+    result = _gate(languages, allowance)
+    # One assertion so a stale census surfaces as a single key-named diff with
+    # paste-ready entries, not three tuple dumps the next PR must untangle.
+    assert not (result.unlisted or result.stale or result.unknown), _census_report(
+        result, allowance
     )
 
 
@@ -289,6 +395,68 @@ def test_gate_rejects_an_unknown_allowance_entry(synthetic_catalogues: Path) -> 
     assert result.unlisted == {("fr", "demo", "demo.title")}
     assert result.unknown == {("de", "demo")}
     assert not result.stale
+
+
+def test_census_report_names_an_unlisted_key_and_its_replacement(
+    synthetic_catalogues: Path,
+) -> None:
+    """The discriminating control: a fake English key makes the census stale.
+
+    The message must name the key rather than print an anonymous tuple, and the
+    replacement entry must merge it into the pair's existing missing set.
+    """
+    (synthetic_catalogues / "en" / "demo.json").write_text(
+        json.dumps({"demo.title": "Title", "demo.new": "New"})
+    )
+    allowance = _allowance(("fr", "demo", ["demo.title"]))
+    result = _gate(_LANGUAGES, allowance)
+    report = _census_report(result, allowance)
+    assert "`demo.new` is missing from the fr `demo` allowance and is not listed" in report
+    assert "`demo.title` is missing from" not in report
+    assert _census_pairs(result, allowance) == (
+        [
+            {
+                "locale": "fr",
+                "namespace": "demo",
+                "reason": "synthetic control",
+                "owner": "synthetic lane",
+                "payoff": "2026-12-31",
+                "missing": ["demo.new", "demo.title"],
+            }
+        ],
+        [],
+    )
+
+
+def test_census_report_names_a_no_longer_missing_key(
+    synthetic_catalogues: Path,
+) -> None:
+    (synthetic_catalogues / "en" / "demo.json").write_text(json.dumps({"demo.title": "Title"}))
+    (synthetic_catalogues / "fr" / "demo.json").write_text(json.dumps({"demo.title": "Titre"}))
+    allowance = _allowance(("fr", "demo", ["demo.title"]))
+    result = _gate(_LANGUAGES, allowance)
+    report = _census_report(result, allowance)
+    assert "`demo.title` is listed in the fr `demo` allowance but is no longer missing" in report
+    assert _census_pairs(result, allowance) == ([], [("fr", "demo")])
+    assert "Delete these now-complete `pairs` entries entirely" in report
+
+
+def test_census_report_marks_a_new_pair_for_review(synthetic_catalogues: Path) -> None:
+    (synthetic_catalogues / "en" / "demo.json").write_text(json.dumps({"demo.title": "Title"}))
+    allowance = _allowance()
+    result = _gate(_LANGUAGES, allowance)
+    entries, removals = _census_pairs(result, allowance)
+    assert removals == []
+    assert entries == [
+        {
+            "locale": "fr",
+            "namespace": "demo",
+            "reason": _CENSUS_PLACEHOLDERS["reason"],
+            "owner": _CENSUS_PLACEHOLDERS["owner"],
+            "payoff": _CENSUS_PLACEHOLDERS["payoff"],
+            "missing": ["demo.title"],
+        }
+    ]
 
 
 def test_allowance_requires_a_reason(synthetic_catalogues: Path) -> None:

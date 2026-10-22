@@ -134,6 +134,60 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes <venv>/bin/.'Local Operator'.<dead-pid>.tmp orphans only; glob is venv-scoped",
     ),
+    (
+        "local_operator/procname.py::_sweep_orphan_plants",
+        "shutil.rmtree",
+        # Every path this module writes is `<runtime root>/<build key>` or a
+        # staging entry beside it, and `<venv>/bin|lib`. The key is the
+        # interpreter's own (parent name, resolved path, size, mtime), the root
+        # is passwd-home-derived, and the basenames are the brand — no session
+        # id, config dir or caller input can reach any of them.
+        "Reclaims <runtime root>/<key>.tmp|dead.<pid>.<thread>, a staging or aside tree "
+        "this module made",
+    ),
+    (
+        "local_operator/procname.py::_plant_runtime",
+        "os.rename",
+        "Publishes this plant's staging dir as <runtime root>/<key>; both interpreter-derived",
+    ),
+    (
+        "local_operator/procname.py::_plant_runtime",
+        "shutil.rmtree",
+        # Two: the failed-build staging tree (a clone that died on ENOSPC must
+        # never be renamed onto the build key) and a staging tree whose rename
+        # lost to a healthy concurrent planter. Both are this plant's own entry.
+        "Removes this plant's own staging tree",
+        2,
+    ),
+    (
+        "local_operator/procname.py::_replace_corrupt",
+        "os.rename",
+        # Three: a CORRUPT <runtime root>/<key> moved aside to <key>.dead.<pid>.
+        # <thread>, that aside put back when it proved healthy after all, and
+        # this plant's staging tree published onto the key. Every path is the
+        # interpreter-derived key or a private name beside it.
+        "Swaps a CORRUPT <runtime root>/<key> aside and publishes staging; interpreter-derived",
+        3,
+    ),
+    (
+        "local_operator/procname.py::_replace_corrupt",
+        "shutil.rmtree",
+        # Three: this plant's staging tree when a concurrent planter repaired
+        # the key first, the moved-aside dead tree, and a staging tree whose
+        # final rename lost. None is ever the published key itself.
+        "Removes <runtime root>/<key>.dead.<pid>.<thread> or this plant's own staging tree",
+        3,
+    ),
+    (
+        "local_operator/procname.py::_link_to",
+        "os.replace",
+        "Atomic replace of <venv>/bin/'Local Operator' with a symlink to the runtime image",
+    ),
+    (
+        "local_operator/procname.py::_link_to",
+        "<path>.unlink",
+        "Clears this pid's own .tmp symlink in <venv>/bin after the replace",
+    ),
     # -- operator/device pairing store (stage D, issue #1310) ----------------
     # Every path in these FOUR is built from `config_dir()/operator/...` plus a
     # device id validated by `_safe_name` (alphanumerics, '-' and '_', at most 128
@@ -453,6 +507,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # The DESKTOP sidebar layout store (`local_operator/server/sidebar_layout.py`),
+    # the same config-root shape as the pin store above and argued the same way:
+    # `write_layout` joins the config ROOT with the fixed basename
+    # `sidebar-layout.json`, or with a `.sidebar-layout.json.<random>.tmp` name
+    # `mkstemp` minted in that same directory. Neither path is derived from a
+    # session id, a transcript or any caller-chosen component, so neither can
+    # resolve under `sessions/`. The replace target is that one preference FILE;
+    # the unlink target is the sibling temp REGULAR FILE this call just created,
+    # on the failure path. (Agent review round 2, R2-1a.)
+    (
+        "local_operator/server/sidebar_layout.py::write_layout",
+        "os.replace",
+        "Atomic replace of <config_dir>/sidebar-layout.json; a fixed config-root name, "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/server/sidebar_layout.py::write_layout",
+        "os.unlink",
+        "Only the sibling mkstemp temp FILE this call created in <config_dir>; "
+        "never a session, transcript or directory",
+    ),
     (
         "local_operator/session/session_tags.py::_write",
         "os.replace",
@@ -598,6 +673,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "`lop network rm`: the record FILE and its .secrets.json FILE under "
         "<config>/network/networks/ (design §12 — local record removal, audit kept)",
+    ),
+    (
+        "local_operator/network/store.py::forget_invite_tokens",
+        "<path>.unlink",
+        "Residue sweep of dead invites: the token FILE <config>/network/outbox/<id>.invite, "
+        "composed by invite_path from safe_component(invite_id) (no separators, so no "
+        "traversal) -- a regular file two levels below network/, never under sessions/",
     ),
     (
         "local_operator/network/store.py::clear_pending_pairing",
@@ -873,6 +955,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "tmp FILE -> last-cleanup.json FILE beside the session dirs (R3-4)",
     ),
     (
+        "local_operator/session/cleanup.py::_write_holds",
+        "os.replace",
+        "tmp FILE -> .session-holds.json FILE beside the session dirs; never a session",
+    ),
+    (
+        "local_operator/session/cleanup.py::_write_holds",
+        "<path>.unlink",
+        "the tmp FILE of a failed holds write",
+    ),
+    (
+        "local_operator/session/census.py::_write_census",
+        "os.replace",
+        "tmp FILE -> .session-census.json FILE beside the session dirs; never a session",
+    ),
+    (
+        "local_operator/session/census.py::_write_census",
+        "<path>.unlink",
+        "the tmp FILE of a failed census write",
+    ),
+    (
         "local_operator/session/cleanup.py::_write_record",
         "<path>.unlink",
         "the tmp FILE of a failed record write",
@@ -1091,26 +1193,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/server/utils/desktop_sessions.py::_stage_and_replace",
         "os.replace",
         "the .desktop.json.<uuid>.tmp staging FILE -> desktop.json FILE",
-    ),
-    # The create+arm rollback in the wakes surface. This call CAN reach a
-    # session directory, and the row says so rather than claiming otherwise:
-    # it removes the draft `wakes.create` made in the same request, when and
-    # only when the arm that followed failed. What makes it safe is an
-    # IDENTITY proof checked at the call site (`_rollback_created`): the
-    # target is this config dir's own `sessions/<id>`, it carries the desktop
-    # draft marker THIS request wrote, and it holds no transcript, no runtime
-    # record and no wake index entry — any of which means something else has
-    # adopted the directory, and it is left alone. It deliberately does NOT go
-    # through `cleanup.remove_session_dir`, and that is the interesting half:
-    # that remover refuses an UNMARKED store, `mark_store`'s contract says
-    # cleanup must never mark its own target, and a store where no session has
-    # ever been built carries no marker — which is exactly the store a
-    # freshly created desktop draft lives in, so routing this through it would
-    # turn the rollback into a silent no-op in the one case it exists for.
-    (
-        "local_operator/server/routes/desktop_wakes.py::_rollback_created",
-        "shutil.rmtree",
-        "the desktop draft THIS request just created, after proving it is untouched",
     ),
     # The local publication's in-memory store swap. `<path>.replace` is this
     # guard's heuristic reading of `store.replace(state)` — the receiver is a
@@ -1610,6 +1692,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "boot records under <config>/run/host only; fixed dirname + one-level "
         "'*.json' glob, never a session path",
     ),
+    (
+        "local_operator/session/runtime/journal.py::clear_run_record",
+        "<path>.unlink",
+        "one run record FILE at <session_dir>/runtime-run.json, and only when its "
+        "own run key matches the caller's; never a directory and never the transcript",
+    ),
     # The viewer registry is the same staged-write shape as the session
     # registry above, one directory over (run/viewers rather than run/mobile)
     # and reaching sessions/ no more than that one does.
@@ -1771,6 +1859,33 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/fork.py::consume_fork_boundary",
         "<path>.unlink",
         "one-shot fork-boundary sidecar FILE",
+    ),
+    # The failed-fork discard (LOH-9 S3). ``fork_dir`` is the directory THIS
+    # call created and claimed one statement earlier, for a fork that does not
+    # exist yet; nothing under it is the user's work, and the parent directory
+    # is never named by this function. Removing it is how a refused roles copy
+    # (over the byte bound, a symlink, an I/O error) avoids leaving a fork whose
+    # inherited attachment points at no definitions.
+    (
+        "local_operator/fork.py::_discard_failed_fork",
+        "shutil.rmtree",
+        "the just-created, still-claimed destination fork dir only; parent never touched",
+    ),
+    # Publishing the roles copy: a staging directory inside the fork's OWN
+    # directory is renamed onto ``<fork>/roles`` with one atomic os.replace.
+    # Neither path can be an existing session: the fork dir was claimed above
+    # and the name is the fixed ``roles`` child of it.
+    (
+        "local_operator/fork.py::_copy_roles_tree",
+        "os.replace",
+        "staging dir -> <fork>/roles inside the just-created fork; never a session dir",
+    ),
+    (
+        "local_operator/fork.py::_copy_roles_tree",
+        "shutil.rmtree",
+        "only its own .roles-<hex> staging dir inside the fork dir on failure "
+        "(three branches: bound crossed mid-copy, OSError, cancelled copy)",
+        3,
     ),
     (
         "local_operator/mobile/install.py::uninstall",
@@ -2540,6 +2655,38 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "cleanup.remove_session_dir",
     ),
     (
+        "local_operator/network/mobility.py::_stash_session_roles",
+        "os.replace",
+        "LOH-9 S2's drop path: renames the session's `roles/` SUBTREE out to "
+        "<config>/dropped-session-roles/<id>, which is OUTSIDE sessions/; the "
+        "session directory itself is never this call's source or target — its "
+        "removal stays cleanup.remove_session_dir's",
+    ),
+    (
+        "local_operator/network/mobility.py::_unstash_session_roles",
+        "os.replace",
+        "Restores the SAME `roles/` subtree into the session when a move is refused "
+        "after stashing it: the reverse of the row above, same two paths, and it "
+        "runs only when the session directory is still present (a refusal must "
+        "change nothing)",
+    ),
+    (
+        "local_operator/session/cleanup.py::hand_off_session_dir",
+        "os.replace",
+        "THE MESH COMMIT: renames sessions/<id> into <config>/network/handed-away/ "
+        "once the destination holds a verified complete copy. The rename is what "
+        "makes 'exactly one copy' atomic — after it no scanner, listing or resume "
+        "can see the id here — and it happens before the tombstone tells the "
+        "destination anything, so a refusal leaves the conversation where it was",
+    ),
+    (
+        "local_operator/network/carry.py::_write_marker",
+        "os.replace",
+        "Atomic write of a session's own desktop.json cwd marker at the promote, "
+        "through a sibling pid-temp file. It rewrites ONE field of a bookkeeping "
+        "file the copy already carried; the transcript is never edited",
+    ),
+    (
         "local_operator/network/mobility.py::_promote",
         "<path>.unlink",
         "Removes the move's own ready.json boot marker from the just-adopted session "
@@ -2747,19 +2894,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "removes the <config_dir>/aida/escalate.json tray FILE after reading it",
     ),
-    # The ONE call of hers that removes a DIRECTORY: the create-failure
-    # cleanup. It is guarded twice in the same function — the directory must
-    # exist AND hold no transcript — so the window it can act in is between
-    # the fresh ``mkdir`` and the first transcript append, and a real
-    # conversation can never be inside it. The id it names was minted by the
-    # very call that created the directory (``uuid4().hex[:12]``), never read
-    # from her state file, so a retry after a partial failure cannot reach an
-    # established id either.
-    (
-        "local_operator/aida/bootstrap.py::_discard_failed_create",
-        "shutil.rmtree",
-        "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
-    ),
     # The Librarian's small stores and her create-failure cleanup: the same
     # shapes, the same arguments as Aida's block above.
     (
@@ -2776,11 +2910,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/librarian/state.py::clear_extras",
         "<path>.unlink",
         "removes the <config_dir>/librarian/extras.json tray FILE after processing it",
-    ),
-    (
-        "local_operator/librarian/bootstrap.py::_discard_failed_create",
-        "shutil.rmtree",
-        "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
     ),
     (
         "local_operator/librarian/proactive.py::reconcile",
@@ -3055,6 +3184,41 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "Removes ONLY this operation's own staged tree under <config_dir>/hub/staging/",
     ),
+    # UNPULL. Every path is built from validated pieces: the managed root
+    # <config_dir>/skills/<alias> (``validate_name`` authenticates a single
+    # kebab-case segment), the intent marker <config_dir>/hub/unpull/
+    # skill-<local_id>.json (``baseline_path`` validates the opaque id) and the
+    # tombstone <config_dir>/hub/backups/skill-<local_id>-unpull-<hex>. The
+    # replace MOVES the managed copy into that tombstone, the unlink removes
+    # this id's own marker, and the rmtree removes ONLY our tombstone -- no
+    # call accepts a session id, a sessions/ path or a caller-named directory.
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "os.replace",
+        "Moves <config_dir>/skills/<validated alias> to its own hub/backups tombstone",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "<path>.unlink",
+        "Removes this skill id's own intent marker under <config_dir>/hub/unpull/",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "shutil.rmtree",
+        "Removes ONLY the tombstone this unpull minted under <config_dir>/hub/backups/",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_unpull_locked",
+        "<path>.unlink",
+        "Removes validated skill-unpull markers under <config_dir>/hub/unpull/ (six branches)",
+        6,
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_unpull_locked",
+        "shutil.rmtree",
+        "After the state write, removes ONLY the marker's own hub/backups tombstone",
+        2,
+    ),
     # The local transaction journal's one JSON writer. Its ONLY caller passes
     # TransactionJournal._path(op-id): <config_dir>/hub/transactions/<validated id>.json
     # with a same-directory mkstemp temp -- never a session-derived path.
@@ -3067,6 +3231,32 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/hub_sync/transactions.py::atomic_json",
         "<path>.unlink",
         "Clears this call's own same-directory .transaction-*.tmp on the error path only",
+    ),
+    # The initial-publication preview receipts: one JSON file per opaque token
+    # under <config_dir>/hub/publication-previews/ (a sibling of sessions/).
+    # `_publication_preview_path` refuses any token that is not
+    # [A-Za-z0-9_-]{16,128}, and both the target and the mkstemp temp are formed
+    # from that fixed directory + token; no session id or caller path reaches
+    # either. Pruning globs *.json in that same fixed directory only.
+    (
+        "local_operator/hub_sync/service.py::_write_publication_preview",
+        "os.replace",
+        "Atomic replace of a <config_dir>/hub/publication-previews receipt from a sibling temp",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_write_publication_preview",
+        "os.unlink",
+        "Clears this call's own same-directory preview temp on the error path only",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_prune_publication_previews",
+        "<path>.unlink",
+        "Removes EXPIRED *.json receipts in <config_dir>/hub/publication-previews/ only",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_delete_publication_preview",
+        "<path>.unlink",
+        "Removes ONE reconciled receipt in <config_dir>/hub/publication-previews/",
     ),
     # -- speech-to-text temp scratch (mobile STT) ---------------------------
     # The Radient leg writes the uploaded clip into a directory THIS call
@@ -3205,6 +3395,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tools/memory_tools.py::_run",
         "<path>.move",
         "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
+    ),
+    # -- the TUI's sidebar grouping toggle: config-root view state ------------
+    # `write_tag_groups` writes `<config>/sidebar-tags.json`, a FIXED path
+    # built from the config root: `os.replace` moves only the sibling mkstemp
+    # file onto it, and the `unlink` removes only that leftover temp sibling
+    # when the replace failed. Neither argument is derived from a session id,
+    # a session directory or caller input, so neither can reach `sessions/`.
+    (
+        "local_operator/tui/sidebar_tags.py::write_tag_groups",
+        "os.replace",
+        "Atomic config-root sidebar-tags.json only; fixed path, never a session entry",
+    ),
+    (
+        "local_operator/tui/sidebar_tags.py::write_tag_groups",
+        "<path>.unlink",
+        "Only the sibling .sidebar-tags-*.tmp leftover; never a session path",
     ),
 )
 
@@ -3394,6 +3600,17 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> .session-holds.json (the holds map, beside the log)
+        "local_operator/session/cleanup.py::_write_holds",
+        # THE ONE PATH DISPLACER THAT MAY NAME A SESSION DIRECTORY, and it is this
+        # module's own function: the mesh commit renames sessions/<id> out to
+        # network/handed-away/ once the destination holds a verified copy. Every
+        # other rename in this neighbourhood is a temp-file swap; this one is
+        # argued for in the allow-list above ("the rename is what makes 'exactly
+        # one copy' atomic").
+        "local_operator/session/cleanup.py::hand_off_session_dir",
+        # tmp -> .session-census.json (the census baseline, beside the log)
+        "local_operator/session/census.py::_write_census",
         # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,
         # never a session directory (the target is a regular file).
         "local_operator/session/delegated_retention.py::_write_cleanup_manifest",

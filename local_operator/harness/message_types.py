@@ -549,6 +549,20 @@ ASK_RESPONSE_MESSAGE_TYPE = "ask_response"
 #: ``wake_prompt`` shape).
 ASK_TIMEOUT_MESSAGE_TYPE = "ask_timeout"
 
+#: The custom-message type of a RELAY's settle note (#2520). Written to the
+#: WATCHER session (the one that relayed another session's ask), it says in one
+#: line which ask the note is about and how it ended. Its id is
+#: ``ask-relay-<relay id>``, so a re-delivery is the same constant-time transcript
+#: check the other two rows use.
+#:
+#: A THIRD type rather than riding ``ask_response``: the response type is an
+#: ANSWER to an ask THIS conversation asked, and the session re-resolves it from
+#: the fold at append time (``refresh_delivery_message``). A relay note is not an
+#: answer and has no row to refresh; borrowing the type would make the append
+#: path look for a response that does not exist. It lives HERE for the same
+#: reason the other two do — the shared renderer must name it.
+ASK_RELAY_MESSAGE_TYPE = "ask_relay"
+
 #: The custom-message type the completion-time project check injects at the
 #: yield boundary (``Session._project_continuation``). Defined here beside
 #: ``TODO_REMINDER_MESSAGE_TYPE`` for the identical reason — the renderer, the

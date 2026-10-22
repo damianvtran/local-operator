@@ -2417,7 +2417,7 @@
     {
       "locale": "es",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2431,12 +2431,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "fr",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2450,12 +2450,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "hi",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2469,12 +2469,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. Devanagari shaping artifact isolated to cell-grid SVG reprojection by same-frame raw Rich SVG/rsvg control; semantic and Textual-cell fit passed, native-terminal shaping not claimed."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. Devanagari shaping artifact isolated to cell-grid SVG reprojection by same-frame raw Rich SVG/rsvg control; semantic and Textual-cell fit passed, native-terminal shaping not claimed. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "ru",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2488,12 +2488,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "vi",
       "namespace": "tui.authoring",
-      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "source_sha256": "4b45b3865daa80ce9bb8f72eff40389528743aa6365f68c038aad4a5756f332b",
       "translator": {
         "agent": "coder (i18n-translator)",
         "model": "openai/gpt-6.1-sol",
@@ -2507,7 +2507,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. MINOR A1 fixed by translator in 6fc3652677: inherit choice now keeps the literal config token per vi style-guide lines 82-86; final runtime notice delta rechecked in real form at both widths."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. MINOR A1 fixed by translator in 6fc3652677: inherit choice now keeps the literal config token per vi style-guide lines 82-86; final runtime notice delta rechecked in real form at both widths. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR."
     },
     {
       "locale": "es",
@@ -2907,6 +2907,481 @@
       },
       "status": "passed",
       "note": "2nd indep pass fr19b: 1st 6 MAJOR fixed; 8/8 verified, 9 unchanged; no tu; validé=DB commit (not user confirm); token cap separate; sync.label 27c; check 0. MINOR: doubled space before ';' in 3 strings."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 96bfab4939ede7e68a15159a166a5a57cc452cc65afa2ae559d39294ea24d1cb. 0 findings."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 2cdfb697b12c864b728ef1b5115d8c6ea36c8dc669c982633d3556bb2e05099a. 1 MINOR recorded: three U+202F in `invalid` replaced by ASCII spaces; non-gating, bytes unchanged."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 03245aa0e5f63ad1c2722b2a1598d45899b22070f811a8be94723dd28818b34d. 0 findings."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 0534e295816e51689af4ddcd66bad131c233944a188d79652e477e7dac07d0d1. 0 findings."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 a597880d8b045c1000412af91bea5034de4567f4a383fd366632c6033bb61864. 0 findings."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Initial ES-1 minor (confirm lost its object), ES-2 nit (idiomatic hacer de), ES-3/ES-4 fit notes. ES-1 and ES-2 fixed; fit notes closed by the status-cell min-w-14/nowrap fix. Re-audit round 2 PASS."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "Initial FR-1 major (saving label overflowed the fixed status cell), FR-2/FR-3 nits. FR-1 resolved by min-w-14/whitespace-nowrap; FR-3 transient row shift noted for design. Copy re-audit round 2 PASS."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Initial HI-1 minor (saving wraps in fixed status cell), resolved by min-w-14/nowrap; copy otherwise clean. Translation audit PASS."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Initial RU-1 nit only (pin hint wraps at 320px); accepted as a wrapping hint. Translation audit PASS."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Initial VI-1 minor (saving fit), VI-2 nit (missing-label width). VI-1 closed by the status-cell fix; VI-2 accepted. Translation audit PASS."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "b5e2474576210634073deea8b9bd36083136129e76356277dcf1c78f3fa84c7d",
+      "translator": {
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (round 2, independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. 1 MINOR fixed: enabled.help measured 74 cells, exactly the 74-cell /settings detail line at 80x24 (rendered, not estimated) and past the ~67-cell en budget, so the row had no margin; tightened to 'Vista previa: envía trabajo al cómputo alojado por Radient en tu malla.' (71). 'malla' for mesh matches the catalogue's network/mesh_updates keys; 'solo local' / 'se permiten ejecuciones remotas' accepted as idiomatic tú register; no unresolved blocker/major. Round 2 independent re-audit (delta: only remote_compute_enabled.help, re-read against the new en 'bound to one mesh network'): the dangling 'ligado' became the predicate 'y lo vincula', this section's 'vincular' term, so the participle can no longer attach to 'cómputo'; 'tuya' dropped for width (72 cells), 'una malla' keeps the single-network reading; 'Radient' untranslated; no containment claim; tú register unchanged. 0 unresolved blocker/major."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "b5e2474576210634073deea8b9bd36083136129e76356277dcf1c78f3fa84c7d",
+      "translator": {
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (round 2, independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. vous register: description's bare 'exécute' (3rd person / tu imperative) fixed to the guide's infinitive action form 'exécuter'; help 'envoie' -> 'envoyer'. enabled.help measured 80 cells, past the 74-cell 80x24 detail line, and 'hébergé par Radient' cannot fit it, so it is now 'Aperçu : envoyer votre travail au calcul de Radient dans votre maillage.' (73) — same referent, 'Aperçu' + U+202F kept; description keeps 'calcul hébergé par Radient'. No unresolved blocker/major. Round 2 independent re-audit (delta: only remote_compute_enabled.help): 'lié' -> 'rattaché', the description's term; U+202F kept before the colon; 73 cells; infinitive action form and vous register unchanged; 'Radient' untranslated; no containment claim. 0 unresolved blocker/major."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "b5e2474576210634073deea8b9bd36083136129e76356277dcf1c78f3fa84c7d",
+      "translator": {
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (round 2, independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. term consistency fixed inside one feature: description's 'Предварительный просмотр' -> 'Предпросмотр', the form the same feature's help and the namespace's static.title ('Предпросмотры файлов') use. enabled.help measured 83 cells, past the 74-cell 80x24 line; now 'Предпросмотр: работа уходит на вычислительные ресурсы Radient в меш-сети.' (73), keeping the description's precise term and dropping the possessive rather than the noun. 'меш-сети' matches the catalogue. No unresolved blocker/major. Round 2 independent re-audit (delta: only remote_compute_enabled.help): comma-joined second predicate fixed to 'и привязана'. At 74 cells the description's 'вычислительные ресурсы' cannot be restored (measured minimum 78, verbless and without 'одной'; 88 with the verb and 'одной'), so the help keeps 'ресурсы Radient' — recorded trade, not an unnoticed regression; 'одной' keeps the one-network claim. 0 unresolved blocker/major."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "b5e2474576210634073deea8b9bd36083136129e76356277dcf1c78f3fa84c7d",
+      "translator": {
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (round 2, independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. 1 MAJOR fixed: enabled.help 'आपका काम … भेजता है' made the work the sender (verb agreed with काम); now 'आपके काम को … भेजता है' with the mesh clause moved before the compute phrase. 1 MAJOR fixed: description's participle 'होस्ट किए कंप्यूट' is not grammatical without 'गए' and the agent was unmarked -> 'Radient द्वारा होस्ट किए गए कंप्यूट'; 'बँधा होगा' (future) -> '… से जुड़ा होता है' (present fact). प्रीव्यू kept: it is this namespace's preview term (static.title, tui_theme.help); help is 66 cells. No unresolved blocker/major. Round 2 independent re-audit (delta: only remote_compute_enabled.help): the trailing 'जो … जुड़ा होता है' sat next to 'Radient कंप्यूट' and read as the compute being network-bound; replaced with a second predicate 'और उसे एक मेश नेटवर्क से जोड़ता है' that binds the work. 63 cells; object marking, the दे-verb agreement and 'Radient' kept; no containment claim. 0 unresolved blocker/major."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "b5e2474576210634073deea8b9bd36083136129e76356277dcf1c78f3fa84c7d",
+      "translator": {
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (round 2, independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. 1 MAJOR fixed: description and help said 'máy tính do Radient vận hành' (a computer), while the setting is compute and the title already says 'Tính toán'; now 'hạ tầng tính toán do Radient vận hành' / 'hạ tầng tính toán Radient'. enabled.help measured 86 cells, past the 74-cell 80x24 line; now 'Bản xem trước: gửi việc tới hạ tầng tính toán Radient trong mạng mesh.' (70). 'mạng mesh' matches the vi guide's recorded setting form; 'Bản xem trước' matches tui.viewer. No unresolved blocker/major. Round 2 independent re-audit (delta: only remote_compute_enabled.help): 'tính toán Radient' was not a usable destination noun, so the description's 'hạ tầng tính toán Radient' is restored; 'Bản xem trước' shortened to 'Xem trước' to stay in the line (73 cells), 'một' kept for the one-network claim; 'Radient' untranslated; no containment claim. 0 unresolved blocker/major."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract (per-outcome finished_* keys, retrying, status_network_*), 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: status_unknown 'seguimos pendientes', tenant 'confirmada por Radient' in submitted and detached, no isolation/containment claim. 1 MINOR fixed: retrying now says 'seguimos pendientes' instead of 'seguimos esperando', matching the audited status_unknown wording for the same still-watching sense. Placeholders, newlines and flags byte-identical; es typography has no space before : ; (unlike fr). Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/96 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2, api-override-client, override-rem",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent, scoped re-audit)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract (per-outcome finished_* keys, retrying, status_network_*), 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: status_unknown 'seguimos pendientes', tenant 'confirmada por Radient' in submitted and detached, no isolation/containment claim. 1 MINOR fixed: retrying now says 'seguimos pendientes' instead of 'seguimos esperando', matching the audited status_unknown wording for the same still-watching sense. Placeholders, newlines and flags byte-identical; es typography has no space before : ; (unlike fr). Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/96 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 1 MAJOR fixed: run_identity_mismatch read 'Radient respondió por … no por …', which asserts answering ON A RUN'S BEHALF; it now uses the construction this namespace already uses for the same fact (network_mismatch 'respondió con'): 'respondió con la ejecución remota {answered}, no con la ejecución {asked_for} solicitada'. unreadable_envelope keeps 'esta versión' (finished_unknown/status_unknown) for build; replayed's 'no se creó ninguna nueva' is read as the run and left alone. Rendered 158/225/139 cells; run_identity_mismatch wraps to 3 terminal lines at 80 columns, as en does there. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set). Scoped Round-4 independent re-audit at 6a7dd801d (delta 120494660..6a7dd801d): only the 3 keys that commit added — api_override, api_override_invalid and preview_not_enabled — were re-read against the en source and its sidecar notes; `git diff 120494660..6a7dd801d -- local_operator/i18n/catalogues` confirms nothing else moved (3 ids per locale plus 3 sidecar entries, 33 insertions, 0 deletions). api_override was read for the consequence the sidecar demands: the Radient LOGIN and the requests leave for {host} instead of the default Radient API, and the variable is to be unset unless the reader controls that host — no locale softens it into 'test server' and every locale also says why ({host} is named and the variable is named). {host} appears exactly once and byte-identically in each of the five; api_override_invalid is ONE sentence naming the accepted shape and every refused class; preview_not_enabled says THIS ACCOUNT, YET and preview, and reads as neither an error nor a permanent refusal. NFC, no NBSP (U+00A0) and no ASCII apostrophe anywhere in the three keys. Width in cells against en's 185/233/69: es 230/282/84, fr 212/285/74, hi 154/200/51, ru 218/283/85, vi 213/280/72 — each inside its own guide's growth band, and none of the three carries maxCells. shipped re-eligibility restored: six-locale set (en, fr, es, ru, vi, hi). 0 findings: tú register throughout ('tus credenciales', 'Quita esa variable'), subjunctive after 'salvo que' correct, no space before ';'. 1 MINOR accepted: 'sin credenciales' renders userinfo — userinfo IS user:password inside a base URL, and it is the word the sibling locales use; no change."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Every round-1 typography fix verified landed: U+202F before : ; ? ! across both namespaces (36 + 7 occurrences, no NBSP, no ASCII apostrophe), including status_line, detached and still_running. Tenant 'confirmé par Radient' in submitted and detached; no isolation/containment claim. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2, api-override-client, override-rem",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent, scoped re-audit)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Every round-1 typography fix verified landed: U+202F before : ; ? ! across both namespaces (36 + 7 occurrences, no NBSP, no ASCII apostrophe), including status_line, detached and still_running. Tenant 'confirmé par Radient' in submitted and detached; no isolation/containment claim. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 1 MAJOR fixed: run_identity_mismatch read 'a répondu pour … et non pour …', the on-behalf-of sense; now 'a répondu avec … et non avec …', matching network_mismatch's 'a répondu avec'. U+202F before : kept in both new colons (2 occurrences across the three keys), no NBSP, no ASCII apostrophe, ’ preserved. Rendered 182/232/138 cells: replayed takes 3 wrapped lines at 80 columns where en takes 2, which no compliant fr rendering avoids (+25% of 137 is 171, itself 3 lines) and which disappears at 100 columns where both are 2; stderr wraps, nothing truncates. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set). Scoped Round-4 independent re-audit at 6a7dd801d (delta 120494660..6a7dd801d): only the 3 keys that commit added — api_override, api_override_invalid and preview_not_enabled — were re-read against the en source and its sidecar notes; `git diff 120494660..6a7dd801d -- local_operator/i18n/catalogues` confirms nothing else moved (3 ids per locale plus 3 sidecar entries, 33 insertions, 0 deletions). api_override was read for the consequence the sidecar demands: the Radient LOGIN and the requests leave for {host} instead of the default Radient API, and the variable is to be unset unless the reader controls that host — no locale softens it into 'test server' and every locale also says why ({host} is named and the variable is named). {host} appears exactly once and byte-identically in each of the five; api_override_invalid is ONE sentence naming the accepted shape and every refused class; preview_not_enabled says THIS ACCOUNT, YET and preview, and reads as neither an error nor a permanent refusal. NFC, no NBSP (U+00A0) and no ASCII apostrophe anywhere in the three keys. Width in cells against en's 185/233/69: es 230/282/84, fr 212/285/74, hi 154/200/51, ru 218/283/85, vi 213/280/72 — each inside its own guide's growth band, and none of the three carries maxCells. shipped re-eligibility restored: six-locale set (en, fr, es, ru, vi, hi). 0 findings: vous register ('vos identifiants', 'Supprimez'), 'l’API Radient par défaut', ’ throughout, U+202F before ';' kept (and no new colon appeared in prose). 1 MINOR accepted: 'sans identifiants ni paramètres de requête ni fragment' uses identifiants for userinfo while api_override uses it for the Radient credential itself; both are credentials of the same destination and no sibling locale distinguishes them — no change."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: 'Radient द्वारा पुष्टि किया गया' in submitted and detached, detach 'निगरानी करने के बजाय', network 'जिस नेटवर्क से रन सबमिट करना है'. 2 MINOR fixed in still_running (changed key): the watch is PAST tense ('निगरानी रोक चुका है', was present 'रोक रहा है'), and 'इसे यहाँ जाँचें' (check it here) became 'जाँचने के लिए', the file's own '<verb> के लिए: <command>' pattern as in interrupted. No isolation wording; placeholders and flags byte-identical. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 68/81 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2, api-override-client, override-rem",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent, scoped re-audit)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: 'Radient द्वारा पुष्टि किया गया' in submitted and detached, detach 'निगरानी करने के बजाय', network 'जिस नेटवर्क से रन सबमिट करना है'. 2 MINOR fixed in still_running (changed key): the watch is PAST tense ('निगरानी रोक चुका है', was present 'रोक रहा है'), and 'इसे यहाँ जाँचें' (check it here) became 'जाँचने के लिए', the file's own '<verb> के लिए: <command>' pattern as in interrupted. No isolation wording; placeholders and flags byte-identical. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 68/81 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 2 findings fixed: (1) run_identity_mismatch read 'रिमोट रन {answered} के लिए उत्तर दिया, उस रन {asked_for} के लिए नहीं' — the 'for' sense drifts toward answering on a run's behalf; it now uses this namespace's own 'लौटाया' (network_mismatch): 'रिमोट रन {answered} लौटाया, न कि वह रन {asked_for} जिसके लिए अनुरोध किया गया था'. (2) unreadable_envelope said 'बिल्ड' where both finished_unknown and status_unknown render build as 'संस्करण'; now 'lop का यह संस्करण'. Polite imperative (करें), danda, 'नहीं बताया जा सकता' and the `<verb> के लिए: <command>` pattern preserved; no ZWJ/ZWNJ; lop and `lop-update` stay Latin. Rendered 118/174/110 cells, no extra terminal line at 80 or 100 columns. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set). Scoped Round-4 independent re-audit at 6a7dd801d (delta 120494660..6a7dd801d): only the 3 keys that commit added — api_override, api_override_invalid and preview_not_enabled — were re-read against the en source and its sidecar notes; `git diff 120494660..6a7dd801d -- local_operator/i18n/catalogues` confirms nothing else moved (3 ids per locale plus 3 sidecar entries, 33 insertions, 0 deletions). api_override was read for the consequence the sidecar demands: the Radient LOGIN and the requests leave for {host} instead of the default Radient API, and the variable is to be unset unless the reader controls that host — no locale softens it into 'test server' and every locale also says why ({host} is named and the variable is named). {host} appears exactly once and byte-identically in each of the five; api_override_invalid is ONE sentence naming the accepted shape and every refused class; preview_not_enabled says THIS ACCOUNT, YET and preview, and reads as neither an error nor a permanent refusal. NFC, no NBSP (U+00A0) and no ASCII apostrophe anywhere in the three keys. Width in cells against en's 185/233/69: es 230/282/84, fr 212/285/74, hi 154/200/51, ru 218/283/85, vi 213/280/72 — each inside its own guide's growth band, and none of the three carries maxCells. shipped re-eligibility restored: six-locale set (en, fr, es, ru, vi, hi). 0 findings: आप register with the polite imperative ('अनसेट करें'), 'पर भेज रहा है' carries the destination and 'उस होस्ट को नियंत्रित नहीं करते' the condition, danda closes both sentences and the namespace's existing ';' usage is unchanged, loans लॉगिन/अनसेट consistent with the guide's settled-loan policy. 1 MINOR accepted: लॉगिन here vs क्रेडेंशियल्स in api_override_invalid — deliberate referent split (the Radient login vs URL userinfo)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: network_mismatch 'отнести к запускам этой сети', still_running 'команда прекратила слежение' (past tense), retranslated for the new 'limit Radient reported' wording. Tenant 'подтверждена Radient' in submitted and detached; no isolation/containment claim; no typographic space before : ; as the ru guide requires. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2, api-override-client, override-rem",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent, scoped re-audit)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: network_mismatch 'отнести к запускам этой сети', still_running 'команда прекратила слежение' (past tense), retranslated for the new 'limit Radient reported' wording. Tenant 'подтверждена Radient' in submitted and detached; no isolation/containment claim; no typographic space before : ; as the ru guide requires. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 1 MAJOR fixed: run_identity_mismatch read 'ответил за …', which in Russian means answering (or taking responsibility) FOR something, not answering with it; now 'вернул удалённый запуск {answered}, а не запрошенный запуск {asked_for}', matching network_mismatch's 'вернул запуск из другой сети'. unreadable_envelope keeps 'эта сборка', the term finished_unknown and status_unknown use. Rendered 150/191/129 cells; run_identity_mismatch is 3 lines at 80 columns, as en is there. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set). Scoped Round-4 independent re-audit at 6a7dd801d (delta 120494660..6a7dd801d): only the 3 keys that commit added — api_override, api_override_invalid and preview_not_enabled — were re-read against the en source and its sidecar notes; `git diff 120494660..6a7dd801d -- local_operator/i18n/catalogues` confirms nothing else moved (3 ids per locale plus 3 sidecar entries, 33 insertions, 0 deletions). api_override was read for the consequence the sidecar demands: the Radient LOGIN and the requests leave for {host} instead of the default Radient API, and the variable is to be unset unless the reader controls that host — no locale softens it into 'test server' and every locale also says why ({host} is named and the variable is named). {host} appears exactly once and byte-identically in each of the five; api_override_invalid is ONE sentence naming the accepted shape and every refused class; preview_not_enabled says THIS ACCOUNT, YET and preview, and reads as neither an error nor a permanent refusal. NFC, no NBSP (U+00A0) and no ASCII apostrophe anywhere in the three keys. Width in cells against en's 185/233/69: es 230/282/84, fr 212/285/74, hi 154/200/51, ru 218/283/85, vi 213/280/72 — each inside its own guide's growth band, and none of the three carries maxCells. shipped re-eligibility restored: six-locale set (en, fr, es, ru, vi, hi). 1 MAJOR fixed in this commit: api_override read 'отправляют ваш вход Radient и запросы' — вход is the act/entrance, not the credential, in the one sentence whose job is to say the login itself leaves for that host; now 'отправляют ваш логин Radient и запросы', the term the ru catalogues already use for login (wire.settings) and consistent with the guide's вы register. 0 other findings: 'Снимите эту переменную, если вы не контролируете этот хост' carries the unless-sense, no typographic space before ';', 'не-ASCII' hyphenation and 'процентного кодирования' intact."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 audit had 0 findings; re-checked against the rewritten status vocabulary: 'Radient xác nhận' in submitted and detached, verb-only address (no 'bạn' padding), NFC throughout, oa/uy tone placement correct (thoát, hoàn, khoản are closed syllables). No isolation/containment claim; placeholders, newlines and flags byte-identical. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2, api-override-client, override-rem",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent, scoped re-audit)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 audit had 0 findings; re-checked against the rewritten status vocabulary: 'Radient xác nhận' in submitted and detached, verb-only address (no 'bạn' padding), NFC throughout, oa/uy tone placement correct (thoát, hoàn, khoản are closed syllables). No isolation/containment claim; placeholders, newlines and flags byte-identical. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 2 findings fixed: (1) run_identity_mismatch read 'trả lời cho lần chạy từ xa {answered}', i.e. replying TO a run; it now uses network_mismatch's 'trả về': 'Radient trả về lần chạy từ xa {answered} …'. (2) unreadable_envelope said 'bản lop này' where finished_unknown and status_unknown render build as 'bản dựng'; now 'bản dựng lop này'. NFC throughout, no ASCII apostrophe, 'Khóa idempotency' matches the four existing key_* rows, verb-only address. Rendered 156/207/126 cells; run_identity_mismatch is 3 lines at 80 and 100 columns, en being 195 cells is 2 only by 5 cells at 100. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set). Scoped Round-4 independent re-audit at 6a7dd801d (delta 120494660..6a7dd801d): only the 3 keys that commit added — api_override, api_override_invalid and preview_not_enabled — were re-read against the en source and its sidecar notes; `git diff 120494660..6a7dd801d -- local_operator/i18n/catalogues` confirms nothing else moved (3 ids per locale plus 3 sidecar entries, 33 insertions, 0 deletions). api_override was read for the consequence the sidecar demands: the Radient LOGIN and the requests leave for {host} instead of the default Radient API, and the variable is to be unset unless the reader controls that host — no locale softens it into 'test server' and every locale also says why ({host} is named and the variable is named). {host} appears exactly once and byte-identically in each of the five; api_override_invalid is ONE sentence naming the accepted shape and every refused class; preview_not_enabled says THIS ACCOUNT, YET and preview, and reads as neither an error nor a permanent refusal. NFC, no NBSP (U+00A0) and no ASCII apostrophe anywhere in the three keys. Width in cells against en's 185/233/69: es 230/282/84, fr 212/285/74, hi 154/200/51, ru 218/283/85, vi 213/280/72 — each inside its own guide's growth band, and none of the three carries maxCells. shipped re-eligibility restored: six-locale set (en, fr, es, ru, vi, hi). 0 findings: bạn appears only on the blocking decision (the guide allows it there), 'Hãy bỏ đặt biến này' uses the settled Microsoft vi rendering of unset, 'đã được đặt' carries the because-clause, NFC precomposed forms throughout. 1 MINOR accepted: 'máy chủ đó' renders 'that host' as server — the guide's keep-`host`-English rule is scoped to the OpenRouter cluster, máy chủ is accurate for the destination, and {host} itself stays verbatim."
     }
   ]
 }
