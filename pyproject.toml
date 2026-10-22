@@ -111,6 +111,17 @@ dependencies = [
     # the ``mcp`` dependency already installs on every supported platform.
     "jsonschema>=4.18",
     "pillow-heif",
+    # The Library's background indexer watches the session journals so a list
+    # request never scans them. FSEvents (macOS), inotify (Linux) and
+    # ReadDirectoryChangesW (Windows) each need their own binding, and a
+    # hand-rolled ctypes FSEvents shim was measured NOT delivering events on the
+    # macOS host this ships to while watchdog 6.0.0 did — so this is a real
+    # dependency, not a convenience. It ships a compiled extension on macOS
+    # (``_watchdog_fsevents``) and falls back to ctypes/inotify on Linux; the
+    # wheels exist for every platform this ships to, and it declares no
+    # mandatory dependency (its only extra, ``watchmedo``, wants PyYAML, which
+    # is already in this list).
+    "watchdog>=6.0.0",
 ]
 requires-python = ">=3.12"
 

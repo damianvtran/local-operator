@@ -20,7 +20,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Annotated, Any, Iterator
+from typing import Annotated, Iterator
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.library import index as library_index
 from local_operator.library import service
+from local_operator.library.indexer import ensure_started
 from local_operator.library.metadata import (
     MAX_TAGS_PER_ASSET,
     MetadataStore,
@@ -62,11 +63,6 @@ TagID = Annotated[str, PathParam(pattern=r"^[a-f0-9]{10}$")]
 SessionIDShape = re.compile(r"^[a-f0-9]{12}$")
 
 _CHUNK = 64 * 1024
-
-#: One background finisher per config root. A poll that arrives while the
-#: catalog is still building joins the running task instead of starting a
-#: second full journal pass — the same single-flight rule as session files.
-_IN_FLIGHT: dict[str, asyncio.Task[Any]] = {}
 
 
 def _config_dir(request: Request) -> Path:
@@ -144,20 +140,17 @@ def _tag_refusal(error: TagRefused) -> HTTPException:
 
 
 def _kick(config: Path) -> None:
-    key = str(config)
-    running = _IN_FLIGHT.get(key)
-    if running is not None and not running.done():
-        return
+    """Make sure the background indexer is running for this config root.
 
-    async def _run() -> None:
-        try:
-            await asyncio.to_thread(library_index.complete_in_background, config)
-        except Exception:  # noqa: BLE001 - a background finish is an optimisation
-            logger.debug("library background build failed", exc_info=True)
-        finally:
-            _IN_FLIGHT.pop(key, None)
-
-    _IN_FLIGHT[key] = asyncio.create_task(_run())
+    The catalog used to be finished here, as one asyncio task per root. The
+    indexer is a singleton with its own watch and backfill loop, so this is now
+    a start-or-return: a second call while it is building is already a no-op,
+    and the ``state=building`` the caller just saw comes from ITS progress.
+    """
+    try:
+        ensure_started(config)
+    except Exception:  # noqa: BLE001 - an index that cannot start must not 500 a list
+        logger.debug("library indexer could not be started", exc_info=True)
 
 
 async def _query_from(

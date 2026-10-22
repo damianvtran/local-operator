@@ -99,6 +99,16 @@ class TagRefused(MetadataError):
         self.code = code
 
 
+def reset_schema_readiness() -> None:
+    """Forget which paths this process has verified.
+
+    Only a test needs this: production never un-learns a schema inside a live
+    process. A test that simulates "the next process meets a future-version
+    store" is exactly that boundary, so it has to say so explicitly.
+    """
+    MetadataStore._ready_paths.clear()
+
+
 def _now() -> float:
     return time.time()
 
@@ -122,15 +132,18 @@ class MetadataStore:
     """
 
     _bootstrap_lock = threading.Lock()
+    #: Paths whose schema this PROCESS has already verified. Class-level, not
+    #: per instance: ``list_assets`` constructs a store per request, and a
+    #: per-instance flag meant ``CREATE TABLE IF NOT EXISTS`` plus a commit ran
+    #: on every list — DDL on the read path, contending with the indexer's
+    #: writer. The schema cannot change under a running process, so one
+    #: verification per resolved path is sound.
+    _ready_paths: set[str] = set()
 
     def __init__(self, config_dir: str | Path) -> None:
         self.config_dir = Path(config_dir)
         self.path = self.config_dir / DB_DIRNAME / DB_FILENAME
-        # Per-instance schema cache. ``CREATE TABLE IF NOT EXISTS`` on every
-        # call serialised concurrent writers behind the bootstrap lock long
-        # enough that an ensure-then-write pair could lose its row; the schema
-        # cannot change under a running process, so checking once is sound.
-        self._ready = False
+        self._key = str(self.path.resolve())
 
     # -- connection / schema -------------------------------------------------
 
@@ -158,12 +171,22 @@ class MetadataStore:
             except sqlite3.Error:
                 pass
 
+    def ensure_schema(self) -> bool:
+        """Create or verify the authoritative schema; ``False`` when unavailable.
+
+        Public because the derived index (``library/store.py``) attaches
+        triggers to ``assets``/``asset_tags``/``tags`` and must not be the
+        component that first creates them: the authored tables belong here.
+        """
+        with self._connect() as connection:
+            return self._ensure_schema(connection)
+
     def _ensure_schema(self, connection: sqlite3.Connection) -> bool:
         """Create/verify the schema. ``False`` means "serve an empty catalog"."""
-        if self._ready:
+        if self._key in self._ready_paths:
             return True
         with self._bootstrap_lock:
-            if self._ready:
+            if self._key in self._ready_paths:
                 return True
             try:
                 connection.executescript(_SCHEMA)
@@ -192,7 +215,7 @@ class MetadataStore:
                 # even when it inserts nothing; leaving it open makes the next
                 # BEGIN IMMEDIATE fail as "transaction within a transaction".
                 connection.commit()
-                self._ready = True
+                self._ready_paths.add(self._key)
                 return True
             except MetadataUnavailable:
                 return False
