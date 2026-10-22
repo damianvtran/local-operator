@@ -193,6 +193,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the wrapper's machine reason, compared to pick the failure clause — never printed",
     ),
+    # The install's supervision-conflict warning (2026-10-21, cloud-node-1): the
+    # ``detail`` read is ``foreign_supervision``'s own composed SENTENCE ("a system
+    # unit (<path>) also runs the relay; …"), never a wire token, joined with its
+    # remedy into one ``steps`` line.
+    ("local_operator/network/relay.py", "_install_systemd", "detail"): (
+        1,
+        "foreign_supervision's composed sentence, not a machine token",
+    ),
     # The onboarding adapter COPIES the runner's own receipt row into the store's
     # six fields: ``detail`` here was composed by the runner a moment earlier
     # (never a peer's wire value), and this read is the field re-shape itself —

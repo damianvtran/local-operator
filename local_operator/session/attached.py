@@ -8522,9 +8522,19 @@ class AttachedSession:
                     self._runtime_ready.set()  # prompts route to the stopped notice
                     self._notify_stopped()
                     return
-                record, _ = await asyncio.to_thread(
-                    find_runtime_record, self._config_dir, self._session_id
-                )
+                # A PEER-HELD SESSION ASKS THE OWNER SEAM, as the read attach already
+                # does (``locate`` above): a scan of THIS machine's run directory
+                # answers "no runtime" for a session a peer holds, so a remote viewer
+                # whose link dropped went cold after COLD_FALLBACK_S even when the
+                # link came back inside it (2026-10-21). A LOCAL session keeps the
+                # direct registry read — the module-level name is the seam this
+                # loop's recovery contract is pinned through.
+                if self._owner.placement.is_local:
+                    record, _ = await asyncio.to_thread(
+                        find_runtime_record, self._config_dir, self._session_id
+                    )
+                else:
+                    record, _ = await asyncio.to_thread(self._owner.locate)
                 if (
                     record is not None
                     and record.protocol >= 5
