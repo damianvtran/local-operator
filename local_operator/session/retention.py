@@ -220,7 +220,19 @@ def read_desktop_purpose(session_dir: Path) -> str:
 #: (every turn appends to it) and the peer-message spool (a note the user has
 #: not read yet is activity waiting for them). Nothing else counts — see
 #: :func:`_activity_mtime`.
-_ACTIVITY_FILES = frozenset({TRANSCRIPT_FILENAME, "inbox.jsonl"})
+#:
+#: THE ARCHIVE NAMES ARE HERE BECAUSE COMPRESSION MUST NOT MOVE THE CLOCK.
+#: ``session.compression`` renames ``transcript.jsonl`` to
+#: ``transcript.jsonl.zst``/``.gz`` and stamps the archive with the original
+#: mtime; without these two names the clock would read ``None`` for a
+#: compressed session, and every ranking that uses it (the picker's order, the
+#: cleanup policy's recent-N guard) would change the moment a pass ran. The
+#: literal names rather than an import: this module is on the picker's hot path
+#: and must stay stdlib-light, and ``tests/unit/session/test_compression.py``
+#: pins the two lists equal so the spelling cannot drift.
+_ACTIVITY_FILES = frozenset(
+    {TRANSCRIPT_FILENAME, "inbox.jsonl", "transcript.jsonl.zst", "transcript.jsonl.gz"}
+)
 
 #: This module's view of the platform. A module-local copy rather than reading
 #: ``sys.platform`` at the point of use, so a test can steer the Windows branch

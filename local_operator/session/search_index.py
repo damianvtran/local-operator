@@ -87,7 +87,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from local_operator.resume import TITLE_SIDECAR_NAME, TRANSCRIPT_NAME, read_title_names
+from local_operator.resume import TITLE_SIDECAR_NAME, read_title_names
 
 #: Characters of prose kept per session. Enough to hold the subject matter of a
 #: long conversation's opening stretch — the part that says what the session was
@@ -131,7 +131,23 @@ INDEX_FILENAME = "session_search_index.json"
 #: is byte-identical. Bumping discards every v1 entry once so the whole store
 #: rebuilds with the new shape; ``_load`` already drops on version mismatch, so
 #: this needs no migration code.
-INDEX_VERSION = 2
+#: 1 -> 2: the digest now PREPENDS the session's title and every past name it
+#: has borne (from the ``title.json`` sidecar), and the cache signature gains
+#: the sidecar's mtime so a rename re-folds the digest even when the transcript
+#: is byte-identical. Bumping discards every v1 entry once so the whole store
+#: rebuilds with the new shape; ``_load`` already drops on version mismatch, so
+#: this needs no migration code.
+#:
+#: 2 -> 3: transcript compression. A compressed session's body lives in
+#: ``transcript.jsonl.zst``/``.gz``, so the entry now records the CODEC it was
+#: digested from and its signature is the PHYSICAL stat of whichever file is on
+#: disk (see :func:`_physical_source`). This is what makes a compressed session
+#: stay searchable with NO decompression and no re-digest: the compression pass
+#: rewrites the entry's signature in place (:func:`record_archive`), so the
+#: cached digest is still valid for the bytes it was taken from. Bumping drops
+#: every v2 entry once, deliberately — a v2 signature describes a plain file
+#: that may no longer exist.
+INDEX_VERSION = 3
 
 #: Extra characters the title-fold may add on top of :data:`DIGEST_CHARS`. The
 #: title and past names are the human's own summary of what the session became,
@@ -197,6 +213,18 @@ def digest_transcript_read(transcript: Path) -> tuple[str, bool]:
             head = handle.read(SCAN_BYTES)
     except OSError:
         return "", False
+    return _digest_text(head), True
+
+
+def _digest_text(head: str) -> str:
+    """The searchable prose of a bounded transcript head (the digest's body).
+
+    Split out so the plain and compressed readers share ONE parse: an archive
+    is decompressed up to the same :data:`SCAN_BYTES` window and handed to this
+    function as text, so a compressed session's digest is byte-for-byte the
+    digest it had before compression (the test that spies on
+    ``digest_transcript_read`` asserts both halves of that).
+    """
     parts: list[str] = []
     size = 0
     for line in head.splitlines():
@@ -222,8 +250,8 @@ def digest_transcript_read(transcript: Path) -> tuple[str, bool]:
                 # Stop reading as soon as the cap is reached rather than
                 # collecting everything and slicing at the end: the slice would
                 # still have paid to build the discarded remainder.
-                return " ".join(" ".join(parts).split())[:DIGEST_CHARS], True
-    return " ".join(" ".join(parts).split())[:DIGEST_CHARS], True
+                return " ".join(" ".join(parts).split())[:DIGEST_CHARS]
+    return " ".join(" ".join(parts).split())[:DIGEST_CHARS]
 
 
 def _texts(content: object) -> list[str]:
@@ -244,6 +272,37 @@ def _texts(content: object) -> list[str]:
             if isinstance(text, str) and text.strip():
                 out.append(text)
     return out
+
+
+def _physical_source(session_dir: Path) -> tuple[Path, str | None]:
+    """The file holding this session's body, and its archive codec (``None`` = plain).
+
+    THE single answer to "where is the transcript", so ``build_index`` and the
+    reader tier cannot disagree. Imported lazily rather than at module scope:
+    ``session.compression`` is stdlib-only by contract, and this module is
+    imported by the picker before anything needs a codec at all.
+    """
+    from local_operator.session import compression
+
+    return compression.transcript_source(session_dir)
+
+
+def _digest_archive_head(session_dir: Path) -> tuple[str, bool]:
+    """The digest of a compressed transcript, decompressing only the scan window.
+
+    ``readable=False`` (never cached) when the archive cannot be decoded — a
+    ``.zst`` on a build without ``compression.zstd`` is exactly this case, and
+    it must not be cached as "no prose" any more than an unreadable plain file
+    may be. The fold of the title into the digest is unchanged, so the digest is
+    the same string the session had before compression.
+    """
+    from local_operator.session import compression
+
+    try:
+        head = compression.read_head(session_dir, SCAN_BYTES)
+    except compression.ArchiveError:
+        return "", False
+    return _digest_text(head.decode("utf-8", errors="replace")), True
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -340,7 +399,11 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
     digests: dict[str, str] = {}
     for session_id in session_ids:
         session_dir = config_dir / "sessions" / session_id
-        transcript = session_dir / TRANSCRIPT_NAME
+        # The PHYSICAL source: the plain transcript, or the compressed archive
+        # when compression has run. Using the plain name here would stat a file
+        # that no longer exists and drop a compressed session out of body search
+        # entirely — the regression this resolver exists to stop.
+        transcript, codec = _physical_source(session_dir)
         try:
             stat = transcript.stat()
         except OSError:
@@ -367,6 +430,12 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
         if (
             isinstance(previous, dict)
             and previous.get("signature") == signature
+            # The codec joins the reuse test: a session that has just been
+            # compressed has a NEW physical signature, but an entry the pass
+            # already rewrote in place (``record_archive``) matches on both and
+            # is reused without touching the archive at all. An entry whose
+            # codec disagrees is re-digested, never served across a codec change.
+            and previous.get("codec") == codec
             and isinstance(previous.get("digest"), str)
         ):
             digest = previous["digest"]
@@ -380,7 +449,10 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
             # names always survive the DIGEST_CHARS cap the opening stretch would
             # otherwise fill.
             names = read_title_names(session_dir)
-            body, readable = digest_transcript_read(transcript)
+            if codec is None:
+                body, readable = digest_transcript_read(transcript)
+            else:
+                body, readable = _digest_archive_head(session_dir)
             digest = " ".join([*names, body]).strip()[: DIGEST_CHARS + TITLE_HEADROOM]
             if not readable:
                 # The transcript could not be READ, which says nothing about its
@@ -394,11 +466,52 @@ def build_index(config_dir: Path, session_ids: list[str]) -> dict[str, str]:
                 digests[session_id] = digest
                 entries.pop(session_id, None)
                 continue
-        entries[session_id] = {"signature": signature, "digest": digest}
+        entries[session_id] = {"signature": signature, "codec": codec, "digest": digest}
         digests[session_id] = digest
     if entries != cached:
         _save(index_path(config_dir), entries)
     return digests
+
+
+def record_archive(config_dir: Path, session_id: str, *, source: Path, codec: str) -> bool:
+    """Re-key one cached entry onto the archive that now holds its bytes.
+
+    Called by the compression pass AFTER the archive has landed and the source
+    has been removed, and it is deliberately a REWRITE, not a re-digest: the
+    bytes did not change, only the file that holds them, and re-digesting every
+    compressed session would decompress the whole compressed corpus on the next
+    picker open — the exact cost the cache exists to avoid.
+
+    ``source`` is the file now on disk (the archive). The stored signature is
+    its physical stat, so the next ``build_index`` reuses this digest. Returns
+    ``False`` when there is no entry to rewrite (nothing was cached for this
+    session, so the next build digests the archive's head directly) or when the
+    index cannot be read or written — always harmless: a cache that misses
+    costs one bounded digest, never a search result.
+    """
+    path = index_path(Path(config_dir))
+    cached = _load(path)
+    entry = cached.get(session_id)
+    if not isinstance(entry, dict):
+        return False
+    try:
+        stat = Path(source).stat()
+    except OSError:
+        return False
+    try:
+        title_mtime = (
+            Path(config_dir) / "sessions" / session_id / TITLE_SIDECAR_NAME
+        ).stat().st_mtime
+    except OSError:
+        title_mtime = 0
+    updated = dict(cached)
+    updated[session_id] = {
+        "signature": [stat.st_size, stat.st_mtime, title_mtime],
+        "codec": codec,
+        "digest": entry.get("digest", ""),
+    }
+    _save(path, updated)
+    return True
 
 
 def search_digests(digests: dict[str, str], query: str) -> set[str]:
