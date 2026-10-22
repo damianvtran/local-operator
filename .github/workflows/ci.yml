@@ -1004,8 +1004,12 @@ jobs:
         # 420 s step). The store-walk child is in a NEW SESSION by design and is
         # outside that group, so it carries its own parent-death guard (it exits
         # within a second of pytest disappearing); a step timeout therefore leaves
-        # no native child behind. `--memory-mb 0`: no inherited budget on a runner,
-        # and the auto budget refuses to start when it cannot be measured.
+        # no native child behind. `--memory-mb 0` is passed EXPLICITLY because this
+        # job has no memory policy today: nothing else in it is capped, and a cap
+        # guessed for six untimed cases could kill a healthy test, so none is invented.
+        # The wrapper reports it as "memory guard disabled (explicit)". No inherited
+        # positive CI budget was verified here, and Ubuntu's ability to measure memory
+        # is not the reason; a real cap is a separate, measured decision.
         #
         # COVERAGE: the exact source of the ordinary run, appended to its data.
         # A bare `--cov` would reset the selection; `--cov-fail-under=0` and the
