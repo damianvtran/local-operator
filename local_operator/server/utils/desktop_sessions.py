@@ -110,6 +110,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
+    bound_delta_rows_in_place,
     job_trajectory_wire_value,
     sync_wire_payload,
 )
@@ -3007,6 +3008,28 @@ class DesktopSessionBridge:
             for key in ("jobs", "usage_components"):
                 if key in payload["changes"]:
                     payload["changes"][key] = bounded[key]
+        # A PER-ROW DELTA IS NOT RE-INFLATED. This used to replace
+        # ``changes["jobs"]`` with the bridge's full bounded snapshot, because
+        # the runtime's delta carried the whole roster and the snapshot's bounds
+        # were what kept it on the wire. That is now backwards: the runtime
+        # sends only the rows that moved (``job_deltas``), so substituting the
+        # 185-row snapshot put ~715 KB back on a frame that carried one row —
+        # measured on session 17cd3e74c66f's checkpoint. Bound the CHANGED ROWS
+        # instead, with the same roster share the snapshot and the runtime use,
+        # so an older runtime's unbounded rows still leave here bounded.
+        job_deltas = payload.get("job_deltas")
+        if isinstance(job_deltas, dict):
+            upserted = job_deltas.get("upserted")
+            if isinstance(upserted, list) and upserted:
+                # The producer sends the divisor as a scalar. Rebuilding the
+                # snapshot just to COUNT its rows would re-create the per-tick
+                # cost this delta removes — and this branch runs on every tick.
+                # The fallback is for a runtime older than the scalar, which
+                # still needs a correct share.
+                roster_size = job_deltas.get("roster_size")
+                if not isinstance(roster_size, int) or roster_size < 1:
+                    roster_size = len(self.state()["snapshot"].get("jobs") or ())
+                bound_delta_rows_in_place(upserted, roster_size=roster_size)
         self.publish("frontend.update", payload)
 
     async def refresh_attention(self) -> dict[str, Any]:

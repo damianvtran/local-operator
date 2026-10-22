@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import pickle
 import threading
 import time
@@ -385,7 +386,7 @@ def test_subagent_progress_defers_job_publication_to_the_coalescer(monkeypatch) 
     update = store.refresh_jobs(session)
     assert update is not None
     assert len(updates) == 1
-    assert updates[0].changes["jobs"][0]["latest_details"] == {"progress": "reading files"}
+    assert updates[0].job_deltas["upserted"][0]["latest_details"] == {"progress": "reading files"}
 
 
 def test_slash_capabilities_classify_every_advertised_command_and_images() -> None:
@@ -877,7 +878,7 @@ def test_one_large_roster_progress_update_sends_only_the_new_event() -> None:
 
     assert update is not None
     assert update.job_trajectory_appends == {jobs[-1].id: [{"type": "notice", "index": 500}]}
-    assert all("trajectory" not in summary for summary in update.changes["jobs"])
+    assert all("trajectory" not in summary for summary in update.job_deltas["upserted"])
     assert len(store.state.jobs[-1].trajectory) == 501
 
 
@@ -3328,3 +3329,185 @@ def test_the_unstamped_wire_basis_uses_the_effective_model_like_the_ledger() -> 
     # the ledger's own helper gives an unknown provider) — never a crash and
     # never a plan claim on a call whose credential kind nothing records.
     assert _usage_billing_basis(unstamped, None) == "billed"
+
+
+def _roster_rows(count: int) -> list[JobState]:
+    """``count`` child rows with enough content for the roster size to matter."""
+    return [
+        JobState(
+            id=f"child-{index:03d}",
+            type="task",
+            session_id=f"child-session-{index:03d}",
+            status="running",
+            label=f"child {index}",
+            prompt=f"prompt {index}",
+            result_text=f"result {index} " + ("r" * 1_500),
+            latest_details={"progress": f"working {index}"},
+        )
+        for index in range(count)
+    ]
+
+
+def test_a_one_row_roster_change_ships_one_row_not_the_roster() -> None:
+    """THE MEASURED FRAME. A live roster tick must not re-serialize the roster.
+
+    On session 17cd3e74c66f's checkpoint (185 rows, ``jobs`` 715,758 B in the
+    attach snapshot) a one-row change emitted ``changes.jobs`` at 383,608 B every
+    50 ms, and the desktop bridge then replaced it with the full bounded
+    snapshot — ~715 KB on a frame that carried one row. ``job_deltas`` carries
+    the changed rows only, and the per-row bounds still apply to each of them.
+    """
+    jobs = _roster_rows(185)
+    store = FrontendStateStore(_state(jobs=jobs))
+    snapshot = sync_wire_payload(store.subscribe(lambda _: None).sync)["snapshot"]["jobs"]
+    roster_bytes = len(json.dumps(snapshot))
+    assert roster_bytes > 100_000, f"fixture must be big enough to matter; {roster_bytes}"
+
+    changed = [*jobs[:-1], jobs[-1].model_copy(update={"status": "completed"})]
+    update = store.mutate(jobs=changed)
+
+    assert update is not None
+    assert "jobs" not in update.changes, "a tick must not carry a roster replacement"
+    assert [row["id"] for row in update.job_deltas["upserted"]] == [jobs[-1].id]
+    assert "removed" not in update.job_deltas
+    # The divisor the rows were bounded against rides as a scalar so a
+    # re-bounding consumer never has to rebuild the snapshot to count rows.
+    assert update.job_deltas["roster_size"] == 185
+    delta_bytes = len(json.dumps(update.job_deltas))
+    assert (
+        delta_bytes < 10_000
+    ), f"one-row delta was {delta_bytes} B against a {roster_bytes} B roster"
+    # ...and the row that DID ship still went through the roster bounds, off the
+    # same share the snapshot divides by: live and seeded previews agree.
+    row = update.job_deltas["upserted"][0]
+    assert len(row["result_text"]) < len("result 184 " + ("r" * 1_500))
+
+
+def test_a_follower_merges_a_row_delta_in_place_and_applies_removals() -> None:
+    """The receiver's half: merge by id, carry untouched rows by identity."""
+    jobs = _roster_rows(12)
+    owner = FrontendStateStore(_state(jobs=jobs))
+    follower = FrontendStateStore(owner.state)
+    # ``state`` hands back a clone; the canonical rows live on ``_state``, and
+    # identity there is exactly what proves a carried row was not rebuilt.
+    untouched = follower._state.jobs[0]
+
+    status_update = owner.mutate(
+        jobs=[*jobs[:-1], jobs[-1].model_copy(update={"status": "completed"})]
+    )
+    assert status_update is not None
+    follower.apply_update(FrontendUpdate.model_validate_json(status_update.model_dump_json()))
+
+    assert len(follower.state.jobs) == len(jobs)
+    assert [job.id for job in follower.state.jobs] == [job.id for job in jobs]
+    assert follower.state.jobs[-1].status == "completed"
+    # Incremental means untouched rows are the SAME objects, not rebuilt copies.
+    assert follower._state.jobs[0] is untouched
+
+    shorter = owner.mutate(jobs=[*jobs[:-2], jobs[-2].model_copy(update={"status": "failed"})])
+    assert shorter is not None
+    assert shorter.job_deltas["removed"] == [jobs[-1].id]
+    follower.apply_update(FrontendUpdate.model_validate_json(shorter.model_dump_json()))
+    assert [job.id for job in follower.state.jobs] == [job.id for job in jobs[:-1]]
+    assert follower.state.jobs[-1].status == "failed"
+
+
+def test_a_full_roster_frame_still_replaces_and_a_delta_yields_to_it() -> None:
+    """Protocol compatibility: ``changes["jobs"]`` remains the replacement form.
+
+    An older runtime (or a snapshot-seeded test) sends the whole roster, and it
+    must keep working exactly as before. When both forms somehow arrive, the
+    replacement wins — it is the more complete statement.
+    """
+    jobs = _roster_rows(3)
+    owner = FrontendStateStore(_state(jobs=jobs))
+    follower = FrontendStateStore(owner.state)
+
+    replacement = FrontendUpdate(
+        epoch=owner.state.epoch,
+        sequence=owner.state.sequence + 1,
+        changes={"jobs": [_job_summary_wire(row) for row in _roster_rows(2)]},
+    )
+    follower.apply_update(replacement)
+    assert [job.id for job in follower.state.jobs] == ["child-000", "child-001"]
+
+    both = FrontendUpdate(
+        epoch=owner.state.epoch,
+        sequence=owner.state.sequence + 2,
+        changes={"jobs": [_job_summary_wire(_roster_rows(1)[0])]},
+        job_deltas={
+            "upserted": [_job_summary_wire(_roster_rows(2)[1])],
+            "removed": ["child-000"],
+        },
+    )
+    follower.apply_update(both)
+    assert [job.id for job in follower.state.jobs] == ["child-000"]
+
+
+def test_an_explicit_order_rides_only_a_delta_whose_merge_cannot_derive_it() -> None:
+    """Order is derivable from a normal tick, so the common frame must not pay.
+
+    The receiver's merge order is "rows I already hold, then new ids in arrival
+    order" — the roster order for every tick but one that re-adds a job anywhere
+    other than the end. Spelling the ids out on every tick would cost ~7 B per
+    roster row; spelling them out on divergence keeps the order exact for the
+    cases the merge cannot see.
+    """
+    jobs = _roster_rows(3)
+    owner = FrontendStateStore(_state(jobs=jobs))
+    follower = FrontendStateStore(owner.state)
+
+    appended = owner.mutate(jobs=[*jobs, JobState(id="child-999", type="task")])
+    assert appended is not None
+    assert "order" not in appended.job_deltas
+    follower.apply_update(FrontendUpdate.model_validate_json(appended.model_dump_json()))
+    assert [job.id for job in follower.state.jobs] == [
+        "child-000",
+        "child-001",
+        "child-002",
+        "child-999",
+    ]
+
+    returning = JobState(id="child-997", type="task")
+    re_added = owner.mutate(jobs=[returning, *owner.state.jobs])
+    assert re_added is not None
+    assert re_added.job_deltas["order"] == [
+        "child-997",
+        "child-000",
+        "child-001",
+        "child-002",
+        "child-999",
+    ]
+    follower.apply_update(FrontendUpdate.model_validate_json(re_added.model_dump_json()))
+    assert [job.id for job in follower.state.jobs] == re_added.job_deltas["order"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-an-object",
+        {"upserted": "x", "removed": "c0"},
+        {"upserted": [{"id": "a"}], "removed": ["a", 3]},
+        {"order": ["a", None]},
+        {"roster_size": "185"},
+        {"roster_size": True},
+    ],
+)
+def test_a_malformed_job_delta_is_refused_before_it_can_apply_as_empty(bad: Any) -> None:
+    """Structural validation, because a filtered-to-nothing delta is silent drift.
+
+    An empty delta means "nothing moved" and consumes a sequence, so a frame
+    whose arms are the wrong SHAPE must be refused at validation rather than
+    becoming an empty merge downstream — the follower would stay stale forever
+    with a gap check that stays happy.
+    """
+    with pytest.raises(ValueError):
+        FrontendUpdate.model_validate(
+            {"epoch": "e", "sequence": 2, "changes": {}, "job_deltas": bad}
+        )
+
+
+def _job_summary_wire(job: JobState) -> dict[str, Any]:
+    from local_operator.session.frontend_state import _job_summary
+
+    return _job_summary(job)

@@ -401,6 +401,67 @@ def test_agent_end_preserves_mixed_receipt_and_estimate_calls() -> None:
         assert turn_cost(session.model_label, ended.usage) == pytest.approx(20.001)
 
 
+def test_agent_end_folds_the_wire_tail_aggregate_into_the_band() -> None:
+    """A remote viewer must not undercount a turn the socket bound shortened.
+
+    ``bound_agent_end_for_wire`` keeps the newest messages when a deep turn
+    would cross the socket line and folds the dropped rows' receipts into
+    ``usage_aggregate``. The band sums ``event.messages``, so without this
+    merge a 3,000-message turn would report the spend of its last 24 rows.
+    """
+    _controller_instance, session, app = _controller()
+    retained = Message.assistant(
+        usage=Usage(
+            input_tokens=100,
+            output_tokens=5,
+            context_tokens=200_000,
+            provider="test",
+            model_id="m",
+        )
+    )
+    aggregate = {
+        "input_tokens": 1_800,
+        "output_tokens": 90,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "context_tokens": 50_000,
+        "cost_components": [
+            Usage(input_tokens=1_800, output_tokens=90, provider="test", model_id="m").model_dump(
+                mode="json"
+            )
+        ],
+    }
+    # Through ``model_validate`` like the wire does: ``usage_aggregate`` is an
+    # EXTRA on ``AgentEndEvent`` (the additive-key contract), not a declared
+    # field, so a direct keyword would be a type error against the model.
+    session.emit(
+        AgentEndEvent.model_validate(
+            {"type": "agent_end", "messages": [retained], "usage_aggregate": aggregate}
+        )
+    )
+
+    ended = app.posted[-1]
+    assert isinstance(ended, TurnEnded)
+    assert ended.usage.input_tokens == 1_900
+    assert ended.usage.output_tokens == 95
+    # The NEWEST retained reading wins: the aggregate is the older suffix.
+    assert ended.usage.context_tokens == 200_000
+    assert len(ended.usage.cost_components) == 2
+
+    # ...and when the retained tail carries no receipt at all, the aggregate is
+    # the only thing left that can settle the turn.
+    session.emit(AgentStartEvent())
+    session.emit(
+        AgentEndEvent.model_validate(
+            {"type": "agent_end", "messages": [], "usage_aggregate": aggregate}
+        )
+    )
+    ended = app.posted[-1]
+    assert isinstance(ended, TurnEnded)
+    assert ended.usage.input_tokens == 1_800
+    assert ended.usage.context_tokens == 50_000
+
+
 def test_orphaned_tool_end_buffered_until_start() -> None:
     controller, session, app = _controller()
     session.emit(AgentStartEvent())
