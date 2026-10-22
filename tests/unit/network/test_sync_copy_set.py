@@ -456,6 +456,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/`` — install-level publication state, never an entry of a session "
         "directory",
     ),
+    # The carrier's HASH DOMAIN is not a path: ``TREE_HASH_PREFIX`` is the
+    # separator string every tree digest starts with ("skill-tree-v1\n"), the
+    # same kind of value as a version tag. The module's real filenames
+    # (``SKILL.md``, the archive name) are classified where they live, and no
+    # constant here names an entry of a session directory.
+    "local_operator/hub_sync/skill_bundle.py": (
+        1,
+        "``TREE_HASH_PREFIX``: the tree-hash domain separator, not a pathname",
+    ),
     "local_operator/skills/discovery.py": (
         1,
         "``_SKILL_FILE`` (``SKILL.md``): the marker FILENAME looked for inside skill "
