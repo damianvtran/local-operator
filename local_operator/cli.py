@@ -758,6 +758,100 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     hub_link.add_argument("--json", action="store_true")
 
+    # ``skills``: the smallest CLI that exercises publish / pull / subscribe /
+    # update for hub skills, including the BUNDLE carrier (--bundle on publish,
+    # the publisher confirmation on public pulls). It drives the SAME service
+    # functions the desktop routes use -- there is no second sync engine.
+    skills_parser = subparsers.add_parser(
+        "skills",
+        help="Publish, pull and synchronize hub skills (documents and bundles)",
+        parents=[parent_parser],
+    )
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
+    skills_publish = skills_subparsers.add_parser(
+        "publish",
+        help="Publish a local skill to the hub (use --bundle for the multi-file form)",
+        parents=[parent_parser],
+    )
+    skills_publish.add_argument("name", help="The local skill's name")
+    skills_publish.add_argument(
+        "--public", action="store_true", help="Publish to the public catalogue"
+    )
+    skills_publish.add_argument(
+        "--org", default=None, metavar="TENANT", help="Publish to this organization"
+    )
+    skills_publish.add_argument(
+        "--bundle",
+        action="store_true",
+        help="Publish as a bundle (a directory tree with binary files); requires "
+        "the hub's skill-bundles capability and no preview pin",
+    )
+    skills_publish.add_argument("--alias", default=None, help="The published name")
+    skills_publish.add_argument(
+        "--no-subscribe", action="store_true", help="Publish without subscribing this machine"
+    )
+    skills_publish.add_argument(
+        "--yes", action="store_true", help="Confirm the publication without prompting"
+    )
+    skills_publish.add_argument("--json", action="store_true")
+
+    skills_pull = skills_subparsers.add_parser(
+        "pull",
+        help="Install a hub skill (a bundle needs the publisher/hash confirmation)",
+        parents=[parent_parser],
+    )
+    skills_pull.add_argument("hub_id", help="The hub skill id")
+    skills_pull.add_argument("--public", action="store_true", help="Pull from the public catalogue")
+    skills_pull.add_argument(
+        "--org", default=None, metavar="TENANT", help="Pull from this organization"
+    )
+    skills_pull.add_argument(
+        "--alias", default=None, help="The local name (defaults to the published name)"
+    )
+    skills_pull.add_argument(
+        "--no-subscribe", action="store_true", help="Install without subscribing"
+    )
+    skills_pull.add_argument(
+        "--confirm-publisher",
+        default=None,
+        metavar="ID",
+        help="The publisher account id the bundle prompt named",
+    )
+    skills_pull.add_argument(
+        "--confirm-hash",
+        default=None,
+        metavar="HASH",
+        help="The bundle archive sha256 the prompt named",
+    )
+    skills_pull.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the bundle publisher and hash shown by this command",
+    )
+    skills_pull.add_argument("--json", action="store_true")
+
+    skills_sync = skills_subparsers.add_parser(
+        "sync",
+        help="Check hub skills and fast-forward the ones that are safe to update",
+        parents=[parent_parser],
+    )
+    skills_sync.add_argument("--name", default=None, help="Only this linked skill")
+    skills_sync.add_argument("--all", action="store_true", help="Every linked skill (the default)")
+    skills_sync.add_argument(
+        "--check", action="store_true", help="Report what would change, writing nothing"
+    )
+    skills_sync.add_argument(
+        "--yes", action="store_true", help="Apply without prompting (required off a terminal)"
+    )
+    skills_sync.add_argument("--json", action="store_true")
+
+    skills_status = skills_subparsers.add_parser(
+        "status",
+        help="Show every linked skill's local/hub state (no network)",
+        parents=[parent_parser],
+    )
+    skills_status.add_argument("--json", action="store_true")
+
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
         "serve", help=_sv.serve().envelope(locale=help_locale)["text"], parents=[parent_parser]
@@ -11674,6 +11768,266 @@ def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
     return 0
 
 
+def skills_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop skills …`` -- publish / pull / sync / status for hub skills.
+
+    Thin by design: every arm calls the SAME ``hub_sync.service`` function the
+    desktop routes call (``preview_skill_publication`` + ``publish_skill``,
+    ``install_skill``, ``check_items`` + ``apply_items``, ``links_snapshot``), so
+    the CLI can never grow a second sync engine with different safety rules.
+    """
+
+    command = getattr(args, "skills_command", None)
+    if command == "publish":
+        return _skills_publish(args, base_dir)
+    if command == "pull":
+        return _skills_pull(args, base_dir)
+    if command == "sync":
+        return _skills_sync(args, base_dir)
+    if command == "status":
+        return _skills_status(args, base_dir)
+    print(f"error: unknown skills command: {command}")
+    return 2
+
+
+def _skills_scope(args: argparse.Namespace) -> tuple[str, str | None]:
+    """``--public`` / ``--org TENANT`` as the paired scope the service requires."""
+
+    public = bool(getattr(args, "public", False))
+    tenant = getattr(args, "org", None)
+    if public and tenant:
+        raise ValueError("pass either --public or --org, not both")
+    if not public and not tenant:
+        raise ValueError("pass --public or --org TENANT")
+    return ("public", None) if public else ("org", str(tenant))
+
+
+def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    try:
+        visibility, tenant_id = _skills_scope(args)
+    except ValueError as error:
+        print(f"error: {error}")
+        return 2
+    form = "bundle" if bool(getattr(args, "bundle", False)) else "document"
+    alias = getattr(args, "alias", None) or args.name
+    subscribe = not bool(getattr(args, "no_subscribe", False))
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    try:
+        preview = svc.preview_skill_publication(
+            ctx,
+            source_skill=args.name,
+            local_alias=alias,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            subscribe=subscribe,
+            auto_push=False,
+            confirm_public_egress=False,
+            form=form,
+        )
+    except LinkError as error:
+        print(f"error: {error}")
+        return 1
+    if not getattr(args, "json", False):
+        print(f"{form} publication of {args.name!r} as {alias!r} " f"({visibility})")
+        if form == "bundle":
+            facts = preview.get("bundle") or {}
+            print(
+                f"  {facts.get('file_count')} files, {facts.get('size')} bytes "
+                f"(tree {str(facts.get('tree_hash'))[:12]}...)"
+            )
+        if preview.get("reason"):
+            print(f"  cannot publish: {preview['reason']}")
+    if preview.get("reason"):
+        if getattr(args, "json", False):
+            print(_json.dumps(preview, indent=2))
+        return 1
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            print("error: pass --yes to publish (no terminal to confirm on)")
+            return 1
+        answer = input("Publish this skill to the hub? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("cancelled")
+            return 1
+    try:
+        result = svc.publish_skill(
+            ctx,
+            source_skill=args.name,
+            local_alias=alias,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            subscribe=subscribe,
+            auto_push=False,
+            confirm_public_egress=False,
+            preview_receipt=str(preview.get("preview_receipt") or ""),
+            form=form,
+        )
+    except LinkError as error:
+        print(f"error: {error}")
+        return 1
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2))
+        return 0
+    link = result.get("link") or {}
+    print(f"published {link.get('name') or alias} ({form}) as {link.get('hub_id') or '?'}")
+    return 0
+
+
+def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    try:
+        visibility, tenant_id = _skills_scope(args)
+    except ValueError as error:
+        print(f"error: {error}")
+        return 2
+    subscribe = not bool(getattr(args, "no_subscribe", False))
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    alias = getattr(args, "alias", None)
+    try:
+        preview = svc.install_skill(
+            ctx,
+            hub_source=(svc.prov.canonical_hub_source(ctx.config_manager) or ""),
+            hub_id=args.hub_id,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            alias=alias,
+            subscribe=subscribe,
+            dry_run=True,
+        )
+    except LinkError as error:
+        print(f"error: {error}")
+        return 1
+    bundle = preview.get("bundle")
+    publisher = preview.get("publisher")
+    if not getattr(args, "json", False):
+        name = (bundle or {}).get("name") or args.hub_id
+        print(f"install {name!r} ({'bundle' if bundle else 'document'}) from {visibility}")
+        if bundle:
+            facts = bundle.get("bundle") or {}
+            print(
+                f"  {facts.get('file_count')} files, {facts.get('size')} bytes, "
+                f"sha256 {facts.get('hash')}"
+            )
+            named = (publisher or {}).get("id", "(unnamed)")
+            shown = (publisher or {}).get("name")
+            print(f"  publisher {named}" + (f" ({shown})" if shown else ""))
+    confirmed = False
+    confirm_publisher = getattr(args, "confirm_publisher", None)
+    confirm_hash = getattr(args, "confirm_hash", None)
+    if bundle is None:
+        # A DOCUMENT pull carries no bundle confirmation; its link consent is the
+        # ordinary subscribe policy.
+        pass
+    elif bool(getattr(args, "yes", False)):
+        confirmed = True
+    elif confirm_publisher and confirm_hash:
+        # The service compares BOTH against the row it re-reads; the CLI only
+        # forwards them, so a swapped publisher or archive refuses there.
+        pass
+    elif sys.stdin.isatty() and not getattr(args, "json", False):
+        answer = input("Install this bundle? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("cancelled")
+            return 1
+        confirmed = True
+    else:
+        print(
+            "error: a public bundle install needs the publisher confirmation: pass "
+            "--confirm-publisher ID --confirm-hash HASH, or --yes"
+        )
+        return 1
+    try:
+        result = svc.install_skill(
+            ctx,
+            hub_source=(svc.prov.canonical_hub_source(ctx.config_manager) or ""),
+            hub_id=args.hub_id,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            alias=alias,
+            subscribe=subscribe,
+            confirm=confirmed,
+            confirm_publisher_id=confirm_publisher,
+            confirm_bundle_hash=confirm_hash,
+        )
+    except LinkError as error:
+        print(f"error: {error}")
+        return 1
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2))
+        return 0
+    link = result.get("link") or {}
+    print(f"installed {link.get('name') or args.hub_id}")
+    return 0
+
+
+def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+
+    names = [args.name] if getattr(args, "name", None) else None
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    checks = svc.check_items(ctx, kinds=("skill",), names=names)
+    if getattr(args, "check", False):
+        rows = [svc.check_report(c).to_json() for c in checks]
+        if getattr(args, "json", False):
+            print(_json.dumps({"checks": rows}, indent=2))
+            return 0
+        for row in rows:
+            reason = row.get("error_class") or row.get("outcome") or ""
+            print(f"{row.get('name')}: {row.get('outcome')} {reason}".rstrip())
+        return 0
+    report = svc.apply_items(
+        ctx,
+        kind="skill",
+        names=names,
+        all_available=True,
+        auto=False,
+        checks=checks,
+    )
+    payload = report.to_json()
+    if getattr(args, "json", False):
+        print(_json.dumps(payload, indent=2))
+        return 0
+    for item in payload.get("reports") or []:
+        detail = item.get("error_class") or item.get("outcome") or ""
+        print(f"{item.get('name')}: {item.get('outcome')} {detail}".rstrip())
+    return 0
+
+
+def _skills_status(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    snapshot = svc.links_snapshot(ctx, kinds=("skill",))
+    if getattr(args, "json", False):
+        print(_json.dumps(snapshot, indent=2))
+        return 0
+    links = snapshot.get("links") or []
+    if not links:
+        print("No linked skills.")
+        return 0
+    for link in links:
+        form = "bundle" if str(link.get("form") or "") == "bundle" else "document"
+        pull = (link.get("pull") or {}) if isinstance(link.get("pull"), dict) else {}
+        print(
+            f"{link.get('name')} [{form}] {link.get('visibility') or '?'} "
+            f"state={pull.get('state') or 'unknown'}"
+        )
+    return 0
+
+
 def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     """Create a new agent with the given name."""
 
@@ -16255,6 +16609,8 @@ def main() -> int:
                     return hub_link_set_command(args, base_dir)
                 parser.error(f"Invalid hub link command: {args.hub_link_command}")
             parser.error(f"Invalid hub command: {args.hub_command}")
+        elif args.subcommand == "skills":
+            return skills_command(args, base_dir)
         elif args.subcommand == "mobile":
             return mobile_command(args)
         elif args.subcommand == "tunnel":
