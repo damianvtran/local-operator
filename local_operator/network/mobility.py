@@ -1778,6 +1778,89 @@ def _destination_move(
             ),
             "",
         )
+    except Moved as refusal:
+        # A PEER-LINK FAILURE MID-COPY IS A REFUSAL, NOT AN EXCEPTION. ``sync_from``'s
+        # ``ask`` raises ``Moved`` when the source stops answering between chunks —
+        # measured live on 2026-10-21, where the escape tore down the relay's
+        # ``mesh-control-conn`` thread and the CLI read a wedged relay
+        # (``relay_unavailable``) while the source kept a ``prepared`` journal that
+        # refused every retry. Nothing has committed here (the owner only commits on
+        # the later ``ready``), so the partial staging is swept exactly as a
+        # ``SyncRefused`` is. The sentence has to say the SOURCE still holds the
+        # conversation: that is what makes a retry safe, and why the source's own
+        # journal may need its relay restarted before it can be re-prepared.
+        _roll_back_destination(server, session_id, staging)
+        dest = str(server._own_label())  # noqa: SLF001
+        holder = owner_name or owner_device or "the source"
+        if dest == holder:
+            # NAMES ARE NOT UNIQUE (m1): two members can share one, and the
+            # sentence's whole job is to say which device discarded a copy and
+            # which one still holds the only one.
+            dest = f"{dest} (this move's destination)"
+            holder = f"{holder} (the source)"
+        # THE CAUSE MAY NOT STACK A SECOND STATE CLAIM (D1). The production cause
+        # for a dead link is ``_unreachable(None)``'s "that device is unreachable
+        # (no answer on its link); nothing was changed" — appended above the rest,
+        # it says "nothing was changed" and then says the destination discarded a
+        # copy and the source is paused, which contradict each other in one
+        # sentence. The trailing clause is dropped, and for an unreachable peer the
+        # cause names the HOLDER instead of "that device" (which the destination
+        # reading it cannot resolve). Other codes keep the producer's own sentence,
+        # minus the same trailing clause.
+        cause = str(refusal.message)
+        # ONE TRAILING PERIOD BELONGS TO THE COMPOSED SENTENCE (R4-4), not to the
+        # producer's fragment: strip it before the clause so a peer message ending
+        # in a period cannot produce ".." when the sentence appends its own.
+        if cause.endswith("."):
+            cause = cause[:-1]
+        for clause in (
+            "; nothing was changed",
+            "; nothing has changed",
+            # ``LinkTransport.ask``'s "the peer answered something this build does
+            # not understand" / "answered with nothing this build can read" pair
+            # joins the same claim with a COMMA, and those are real producer
+            # sentences a destination composes its notice over (R5-1).
+            ", so nothing was changed",
+            ", so nothing has changed",
+        ):
+            if cause.endswith(clause):
+                cause = cause[: -len(clause)]
+                break
+        # R4-2: the holder-named rewrite is for a LINK-LEVEL silence only. A peer
+        # that ANSWERED with code unreachable (a build that does not understand the
+        # op, a refusal it composed itself) did not stop answering, and claiming it
+        # did would be a false diagnosis of a working link.
+        if refusal.code == "unreachable" and "no answer on its link" in cause:
+            cause = f"{holder} stopped answering during the copy (no answer on its link)"
+        if keep:
+            # A COPY LEAVES THE SOURCE RUNNING AND JOURNALS NOTHING (U8), so
+            # "paused" and "restart" would be false: there is no handoff to
+            # unpick, and the source must not be told to stop its conversation.
+            sentence = (
+                f"{cause}. {dest} discarded its partial copy; {holder} "
+                "still has the conversation and was not paused (a copy leaves it "
+                "running). Run the copy again."
+            )
+        else:
+            # U9: the restart is spelled with the DEVICE IT RUNS ON first, so a
+            # reader does not run a local command expecting it to act remotely.
+            sentence = (
+                f"{cause}. {dest} discarded its partial copy; {holder} "
+                "still has the conversation, paused for this move. On "
+                f"{holder}, restart the relay (`lop network restart`), then run "
+                "the move again."
+            )
+        return (
+            None,
+            _move_refusal(
+                session_id,
+                refusal.code or "unreachable",
+                sentence,
+                phase_reached="prepared",
+                changed=False,
+            ),
+            "",
+        )
 
     # THE DESTINATION'S OWN CONTENT DIGEST, computed from the bytes it actually
     # holds over the same function the owner uses (``sync.copy_content_digest``),
@@ -3498,6 +3581,11 @@ def _source_prepare(
             # entry's writer is alive — and that gap is recorded, not guessed at.
             phase = str(existing.get("phase") or "")
             age = _handoff_age(existing)
+            # THE DEVICE, NOT "this device": the reader is the DESTINATION, so
+            # "this device" named the wrong machine and its remedy (restart the
+            # destination's relay) cleared nothing. The journal is device-local,
+            # so the holder for an entry here is always this relay's own device.
+            holder = str(server._own_label())  # noqa: SLF001
             # THE ESCAPE IS NAMED, because it is not derivable from the state. An
             # entry written by this device's LIVE relay is skipped by every reconcile
             # (the instance rule that stops a merely slow peer losing an in-flight
@@ -3512,10 +3600,10 @@ def _source_prepare(
                 "result": "refused",
                 "code": "in_progress",
                 "message": (
-                    "a handoff of that conversation is already in progress on this "
-                    f"device (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    "changed; if the other device has stopped answering, restart this "
-                    "device's relay (`lop network restart`) and try the move again"
+                    "a handoff of that conversation is already in progress on "
+                    f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
+                    f"changed. If the move does not finish on its own, restart the "
+                    f"relay on {holder} (`lop network restart`), then try the move again."
                 ),
                 "session_id": session_id,
             }
@@ -5225,29 +5313,53 @@ def local_move_handler(server: "RelayServer") -> Any:
             reconcile(server.root, server=server, only=session_id)
         except Exception:  # noqa: BLE001 — recovery is best effort
             logger.debug("mobility: reconcile before a move failed", exc_info=True)
-        if to == "local":
-            return _recall(
+        try:
+            if to == "local":
+                return _recall(
+                    server,
+                    session_id,
+                    keep=keep,
+                    wait_s=wait_s,
+                    engage_on_arrival=engage_on_arrival,
+                    queue=queue,
+                    drop_session_roles=drop_session_roles,
+                    request_id=request_id,
+                    resume_queued=resume_queued,
+                )
+            return _offload(
                 server,
                 session_id,
+                to=to,
                 keep=keep,
                 wait_s=wait_s,
                 engage_on_arrival=engage_on_arrival,
                 queue=queue,
-                drop_session_roles=drop_session_roles,
                 request_id=request_id,
-                resume_queued=resume_queued,
+                drop_session_roles=drop_session_roles,
             )
-        return _offload(
-            server,
-            session_id,
-            to=to,
-            keep=keep,
-            wait_s=wait_s,
-            engage_on_arrival=engage_on_arrival,
-            queue=queue,
-            request_id=request_id,
-            drop_session_roles=drop_session_roles,
-        )
+        except Moved as refusal:
+            # THE CONTROL CONNECTION MAY NOT DIE ON A MOVEMENT FAILURE. Every
+            # ``ask`` the recall/offload path makes can raise ``Moved`` on a dead
+            # or refusing peer, and an escape here unwound the relay's
+            # ``mesh-control-conn`` thread — the CLI then reported
+            # ``relay_unavailable`` about a relay that was still serving, which is
+            # exactly the "wedged relay" a failed move may not impersonate. The
+            # callers below already turn the peer's answers into refusals; this is
+            # the last arm, and it never swallows anything but ``Moved``.
+            logger.warning(
+                "mobility: %s of %s failed on the peer link (%s); answering a "
+                "refusal instead of dropping the control connection",
+                "recall" if to == "local" else "offload",
+                session_id,
+                refusal.code or "unreachable",
+                exc_info=True,
+            )
+            return _move_refusal(
+                session_id,
+                refusal.code or "unreachable",
+                refusal.message,
+                changed=False,
+            )
 
     return _handle
 
