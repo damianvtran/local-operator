@@ -11883,6 +11883,7 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
 
     from local_operator.hub_sync import service as svc
     from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.provenance import canonical_hub_source
 
     try:
         visibility, tenant_id = _skills_scope(args)
@@ -11892,10 +11893,11 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     subscribe = not bool(getattr(args, "no_subscribe", False))
     ctx = svc.sync_context(ConfigManager(base_dir))
     alias = getattr(args, "alias", None)
+    hub_source = canonical_hub_source(ctx.config_manager) or ""
     try:
         preview = svc.install_skill(
             ctx,
-            hub_source=(svc.prov.canonical_hub_source(ctx.config_manager) or ""),
+            hub_source=hub_source,
             hub_id=args.hub_id,
             visibility=visibility,  # type: ignore[arg-type]
             tenant_id=tenant_id,
@@ -11948,7 +11950,7 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     try:
         result = svc.install_skill(
             ctx,
-            hub_source=(svc.prov.canonical_hub_source(ctx.config_manager) or ""),
+            hub_source=hub_source,
             hub_id=args.hub_id,
             visibility=visibility,  # type: ignore[arg-type]
             tenant_id=tenant_id,
