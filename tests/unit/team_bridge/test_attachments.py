@@ -575,6 +575,11 @@ def _connector_rig(monkeypatch, tmp_path, hub: Hub, *, verdict: str, vision: boo
     monkeypatch.setattr(conversation_mod, "screen_item", fake_screen)
     monkeypatch.setattr(conversation_mod, "deliver_wake", fake_deliver)
     monkeypatch.setattr(conversation_mod, "_screener_sees_images", lambda _d: vision)
+    # The rig's session is ENGAGED: these tests are about image screening and
+    # admission, which run only past #2777's F8 gate (a never-used designated
+    # session under consent v1 holds ``open_chief_of_staff`` before any byte
+    # fetch). That gate is tested on its own in test_connector.py.
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
     ref = ConversationFeedRef(
         CID, MID, 1, True, conversation_name="#qa", sender_label="Ada", sender_kind="human"
     )
@@ -649,6 +654,26 @@ async def test_screener_without_vision_admits_text_only_with_the_d5_marker(
     assert "[1 image attachment withheld: screening model has no vision]" in cards[0]
     with pytest.raises(BridgeRefusal):  # text-only allow -> context 404
         hub.fetch(hub.descriptors[0]["id"], "context")
+
+
+@pytest.mark.asyncio
+async def test_an_engagement_hold_fetches_no_image_bytes(monkeypatch, tmp_path) -> None:
+    """#2777's F8 hold on a never-used session must win before any image work.
+
+    Integration guard for this branch meeting main's gate: a held message is
+    re-driven later, so a screen-purpose byte fetch here would be wasted hub
+    traffic and would hand pixels to a session the owner never opened.
+    """
+
+    hub = Hub([_png()])
+    owner, ref, screened, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    monkeypatch.setattr(
+        conversation_mod, "engagement_hold", lambda designation, config_dir: "open_chief_of_staff"
+    )
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert out == {"action": "hold", "message_id": MID, "code": "open_chief_of_staff"}
+    assert hub.fetches == [] and hub.admits == []
+    assert screened == [] and cards == []
 
 
 @pytest.mark.asyncio
