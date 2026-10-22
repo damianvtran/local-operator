@@ -6599,6 +6599,16 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             model_choice = {"provider": provider, "model_id": model_id}
         else:
             model_choice = None
+        if model_choice is not None and effort:
+            # THE LEVEL RIDES THE MODEL CHOICE (QA round 1, Q1 on #2754). The
+            # frame-level ``effort`` below is applied only through
+            # ``resolve_create_identity`` into ``identity.birth``, which a
+            # ``--team``-only create never reaches, so ``--effort max`` was dropped
+            # and the runtime ran its seed. The choice is what every create path
+            # applies (``relay._set_model_on``), under both spellings: an owner on
+            # 0.84.7 or earlier reads only ``effort``. The frame-level key stays,
+            # because the identity path still reads it when no model is named.
+            model_choice = {**model_choice, "reasoning_effort": effort, "effort": effort}
         # THE SAVED MODE SUPPLIES THE IMPLIED REQUEST (remote-onboarding §6
         # defect 2, the create half): a device whose ``tool_approval_mode``
         # resolves ``auto`` asks for an unattended session when it asks a peer

@@ -1052,6 +1052,50 @@ async def test_create_on_a_peer_forwards_the_target_and_answers_the_peers_bindin
 
 
 @pytest.mark.asyncio
+async def test_a_peer_agent_whose_instructions_were_not_applied_is_not_bound(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The create's binding agrees with the listing the sidebar polls next.
+
+    Review round 1, R2 on #2754: the peer names a legacy (non-attachable) agent
+    in its reply with ``instructions_applied: false`` but records no agent on the
+    session's attachment, so its listing reads ``agent: null``. Binding the name
+    here drew a badge that the next poll took away.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    relay = FakeRelay(
+        {
+            "peer_session_create": {
+                "session_id": "9f3ac1e0b7d2",
+                "agent": {
+                    "name": "legacy-helper",
+                    "id": "",
+                    "kind": "agent",
+                    "instructions_applied": False,
+                    "detail": "",
+                },
+                "team": None,
+            }
+        }
+    )
+    _join(monkeypatch, relay)
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={
+            "request_id": REQUEST_ID,
+            "cwd": str(root),
+            "peer": PEER,
+            "target": {"kind": "agent", "name": "legacy-helper"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["result"]
+    assert body["binding"] == {"agent": None, "team": None}
+    assert body["identity"]["agent"]["instructions_applied"] is False
+
+
+@pytest.mark.asyncio
 async def test_a_config_auto_create_on_a_peer_requests_unattended(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2273,3 +2317,71 @@ async def test_networks_keep_a_revocation_and_drop_only_a_superseded_tombstone(
     if kept:
         assert by_id[REJOINED_OLD]["active"] is False, "a revocation is marked, not hidden"
     assert by_id[REJOINED_NEW]["active"] is True
+
+
+def test_a_remote_rows_binding_is_the_owners_answer_and_absence_is_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidebar's team badge reads ``binding.team``, so a remote row must carry it.
+
+    Operator report, 2026-10-21: this projection hardcoded ``None``/``None`` for
+    every remote row, so a session running under a team on a peer drew no team
+    badge while the same session held locally drew one. The owner's claim now
+    rides (``SessionRow.team``/``agent``); a row with no claim — an older peer —
+    is the same ``None`` as before, never a guessed team.
+    """
+    from local_operator.server.utils.desktop_mesh import remote_session_rows
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    (tmp_path / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    teamed = SessionRow(OTHER, 1789400000.0, "under a team", team="lopdev")
+    agented = SessionRow("c" * 12, 1789400000.0, "under an agent", agent="coder")
+    older = SessionRow("d" * 12, 1789400000.0, "older peer")
+    monkeypatch.setattr(
+        peer_rows_mod, "peer_session_rows", lambda root=None, **kwargs: (teamed, agented, older)
+    )
+
+    rows = remote_session_rows(tmp_path, pins=set())
+
+    assert rows[0]["binding"] == {"agent": None, "team": "lopdev"}
+    assert rows[1]["binding"] == {"agent": "coder", "team": None}
+    assert rows[2]["binding"] == {"agent": None, "team": None}
+
+
+def test_a_peer_create_names_its_level_in_both_spellings_for_an_older_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chosen level must survive an owner that has not upgraded.
+
+    Operator report, 2026-10-21 (``Max`` showed as ``High`` on a remote
+    session): the owner's ``set_model`` hop read only ``model["effort"]`` while
+    this function forwards the route's ``reasoning_effort``, so every desktop
+    level was dropped on the peer. The owner now reads both, but a peer on an
+    older build reads only the legacy key, so the frame carries it as well. A
+    level-less pick stays level-less (no key is invented).
+    """
+    from local_operator.server.utils import desktop_mesh
+
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        desktop_mesh,
+        "_call",
+        lambda root, op, **fields: sent.append(fields) or {"session_id": OTHER},
+    )
+    monkeypatch.setattr(
+        "local_operator.session_factory.saved_tool_approval_is_auto", lambda root: False
+    )
+
+    chosen = {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning_effort": "max"}
+    desktop_mesh.create_on_peer(tmp_path, PEER, model=chosen)
+    desktop_mesh.create_on_peer(
+        tmp_path, PEER, model={"provider": "deepseek", "model_id": "deepseek-flash"}
+    )
+
+    assert sent[0]["model"] == {**chosen, "effort": "max"}
+    assert chosen == {
+        "provider": "deepseek",
+        "model_id": "deepseek-flash",
+        "reasoning_effort": "max",
+    }, "the caller's dict is not mutated"
+    assert "effort" not in sent[1]["model"]
