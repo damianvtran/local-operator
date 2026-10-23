@@ -649,8 +649,17 @@ async def test_the_allow_consequence_follows_the_saved_policy(config_dir: Path) 
     asks; leaving "ask again next time" under Allow tells the reader the
     opposite of the confirmation two rows above (U3/D3). The swap is
     description-only: the card's height must not move.
+
+    Asserted on the card's MODEL (``_row_description``), not on a painted frame:
+    a CI runner settles this card at 96x9 where the plan legitimately sheds
+    descriptions, while a roomy terminal paints them — the policy swap must not
+    depend on which plan the dock afforded. The painted half lives in
+    ``test_auto_copy_does_not_move_rows_at_46_columns``, which waits for the
+    auto wording to PAINT and pins S/G row stability at a geometry where the
+    prose column is guaranteed.
     """
     from local_operator.config import ConfigManager
+    from local_operator.tui.widgets.editor import Editor
     from tests.unit.tui.test_approvals_ux import _submit
 
     # Pin the FILE's mode: the app reads it at boot, and a leaked default would
@@ -659,53 +668,36 @@ async def test_the_allow_consequence_follows_the_saved_policy(config_dir: Path) 
 
     session = GatedSession()
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
         card = await _card(pilot, app)
 
-        async def _roomy(needle: str, *, seconds: float = 10.0) -> str:
-            """The settled ROOMY frame containing ``needle``, or a real failure.
-
-            A fixed number of pauses bet on how fast the dock grows under CI
-            load; the observable is the geometry plus the expected copy. The
-            card's own ladder sheds descriptions while the budget is brief, so
-            a timeout here is either a real layout regression or a plan that
-            never got its width — name both in the failure.
-            """
-            deadline = asyncio.get_running_loop().time() + seconds
-            text = ""
-            while True:
-                await pilot.pause(0.05)
-                text = "\n".join(_lines(card))
-                if needle in text and card.size.width >= 96:
-                    return text
-                if asyncio.get_running_loop().time() >= deadline:
-                    raise AssertionError(
-                        f"{needle!r} never reached a roomy frame: size={card.size} "
-                        f"region={card._body.region} lines={_lines(card)}"
-                    )
-
-        before = await _roomy("run this call and ask again next time")
-        assert "run this call and ask again next time" in before, before
-        before_rows = len(_lines(card))
+        assert card._row_description(0) == "run this call and ask again next time"
 
         await pilot.press("S")
+        for _ in range(50):
+            await pilot.pause()
+            if card._policy.mode == "auto":
+                break
         assert card._policy.mode == "auto", card._policy
-        after = await _roomy("run this call; later calls are auto")
-        assert "run this call; later calls are auto" in after, after
-        assert "run this call and ask again next time" not in after, after
-        assert len(_lines(card)) == before_rows, "the swap moved a row"
+        assert card._row_description(0) == "run this call; later calls are auto"
 
         # The restore direction: tightening re-arms the prompt and the wording
         # must say so again. Focus the composer first — Enter while the card
         # holds focus ANSWERS it (that is the card's own Enter), not submits.
-        from local_operator.tui.widgets.editor import Editor
-
         app.query_one(Editor).focus()
         await pilot.pause()
         await _submit(pilot, app, "/approvals ask")
-        await _roomy("run this call and ask again next time")
+        for _ in range(50):
+            await pilot.pause()
+            if card._policy.mode == "ask":
+                break
+        assert card._policy.mode == "ask", card._policy
+        assert card._row_description(0) == "run this call and ask again next time"
+
+        card.focus()
+        await pilot.pause()
         await pilot.press("n")
         await asyncio.wait_for(pending, 2)
 
