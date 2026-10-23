@@ -132,7 +132,9 @@ async def test_real_turn_audio_result_journals_sound_only_done_row_and_live_beat
     tmp_path, tool_name
 ):
     async def execute(tool_call_id, args, signal, on_update, context):
-        return result([artifact()], tool_name).model_copy(update={"tool_call_id": tool_call_id})
+        # THE REAL SHAPE: one call, fourteen artifacts. The loop hands this tool
+        # result to the supplement producer exactly as a live turn does.
+        return result(sound_batch(), tool_name).model_copy(update={"tool_call_id": tool_call_id})
 
     tool = AgentTool(
         name=tool_name,
@@ -160,12 +162,16 @@ async def test_real_turn_audio_result_journals_sound_only_done_row_and_live_beat
         await session.prompt("Generate a short audio clip")
         row = await _await_row(session.transcript)
         assert row["state"] == "done" and row["files"] == row["components"] == []
-        assert row["sounds"] == [
-            {"attachment": "0" * 32, "mime": "audio/mpeg", "title": "Voiceover", "duration_s": 2.5}
+        # The whole batch reaches the journal row from the live turn, in order.
+        assert [sound["attachment"] for sound in row.get("sounds", [])] == [
+            f"{n:032x}" for n in range(BATCH_SOUNDS)
+        ]
+        assert [sound["title"] for sound in row.get("sounds", [])] == [
+            f"Storm swell {n}" for n in range(BATCH_SOUNDS)
         ]
         assert reader_disposition(row, job_live=False) == "block"
         beats = [event for event in events if event.type == "supplement_progress"]
-        assert beats[-1].sounds == row["sounds"]
+        assert beats[-1].sounds == row.get("sounds")
     finally:
         await handle.dispose()
         await session.dispose()
@@ -189,7 +195,9 @@ async def test_graphics_decided_and_terminal_rows_restate_the_same_turn_sounds(
     session = _make_session(tmp_path / "session", ScriptedStream([]), [], tmp_path)
     handle = await _handle(session, tmp_path)
     StubRunner(handle._supplements, answers=[BLOCK]).install(monkeypatch)
-    sounds = turn_sounds(snapshot_messages([Message.tool_result(result([artifact()]))]))
+    sounds = turn_sounds(
+        snapshot_messages([Message.tool_result(result(sound_batch(), "generate_sound_effect"))])
+    )
     try:
         handle._supplements._render(
             "answer", _decision(), DATASETS, "chart", "facts", _settings(), sounds=sounds
