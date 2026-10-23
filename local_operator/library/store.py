@@ -572,6 +572,8 @@ class LibraryStore:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         if self._key in self._failed_paths:
             raise IndexUnavailable("library index is unreadable", corrupt=True)
+        if self._key not in self._ready_paths:
+            self._recover_if_flagged()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self.path, timeout=5.0)
@@ -646,16 +648,6 @@ class LibraryStore:
                 # refusal, not as a bare ``ProgrammingError``.
                 connection.execute("PRAGMA journal_mode=WAL")
                 self._clean_stale_rebuilds()
-                if self._state_value(connection, STATE_RECOVERY_FAILED) == "1":
-                    # A previous process refused this file. Prove the metadata is
-                    # readable BEFORE serving: a repaired file clears the flag and
-                    # continues; a still-torn one is the typed 503, never an empty
-                    # "building" page with every asset 404 (QA Q-R5-1).
-                    if not self._probe_authoritative():
-                        self._failed_paths.add(self._key)
-                        raise IndexUnavailable("library metadata is unreadable", corrupt=True)
-                    self._persist_recovery_failure(False)
-                    self._failed_paths.discard(self._key)
                 # The metadata tables are AUTHORITATIVE and owned by
                 # ``MetadataStore``; three triggers below attach to them, so they
                 # must exist before this script runs. A derived table may never
@@ -779,7 +771,13 @@ class LibraryStore:
         rebuilt = self._rebuild_database()
         if not rebuilt:
             self._refuse("the database cannot be rebuilt from its metadata")
-        return rebuilt
+            return False
+        # The replacement file carries no flag row at all (only the AUTHORITATIVE
+        # tables are copied), so record the healthy verdict explicitly: a later
+        # boot must not have to guess whether an absent row means "never failed".
+        self._ready_paths.add(self._key)
+        self._persist_recovery_failure(False)
+        return True
 
     def _refuse(self, reason: str) -> None:
         """Refuse every read AND leave the refusal on disk for the next process."""
@@ -855,6 +853,43 @@ class LibraryStore:
             return False
         finally:
             connection.close()
+
+    def _recover_if_flagged(self) -> None:
+        """A previous process refused this file: try ONE real repair before serving.
+
+        The flag must be cleared only on the evidence that SET it. A shallow
+        ``SELECT * LIMIT 1`` per table used to clear it, and a tear in a
+        non-leftmost leaf passes that probe — the process then served
+        ``building`` with zero rows on a file it had just refused (R6-1).
+        ``recover_derived`` is the only thing allowed to clear the flag: it
+        proves the metadata, recreates or rebuilds the derived half, and clears
+        the flag only when the whole file checks out. It uses raw connections,
+        so this cannot recurse through ``_connect``.
+
+        Cost: on a healthy file this is ONE small ``idx_state`` read, because the
+        flag row is absent; on a flagged file it is one recovery (a 1.24 s check
+        measured on a 38 MB index), which is the price of not serving damage.
+        """
+        try:
+            probe = sqlite3.connect(self.path, timeout=5.0)
+        except sqlite3.Error:
+            return
+        try:
+            probe.execute("PRAGMA busy_timeout=5000")
+            row = probe.execute(
+                "SELECT value FROM idx_state WHERE key = ?", (STATE_RECOVERY_FAILED,)
+            ).fetchone()
+        except sqlite3.Error:
+            # No idx_state yet (a fresh file) or an unreadable one: the normal
+            # bootstrap decides, and it cannot serve derived rows it does not
+            # have.
+            return
+        finally:
+            probe.close()
+        if row is None or str(row[0]) != "1":
+            return
+        if not self.recover_derived():
+            raise IndexUnavailable("library metadata is unreadable", corrupt=True)
 
     def _persist_recovery_failure(self, failed: bool) -> None:
         """Record the refusal in ``idx_state`` so it survives the process.
