@@ -2527,9 +2527,7 @@ class StatusDiscipline:
 
         self._identity_revision += 1
         revision = self._identity_revision
-        return self._observe(
-            await self._check(Boundary.SURFACE_OPEN, identity_revision=revision)
-        )
+        return self._observe(await self._check(Boundary.SURFACE_OPEN, identity_revision=revision))
 
     def _observe(self, check: StatusCheck) -> StatusCheck:
         """Record visibility identically for ordinary and explicit mutation reads."""
@@ -2550,9 +2548,7 @@ class StatusDiscipline:
             )
         return check
 
-    async def _check(
-        self, boundary: Boundary | str, *, identity_revision: int = 0
-    ) -> StatusCheck:
+    async def _check(self, boundary: Boundary | str, *, identity_revision: int = 0) -> StatusCheck:
         """The cached-or-fresh read behind :meth:`check`."""
 
         boundary = Boundary.parse(boundary)
@@ -2641,7 +2637,9 @@ class StatusDiscipline:
                 texts=texts.snapshot(),
             )
             self._states[key] = _AccountState(
-                last_attempt=time.monotonic(), check=check, texts=texts,
+                last_attempt=time.monotonic(),
+                check=check,
+                texts=texts,
                 identity_revision=revision,
             )
             return check
