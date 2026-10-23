@@ -645,7 +645,9 @@ def _envelope_result(response: httpx.Response) -> dict[str, Any]:
     """The ``result`` object from the house ``{msg, result}`` envelope.
 
     A 2xx that is not that shape is a protocol violation, not a refusal: it earns
-    its own code so a surface does not render an empty success.
+    its own code so a surface does not render an empty success. Map it to a
+    gateway failure: retaining the upstream 2xx here makes desktop HTTP clients
+    treat a protocol error as success even though the body contains a refusal.
     """
 
     try:
@@ -654,14 +656,14 @@ def _envelope_result(response: httpx.Response) -> dict[str, Any]:
         raise BridgeRefusal(
             "bridge_invalid_response",
             "Radient returned an invalid response.",  # i18n: ignore, no code
-            http_status=response.status_code,
+            http_status=502,
         ) from None
     result = envelope.get("result") if isinstance(envelope, dict) else None
     if not isinstance(result, dict):
         raise BridgeRefusal(
             "bridge_invalid_response",
             "Radient returned an invalid response.",  # i18n: ignore, no code
-            http_status=response.status_code,
+            http_status=502,
         )
     return result
 
@@ -970,6 +972,7 @@ class TeamBridgeClient:
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
         access: OAuthAccess | None = None,
+        empty_result: bool = False,
     ) -> dict[str, Any]:
         """One authenticated request: resolve, send, refresh-once-on-401, map refusals.
 
@@ -1003,6 +1006,15 @@ class TeamBridgeClient:
                 raise BridgeSignInRequired(SIGN_IN_SENTENCE)
         if response.status_code >= 400:
             raise _refusal(response)
+        if empty_result:
+            # Cancellation acknowledges a CAS with {msg} and no result. Opt in
+            # only for that wire contract; malformed read replies still fail.
+            try:
+                envelope = response.json()
+            except ValueError:
+                envelope = None
+            if isinstance(envelope, dict) and isinstance(envelope.get("msg"), str):
+                return {}
         return _envelope_result(response)
 
     async def _refreshed_access(self, pinned: OAuthAccess) -> OAuthAccess:
@@ -1721,6 +1733,49 @@ class TeamBridgeClient:
         if limit is not None:
             params["limit"] = int(limit)
         return await self._send("GET", "/messaging/decisions", params=params, access=access)
+
+    # -- scheduled messages -------------------------------------------------
+
+    async def scheduled_list(
+        self, *, tenant_id: str, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Read server-owned schedules; no body or timer is retained locally."""
+        return await self._send(
+            "GET", "/messaging/scheduled", params={"tenant_id": tenant_id}, access=access
+        )
+
+    async def scheduled_create(
+        self, body: Mapping[str, Any], *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Schedule an existing conversation through the server's canonical Send policy."""
+        return await self._send("POST", "/messaging/scheduled", body=body, access=access)
+
+    async def scheduled_update(
+        self,
+        scheduled_id: str,
+        *,
+        tenant_id: str,
+        body: Mapping[str, Any],
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        return await self._send(
+            "PATCH",
+            f"/messaging/scheduled/{scheduled_id}",
+            params={"tenant_id": tenant_id},
+            body=body,
+            access=access,
+        )
+
+    async def scheduled_cancel(
+        self, scheduled_id: str, *, tenant_id: str, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        return await self._send(
+            "DELETE",
+            f"/messaging/scheduled/{scheduled_id}",
+            params={"tenant_id": tenant_id},
+            access=access,
+            empty_result=True,
+        )
 
     # -- conversations ------------------------------------------------------
     #
