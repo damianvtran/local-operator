@@ -31,7 +31,13 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   channel is the agent's own space, not a silent copy of its owner's.
 - **channel_post** — append one message as the agent. The body is the caller's
   text; one ``client_ref`` is minted per call, so a retry inside the client
-  reuses it and a second call is a second message.
+  reuses it and a second call is a second message. ``thread_root_id`` posts it
+  as a REPLY in that message's thread instead of at channel level — how agents
+  coordinate without flooding the channel (e.g. one QA-claim thread per item
+  in #agents). Threads are one level: the root must be a channel-level message.
+- **channel_thread** — one thread, oldest-first: the root (with its reply
+  count) and a bounded page of replies. Same screening rule as history — an
+  unadmitted reply is metadata with ``body`` null.
 - **channel_history** — a bounded page of messages. The server admits bodies
   per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
   hash) of messages it has not admitted, with ``body`` null, and only the
@@ -56,6 +62,7 @@ uses). No probing, no second gating convention.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -67,7 +74,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
-from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    Content,
+    ImageContent,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
@@ -76,7 +90,13 @@ from .types import CONVERSATION_ID_PATTERN
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
 #: tries the word gets the right sentence back.
-CHANNEL_OPS: tuple[str, ...] = ("channels", "channel_create", "channel_post", "channel_history")
+CHANNEL_OPS: tuple[str, ...] = (
+    "channels",
+    "channel_create",
+    "channel_post",
+    "channel_history",
+    "channel_thread",
+)
 BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", *CHANNEL_OPS)
 
 #: The server caps a conversation page at 100 (contract §10.1); bounding here
@@ -87,6 +107,17 @@ CONVERSATION_PAGE_MAX = 100
 #: and taken from the member row by the server; this one is what another
 #: member sees until the channel's members relabel it.
 CHANNEL_CREATE_DEFAULT_LABEL = "agent"
+
+#: The most images ONE channel_history call puts into context. A 100-message
+#: page could otherwise carry 400 images (each up to 1 MiB after bounding) —
+#: a context bill no single read should run up. The rest are named in text
+#: so the agent can page a narrower window to see them.
+HISTORY_IMAGES_MAX = 8
+
+#: Private outcome key for the fetched images. Popped by ``_execute`` before
+#: the outcome becomes ``ToolResult.details`` — details persist with the
+#: transcript row, and image bytes must exist only in the content blocks.
+_IMAGES_KEY = "_images"
 
 #: Local claim lifetime for ``ack working`` — generous enough for a CoS turn,
 #: short enough that a crashed session's claim frees itself.
@@ -160,6 +191,7 @@ class BridgeToolParams(BaseModel):
         "channel_create",
         "channel_post",
         "channel_history",
+        "channel_thread",
     ]
     message_id: str = ""
     body_sha256: str = ""
@@ -181,6 +213,9 @@ class BridgeToolParams(BaseModel):
     cursor: str | None = None
     before_seq: int | None = None
     after_seq: int | None = None
+    #: channel_post: reply in this root message's thread; channel_thread: the
+    #: thread to read. A conversation message id (bcmsg_…).
+    thread_root_id: str = ""
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -192,6 +227,10 @@ def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
 #: the path (``#``, ``..``, slashes) is refused BEFORE any client call. The
 #: pattern lives in ``team_bridge.types`` so the two entry points cannot drift.
 _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
+#: A conversation MESSAGE id is interpolated into the replies path the same
+#: way, so it is held to the minted grammar (the desktop route's
+#: ``_MESSAGE_ID``) before any client call.
+_CONVERSATION_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
 
 
 def _full_body_text(result: Any) -> str | None:
@@ -301,7 +340,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # admit the read, while disabled/signin/pending refuse both directions. The
     # channel reads (list/history) are fetches for the same reason; create and
     # post are mutations.
-    is_read = op in ("take_up", "channels", "channel_history")
+    is_read = op in ("take_up", "channels", "channel_history", "channel_thread")
     refusal = admission_refusal(runtime, is_read=is_read)
     if refusal is not None:
         admit_soon(runtime)
@@ -481,6 +520,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error("channel_post needs a conversation id (bcv_…)")
         if not params.body.strip():
             return _error("channel_post needs non-empty body")
+        thread_root_id = params.thread_root_id.strip()
+        if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
+            return _error("channel_post thread_root_id must be a message id (bcmsg_…)")
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -493,6 +535,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 tenant_id=runtime.tenant_id,
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
+                thread_root_id=thread_root_id or None,
             )
         except Exception as failure:
             return _error(f"the post did not confirm: {failure}", code="post_failed")
@@ -502,6 +545,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         message_id = str(message.get("id") or "")
         seq = message.get("seq")
         content = f"posted to {channel_id}: message {message_id or '?'}"
+        if thread_root_id:
+            content += f" (reply in thread {thread_root_id})"
         if isinstance(seq, int):
             content += f" at seq {seq}"
         return {"ok": True, "message_id": message_id, "state": "sent", "content": content}
@@ -531,10 +576,55 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # Bodies are external content even when the sender is a teammate's
         # agent: the same untrusted wrap as take_up. Unadmitted messages carry
         # ``body: null`` — metadata only — and stay that way (no local cache).
+        images = await _history_images(runtime, channel_id, result, endpoint_id)
         return {
             "ok": True,
             "state": "ok",
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            _IMAGES_KEY: images,
+        }
+
+    if params.op == "channel_thread":
+        channel_id = params.channel_id.strip()
+        if _CONVERSATION_ID.fullmatch(channel_id) is None:
+            return _error("channel_thread needs a conversation id (bcv_…)")
+        thread_root_id = params.thread_root_id.strip()
+        if _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
+            return _error("channel_thread needs thread_root_id, a message id (bcmsg_…)")
+        if params.before_seq is not None:
+            return _error("channel_thread reads oldest-first: page with after_seq (inclusive)")
+        if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
+            return _error(f"channel_thread limit must be 1..{CONVERSATION_PAGE_MAX}")
+        try:
+            result = await runtime.client.conversation_replies(
+                channel_id,
+                thread_root_id,
+                tenant_id=runtime.tenant_id,
+                limit=int(params.limit),
+                after_seq=params.after_seq,
+                endpoint_id=endpoint_id,
+            )
+        except Exception as failure:
+            return _error(f"could not read the thread: {failure}", code="thread_failed")
+        # Same untrusted wrap as channel_history: a reply body is external
+        # content, and an unadmitted one is already null from the server.
+        # Images too (R1-02): the channel timeline excludes replies, so this
+        # is the ONLY read through which a reply's admitted images can reach
+        # the agent — same caption, same fresh context fetch, same budget.
+        thread_rows: list[Any] = []
+        if isinstance(result, dict):
+            root = result.get("root")
+            if isinstance(root, dict):
+                thread_rows.append(root)
+            replies = result.get("replies")
+            if isinstance(replies, list):
+                thread_rows.extend(replies)
+        images = await _history_images(runtime, channel_id, {"messages": thread_rows}, endpoint_id)
+        return {
+            "ok": True,
+            "state": "ok",
+            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            _IMAGES_KEY: images,
         }
 
     # The decide/unknown refusals above run before the gates; this later return
@@ -544,6 +634,125 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         f"unknown bridge op {params.op!r}",
         code="invalid_request",
     )
+
+
+def _screener_sees_images(runtime: BridgeRuntime) -> bool:
+    """Whether this machine's screening model accepts images (the connector's rule)."""
+
+    from .connector.conversation import _screener_sees_images as sees
+
+    try:
+        return sees(Path(runtime.config_dir))
+    except Exception:  # noqa: BLE001 — unknown reads as "no vision", never a crash
+        return False
+
+
+def _image_provenance(channel_id: str, message: dict[str, Any], lines: list[str]) -> str:
+    """The caption leading one message's images: clause first, then provenance.
+
+    Every image is sender-controlled content exactly like a body — a picture
+    can carry instructions as easily as text — so the ONE untrusted clause
+    leads it, and the provenance (who, where, which attachment, how big) lets
+    the agent say what it is looking at. No hashes and no filenames.
+    """
+
+    raw_sender = message.get("sender")
+    sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
+    label = str(sender.get("display_label") or "member").replace("\n", " ")[:200]
+    kind = str(sender.get("kind") or "unknown")[:16]
+    head = (
+        f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+        f"Images from message {message.get('id')} in {channel_id} "
+        f"(seq {message.get('seq')}) from {label} ({kind}):"
+    )
+    return "\n".join([head, *lines])
+
+
+async def _history_images(
+    runtime: BridgeRuntime, channel_id: str, page: Any, endpoint_id: str
+) -> list[tuple[str, list[tuple[bytes, str]]]]:
+    """Per admitted message with images: ``(caption, [(bytes, mime), ...])``.
+
+    WHY A FRESH FETCH. The hub lists attachment descriptors to an agent only
+    after an ``allow`` bound to the message's ``attachments_hash``, and serves
+    ``purpose=context`` bytes under that same predicate (decision D1). These
+    bytes are fetched HERE, at read time, every time: never from the
+    connector's screening fetch, never cached in the team-bridge store,
+    sqlite, disk or a log. A refusal (text-only allow, reject, expired) is a
+    line in the caption, never a silent gap.
+    """
+
+    from .attachments import (
+        AttachmentRejected,
+        parse_descriptors,
+        verify_and_bound,
+        withheld_marker,
+    )
+
+    if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+        return []
+    out: list[tuple[str, list[tuple[bytes, str]]]] = []
+    budget = HISTORY_IMAGES_MAX
+    for message in page["messages"]:
+        if not isinstance(message, dict) or not isinstance(message.get("id"), str):
+            continue
+        descriptors = parse_descriptors(message.get("attachments"))
+        count = message.get("attachment_count")
+        if not descriptors:
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                # Images exist but were not admitted to this agent's context
+                # (screened text-only, rejected, or pending). When the text
+                # WAS admitted and this machine's screener has no vision, say
+                # exactly that (D5) — it is the one cause the user can fix.
+                noun = "attachment" if count == 1 else "attachments"
+                marker = f"[{count} image {noun} withheld: not admitted by screening]"
+                if message.get("body") is not None and not _screener_sees_images(runtime):
+                    marker = withheld_marker(count)
+                out.append((_image_provenance(channel_id, message, [marker]), []))
+            elif descriptors is None:
+                out.append(
+                    (
+                        _image_provenance(
+                            channel_id, message, ["[images withheld: could not be verified]"]
+                        ),
+                        [],
+                    )
+                )
+            continue
+        lines: list[str] = []
+        blocks: list[tuple[bytes, str]] = []
+        for index, descriptor in enumerate(descriptors, start=1):
+            meta = (
+                f"{index}. attachment {descriptor.id}: {descriptor.mime} "
+                f"{descriptor.width}x{descriptor.height}, {descriptor.size} bytes"
+            )
+            if not descriptor.fetchable:
+                lines.append(f"{meta} — [image expired]")
+                continue
+            if budget <= 0:
+                lines.append(f"{meta} — [not shown: image limit per read reached; page narrower]")
+                continue
+            try:
+                data, _mime = await runtime.client.fetch_attachment(
+                    channel_id,
+                    message["id"],
+                    descriptor.id,
+                    tenant_id=runtime.tenant_id,
+                    endpoint_id=endpoint_id,
+                    purpose="context",
+                )
+                verified = await verify_and_bound(data, descriptor)
+            except AttachmentRejected:
+                lines.append(f"{meta} — [image withheld: could not be verified]")
+                continue
+            except Exception:  # noqa: BLE001 — BridgeRefusal/unreachable: a line, not a crash
+                lines.append(f"{meta} — [image withheld: not available to this agent]")
+                continue
+            budget -= 1
+            lines.append(meta)
+            blocks.append((verified.private_payload(), verified.wire_mime))
+        out.append((_image_provenance(channel_id, message, lines), blocks))
+    return out
 
 
 def build_bridge_tool(context: ToolContext) -> AgentTool | None:
@@ -564,6 +773,8 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         context: ToolContext,
     ) -> ToolResult:
         outcome = await execute_bridge(runtime, args)
+        # Bytes never ride ``details`` (persisted with the transcript row).
+        images = outcome.pop(_IMAGES_KEY, None) or []
         if outcome.get("ok"):
             if outcome.get("content") is not None:
                 # Read-shaped channel results carry their own model-facing
@@ -591,10 +802,22 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                     note = ""
             if note:
                 content = f"{content}\n\n[bridge guidance — advisory]\n{note}"
+            blocks: list[Content] = [TextContent(text=content)]
+            # Caption-then-image, the shape every image tool result uses
+            # (``tools.builtin._image``): a text-only consumer still reads what
+            # each image is, and a session whose model cannot take images has
+            # each block replaced by the harness's own omission notice
+            # (``session._without_images``) while the caption remains.
+            for caption, pictures in images:
+                blocks.append(TextContent(text=caption))
+                blocks.extend(
+                    ImageContent(data=base64.b64encode(data).decode("ascii"), mime_type=mime)
+                    for data, mime in pictures
+                )
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="bridge",
-                content=[TextContent(text=content)],
+                content=blocks,
                 details=outcome,
             )
         return ToolResult(
@@ -610,14 +833,16 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         label="Team Bridge",
         description=(
             "Team Bridge: take_up/ack delivered messages, send/reply, and channel ops "
-            "(channels, channel_create, channel_post, channel_history) as this session's "
+            "(channels, channel_create, channel_post [thread_root_id replies in a thread], "
+            "channel_history, channel_thread) as this session's "
             "agent. This tool cannot approve or deny — that is the human's ask queue."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
         call_approval_tier=lambda args: (
             "read"
-            if str(args.get("op")) in ("take_up", "ack", "channels", "channel_history")
+            if str(args.get("op"))
+            in ("take_up", "ack", "channels", "channel_history", "channel_thread")
             else "write"
         ),
         concurrency="exclusive",
