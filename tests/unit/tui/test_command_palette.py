@@ -367,6 +367,50 @@ class TestWidget:
             ), "recent_session_rows ran on the event loop; the provider must offload it"
 
     @pytest.mark.asyncio
+    async def test_typing_while_the_scan_runs_still_fills_the_same_open(
+        self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """QA round 2, Q-2: a keystroke must not strand the palette empty.
+
+        Textual's gather is exclusive, so typing cancels the in-flight gather
+        and that cancellation reaches the provider's init task. When the scan
+        lived in `startup`, the provider was left uninitialised and the palette
+        showed no rows for the rest of that open. The scan now lives in a
+        shielded task the next search resumes.
+        """
+        started = threading.Event()
+        release = threading.Event()
+
+        def _rows() -> list[Any]:
+            started.set()
+            release.wait(10.0)
+            return [_Row("stored conversation", "cccc3333")]
+
+        monkeypatch.setattr(app, "_palette_session_rows", _rows)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            await pilot.press("ctrl+p")
+            for _ in range(200):
+                if started.is_set():
+                    break
+                await pilot.pause(0.01)
+            assert started.is_set(), "the provider never started its scan"
+            # The keystroke restarts the exclusive gather while the scan is
+            # still blocked — the exact state that used to cancel startup.
+            await pilot.press(*"conv")
+            release.set()
+            labels: list[str] = []
+            for _ in range(200):
+                labels = [
+                    str(option.prompt).split("\n", 1)[0]
+                    for option in app.screen.query_one(CommandList).options
+                ]
+                if labels:
+                    break
+                await pilot.pause(0.05)
+            assert any("stored conversation" in label for label in labels), labels
+
+    @pytest.mark.asyncio
     async def test_a_reserved_agent_name_is_dispatched_literally(self, app: OperatorApp) -> None:
         """`/agent =chart` attaches a profile named chart and sends no prompt."""
         async with app.run_test(size=(100, 30)) as pilot:
@@ -502,7 +546,7 @@ class TestWidget:
         self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No slash commands, sections, sessions or names: still a usable screen."""
-        monkeypatch.setattr(app, "_palette_entries", lambda: [])
+        monkeypatch.setattr(app, "_palette_entries", lambda *, session_rows: [])
         async with app.run_test(size=(100, 30)) as pilot:
             await await_session_boot(app)
             await pilot.press("ctrl+p")
