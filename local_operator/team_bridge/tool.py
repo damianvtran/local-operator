@@ -607,7 +607,14 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
     ) -> ToolResult:
         outcome = await execute_bridge(runtime, args)
         if outcome.get("ok"):
-            if outcome.get("content") is not None:
+            peer_receipt = args.get("op") in ("send", "reply")
+            if peer_receipt:
+                # Providers receive TextContent, not necessarily details. Keep
+                # the same receipt in both so "sent" cannot hide the inbox-only
+                # acceptance boundary from a model. The executor's receipt is
+                # closed metadata; never serialize the request or server body.
+                content = json.dumps(outcome, ensure_ascii=False)
+            elif outcome.get("content") is not None:
                 # Read-shaped channel results carry their own model-facing
                 # rendering (JSON page, or the untrusted-wrapped history).
                 content = str(outcome["content"])
@@ -631,12 +638,20 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                     note = str(getter() or "")
                 except Exception:  # noqa: BLE001 — advice only, never a failure
                     note = ""
+            blocks = [TextContent(text=content)]
             if note:
-                content = f"{content}\n\n[bridge guidance — advisory]\n{note}"
+                if peer_receipt:
+                    # Preserve existing advice without appending prose to the
+                    # receipt's JSON block, which must parse on its own.
+                    blocks.append(TextContent(text=f"[bridge guidance — advisory]\n{note}"))
+                else:
+                    blocks = [
+                        TextContent(text=f"{content}\n\n[bridge guidance — advisory]\n{note}")
+                    ]
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="bridge",
-                content=[TextContent(text=content)],
+                content=blocks,
                 details=outcome,
             )
         return ToolResult(

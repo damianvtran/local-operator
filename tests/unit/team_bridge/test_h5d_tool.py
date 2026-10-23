@@ -317,11 +317,15 @@ async def test_a_reply_pairs_thread_and_to_and_the_send_confirms_in_the_outbox(t
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op", ["send", "reply"])
 @pytest.mark.parametrize("status", [200, 201])
-async def test_legacy_send_receipt_exposes_only_server_acceptance(tmp_path, op, status) -> None:
+@pytest.mark.parametrize("advisory", ["", "synthetic advisory"])
+async def test_legacy_send_receipt_exposes_only_server_acceptance(
+    tmp_path, monkeypatch, op, status, advisory,
+) -> None:
     """Both new acceptance and an idempotent server answer keep the old fields.
 
-    Use the real tool adapter so metadata must survive into ToolResult.details,
-    not just an internal helper. The synthetic response deliberately includes
+    Use the real tool adapter so metadata must survive into model-visible
+    TextContent as well as details (providers need not serialize details).
+    The synthetic response deliberately includes
     body/provenance fields: the additive receipt must never echo them.
     """
     requests: list[httpx.Request] = []
@@ -341,6 +345,7 @@ async def test_legacy_send_receipt_exposes_only_server_acceptance(tmp_path, op, 
         owner=_owner(),
         session_id="synthetic-session",
     )
+    monkeypatch.setattr(runtime.client, "guidance_note", lambda: advisory)
     context = ToolContext(bridge_runtime=runtime)
     tool = build_bridge_tool(context)
     assert tool is not None
@@ -358,6 +363,13 @@ async def test_legacy_send_receipt_exposes_only_server_acceptance(tmp_path, op, 
         "execution_confirmed": False,
     }
     assert result.is_error is not True
+    assert json.loads(result.content[0].text) == result.details
+    if advisory:
+        assert len(result.content) == 2
+        assert result.content[1].text == f"[bridge guidance — advisory]\n{advisory}"
+    else:
+        assert len(result.content) == 1
+    assert text not in result.text
     assert text not in json.dumps(result.details)
     assert requests[0].url.path == "/v1/messaging/messages"
     wire = json.loads(requests[0].content)
@@ -459,3 +471,94 @@ async def test_refused_legacy_send_has_no_success_receipt(tmp_path, op) -> None:
     assert not metadata.intersection(result)
     assert "message_id" not in result and result.get("state") != "sent"
     assert Outbox(tmp_path).pending(runtime.key()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["send", "reply"])
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        None,
+        [],
+        "private-response-canary",
+        {},
+        {"message": None},
+        {"message": []},
+        {"message": "private-response-canary"},
+        {"message": {}},
+        {"message": {"id": ""}},
+        {"message": {"id": "   "}},
+        {"message": {"id": 42}},
+        {"message": {"id": "bcmsg_9"}},
+        {"message": {"id": "bmsg_bad/path"}},
+    ],
+)
+async def test_malformed_legacy_receipt_stays_pending_until_frozen_replay_confirms(
+    tmp_path, monkeypatch, op, receipt,
+) -> None:
+    """A 2xx envelope is not a send receipt; never retire its retryable intent.
+
+    As above, the replay injects the saved intent, not a fresh manual send.
+    The server may have accepted before returning a malformed reply, so both
+    the idempotency reference and exact request must survive reconciliation.
+    """
+    from local_operator.team_bridge.outbox import Outbox
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _ok(receipt, status=201)
+        return _ok({"message": {"id": "bmsg_9"}}, status=200)
+
+    runtime = BridgeRuntime(
+        client=_client(handler),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    args = {"op": op, "to": {"account_id": "acc_2"}, "text": "synthetic outgoing"}
+    if op == "reply":
+        args["thread_id"] = "bth_1"
+    context = ToolContext(bridge_runtime=runtime)
+    tool = build_bridge_tool(context)
+    assert tool is not None
+    tool_result = await tool.execute("synthetic-invalid", args, None, None, context)
+    result = tool_result.details
+    assert result is not None
+    assert result["ok"] is False and result["code"] == "send_unconfirmed"
+    assert result["error"] == "the send did not confirm: send_receipt_invalid"
+    assert tool_result.is_error is True
+    assert tool_result.text == result["error"]
+    assert "server_accepted" not in tool_result.text
+    assert "private-response-canary" not in tool_result.text
+    assert "private-response-canary" not in json.dumps(result)
+    assert "message_id" not in result and result.get("state") != "sent"
+    metadata = {
+        "destination_type", "receipt_stage", "conversation_history", "execution_confirmed",
+    }
+    assert not metadata.intersection(result)
+    outbox = Outbox(tmp_path)
+    pending = outbox.pending(runtime.key())
+    assert len(pending) == 1
+    assert pending[0].state == "pending" and pending[0].message_id is None
+    assert pending[0].error_code is None
+    assert pending[0].client_ref == json.loads(requests[0].content)["client_ref"]
+    monkeypatch.setattr(Outbox, "record_send", lambda self, owner_key, **kwargs: pending[0])
+    replay_result = await tool.execute("synthetic-replay-call", args, None, None, context)
+    confirmed = replay_result.details
+    assert replay_result.is_error is False
+    assert json.loads(replay_result.content[0].text) == confirmed
+    assert confirmed == {
+        "ok": True,
+        "message_id": "bmsg_9",
+        "state": "sent",
+        "destination_type": "peer_inbox",
+        "receipt_stage": "server_accepted",
+        "conversation_history": False,
+        "execution_confirmed": False,
+    }
+    assert requests[0].content == requests[1].content
+    assert outbox.pending(runtime.key()) == []
