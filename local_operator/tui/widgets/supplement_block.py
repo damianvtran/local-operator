@@ -242,6 +242,17 @@ class SupplementBlock(TranscriptBlock):
         # a player: see ``supplement_mod.sound_row_text`` for the D10 rule.
         for text in supplement_mod.sound_rows(self._sounds()):
             lines.append(self._fit(self._line(text, style=self._muted_style()), body))
+        sounds_more = self._sounds_more()
+        if sounds_more > 0:
+            # The row bound (SOUNDS_MAX) cut the list; say so instead of ending it.
+            lines.append(
+                self._fit(
+                    self._line(
+                        supplement_mod.sounds_more_text(sounds_more), style=self._more_style()
+                    ),
+                    body,
+                )
+            )
 
         if show_line:
             line = self._state_line(disposition)
@@ -455,6 +466,13 @@ class SupplementBlock(TranscriptBlock):
         if not isinstance(sounds, list):
             return []
         return [item for item in sounds if isinstance(item, Mapping)]
+
+    def _sounds_more(self) -> int:
+        """How many sounds the row bound held back (0 when it did not bite)."""
+        count = self._details.get("sounds_more")
+        if isinstance(count, bool) or not isinstance(count, int):
+            return 0
+        return max(0, count)
 
     def _more_paths(self) -> list[str]:
         more = self._details.get("more")

@@ -49,6 +49,7 @@ __all__ = [
     "preparing_line",
     "sound_row_text",
     "sound_rows",
+    "sounds_more_text",
     "state_rank",
 ]
 
@@ -217,6 +218,17 @@ def sound_row_text(sound: Mapping[str, object]) -> str:
 def sound_rows(sounds: Sequence[Mapping[str, object]]) -> list[str]:
     """Every sound's row, in generation order (the row's own order, never re-sorted)."""
     return [sound_row_text(sound) for sound in sounds]
+
+
+def sounds_more_text(count: int) -> str:
+    """The sound bound's disclosure row: ``12 more sounds`` (``more_text``'s twin).
+
+    ``SOUNDS_MAX`` is 200, so this row is unreachable in practice -- and that is
+    exactly why it must exist: the one case the bound bites is the case where the
+    user would otherwise never learn that a sound they generated is missing.
+    """
+    count = max(0, int(count))
+    return f"{count} more sound" if count == 1 else f"{count} more sounds"
 
 
 def file_row_parts(file: Mapping[str, object]) -> tuple[str, str, str]:
