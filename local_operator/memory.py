@@ -1049,6 +1049,12 @@ class MemoryStore:
         failed commit left 30 of 32 pages allocated). Status uses
         ``batch=False``: that transient state still accepts smaller writes and
         is reported by the near-cap warning instead of a false FULL.
+
+        Cost of the ``free == 0`` rule on the refusal path: a transaction that
+        exhausts a small freelist mid-flight at the cap reports the generic
+        refusal instead of the cap message. That is accepted — translating any
+        SQLITE_FULL while free pages exist would recreate the false-FULL
+        diagnosis on the recovery state, which is worse than a generic sentence.
         """
         slack = MAX_BATCH_BYTES // page_size if batch else 0
         return free == 0 and cap - pages <= slack
@@ -1090,11 +1096,11 @@ class MemoryStore:
         """
         return (
             f"Memory store is full: {self.path} has reached its "
-            f"{format_bytes(cap_bytes)} cap, so no new fact can be saved until space "
-            "is freed. Inspect usage with `lop memory status`, reclaim space with "
-            "`lop memory forget SCOPE/ID --revision REV --yes`, and compact the file "
-            f"with `sqlite3 {shlex.quote(str(self.path))} 'VACUUM'`. Run that VACUUM "
-            "first if the forget is also refused. See guide://memory."
+            f"{format_bytes(cap_bytes)} cap, so writes that need a new page are refused "
+            "until space is freed. Inspect usage with `lop memory status`, reclaim "
+            "space with `lop memory forget SCOPE/ID --revision REV --yes`, and compact "
+            f"the file with `sqlite3 {shlex.quote(str(self.path))} 'VACUUM'`. Run that "
+            "VACUUM first if the forget is also refused. See guide://memory."
         )
 
     def _storage_view(self, db: sqlite3.Connection) -> dict[str, Any]:
