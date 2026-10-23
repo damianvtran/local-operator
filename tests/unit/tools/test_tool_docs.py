@@ -462,6 +462,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # 528 -> 531 in review round 2: the receipt claim is qualified to
     # ``assign``, because ``create``/``list``/``rename`` name categories only.
     "tags": 531,
+    # NEW (claude.ai artifact data store, 2026-10-21): the ``artifact_data``
+    # doc — the per-action field table, the path/`me` rules and the
+    # ``if_version`` contract. The tool is DEFERRED, so this doc is what the
+    # first ``tool://`` read or call teaches; its schema adds nothing to the
+    # start context (``scripts/bench_context_budget.py`` unchanged).
+    "artifact_data": 818,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than
