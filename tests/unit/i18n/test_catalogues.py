@@ -187,11 +187,16 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # namespace, so the refusal notices fell back to English; now each carries
     # a 30-key / 84-key catalogue with its own audited ledger row (see
     # i18n/ledger.json), which is the same condition every namespace above was
-    # admitted on.
+    # admitted on. The relay.asks slice adds the SPA's ask cards/sheet/dock
+    # namespace `relay.asks` on the same terms — it is a DIFFERENT namespace
+    # from R5's `relay.ask` (the dismiss reasons and stale-ask line), and
+    # `namespaces()` returns the files sorted, so `relay.asks` sorts before
+    # `relay.session.tags` rather than where the slice landed.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
         "relay.ask",
+        "relay.asks",
         "relay.session.tags",
         "tui.asks",
         "tui.authoring",
