@@ -423,6 +423,17 @@ export interface PendingAsk {
 	    message) and draws no line either: there is nothing stale to report. */
 	user_messages_since?: number;
 	last_user_message_at?: number;
+	/** WHY and WHEN this ask was dismissed (SA-D8, design §17). `dismissed_at` is
+	    the stamp the daemon's shared visibility rule reads — a dismissal BEFORE
+	    the deadline keeps a settled row, one at or after it leaves — and
+	    `dismissed_reason` is the operator's own word (`moot` |
+	    `answered_in_chat`), which the settled card states under its badge.
+
+	    ABSENT on every other status, and absent on a dismissal recorded by an
+	    older runtime: the card then keeps the sentence it always had rather than
+	    inventing a reason. */
+	dismissed_at?: number;
+	dismissed_reason?: string;
 }
 
 /** One aggregated row of the published `spend_channels` object

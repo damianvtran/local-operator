@@ -38,6 +38,7 @@ from local_operator.tui.widgets.ask_queue import (
     AskQueueList,
     ask_rows,
     context_text,
+    dismiss_reason_text,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -336,6 +337,81 @@ async def test_the_context_line_is_part_of_its_row_for_the_pointer(enabled):
         # A click on a row opens its card; the ask it opened is the one above the
         # sub-line, never the one below.
         assert app._ask_mounted_id == "a1"
+
+
+# -- SA-D8: the dismissed row's reason line ---------------------------------
+
+
+def test_the_reason_line_names_the_operator_own_word():
+    """SA-D8 (design §17): the chip says ``dismissed``; only the detail line can
+    say WHY, and it reuses the dismissal receipt's sentences — one act, one
+    wording, on this surface too."""
+    moot = ask_rows([_row("a1", status="dismissed", dismissed_at=_NOW, dismissed_reason="moot")])
+    assert dismiss_reason_text(moot[0]) == "Dismissed — no longer needed"
+    chat = ask_rows(
+        [_row("a1", status="dismissed", dismissed_at=_NOW, dismissed_reason="answered_in_chat")]
+    )
+    assert dismiss_reason_text(chat[0]) == "Dismissed — answered in chat"
+    # No reason recorded (an older runtime wrote the row): the existing sentence,
+    # not an invented reason — and that sentence is only ever this fallback, since
+    # an open-ask dismissal DOES tell the agent.
+    legacy = ask_rows([_row("a1", status="dismissed", dismissed_at=_NOW)])
+    assert dismiss_reason_text(legacy[0]) == "Dismissed — no reply sent"
+    # Every other status owes no reason line, and an OPEN row keeps SA-D7's line.
+    assert dismiss_reason_text(ask_rows([_row("a1")])[0]) == ""
+    assert dismiss_reason_text(ask_rows([_row("a1", status="answered")])[0]) == ""
+
+
+async def test_the_reason_line_paints_under_the_dismissed_row(enabled):
+    """A MOUNTED list: the line is clipped against the painted width, so the
+    painted sequence is the only thing that proves it lands under its own row."""
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        listing = await _open_list(
+            pilot,
+            app,
+            [
+                _row("a1", status="dismissed", dismissed_at=_NOW, dismissed_reason="moot"),
+                _row("a2"),
+                _row("a3"),
+            ],
+        )
+        painted = listing.render().plain.splitlines()
+        # header + (settled row + its reason line) + the two open rows. TWO open
+        # rows because one answerable ask expands straight to its card (D11).
+        assert len(painted) == 1 + 2 + 1 + 1, painted
+        assert "Question for a1?" in painted[1]
+        assert "dismissed" in painted[1], "the chip stays the row's status"
+        assert painted[2].startswith(" " * SUB_LINE_INDENT)
+        assert "Dismissed — no longer needed" in painted[2]
+        assert "Question for a2?" in painted[3]
+
+
+async def test_the_reason_line_belongs_to_its_row_for_the_pointer(enabled):
+    """The detail slot is where a LAPSED row's collapsed card also sits, so the
+    line map has to count it: a click on the reason selects the row it explains."""
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        listing = await _open_list(
+            pilot,
+            app,
+            [
+                _row("a1", status="dismissed", dismissed_at=_NOW, dismissed_reason="moot"),
+                _row("a2"),
+                _row("a3"),
+            ],
+        )
+        top = listing.content_region.y - listing.region.y
+        await pilot.click(AskQueueList, offset=(4, top + listing.HEADER_ROWS + 1))
+        await _settle(pilot)
+        # A click on the reason line selects the row it explains (index 0 is the
+        # dismissed ask). Nothing mounts: a settled row has nothing to answer.
+        assert listing.index == 0
+        assert app._ask_mounted_id is None
 
 
 # -- round 1 remediation: the surfaces ---------------------------------------
