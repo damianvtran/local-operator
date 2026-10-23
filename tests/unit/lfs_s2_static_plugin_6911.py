@@ -1,5 +1,6 @@
 """ONE unchanged original S2; measurement-only hooks, no new load or thresholds."""
 import hashlib
+import cProfile
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from scripts.diagnostics.lfs_pair_6911.controller import validate_identity
 from scripts.diagnostics.native_worker_6911.carrier import native_sources
-from scripts.diagnostics.s2_static_6911.controller import project_measurement
+from scripts.diagnostics.s2_static_6911.controller import project_measurement, serialize_profile
 
 NODE = 'tests/unit/test_tui_responsiveness.py::test_s2_send_to_agent_end_keeps_the_loop_under_the_bar'
 ROWS, REPORTS = [], []
@@ -65,7 +66,7 @@ def pytest_runtest_call(item):
     labels=set(workers.ACTIVE.allowlist.values())
     module=item.module
     row=dict(token=CALLS,identity=identity,native_sources=native,phases=[],summary=None,
-             effective=None,call_pass=False,performance_oracle=False,restored=False)
+             effective=None,call_pass=False,performance_oracle=False,restored=False,cpu_profile=None)
     original_stop=module.StallRecorder.stop
     original_begin=module.StallRecorder.begin_noise_window
     original_end=module.StallRecorder.end_noise_window
@@ -92,7 +93,12 @@ def pytest_runtest_call(item):
             wall=min(max(module.NOISE_K*noise_floor_ms,wall),module.NOISE_WALL_CAP_MS)
         row['effective']=dict(cpu_ms=cpu,wall_ms=wall)
         return original_bar(recorder,cpu_ceiling_ms,wall_ceiling_ms,noise_floor_ms)
+    profiler=None
+    previous=sys.getprofile()
     try:
+        if previous is not None:raise ValueError('preexisting profiler STOP')
+        profiler=cProfile.Profile(timer=time.thread_time_ns,timeunit=1e-9)
+        profiler.enable(subcalls=True,builtins=False)
         with patch.object(module.StallRecorder,'begin_noise_window',begin), patch.object(module.StallRecorder,'end_noise_window',end), patch.object(module.StallRecorder,'stop',stop), patch.object(module.StallRecorder,'assert_no_stall_loaded',bar):
             outcome=yield
             row['call_pass']=outcome.excinfo is None
@@ -104,8 +110,13 @@ def pytest_runtest_call(item):
                         row['performance_oracle']=True
                     tb=tb.tb_next
     finally:
-        row['restored']=all((module.StallRecorder.stop is original_stop,module.StallRecorder.begin_noise_window is original_begin,module.StallRecorder.end_noise_window is original_end,module.StallRecorder.assert_no_stall_loaded is original_bar))
-        ROWS.append(row)
+        try:
+            if profiler is not None:
+                profiler.disable()
+                row['cpu_profile']=serialize_profile(profiler.getstats(),workers.ACTIVE.allowlist,sys.getprofile() is previous)
+        finally:
+            row['restored']=all((module.StallRecorder.stop is original_stop,module.StallRecorder.begin_noise_window is original_begin,module.StallRecorder.end_noise_window is original_end,module.StallRecorder.assert_no_stall_loaded is original_bar))
+            ROWS.append(row)
 
 
 def pytest_runtest_logreport(report):
