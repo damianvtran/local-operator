@@ -986,8 +986,10 @@ class ScopedTeamRegistry:
             if existing is not None and str(existing.name).casefold() != target.casefold():
                 # The target resolves only through another team's ALIAS. A replace
                 # would RENAME that row out from under the key its own users know,
-                # which is not what the confirmation promised.
-                raise ValueError(promote_collision("team", target))
+                # which is not what the confirmation promised. The sentence names
+                # the key and its owner: the generic one would claim a team of the
+                # target name exists and advise a replace that refuses identically.
+                raise ValueError(promote_alias_target_collision(target, str(existing.name)))
             conflict = _account_team_keys(
                 self.global_registry,
                 target,
@@ -1424,6 +1426,24 @@ def promote_member_collision(team: str, kind: str, name: str) -> str:
         f"has {article} {kind} named {name!r}, so copying would overwrite it; nothing "
         f"was promoted. Confirm with `/team promote {team} replace` — that replaces "
         "the team and its colliding members together."
+    )
+
+
+def promote_alias_target_collision(name: str, owner: str) -> str:
+    """The refusal for a target NAME the account resolves only through an alias.
+
+    :func:`promote_collision` would say the account has a team of that name and
+    advise replacing it — both false: no row bears the name, and a replace of it
+    finds nothing to overwrite and refuses identically. Renaming the alias-owning
+    row is exactly what a confirmation of THIS command cannot authorize, so the
+    sentence names the key, its owner, and the one edit that moves it.
+    """
+
+    return (
+        f"your account has no team named {name!r}; that key is an alias of "
+        f"{owner!r}, so promoting would rename {owner!r} out from under the name "
+        "its own users know, and nothing was promoted. Rename or drop that alias "
+        f"on {owner!r} (`/team edit {owner}`), then promote again."
     )
 
 

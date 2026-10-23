@@ -758,3 +758,41 @@ def test_a_replace_never_renames_the_team_that_owns_the_nested_name_as_an_alias(
     assert kept.aliases == ["inner"]
     assert all(team.name != "inner" for team in stacks["global_teams"].list_teams())
     assert stacks["global_teams"].get_team_by_name("pod") is None
+
+
+def test_a_target_that_is_only_another_teams_alias_names_the_alias(stacks) -> None:
+    """A target the account holds only as an ALIAS is not a team of that name.
+
+    The generic sentence claimed a team named 'inner' existed and advised
+    `/team promote inner replace`, which refuses identically because replace
+    targets that NAME. The refusal now names the alias and its owner, and the
+    alias edit that actually works (top-level sibling of MINOR-2).
+    """
+
+    _team(stacks["teams"], "inner", manager="manager", members=[])
+    owner = stacks["global_teams"].create_team(
+        TeamEditFields(name="other", manager="manager", aliases=["inner"])
+    )
+
+    with pytest.raises(ValueError) as caught:
+        stacks["teams"].promote("inner", authorized_by=ORIGIN, agents=stacks["agents"])
+
+    text = str(caught.value)
+    assert "no team named 'inner'" in text
+    assert "'other'" in text and "alias" in text
+    assert "/team edit other" in text
+
+    # A confirmed replace is not the remedy, and changes nothing either.
+    with pytest.raises(ValueError) as replaced:
+        stacks["teams"].promote(
+            "inner", replace=True, authorized_by=ORIGIN, agents=stacks["agents"]
+        )
+    assert str(replaced.value) == text
+    kept = stacks["global_teams"].get_team_by_name("other")
+    assert kept is not None and kept.id == owner.id
+    assert kept.name == "other" and kept.aliases == ["inner"]
+
+    # The named remedy works: drop the alias on the owner, then promote.
+    stacks["global_teams"].update_team(owner.id, TeamEditFields(aliases=[]))
+    result = stacks["teams"].promote("inner", authorized_by=ORIGIN, agents=stacks["agents"])
+    assert "inner" in [row["name"] for row in result.created]
