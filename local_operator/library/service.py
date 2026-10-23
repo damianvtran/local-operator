@@ -476,7 +476,12 @@ def list_assets(
         time.sleep(INDEX_RETRY_S)
         try:
             return attempt()
-        except library_store.IndexUnavailable:
+        except library_store.IndexUnavailable as error:
+            if not getattr(error, "corrupt", True):
+                # A busy lock or an I/O hiccup is not damage: rebuilding here
+                # would DISCARD a healthy index to answer a transient error.
+                # The typed refusal is the honest answer; the caller retries.
+                raise LibraryUnavailable(str(config)) from None
             # Still unreadable: the derived file is rebuildable by contract. One
             # recovery, then an empty BUILDING page the indexer repopulates; a
             # failed recovery is a 503, never a 500.

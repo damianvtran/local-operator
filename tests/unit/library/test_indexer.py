@@ -14,10 +14,20 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.library import indexer, service
+from local_operator.library.metadata import MetadataStore
 from local_operator.library.store import LibraryStore
 from local_operator.session.attachments import cache_media
 
-from ._fixtures import OTHER, SESSION, config_root, image_rows, png, session, write_rows
+from ._fixtures import (
+    OTHER,
+    SESSION,
+    config_root,
+    image_rows,
+    png,
+    session,
+    user_row,
+    write_rows,
+)
 
 CHILD = "0123456789ab"
 SECOND = "222222222222"
@@ -65,7 +75,8 @@ def test_a_burst_coalesces_into_one_batch(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(indexer, "MAX_COALESCE_S", 0.05)
     for number in range(40):
         index._mark_dirty(f"session{number}")
-    batch = index.coalesce("first")
+    batch, wake = index.coalesce("first")
+    assert wake is False
     assert len(batch) == 41
     assert index._queue.empty(), "the batch must consume the whole burst"
 
@@ -372,6 +383,14 @@ def test_a_reader_only_process_takes_over_when_the_writer_stops(tmp_path, monkey
     try:
         assert indexer.writer_available(root) is False
         assert reader._thumb_thread is None
+        # Touch the journal FIRST: an unchanged one is skipped by signature, so
+        # the assertion below would pass without proving anything. A changed
+        # journal is work the reader-only process must refuse to write.
+        journal = root / "sessions" / SESSION / "transcript.jsonl"
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(user_row("u2", 9.0, "one more turn"), separators=(",", ":")) + "\n"
+            )
         # Nothing may be written while another process owns the index: a scan
         # attempt must leave the revision and the database file untouched.
         with LibraryStore(root).read() as connection:
@@ -507,3 +526,86 @@ def test_recovery_wakes_a_parked_worker(tmp_path, monkeypatch) -> None:
             break
         time.sleep(0.05)
     assert rows, "the worker must rebuild immediately after recovery"
+
+
+def test_a_wake_mid_batch_is_not_a_session_id(tmp_path, monkeypatch) -> None:
+    """QA Q-2: ``coalesce`` absorbed the sentinel and the reconcile was lost."""
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    indexer.rebuild_now(root)
+    index = indexer.LibraryIndexer(root)
+
+    # A wake that arrives while a batch is settling still flags the reconcile
+    # and never appears in the dirty set.
+    index._queue.put(indexer._WAKE)
+    dirty, wake = index.coalesce(SESSION)
+    assert wake is True
+    assert dirty == {SESSION}
+
+    dirty, wake = index.coalesce(indexer._WAKE)
+    assert (dirty, wake) == (set(), True)
+    assert indexer._WAKE not in dirty
+
+
+def test_a_wake_during_a_batch_reaches_the_denominator(tmp_path, monkeypatch) -> None:
+    """End to end: recovery's total=0 plus a lost wake left a partial catalog ready."""
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    session(root, OTHER, write_rows("w2", 2.0, written(root, "other.txt")))
+    indexer.rebuild_now(root)
+
+    index = indexer.LibraryIndexer(root)
+    store = LibraryStore(root)
+    # Recovery's reset: the denominator is gone and the build is "not started".
+    with store.write() as connection:
+        store.set_state(
+            connection,
+            **{"sessions_total": "0", "backfill_done": "0", "sessions_scanned": "0"},
+        )
+        connection.execute("DELETE FROM idx_occurrences")
+        connection.execute("DELETE FROM idx_assets")
+
+    index._queue.put(OTHER)
+    first = index._queue.get(timeout=1)
+    index._queue.put(indexer._WAKE)
+    batch, wake = index.coalesce(first)
+    index.process_dirty(batch)
+    assert wake is True
+    index.reconcile()
+
+    state = indexer.index_state(root)
+    assert state["total"] == 2
+    assert state["backfill_done"] == "0", "journals exist, so the build is not done"
+
+
+def test_backfill_never_finishes_on_a_reset_denominator(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    indexer.rebuild_now(root)
+    store = LibraryStore(root)
+    index = indexer.LibraryIndexer(root)
+
+    with store.write() as connection:
+        store.set_state(connection, **{"sessions_total": "0", "backfill_done": "0"})
+    index._maybe_finish_backfill()
+    assert store.state()["backfill_done"] == "0"
+
+    # An EMPTY sessions directory may finish on 0: a fresh install is done.
+    (tmp_path / "empty").mkdir()
+    empty = config_root(monkeypatch, tmp_path / "empty")
+    LibraryStore(empty).ensure_schema()
+    indexer.LibraryIndexer(empty)._maybe_finish_backfill()
+    assert LibraryStore(empty).state()["backfill_done"] == "1"
+
+
+def test_a_fresh_database_is_wal_after_first_use(tmp_path, monkeypatch) -> None:
+    """WAL is set at bootstrap; the connection pragma must not be per-connect."""
+    import sqlite3
+
+    root = config_root(monkeypatch, tmp_path)
+    LibraryStore(root).ensure_schema()
+    with sqlite3.connect(root / "library" / "library.sqlite3") as raw:
+        assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    MetadataStore(root).ensure_schema()
+    with sqlite3.connect(root / "library" / "library.sqlite3") as raw:
+        assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "wal"

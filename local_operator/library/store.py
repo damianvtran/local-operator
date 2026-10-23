@@ -44,7 +44,13 @@ from typing import Any, Final, Protocol
 
 from local_operator.library import classify, identity
 from local_operator.library import index as library_index
-from local_operator.library.metadata import DB_DIRNAME, DB_FILENAME, MetadataStore
+from local_operator.library.metadata import (
+    AUTHORITATIVE_TABLES,
+    DB_DIRNAME,
+    DB_FILENAME,
+    MetadataStore,
+    schema_sql,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +84,40 @@ _Q_TOKEN: Final = re.compile(r"[^\W_]+", re.UNICODE)
 _MAX_Q_TERMS: Final = 16
 
 
+#: One whole-database rebuild per process at a time. Two requests that both see
+#: a broken file must not build two replacements and swap them in some order.
+_REBUILD_LOCK: Final = threading.Lock()
+
+
 class IndexUnavailable(RuntimeError):
-    """The derived index cannot be read or written (corrupt, I/O, future schema)."""
+    """The derived index cannot be read or written (corrupt, I/O, future schema).
+
+    ``corrupt`` distinguishes the ONE class recovery may answer — damage to the
+    file, where discarding the derived tables loses nothing — from transient
+    failures (a busy lock, an I/O hiccup) that must NOT trigger a rebuild: the
+    index is healthy and a rebuild would throw it away.
+    """
+
+    def __init__(self, message: str, *, corrupt: bool = True) -> None:
+        super().__init__(message)
+        self.corrupt = corrupt
+
+
+#: ``SQLITE_CORRUPT`` and ``SQLITE_NOTADB``. BUSY (5) and IOERR (10) are
+#: deliberately absent: they say "try again", not "this file is damaged".
+_CORRUPT_CODES: Final = frozenset({11, 26})
+
+
+def _is_corruption(error: sqlite3.DatabaseError) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if code in _CORRUPT_CODES:
+        return True
+    if code is not None:
+        return False
+    # Older SQLite builds do not expose ``sqlite_errorcode``; the message is the
+    # only signal left, and only these two phrases mean damage.
+    text = str(error).lower()
+    return "malformed" in text or "not a database" in text
 
 
 class ListingQuery(Protocol):
@@ -531,7 +569,11 @@ class LibraryStore:
         try:
             connection.row_factory = sqlite3.Row
             try:
-                connection.execute("PRAGMA journal_mode=WAL")
+                # journal_mode is a DATABASE property, not a connection one: it is
+                # persisted in the file, so switching it on every connect only
+                # buys a write lock another connection may already hold (observed
+                # as ``database is locked`` under the librarian's concurrent
+                # reads). ``_ensure_schema`` sets it once, at bootstrap.
                 connection.execute("PRAGMA busy_timeout=5000")
                 connection.execute("PRAGMA synchronous=NORMAL")
             except sqlite3.DatabaseError as error:
@@ -560,7 +602,7 @@ class LibraryStore:
             try:
                 yield connection
             except sqlite3.DatabaseError as error:
-                raise IndexUnavailable(str(error)) from error
+                raise IndexUnavailable(str(error), corrupt=_is_corruption(error)) from error
 
     @contextmanager
     def write(self) -> Iterator[sqlite3.Connection]:
@@ -572,7 +614,7 @@ class LibraryStore:
             except BaseException as error:
                 connection.rollback()
                 if isinstance(error, sqlite3.DatabaseError):
-                    raise IndexUnavailable(str(error)) from error
+                    raise IndexUnavailable(str(error), corrupt=_is_corruption(error)) from error
                 raise
             connection.commit()
 
@@ -588,6 +630,10 @@ class LibraryStore:
             if self._key in self._ready_paths:
                 return True
             try:
+                # Bootstrap only, and inside the guard: WAL mode needs no open
+                # transaction, and a dead connection must surface as the typed
+                # refusal, not as a bare ``ProgrammingError``.
+                connection.execute("PRAGMA journal_mode=WAL")
                 # The metadata tables are AUTHORITATIVE and owned by
                 # ``MetadataStore``; three triggers below attach to them, so they
                 # must exist before this script runs. A derived table may never
@@ -652,16 +698,21 @@ class LibraryStore:
     def recover_derived(self) -> bool:
         """Discard the derived index and recreate an empty one. Never raises.
 
-        It must not go through :meth:`_connect`: that runs ``_ensure_schema``,
-        whose ``CREATE ... IF NOT EXISTS`` over a MALFORMED ``idx_*`` table fails
-        with the very ``IndexUnavailable`` this method exists to clear — the
-        recovery then answered 503 forever (QA Q-3). So this opens a raw
-        connection and runs DROP + CREATE + the counter reset as ONE script
-        inside one ``BEGIN IMMEDIATE``: a failure halfway rolls back and the next
-        attempt starts from the same state.
+        Two paths, because a damaged index fails in two different ways:
 
-        AUTHORITATIVE tables are never touched, so names, tags and favourites
-        survive a corrupt index.
+        * A MALFORMED table cannot be repaired through ``_connect`` — its
+          ``_ensure_schema`` fails on the very table recovery must drop — so the
+          fast path opens a raw connection and runs DROP + CREATE + the counter
+          reset as ONE script inside one ``BEGIN IMMEDIATE``. A failure halfway
+          rolls back and the next attempt starts from the same state.
+        * A TORN b-tree cannot even be dropped: SQLite cannot free a page whose
+          root or header is damage, so the DROP itself answers ``database disk
+          image is malformed`` (QA Q-1). That case falls back to
+          :meth:`_rebuild_database`, which copies the authoritative tables into
+          a fresh file and swaps it in.
+
+        AUTHORITATIVE tables are never discarded, so names, tags, favourites and
+        edits survive a corrupt index.
         """
         try:
             # The cached readiness would short-circuit the schema work.
@@ -670,48 +721,153 @@ class LibraryStore:
             # ``MetadataStore`` owns them.
             if not MetadataStore(self.config_dir).ensure_schema():
                 return False
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(self.path, timeout=5.0)
-            try:
-                connection.execute("PRAGMA busy_timeout=5000")
-                script = "\n".join(
-                    [
-                        "BEGIN IMMEDIATE;",
-                        # Statements carry no trailing ";" of their own, and the
-                        # schema block below starts with one: without it the
-                        # script reads "DROP ... CREATE ..." and SQLite refuses.
-                        *[f"{statement};" for statement in self._drop_derived_statements()],
-                        # ``_schema_sql`` is ONE script string, not a list of
-                        # statements: unpacking it would feed SQLite its letters.
-                        _schema_sql(),
-                        "INSERT INTO idx_state(key, value) VALUES('{}', '{}') "
-                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value;".format(
-                            STATE_SCHEMA, SCHEMA_VERSION
-                        ),
-                        *[
-                            "INSERT INTO idx_state(key, value) VALUES('{0}', '{1}') "
-                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value;".format(
-                                key, value
-                            )
-                            for key, value in (
-                                (STATE_REVISION, "0"),
-                                (STATE_BACKFILL_DONE, "0"),
-                                (STATE_SESSIONS_TOTAL, "0"),
-                                (STATE_SESSIONS_SCANNED, "0"),
-                            )
-                        ],
-                        "COMMIT;",
-                    ]
-                )
-                connection.executescript(script)
-            finally:
-                connection.close()
+            self._recreate_derived()
             self._ready_paths.add(self._key)
             logger.info("library: derived index rebuilt after an unreadable file")
             return True
+        except sqlite3.DatabaseError as error:
+            # The damage is inside a b-tree this script must free. Only a new
+            # file can be built from what is still readable.
+            logger.warning(
+                "library: derived tables cannot be dropped (%s); rebuilding the database",
+                error,
+            )
         except Exception:  # noqa: BLE001 - a failed recovery is a 503, not a crash
             logger.warning("library: derived index recovery failed", exc_info=True)
             return False
+        return self._rebuild_database()
+
+    def _recreate_derived(self) -> None:
+        """DROP + CREATE + reset in one transaction. Raises on failure."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.path, timeout=5.0)
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.executescript(self._recreate_derived_script())
+        finally:
+            connection.close()
+
+    def _recreate_derived_script(self) -> str:
+        return "\n".join(
+            [
+                "BEGIN IMMEDIATE;",
+                # Statements carry no trailing ";" of their own, and the schema
+                # block below starts with one: without it the script reads
+                # "DROP ... CREATE ..." and SQLite refuses.
+                *[f"{statement};" for statement in self._drop_derived_statements()],
+                # ``_schema_sql`` is ONE script string, not a list of
+                # statements: unpacking it would feed SQLite its letters.
+                _schema_sql(),
+                *[f"{statement};" for statement in self._state_reset_statements()],
+                "COMMIT;",
+            ]
+        )
+
+    @staticmethod
+    def _state_reset_statements() -> list[str]:
+        return [
+            "INSERT INTO idx_state(key, value) VALUES('{0}', '{1}') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value;".format(key, value)
+            for key, value in (
+                (STATE_SCHEMA, SCHEMA_VERSION),
+                # ``STATE_SESSIONS_TOTAL`` is left UNSET rather than 0 by callers
+                # that know better; the rebuild has no way to know the visible
+                # set, so 0 is honest here and ``_maybe_finish_backfill`` treats
+                # "0 owed" as unknown while journals exist.
+                (STATE_REVISION, "0"),
+                (STATE_BACKFILL_DONE, "0"),
+                (STATE_SESSIONS_TOTAL, "0"),
+                (STATE_SESSIONS_SCANNED, "0"),
+            )
+        ]
+
+    def _rebuild_database(self) -> bool:
+        """Copy the authoritative tables into a fresh file and swap it in.
+
+        The metadata tables live in their own btrees, so a torn DERIVED table
+        leaves them readable. This builds the replacement beside the original,
+        copies row-for-row through ``ATTACH``, and ``os.replace``s it — the
+        original is never edited, so a failure leaves it exactly as it was.
+
+        Transactions and locking: one process-wide lock means two requests
+        cannot swap at once, and the caller's cooldown keeps a persistently
+        unreadable file from paying this repeatedly. The replacement is built in
+        rollback-journal mode so the single file is complete when it is moved;
+        the old ``-wal``/``-shm`` are removed after the swap because they belong
+        to the file that no longer exists at that path.
+        """
+        with _REBUILD_LOCK:
+            try:
+                # A second request may have waited on this lock while the first
+                # rebuilt the file. If the DDL now runs, the repair is done and
+                # a second copy would only churn the disk.
+                self._recreate_derived()
+                self._ready_paths.add(self._key)
+                return True
+            except sqlite3.DatabaseError:
+                pass
+            temp = self.path.with_name(
+                f"{self.path.name}.rebuild-{os.getpid()}-{threading.get_ident()}"
+            )
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                for suffix in ("", "-wal", "-shm", "-journal"):
+                    Path(f"{temp}{suffix}").unlink(missing_ok=True)
+                fresh = sqlite3.connect(temp)
+                try:
+                    fresh.executescript(schema_sql())
+                    fresh.execute("ATTACH DATABASE ? AS old", (str(self.path),))
+                    try:
+                        fresh.execute("BEGIN IMMEDIATE")
+                        for table in AUTHORITATIVE_TABLES:
+                            columns = self._copy_columns(fresh, table)
+                            if not columns:
+                                continue
+                            listing = ", ".join(columns)
+                            fresh.execute(
+                                f"INSERT INTO main.{table}({listing}) "
+                                f"SELECT {listing} FROM old.{table}"
+                            )
+                        fresh.execute("COMMIT")
+                    finally:
+                        fresh.execute("DETACH DATABASE old")
+                    # Derived tables and triggers, then the reset. Authoritative
+                    # rows are already in place, so the triggers fire on nothing.
+                    fresh.executescript(_schema_sql())
+                    fresh.executescript(
+                        "BEGIN IMMEDIATE;" + "".join(self._state_reset_statements()) + "COMMIT;"
+                    )
+                finally:
+                    fresh.close()
+                self._swap_in_database(temp)
+                logger.info("library: rebuilt the database from its metadata tables")
+                return True
+            except Exception:  # noqa: BLE001 - refusal, never a crash
+                logger.warning("library: database rebuild failed", exc_info=True)
+                for suffix in ("", "-wal", "-shm", "-journal"):
+                    try:
+                        Path(f"{temp}{suffix}").unlink(missing_ok=True)
+                    except OSError:
+                        continue
+                return False
+
+    def _swap_in_database(self, temp: Path) -> None:
+        """Replace the database with ``temp`` and drop the old file's WAL.
+
+        The ``-wal``/``-shm`` belong to the file that is being replaced: leaving
+        them would attach another database's pages to this path. A method of its
+        own so the tests can prove two concurrent recoveries swap exactly once.
+        """
+        for suffix in ("-wal", "-shm"):
+            Path(f"{self.path}{suffix}").unlink(missing_ok=True)
+        os.replace(temp, self.path)
+
+    @staticmethod
+    def _copy_columns(connection: sqlite3.Connection, table: str) -> list[str]:
+        """Columns present in BOTH files: a migrated table may differ by one."""
+        fresh = [str(row[1]) for row in connection.execute(f"PRAGMA main.table_info({table})")]
+        old = [str(row[1]) for row in connection.execute(f"PRAGMA old.table_info({table})")]
+        return [name for name in fresh if name in set(old)]
 
     @staticmethod
     def _state_value(connection: sqlite3.Connection, key: str) -> str | None:
@@ -763,14 +919,14 @@ class LibraryStore:
             state = self._state(connection)
             scanned = self._count_sessions(connection, complete=True)
             total = self._int_state(state, STATE_SESSIONS_TOTAL)
-        if state.get(STATE_BACKFILL_DONE, "0") == "1" or self._sessions_dir_empty():
+        if state.get(STATE_BACKFILL_DONE, "0") == "1" or self.sessions_dir_empty():
             # An EMPTY journal directory is a finished empty index, not a build
             # in progress: a fresh install must open on "ready" with an empty
             # Library, not on a scanning spinner that never ends.
             return ("ready", scanned, total)
         return ("building", scanned, total)
 
-    def _sessions_dir_empty(self) -> bool:
+    def sessions_dir_empty(self) -> bool:
         """One ``scandir`` probe; it answers on the first entry of a real store."""
         try:
             with os.scandir(self.config_dir / "sessions") as entries:

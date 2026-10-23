@@ -483,21 +483,21 @@ class LibraryIndexer:
                     except Exception:  # noqa: BLE001 - keep the worker alive
                         logger.warning("library: periodic reconcile failed", exc_info=True)
                     continue
-                if first == _WAKE:
-                    # A recovery or an explicit kick wants the backfill to start
-                    # now rather than on the next 6 h tick.
-                    try:
-                        self.reconcile()
-                    except Exception:  # noqa: BLE001 - keep the worker alive
-                        logger.warning("library: wake reconcile failed", exc_info=True)
-                    continue
                 if self._stop.is_set() or not first:
                     continue
-                batch = self.coalesce(first)
+                batch, wake = self.coalesce(first)
                 try:
                     self.process_dirty(batch)
                 except Exception:  # noqa: BLE001 - one bad session must not stop the index
                     logger.warning("library: session batch failed", exc_info=True)
+                if wake:
+                    # A recovery or an explicit kick wants the backfill to start
+                    # now rather than on the next 6 h tick. Reconcile AFTER the
+                    # batch so the sessions it scanned keep their rows.
+                    try:
+                        self.reconcile()
+                    except Exception:  # noqa: BLE001 - keep the worker alive
+                        logger.warning("library: wake reconcile failed", exc_info=True)
         finally:
             self._stop_observer()
 
@@ -544,14 +544,25 @@ class LibraryIndexer:
 
     # -- coalescing ---------------------------------------------------------
 
-    def coalesce(self, first: str) -> set[str]:
+    def coalesce(self, first: str) -> tuple[set[str], bool]:
         """Absorb a burst into one batch: settle ~0.5 s, never longer than 2 s.
+
+        Returns ``(dirty_session_ids, wake)``. The wake sentinel is DROPPED here,
+        not added to the batch: it is not a session id, and letting it through
+        meant ``scan_session`` scanned a session called ``\x00library-wake`` and
+        the reconcile the recovery asked for never ran.
 
         Exposed (rather than inlined in the loop) because that is the unit the
         tests exercise: OS events are not reproducible in CI, the dirty-set
         contract is.
         """
-        dirty: set[str] = {first} if first else set()
+        dirty: set[str] = set()
+        wake = first == _WAKE
+        if first and not wake:
+            dirty.add(first)
+        if wake:
+            # Nothing to settle: the caller wants a reconcile, not a batch.
+            return dirty, True
         start = time.monotonic()
         settle = start + SETTLE_S
         hard = start + MAX_COALESCE_S
@@ -565,7 +576,9 @@ class LibraryIndexer:
                     item = self._queue.get(timeout=timeout)
                 except queue.Empty:
                     continue
-                if item:
+                if item == _WAKE:
+                    wake = True
+                elif item:
                     dirty.add(item)
                 continue
             # The settle window has passed: take whatever is already queued and
@@ -574,9 +587,11 @@ class LibraryIndexer:
                 item = self._queue.get_nowait()
             except queue.Empty:
                 break
-            if item:
+            if item == _WAKE:
+                wake = True
+            elif item:
                 dirty.add(item)
-        return dirty
+        return dirty, wake
 
     # -- scanning -----------------------------------------------------------
 
@@ -632,6 +647,13 @@ class LibraryIndexer:
 
     def scan_session(self, session_id: str) -> bool:
         """Index one session if its journal moved. Returns whether it was scanned."""
+        if not writer_available(self.config_dir):
+            # Single-writer rule, enforced at the WRITE boundary and not only by
+            # the loop that calls this: a reader-only process may serve reads for
+            # its whole life, and a direct scan must not slip a write past the
+            # flock (the strengthened takeover test caught exactly that).
+            logger.debug("library: scan skipped for %s; another process owns the index", session_id)
+            return False
         session_dir = self.config_dir / "sessions" / session_id
         if not session_dir.is_dir():
             self._forget(session_id)
@@ -742,6 +764,12 @@ class LibraryIndexer:
         if state.get(STATE_BACKFILL_DONE) == "1":
             return
         if self.store.incomplete_sessions():
+            return
+        if int(state.get(STATE_SESSIONS_TOTAL) or 0) == 0 and not self.store.sessions_dir_empty():
+            # Recovery resets the denominator to 0, and "0 owed" would otherwise
+            # read as "nothing to do": with rows on disk and journals present
+            # that marks a PARTIAL catalog finished and parks the worker for 6 h
+            # (QA Q-2). Only an empty sessions directory may finish on 0.
             return
         with self.store.write() as connection:
             self.store.set_state(

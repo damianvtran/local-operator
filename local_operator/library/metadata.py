@@ -76,6 +76,31 @@ CREATE TABLE IF NOT EXISTS edits(
 CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
+
+#: The AUTHORITATIVE tables, in an order where nothing references a table that
+#: has not been created yet. The derived index's whole-database rebuild copies
+#: exactly these; anything not listed here is derived and may be discarded.
+AUTHORITATIVE_TABLES: Final = (
+    "assets",
+    "tags",
+    "asset_tags",
+    "chats",
+    "chat_history",
+    "conventions",
+    "edits",
+    "state",
+)
+
+
+def schema_sql() -> str:
+    """The authoritative schema script, for the index's whole-database rebuild.
+
+    Kept as a function rather than a bare import so the rebuild path reads as
+    "create the metadata schema", not as reaching into a private constant.
+    """
+    return _SCHEMA
+
+
 #: Primary tags live in ``state`` because §3.1 freezes the table set and
 #: ``asset_tags`` has no primary column. One key per asset is the assignment;
 #: deleting/merging the tag clears it. This is the same "small durable fact in
@@ -158,7 +183,10 @@ class MetadataStore:
         try:
             connection.row_factory = sqlite3.Row
             try:
-                connection.execute("PRAGMA journal_mode=WAL")
+                # journal_mode is persisted in the file, so it is set once at
+                # bootstrap (``_ensure_schema``), never per connection: asking
+                # for it here takes a write lock and answers "database is
+                # locked" while another connection is writing.
                 connection.execute("PRAGMA busy_timeout=5000")
                 connection.execute("PRAGMA foreign_keys=OFF")
             except sqlite3.DatabaseError as error:
@@ -189,6 +217,9 @@ class MetadataStore:
             if self._key in self._ready_paths:
                 return True
             try:
+                # Bootstrap only, outside any transaction: WAL is a database
+                # property, and a dead connection belongs in the typed refusal.
+                connection.execute("PRAGMA journal_mode=WAL")
                 connection.executescript(_SCHEMA)
                 connection.execute(
                     "INSERT OR IGNORE INTO state(key, value) VALUES('metadata_revision', '0')"
