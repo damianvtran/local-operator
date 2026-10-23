@@ -589,7 +589,7 @@ checks when available.
 | AC6 | A user-requested creation is global: created via a user surface, or via the tool with `scope='global'` **plus a recorded user grant**, and visible in every global picker | integration test |
 | AC7 | Promotion (with grant + confirmation) copies a session role to the global store with provenance; a later, separate session sees it; the session copy still works | promote test + second-session read |
 | AC8 | Promotion of a team copies its session-scoped members (or refuses, naming them); a promoted team launches in another session | promote test; launch in a second session |
-| AC9 | A name collision is refused with the reason, or honours `replace` only when confirmed; no partial writes | negative tests |
+| AC9 | A name collision is refused with the reason, or honours `replace` only when confirmed; no partial writes within a live process, and a SIGKILL leaves at most the members written so far — never a team row whose roster does not resolve (no journal exists; re-promoting collides with a named remedy) | negative tests |
 | AC10 | Deleting the session removes its roles/teams; the global store is untouched; retention sweep has the same effect | cleanup tests |
 | AC11 | No regression: existing global create/list/launch, `/agent class`, schedules, hub and mesh flows behave identically | existing suites + focused regression |
 | AC12 | Guidance is present where the model reads it (tool docs, both guides) and the recommender never leaks session rows outside the session | doc-drift tests + pilot |

@@ -495,7 +495,9 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
-from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
+from local_operator.tui.widgets.status_line import (
+    AGENT_PROFILE_CELLS,
+)
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
@@ -20490,7 +20492,9 @@ class OperatorApp(App[None]):
             return []
         if first.lower() in {"chart", "edit", "promote"} and space:
             # Second slot: names feed the chart, the installed-team editor, or the
-            # promote rehearsal (which then offers its own `replace`/`yes` rows).
+            # promote rehearsal. The rehearsal takes its `replace`/`yes` flags as
+            # typed words: it offers team names here, and no flag rows (review
+            # round 1, NIT-2 — the old comment claimed rows that never existed).
             return [
                 ArgumentChoice(
                     f"{first.lower()} {team.name}",
@@ -21706,12 +21710,12 @@ class OperatorApp(App[None]):
     def _cmd_promote(self, kind: str, rest: str, notice: NoticeFn) -> None:
         """``/agent promote <name>`` / ``/team promote <name>`` — copy, rehearsed.
 
-        Two-step by construction (see :mod:`local_operator.tui.promote_verb`): a
-        bare call runs the SAME preflight with ``dry_run=True`` and reports what a
-        confirmed call would write, and only the ``yes`` spelling commits. That is
-        the confirmation design §7 asks for without a second picker or a modal —
-        the rehearsal names exactly the definitions, and under ``replace`` exactly
-        the ones that would be overwritten.
+        The grammar and the receipts live in :mod:`local_operator.promote_slash`,
+        SHARED with the runtime owner's dispatchers: ``/agent`` and ``/team`` are
+        authoritative-session commands, so a live terminal's line never reaches
+        this method (QA round 1, Q1). This branch still runs where nothing routes,
+        and it must word the confirmation exactly as the owner does — which is why
+        it delegates instead of composing its own notice.
 
         Runs in a worker: the promotion reads and writes both registries on disk
         and takes the composite write lock, none of which may park the event loop.
@@ -21719,94 +21723,41 @@ class OperatorApp(App[None]):
         command on this surface, which is what the account-write rule requires.
         """
 
-        from local_operator.i18n.keys import tui_authoring as keys
-        from local_operator.i18n.text import tr
-        from local_operator.tui.promote_verb import parse_promote
+        from local_operator.session.frontend_state import SlashResult
 
-        translate = tr("tui.authoring")
-        request = parse_promote(rest)
-        if request is None:
-            self._system_notice(
-                translate(keys.promote_usage(command=f"/{kind} promote")), "warning"
-            )
-            return
         session = self._session
         if session is None:
             self._system_notice(*self._no_session_notice())
             return
-        if kind == "agent":
-            registry = getattr(session, "agent_registry", None)
-            agents = registry
-        else:
-            registry = self._team_registry()
-            agents = getattr(session, "agent_registry", None)
-        if registry is None or not hasattr(registry, "promote"):
-            self._system_notice(
-                translate(keys.promote_failed(reason=translate(keys.registry_missing()))),
-                "warning",
-            )
-            return
         self.run_worker(
-            self._promote_worker(kind, registry, agents, request, notice),
+            self._promote_worker(kind, rest, SlashResult),
             thread=False,
             group="session",
         )
 
-    async def _promote_worker(
-        self, kind: str, registry: Any, agents: Any, request: Any, notice: NoticeFn
-    ) -> None:
-        """Run one promote (rehearsal or committed) off the loop and report it."""
+    async def _promote_worker(self, kind: str, rest: str, SlashResult: Any) -> None:
+        """Run the SHARED promote grammar off the loop and paint its notice."""
 
         import asyncio
 
-        from local_operator.i18n.keys import tui_authoring as keys
-        from local_operator.i18n.text import tr
-        from local_operator.profile_scope import promote_missing
+        from local_operator.promote_slash import notice_kind, promote_receipt
 
-        translate = tr("tui.authoring")
-
-        def run(*, dry_run: bool):
-            kwargs = {
-                "as_name": request.as_name,
-                "replace": request.replace,
-                "authorized_by": "surface:tui",
-                "dry_run": dry_run,
-            }
-            if kind == "team":
-                kwargs["agents"] = agents
-            return registry.promote(request.name, **kwargs)
-
-        try:
-            if not request.confirmed:
-                plan = await asyncio.to_thread(run, dry_run=True)
-                created = [row["name"] for row in plan.created]
-                lines: list[str] = []
-                if created:
-                    lines.append(translate(keys.promote_plan(names=", ".join(created))))
-                if plan.replaced:
-                    lines.append(
-                        translate(keys.promote_replace_plan(names=", ".join(plan.replaced)))
-                    )
-                # A plan always names at least one row (the composite refuses a
-                # call that would write nothing), so an empty pair is unreachable.
-                self._system_notice("\n".join(lines), "info")
-                return
-            result = await asyncio.to_thread(run, dry_run=False)
-        except KeyError:
-            noun = "agent" if kind == "agent" else "team"
-            self._system_notice(
-                translate(keys.promote_failed(reason=promote_missing(noun, request.name))),
-                "warning",
-            )
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
             return
-        except Exception as error:  # noqa: BLE001 — every failure here is a refusal
-            # ``PromotionIncomplete`` and the composite's preflight ValueErrors are
-            # English sentences meant to be read verbatim; a registry I/O failure is
-            # reported the same way rather than crashing the app mid-keystroke.
-            self._system_notice(translate(keys.promote_failed(reason=str(error))), "warning")
-            return
-        names = [row["name"] for row in result.created] + list(result.replaced)
-        notice(translate(keys.promote_receipt(names=", ".join(names))))
+        result = await asyncio.to_thread(
+            promote_receipt,
+            session,
+            kind,
+            rest,
+            SlashResult,
+            agents=getattr(session, "agent_registry", None),
+        )
+        self._system_notice(
+            str(getattr(result, "text", "") or ""),
+            notice_kind(str(getattr(result, "style", "") or "info")),
+        )
 
     def _cmd_agent(
         self,
@@ -41876,10 +41827,13 @@ class OperatorApp(App[None]):
                 self._notice(_loop_status_line(data), "info")
                 return
         if text:
-            notice_kind: NoticeKind = "warning" if style == "warning" else "info"
-            if style == "error":
-                notice_kind = "error"
-            self._notice(text, notice_kind)
+            # ``notice_kind`` rather than an inline warning/else: a promotion
+            # rehearsal is ``note`` and its receipt is ``success`` (LOH-9 S4),
+            # and the two branches that render one must agree on those tiers or
+            # the same sentence changes weight depending on which host ran it.
+            from local_operator.promote_slash import notice_kind as _notice_kind
+
+            self._notice(text, _notice_kind(style))  # type: ignore[arg-type]
         # The goal/attach mutation happened on the OWNER (that is where session
         # context lives); the request is sent from HERE so it carries this
         # terminal's own images and paste expansion, and so the transcript row

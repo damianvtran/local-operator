@@ -539,3 +539,85 @@ def test_the_documented_cap_is_positive() -> None:
     # The bound is a contract the refusal text quotes; a zero would make every
     # team promotion refuse, which no test above would otherwise notice.
     assert MAX_PROMOTION_ROWS > 1
+
+
+def test_a_team_promotion_holds_the_agent_composites_lock(stacks, monkeypatch) -> None:
+    """The team lock alone is not enough: it plans and writes AGENT rows.
+
+    Proven by CONTENTION rather than by inspection: with the agent composite's
+    lock held elsewhere, a team promotion must wait for it (and, past the bound,
+    refuse in words). Before the fix it took only the team lock, so an `agent
+    promote` (agent lock only) could pass the same member name as free while the
+    team plan did, and both wrote — leaving two account rows with one name
+    (agent review round 1, MAJOR-1).
+    """
+
+    from local_operator import profile_scope
+
+    _session_role(stacks["agents"], "helper")
+    _team(stacks["teams"], "pod", manager="manager", members=["helper"])
+    monkeypatch.setattr(profile_scope, "WRITE_LOCK_TIMEOUT_S", 0.05)
+
+    # Held from ANOTHER thread: the composite's lock is an RLock, so the same
+    # thread would simply re-enter it and prove nothing.
+    import threading
+
+    lock = stacks["agents"].write_lock
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        lock.acquire()
+        held.set()
+        release.wait(10)
+        lock.release()
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert held.wait(10)
+    try:
+        with pytest.raises(TimeoutError, match="role write lock"):
+            stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+    finally:
+        release.set()
+        thread.join(10)
+
+    # The refusal wrote nothing, and the team lock it took first was released.
+    assert stacks["global_teams"].get_team_by_name("pod") is None
+    assert stacks["global_agents"].get_agent_by_name("helper") is None
+    assert stacks["teams"].write_lock.acquire(timeout=0.1)
+    stacks["teams"].write_lock.release()
+
+
+def test_a_double_rollback_failure_reports_BOTH_remainders(stacks, monkeypatch) -> None:
+    """An inner stuck row is carried into the outer report (MINOR-2).
+
+    ``_create_agent`` raises ``PromotionIncomplete`` naming its own row when its
+    own rollback fails, and that row is not in the caller's undo list — the
+    create raised before registering a step. Rebuilding the message from the
+    outer list alone dropped it, so the receipt under-reported the residue.
+    """
+
+    _session_role(stacks["agents"], "alpha", prompt="alpha prompt\n")
+    _session_role(stacks["agents"], "beta", prompt="beta prompt\n")
+    _team(stacks["teams"], "pod", manager="manager", members=["alpha", "beta"])
+
+    real_prompt = stacks["global_agents"].set_agent_system_prompt
+
+    def prompt_boom(_id, text):
+        if text == "beta prompt\n":
+            raise OSError("prompt write failed")
+        return real_prompt(_id, text)
+
+    def delete_boom(_id):
+        raise OSError("agent store locked")
+
+    monkeypatch.setattr(stacks["global_agents"], "set_agent_system_prompt", prompt_boom)
+    monkeypatch.setattr(stacks["global_agents"], "delete_agent", delete_boom)
+
+    with pytest.raises(PromotionIncomplete) as caught:
+        stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+
+    names = {row["name"] for row in caught.value.remaining}
+    assert names == {"alpha", "beta"}, caught.value.remaining
+    assert "alpha" in str(caught.value) and "beta" in str(caught.value)

@@ -133,3 +133,24 @@ def test_require_writable_refuses_an_unappendable_file(tmp_path: Path) -> None:
             require_writable(tmp_path)
     finally:
         provenance_path(tmp_path).chmod(0o600)
+
+
+def test_a_failed_rotation_records_nothing(tmp_path: Path, monkeypatch) -> None:
+    """Rotate BEFORE appending: a rotation failure leaves no row (MINOR-1).
+
+    Appending first meant a rotation that then failed left the batch in the
+    index while the caller rolled the promotion back — the index named ids that
+    no longer existed, and the user was told nothing had been promoted.
+    """
+
+    monkeypatch.setattr(role_provenance, "MAX_PROVENANCE_BYTES", 1)
+    append_promotions(tmp_path, [_record(name="old")])
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full during rotation")
+
+    monkeypatch.setattr(role_provenance, "_atomic_write", boom)
+    with pytest.raises(OSError, match="disk full during rotation"):
+        append_promotions(tmp_path, [_record(name="new")])
+
+    assert [row["name"] for row in read_promotions(tmp_path)] == ["old"]

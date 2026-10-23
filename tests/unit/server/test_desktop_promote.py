@@ -257,3 +257,69 @@ async def test_capabilities_advertises_profile_promote(promote_api) -> None:
     # Its own key, not a bump: a renderer that predates it keeps every row it
     # already parses and simply offers no promote action.
     assert features["profile_scope"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_answers_the_plan_and_writes_nothing(promote_api) -> None:
+    """The client can name every row a ``confirm_replace`` would overwrite.
+
+    A team ``replace`` cascades to colliding members and nested teams, which the
+    client cannot see from its own screen; the rehearsal answers the same plan
+    the confirmation is built from (agent review round 1, MINOR-3).
+    """
+
+    client, session_id, pool = promote_api
+    async with pool.session(session_id) as bridge:
+        await _seed_role(bridge, "helper", prompt="Help.\n")
+        teams = bridge.remote.team_registry
+        teams.create_team(
+            TeamEditFields(
+                name="pod",
+                manager="helper",
+                members=parse_members(["helper"]),
+                instructions="Collaborate.",
+            ),
+            scope="session",
+        )
+        # Promote the role first, so the team's member now COLLIDES in the
+        # account and the plan has a replaced row to name.
+        promoted = await client.post(
+            f"/v1/desktop/sessions/{session_id}/promote",
+            json=_request(session_id, name="helper"),
+        )
+        rehearsal = await client.post(
+            f"/v1/desktop/sessions/{session_id}/promote",
+            json=_request(session_id, kind="team", name="pod", confirm_replace=True, dry_run=True),
+        )
+        account_team = teams.global_registry.get_team_by_name("pod")
+
+    assert promoted.status_code == 200
+    assert rehearsal.status_code == 200
+    payload = rehearsal.json()["result"]
+    assert payload["dry_run"] is True
+    assert payload["promoted"]["replaced"] == ["helper"]
+    assert [row["name"] for row in payload["promoted"]["created"]] == ["pod"]
+    # A rehearsal writes nothing — the account has no team row to read back.
+    assert account_team is None
+
+
+@pytest.mark.asyncio
+async def test_a_peer_session_is_409_not_404(promote_api, monkeypatch) -> None:
+    """A conversation on another device answers the family's 409.
+
+    Its roles live on that device; this build cannot write them there, and a 404
+    about a row the user can see is the lie the sibling write routes already
+    refuse to tell (agent review round 1, MINOR-4).
+    """
+
+    from local_operator.server.utils import desktop_mesh
+
+    client, session_id, _pool = promote_api
+    monkeypatch.setattr(desktop_mesh, "remote_owner", lambda _root, _sid: ("dev-b", "Studio"))
+
+    response = await client.post(
+        f"/v1/desktop/sessions/{session_id}/promote", json=_request(session_id)
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "session_is_remote"

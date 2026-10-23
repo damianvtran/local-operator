@@ -21,9 +21,11 @@ BOUNDED BY CONSTRUCTION
 =======================
 
 An append-only file that nothing rotates grows without limit, so every append
-first checks the file's size and, past :data:`MAX_PROVENANCE_BYTES`, rewrites it
-with the most recent :data:`MAX_PROVENANCE_ROWS` rows. The rewrite is atomic
-(temp file + ``os.replace``) under the same lock, so a reader never sees a
+first checks whether the batch would cross :data:`MAX_PROVENANCE_BYTES` and, if
+it would, rewrites the file with the most recent rows before appending. Rotating
+BEFORE the append is what makes an unwritable index fail with nothing recorded
+rather than with rows for a promotion that then rolled back. The rewrite is
+atomic (temp file + ``os.replace``) under the same lock, so a reader never sees a
 truncated index and a crash leaves either the old file or the new one.
 
 The lock is a separate ``.lock`` file rather than the data file itself: a
@@ -195,16 +197,31 @@ def append_promotions(config_dir: str | Path, records: Iterable[Mapping[str, Any
         lines = "".join(
             json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n" for record in prepared
         )
-        with open(target, "a", encoding="utf-8") as handle:
-            handle.write(lines)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if target.stat().st_size > MAX_PROVENANCE_BYTES:
-            kept = read_promotions(root)[-MAX_PROVENANCE_ROWS:]
+        # ROTATE BEFORE APPENDING, not after. Appending first and rotating
+        # second made a rotation failure leave the batch's rows in place while
+        # the caller rolled the promotion back: the index then named ids that no
+        # longer existed, and the user was told nothing had been promoted (review
+        # round 1, MINOR-1). Rotating first means a failure here has written
+        # NEITHER the definitions nor their rows, which is the order the
+        # all-or-nothing rule actually needs.
+        #
+        # The keep-count leaves room for this batch, so one append cannot push
+        # the file past MAX_PROVENANCE_ROWS even when the batch is the bound
+        # itself (``MAX_PROMOTION_ROWS``).
+        if (
+            target.exists()
+            and target.stat().st_size + len(lines.encode("utf-8")) > MAX_PROVENANCE_BYTES
+        ):
+            keep = max(MAX_PROVENANCE_ROWS - len(prepared), 0)
+            kept = read_promotions(root)[-keep:] if keep else []
             _atomic_write(
                 target,
                 "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in kept),
             )
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write(lines)
+            handle.flush()
+            os.fsync(handle.fileno())
     return [record["id"] for record in prepared]
 
 

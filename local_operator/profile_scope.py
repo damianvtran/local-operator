@@ -328,10 +328,16 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
         # The copy already exists HERE; what is missing is the user's own act on a
         # surface that can show them exactly what will be copied.
         noun = "/agent promote" if intent.kind == "agent" else "/team promote"
+        # The remedy names only what exists: the TUI verb, and the desktop
+        # session route as a capability (``POST …/sessions/<id>/promote``) rather
+        # than a button. Round 1 (U3) caught the copy naming a desktop action no
+        # client in this slice draws; a surface that cannot be found is not a
+        # remedy.
         return (
-            f"{opening} Ask them to use the desktop's Use-in-all-conversations action "
-            f"or the TUI `{noun} {intent.name}` verb: both name exactly what will be "
-            "copied, and neither can be run on their behalf."
+            f"{opening} Ask them to promote it themselves: `{noun} {intent.name}` in "
+            "the TUI, or the desktop client's promote action where that client offers "
+            "one (the session promote route). Both name exactly what will be copied, "
+            "and neither can be run on their behalf."
         )
     if intent.kind == "team":
         action = "the TUI `/team` form"
@@ -682,11 +688,17 @@ class ScopedAgentRegistry:
                         }
                     ],
                 )
-            except BaseException:
+            except BaseException as error:
                 remaining = _undo_all(undo)
                 if remaining:
+                    # Only when the OUTER undo left rows: with no outer remainder
+                    # the caught exception already names its own stuck row, and
+                    # re-wrapping it would replace that precise sentence with the
+                    # generic one (MINOR-2 is about not LOSING a remainder, not
+                    # about re-wording a complete one).
+                    merged = _carried_remaining(error, remaining)
                     raise PromotionIncomplete(
-                        _incomplete_message("agent", target, remaining), remaining
+                        _incomplete_message("agent", target, merged), merged
                     ) from None
                 raise
             return PromoteResult(
@@ -701,6 +713,9 @@ class ScopedAgentRegistry:
 
         Runs under the caller's write section: the collision check and the write
         must share one lock, or two promotions of the same name both pass it.
+        Callers must therefore hold the AGENT composite's lock — a team promotion
+        holds both composites' (see :meth:`ScopedTeamRegistry.promote`), because
+        it plans and writes agent rows through this same planner.
         """
 
         from local_operator.agent_profiles import is_role, is_specialist
@@ -941,7 +956,22 @@ class ScopedTeamRegistry:
         from local_operator.teams import validate_team_name
 
         requested = str(name or "").strip()
-        with _write_section(self):
+        # BOTH composites' write locks, in the order team -> agent.
+        #
+        # A team promotion writes AGENT rows (its conversation-scoped members)
+        # through the agent composite's private writers, and those deliberately
+        # take no lock of their own. Holding only the TEAM lock left the member
+        # preflight and an `agent promote` (which takes only the AGENT lock) able
+        # to pass the same name as free and both write it; `save_agent` has no
+        # uniqueness guard, so the result was two account rows with one name and
+        # a resolver that returns whichever it finds first (agent review round
+        # 1, MAJOR-1).
+        #
+        # The ORDER is fixed team -> agent because it is the only path that ever
+        # holds both: an agent write takes the agent lock alone and a team write
+        # takes the team lock alone, so no caller can hold agent and wait for
+        # team. A fixed order is what keeps that true.
+        with _write_section(self), _write_section(agents):
             source = self.session_registry.get_team_by_name(requested)
             if source is None:
                 if self.global_registry.get_team_by_name(requested) is not None:
@@ -992,9 +1022,20 @@ class ScopedTeamRegistry:
                 team_plans.append((nested, member_target, member_existing))
             role_provenance.require_writable(self.config_dir)
 
+            # ``created`` is what the call would CREATE, exactly as the committed
+            # result's list is: a row in ``replaced`` is not also a creation, or
+            # a rehearsal would tell the user it is making a copy of something it
+            # is about to overwrite (agent review round 1, MINOR-3's confirmation
+            # quality — the desktop client builds its sentence from this plan).
             planned: list[dict[str, Any]] = [
-                {"kind": "agent", "name": plan.target, "id": ""} for plan in agent_plans
-            ] + [{"kind": "team", "name": plan[1], "id": ""} for plan in team_plans]
+                {"kind": "agent", "name": plan.target, "id": ""}
+                for plan in agent_plans
+                if plan.existing is None
+            ] + [
+                {"kind": "team", "name": plan[1], "id": ""}
+                for plan in team_plans
+                if plan[2] is None
+            ]
             if existing is None:
                 planned.append({"kind": "team", "name": target, "id": ""})
             if dry_run:
@@ -1105,11 +1146,17 @@ class ScopedTeamRegistry:
                     }
                 )
                 provenance_ids = role_provenance.append_promotions(self.config_dir, records)
-            except BaseException:
+            except BaseException as error:
                 remaining = _undo_all(undo)
                 if remaining:
+                    # Only when the OUTER undo left rows: with no outer remainder
+                    # the caught exception already names its own stuck row, and
+                    # re-wrapping it would replace that precise sentence with the
+                    # generic one (MINOR-2 is about not LOSING a remainder, not
+                    # about re-wording a complete one).
+                    merged = _carried_remaining(error, remaining)
                     raise PromotionIncomplete(
-                        _incomplete_message("team", target, remaining), remaining
+                        _incomplete_message("team", target, merged), merged
                     ) from None
                 raise
             return PromoteResult(
@@ -1332,9 +1379,9 @@ def promote_collision(kind: str, name: str) -> str:
     article = "an" if kind == "agent" else "a"
     return (
         f"your account already has {article} {kind} named {name!r}, so promoting would "
-        "overwrite it; nothing was copied. Confirm the overwrite (the desktop "
-        f"action's replace, or `{verb} {name} replace` in the TUI) and retry, or "
-        "promote under another name."
+        "overwrite it; nothing was copied. Confirm the overwrite (the desktop promote "
+        f"request's `confirm_replace`, or `{verb} {name} replace` in the TUI) and "
+        "retry, or promote under another name."
     )
 
 
@@ -1472,6 +1519,31 @@ def _account_team_keys(
         if found is not None and str(found.id) != str(skip_id or ""):
             return found
     return None
+
+
+def _carried_remaining(
+    error: BaseException, remaining: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The rows BOTH failures left behind, de-duplicated by row identity.
+
+    A nested failure names its own stuck row in ``PromotionIncomplete.remaining``
+    (the create's rollback did not finish), and that row is not in the outer undo
+    list — the create raised before registering a step — so rebuilding the
+    message from the outer list alone silently dropped it (review round 1,
+    MINOR-2). Identity is ``(kind, id)``: the same row can only be named once.
+    """
+
+    carried = list(getattr(error, "remaining", ()) or ())
+    if not carried:
+        return remaining
+    merged = list(remaining)
+    seen = {(str(row.get("kind")), str(row.get("id"))) for row in merged}
+    for row in carried:
+        key = (str(row.get("kind")), str(row.get("id")))
+        if key not in seen:
+            merged.append(row)
+            seen.add(key)
+    return merged
 
 
 def _undo_all(undo: list[tuple[dict[str, Any], Callable[[], None]]]) -> list[dict[str, Any]]:
