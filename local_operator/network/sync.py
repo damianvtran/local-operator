@@ -132,6 +132,32 @@ CREATED_AT_NAME = "created_at.json"
 #: module that owns it, so the duplication cannot drift.
 COPY_SET_NAMES: tuple[str, ...] = (
     TRANSCRIPT_NAME,
+    # THE TRANSCRIPT'S ARCHIVE FORMS (``compression.ARCHIVE_FILENAMES``), spelled
+    # here because this module must import standalone. They ARE the transcript: a
+    # compressed session is one whose body is ``transcript.jsonl.gz``/``.zst``
+    # instead of ``transcript.jsonl``, and ``compression.restore_for_write`` turns
+    # it back into the plain file this layer's protocol is written in.
+    #
+    # WHY THE ACCOUNTING MATTERS EVEN THOUGH THE ARCHIVE NEVER TRAVELS. A
+    # deleting move asks ``assert_complete`` BEFORE anything restores the
+    # transcript (``mobility._source_prepare``, deliberately: the question "would
+    # this delete something we cannot carry" is answered before the conversation
+    # is stopped), so an archive that no list names refuses the move with
+    # ``unlisted_content`` — and the sentence it prints offers "move or remove
+    # it" as the remedy, which for a compressed session is the only copy of the
+    # conversation. Compression is on by default, so this was every session past
+    # ``after_days``. Leaving them OUT of ``EXCLUDED_ENTRIES`` is the same point
+    # from the other side: excluding the transcript would let a deleting move
+    # proceed without it if the restore ever failed.
+    #
+    # What makes the pair harmless is that the prepare restores the archive
+    # before anything is digested or served: the plan names ``transcript.jsonl``
+    # with the plain bytes, and the archive is gone. In the window before that,
+    # both names are accounted for; neither is ever carried under its own name
+    # (``_member_stamps`` skips a member that is absent, and the restore is what
+    # retires the archive).
+    "transcript.jsonl.zst",
+    "transcript.jsonl.gz",
     "title.json",
     "attachment.json",
     "origin.json",
@@ -445,16 +471,30 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # completeness check would have to account for a file that is meaningful
     # only where it was taken.
     ".transcript.lock": "a per-device writer lock, meaningful only where it was taken",
+    # THE PARKED PLAIN JOURNAL OF A CRASH-INTERRUPTED COMPRESSION
+    # (``session/compression.QUARANTINE_NAME``, ``.transcript.jsonl.quarantine``).
+    # The pass publishes the VERIFIED archive first and only then renames the plain
+    # file here, so a surviving quarantine always has a byte-identical archive beside
+    # it, and ``restore_for_write`` renames it back to the plain name before any byte
+    # is served. Excluded rather than carried because carrying it would be a second
+    # name for the transcript on a destination that also restored the archive; left
+    # unclassified it would refuse the move of a session whose only sin is a crash
+    # during the compression pass, with "remove it" as the remedy.
+    ".transcript.jsonl.quarantine": (
+        "a crash-interrupted compression's parked plain journal, restored by the "
+        "next write and duplicated by the verified archive beside it"
+    ),
     # The listing cache written beside an archive at compression time
     # (``session/compression.PREVIEW_SIDECAR_NAME``): two condensed strings
     # ABOUT the transcript's tail, derived from bytes the copy carries anyway.
-    # Excluded rather than copied because it is a cache, not a fact about the
-    # conversation: a destination that restores and appends DELETES it, and one
-    # that never compresses would keep a document describing an archive it did
-    # not write. The cost of leaving it behind is one bounded tail read on the
-    # first listing; the cost of carrying it is a second source of truth about
-    # a transcript.
-    "preview.json": "a listing cache derived from the archive's tail; the destination rewrites it",
+    # Excluded because it is a cache, not a fact about the conversation: the
+    # transcript itself arrives (as the plain journal the restore publishes) and
+    # the destination rebuilds this document from that transcript's own tail on
+    # the first listing that needs it — ``resume._tail_entries`` writes the
+    # sidecar after the read — so carrying it would be a second source of truth
+    # about a transcript to save exactly nothing. Leaving it behind costs one
+    # bounded tail read, once: the process that paid it records the answer.
+    "preview.json": "a listing cache derived from the archive's tail; the destination rebuilds it",
 }
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading
@@ -1402,6 +1442,27 @@ def _restore_for_serving(directory: Path) -> bool:
         # restore_for_write already folds its own failures; this covers a path
         # that vanished under it, which the caller reports as a missing session.
         return False
+
+
+def restore_transcript(directory: Path) -> bool:
+    """Make ``directory``'s transcript PLAIN before this layer digests or serves it.
+
+    THE INVARIANT, SPELLED ONCE. Sync's protocol is written in plain-journal bytes:
+    a plan publishes offsets and digests into ``transcript.jsonl`` and a fetch
+    serves ranges of that file, so a compressed session is restored to the plain
+    form before any byte is described (see :func:`_restore_for_serving`).
+    ``build_manifest`` has always done that for the plan it builds. Callers that
+    digest the copy set BEFORE a manifest exists — ``mobility._source_prepare``
+    hashes every member while the source is still running, so the stop covers the
+    copy rather than the digest — have to restore first: a stamp taken from
+    ``transcript.jsonl.gz`` describes a member the plan will not name, and the
+    ``stamps_valid`` re-check then reads the archive's removal by the restore as a
+    change and refuses a move that already happened (review round 3, M-1).
+
+    ``False`` when nothing needed restoring OR the restore failed; a caller that
+    needs the two apart asks :func:`compression.unreadable_archive_error`.
+    """
+    return _restore_for_serving(directory)
 
 
 def build_manifest(
