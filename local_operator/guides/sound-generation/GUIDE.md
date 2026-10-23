@@ -113,7 +113,8 @@ login picks them up at the NEXT session start.
   now." (`audio_rate_limited`). The harness retries that refusal four times
   with backoff — attempts at 0, 10, 30 and 65 s — then reports it as a busy
   failure (not a quota one), with the window it waited out in the receipt
-  (`4 attempts over 65 s`). The 65 s is sized against the server's own
+  (`4 attempts over 65 s`; a batch adds jitter, so up to ~75 s). The 65 s is
+  sized against the server's own
   45 s hold on a running vendor call (`ElevenLabsSpeechTimeout`), not guessed:
   a shorter ladder exhausted inside that window. Only the admission refusal is
   retried (it creates no job and charges nothing); timeouts, network errors and
@@ -160,15 +161,16 @@ at 11) waits out the hold and retries instead of failing:
   65 s. Since 65 s clears the 45 s hold, the resumed items are admitted without
   the caller needing to know slots exist.
 - An exhausted ladder reads `Audio platform at capacity: 4 attempts over 65 s.`
-  (details carry `error_type: audio_rate_limited`, `attempts` and
-  `capacity_window_s`), so a genuinely sustained shortage is distinguishable
-  from a one-off stop.
+  — that sentence is the receipt on a single call and on each batch row, whose
+  details carry the attempt list and `error_type: audio_rate_limited`. It is
+  what distinguishes a genuinely sustained shortage from a one-off stop.
 - Jitter between parallel workers only ever LENGTHENS a wait (1.0–1.15×), so a
   desynchronised retry cannot land back inside the hold.
 
 The trade: a batch is still bounded by one 225 s tool call, and under constant
 capacity a long batch could spend its budget waiting for admission. A 3-item
-resume's worst case is about 65 s of waiting plus one generation.
+resume waits at least 65 s — up to about 75 s with jitter — plus one
+generation.
 
 ## Naming the result
 

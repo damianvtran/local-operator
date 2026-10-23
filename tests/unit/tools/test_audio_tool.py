@@ -1308,9 +1308,12 @@ class _SlotServer:
     It models the ONE server fact this regression turns on: a cancel does not
     abort a running vendor call (agent-server's
     ``TestRunningCancelDoesNotAbortTheCall``), so an abandoned job keeps its
-    per-account slot until the provider's ``ElevenLabsSpeechTimeout`` — 45 s.
-    ``clock`` is virtual: the rung's own poll and submit waits advance it, so a
-    45 s hold costs the test no wall time, and no vendor is ever called.
+    per-account slot until the provider's ``ElevenLabsSpeechTimeout``. The hold
+    here runs 45 s from the ABANDON, where the contract measures it from the
+    call — deliberately stricter than the server, so the window can never be
+    shorter than production's. ``clock`` is virtual: the rung's own poll and
+    submit waits advance it, so the hold costs the test no wall time, and no
+    vendor is ever called.
     """
 
     HOLD_S = 45.0
@@ -1555,6 +1558,66 @@ async def test_a_resumed_batch_waits_out_the_work_a_stop_abandoned(monkeypatch):
     assert server.clock - resumed_at >= _SlotServer.HOLD_S
     # A fresh signal: nothing from the stopped call survived into this one.
     assert resumed_signal.aborted is False
+
+
+@pytest.mark.asyncio
+async def test_a_three_item_batch_spends_on_admission_but_not_its_whole_budget(monkeypatch):
+    """The ladder cannot eat the 225 s batch budget on a 3-item resume.
+
+    The reviewer's N1: a constant-vs-constant comparison proves nothing, so this
+    runs the scheduling question instead. The same two-slot server with ZERO
+    free slots refuses every submit for good — the worst admission case. Two
+    workers exhaust their ladders, the queued third item then exhausts its own,
+    and the batch still returns at its admission cost instead of being cut off
+    by ``SOUND_BATCH_TIMEOUT_S``: every row is a FAILED capacity receipt, never
+    "Never started" or a deadline cancellation.
+    """
+    from local_operator.audiogen import cascade, rungs
+
+    monkeypatch.setattr(cascade.audio_availability, "radient_available", lambda cfg=None: True)
+    monkeypatch.setattr(cascade.audio_availability, "elevenlabs_key", lambda cfg=None: None)
+    monkeypatch.setattr(cascade.audio_availability, "openai_audio_key", lambda cfg=None: None)
+
+    server = _SlotServer(capacity=0)
+    monkeypatch.setattr(rungs, "_submit_sleep", server.sleep)
+    monkeypatch.setattr(rungs.random, "uniform", lambda low, high: 1.0)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(server.handle)) as client:
+
+        async def route(route, **kwargs):
+            assert route == AudioRoute.RADIENT
+            return await rungs.run_radient(
+                kwargs["spec"],
+                base_url="https://fixture.invalid/v1",
+                credential="tok",
+                handle=kwargs["handle"],
+                emit=kwargs["emit"],
+                pause=server.sleep,
+                client=client,
+            )
+
+        monkeypatch.setattr(cascade, "_run_route", route)
+        result = await audio_tool.execute_generate_sound_effect(
+            "full",
+            {"sounds": [{"prompt": f"sound-{n}", "duration_s": 0.5} for n in range(3)]},
+            None,
+            None,
+            None,
+        )
+
+    details = _details(result)
+    assert (details["completed"], details["failed"], details["cancelled"]) == (0, 3, 0)
+    assert "Batch time budget reached" not in _text(result)
+    for row in details["artifacts"]:
+        assert row["status"] == "failed"
+        # The receipt names the attempts; its exact duration is asserted once, in
+        # test_rungs' fake-clock case (two ladders share this virtual clock, so
+        # its elapsed figure is a model artefact, not a wall time).
+        assert "Audio platform at capacity: 4 attempts over" in row["error"]
+        assert row["http_status"] == 429
+    # The admission cost, not the deadline: the batch stopped because the ladder
+    # gave up, and it did so inside its own budget. A longer ladder fails here.
+    assert server.clock < audio_tool.SOUND_BATCH_TIMEOUT_S
 
 
 def test_hub_reason_error_appends_the_reason_and_keeps_typed_fields() -> None:

@@ -170,9 +170,9 @@ SUBMIT_MAX_ATTEMPTS = 4
 #: The trade, stated where the constants live: ``SOUND_BATCH_TIMEOUT_S`` stays
 #: 225 s (``tools.audio_tool``). Under sustained capacity a 14-item batch on 2
 #: workers could spend 7 rounds x 65 s on admission alone, while the reported
-#: 3-item resume's worst case is ~65 s plus one generation. Raising the batch
-#: budget instead would let a stuck batch outlive the tool call's own bound, so
-#: the ladder is what gives.
+#: 3-item resume waits at least 65 s — 65-74.75 s with the jitter above —
+#: plus one generation. Raising the batch budget instead would let a stuck
+#: batch outlive the tool call's own bound, so the ladder is what gives.
 SUBMIT_BACKOFF_S = (10.0, 20.0, 35.0)
 #: The batch jitter MULTIPLIER. It only ever LENGTHENS a wait: two workers
 #: still desynchronise, but the floor never drops below the hold the ladder is
@@ -353,16 +353,14 @@ def _is_transient_api_error(exc: APIError) -> bool:
 def _is_admission_refusal(exc: APIError) -> bool:
     """Whether this submit failure is the admission bound (retryable) — nothing else.
 
-    Two spellings count: the HTTP status (429) and the contract's code
-    (``audio_rate_limited``) in either the parsed ``code`` or the details map.
-    A 429 from an INTERMEDIARY would not be safe to retry blindly, so the code
-    is what decides when it is present; the bare status is the fallback for a
-    deployment whose body is not JSON.
+    THE STATUS IS THE GUARD, and it is read before anything else: only HTTP 429
+    is the admission bound. A body may repeat the contract's code on ANY status,
+    and trusting the code first retried a 5xx carrying ``audio_rate_limited`` —
+    the one case the ladder's own rule forbids, because a request that may have
+    been accepted can be billed twice by a re-POST (review M1). A status-less
+    error is not an admission refusal either: the ladder is for a response that
+    said "refused", never for an unknown outcome.
     """
-    if exc.code == "audio_rate_limited":
-        return True
-    if exc.details.get("error_type") == "audio_rate_limited":
-        return True
     return exc.status_code == 429
 
 
