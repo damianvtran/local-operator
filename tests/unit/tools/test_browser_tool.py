@@ -2504,3 +2504,189 @@ def test_brackets_inside_a_quoted_locator_value_are_content() -> None:
     assert "unbalanced" in builtin._locator_shape_problem('role=checkbox[name="Active"')
     assert "unterminated" in builtin._locator_shape_problem('role=checkbox[name="Active]')
     assert "unterminated" in builtin._locator_shape_problem('role=checkbox[name="Active')
+
+
+# --- query: the read-only DOM answer -----------------------------------------
+#
+# The incident's most useful unanswered question was "what is the id/name/role
+# of the checkbox next to Active?". `read` returns no attributes, `snapshot`
+# returns an AX tree, and there is no eval. These tests pin the answer's wire
+# shape and its rendering, plus the boundaries that keep it read-only and
+# bounded.
+
+QUERY_RESULT = {
+    "count": 2,
+    "truncated": False,
+    "matches": [
+        {
+            "tag": "input",
+            "id": "hook_active_55a1",
+            "name": "hook[active]",
+            "role": "checkbox",
+            "ariaLabel": "",
+            "text": "",
+            "type": "checkbox",
+            "visible": True,
+            "inView": True,
+            "disabled": False,
+            "checked": True,
+            "value": "on",
+            "rect": {"x": 1, "y": 2, "width": 3, "height": 4},
+        },
+        {
+            "tag": "input",
+            "id": "hook_url_66b2",
+            "name": "hook[url]",
+            "role": "",
+            "ariaLabel": "Webhook URL",
+            "text": "",
+            "type": "url",
+            "visible": False,
+            "inView": False,
+            "disabled": True,
+            "checked": None,
+            "value": "",
+            "rect": {"x": 0, "y": 0, "width": 0, "height": 0},
+        },
+    ],
+}
+
+
+def test_query_forwards_the_selector_and_limit(monkeypatch) -> None:
+    sent = _bridge_result(monkeypatch, QUERY_RESULT)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "query", "selector": "input[type=checkbox]", "limit": 5},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert sent[-1]["action"] == "query"
+    assert sent[-1]["params"]["selector"] == "input[type=checkbox]"
+    assert sent[-1]["params"]["limit"] == 5
+
+
+def test_query_renders_the_identity_an_agent_asked_for(monkeypatch) -> None:
+    _bridge_result(monkeypatch, QUERY_RESULT)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "query", "selector": "input"},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "2 matches for 'input'" in result.text
+    # The answer to the measured question, on one line.
+    assert 'input#hook_active_55a1[name="hook[active]"] type=checkbox role=checkbox' in result.text
+    assert "visible, in view, checked" in result.text
+    assert "NOT visible" in result.text and "disabled" in result.text
+    assert result.details["count"] == 2
+
+
+def test_query_says_when_the_page_has_more_than_it_showed(monkeypatch) -> None:
+    _bridge_result(
+        monkeypatch, {"count": 400, "truncated": True, "matches": QUERY_RESULT["matches"]}
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "query", "selector": "input", "limit": 2},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "the page has 400" in result.text
+    assert "narrow the selector" in result.text
+
+
+def test_query_with_no_matches_is_an_answer_not_an_error(monkeypatch) -> None:
+    _bridge_result(monkeypatch, {"count": 0, "truncated": False, "matches": []})
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "query", "selector": "#nope"},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "nothing in the document matches this selector" in result.text
+
+
+def test_query_refuses_a_missing_selector_and_a_locator(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx())
+    missing = _run(tool, "t1", {"action": "query"}, _secret_ctx(surface_id="bridge:9:nonce"))
+    assert missing.is_error is True
+    assert "'query' requires a selector" in missing.text
+
+    locator = _run(
+        tool,
+        "t2",
+        {"action": "query", "selector": 'role=checkbox[name="Active"]'},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+    assert locator.is_error is True
+    assert "resolve a click/type TARGET" in locator.text
+
+
+def test_query_limit_is_bounded_and_start_is_not_its_parameter(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx())
+    too_many = _run(
+        tool,
+        "t1",
+        {"action": "query", "selector": "input", "limit": builtin.QUERY_MAX_ELEMENTS + 1},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+    assert too_many.is_error is True
+    assert "narrow the selector instead of asking for more" in too_many.text
+
+    wrong_field = _run(
+        tool,
+        "t2",
+        {"action": "query", "selector": "input", "start": 2},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+    assert wrong_field.is_error is True
+    assert "'start' only valid for 'snapshot'" in wrong_field.text
+
+
+def test_query_is_refused_on_cmux_with_the_other_read_actions(monkeypatch) -> None:
+    """cmux has no page-script primitive; the degrade must name `query` too."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "query", "selector": "input"},
+        _with_surface("surface:3"),
+    )
+
+    assert result.is_error is True
+    assert "query" in result.text
+    assert not [call for call in fake.calls if call[3:4] == ["query"]]
+
+
+def test_a_malformed_query_count_does_not_break_the_answer(monkeypatch) -> None:
+    """R1-1 (query round 1): `count` is model input, not a trusted integer."""
+    for broken in ({}, "abc", None):
+        _bridge_result(
+            monkeypatch,
+            {"count": broken, "truncated": False, "matches": QUERY_RESULT["matches"]},
+        )
+        tool = builtin.build_browser_tool(_ctx())
+        result = _run(
+            tool,
+            "t1",
+            {"action": "query", "selector": "input"},
+            _secret_ctx(surface_id="bridge:9:nonce"),
+        )
+        assert not result.is_error, (broken, result.text)
+        assert "2 matches for 'input'" in result.text
