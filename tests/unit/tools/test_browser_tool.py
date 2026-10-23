@@ -2313,9 +2313,7 @@ def test_a_context_cut_page_does_not_name_a_next_start(monkeypatch) -> None:
     assert not result.is_error, result.text
     assert "cut to fit the context" in result.text
     assert "pass start=" not in result.text
-<<<<<<< HEAD
     assert "lines 1-50 of 900" in result.text
-=======
 
 
 # --- accessibility locators --------------------------------------------------
@@ -2405,7 +2403,22 @@ def test_a_ref_click_keeps_its_existing_copy(monkeypatch) -> None:
     assert result.text.startswith("Clicked e57 (no navigation).")
 
 
+def test_a_locator_is_accepted_for_upload_too(monkeypatch) -> None:
+    """R1-5: `upload` resolves through the same target path, so a locator works."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "upload", "selector": 'label="Choose file"', "paths": []},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+    # The paths list is empty, so this refuses on THAT — never on the locator.
+    assert "locator" not in result.text.lower()
+
+
 def test_a_locator_is_refused_where_only_css_makes_sense(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     tool = builtin.build_browser_tool(_ctx())
     for action in ("snapshot", "read", "scroll"):
         result = _run(
@@ -2418,6 +2431,38 @@ def test_a_locator_is_refused_where_only_css_makes_sense(monkeypatch) -> None:
         assert "role= locators resolve a click/type TARGET" in result.text or (
             "snapshot takes a CSS selector" in result.text
         ), (action, result.text)
+
+
+def test_a_malformed_locator_is_not_blamed_on_the_host() -> None:
+    """R1-3: an unterminated quote is the CALLER's typo, not an old host.
+
+    Before this, any `internal` error on a locator-shaped selector said "this
+    browser host predates accessibility locators. Update the desktop app" — the
+    wrong remedy, and the same misdiagnosis class `_capability_message` exists
+    to avoid.
+    """
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    class HostThatSaysNo:
+        host = "extension"
+
+        async def call(self, action, params):
+            raise BridgeError(ErrorCode.INTERNAL, "DOM Error while querying")
+
+    _result, problem = asyncio.run(
+        builtin._bridge_call(
+            "t1",
+            "click",
+            {"selector": 'role=checkbox[name="Active'},
+            surface="bridge:9:nonce",
+            client=HostThatSaysNo(),
+        )
+    )
+
+    assert problem is not None and problem.is_error
+    assert "unterminated" in problem.text
+    assert "predates accessibility locators" not in problem.text
 
 
 def test_an_old_host_treating_a_locator_as_css_is_explained(monkeypatch) -> None:
@@ -2449,4 +2494,13 @@ def test_an_old_host_treating_a_locator_as_css_is_explained(monkeypatch) -> None
     assert problem is not None and problem.is_error
     assert "predates accessibility locators" in problem.text
     assert "snapshot ref" in problem.text
->>>>>>> eaa7bb97b7 (feat(browser): resolve accessibility locators on click and type)
+
+
+def test_brackets_inside_a_quoted_locator_value_are_content() -> None:
+    """Round-2 residual: `text="Array [1]"` is well-formed, not trailing content."""
+    assert builtin._locator_shape_problem('text="Array [1]"') == ""
+    assert builtin._locator_shape_problem('role=checkbox[name="Active [x]"]') == ""
+    # Balanced quotes, unbalanced bracket: the bracket is what is wrong.
+    assert "unbalanced" in builtin._locator_shape_problem('role=checkbox[name="Active"')
+    assert "unterminated" in builtin._locator_shape_problem('role=checkbox[name="Active]')
+    assert "unterminated" in builtin._locator_shape_problem('role=checkbox[name="Active')

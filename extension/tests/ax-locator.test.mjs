@@ -172,3 +172,79 @@ test("a suggestion resolves back to the element it named", async () => {
     await close();
   }
 });
+
+test("a locator with trailing content is refused, not half-interpreted", async () => {
+  // Agent review round 1, R1-1: reading up to the first closing quote DROPPED the
+  // caller's constraint — `[checked]` vanished and `please` vanished — so the
+  // locator selected something the caller never asked for.
+  const { loaded, close } = await load("src/driver/ax-locator.ts");
+  try {
+    assert.equal(loaded.parseLocator('role=checkbox[name="Active"][checked]'), null);
+    assert.equal(loaded.parseLocator('text="Submit" please'), null);
+    assert.equal(loaded.parseLocator('label="Home" "Work"'), null);
+    // Unterminated quotes and unbalanced brackets are CSS, not half a locator.
+    assert.equal(loaded.parseLocator('role=checkbox[name="Active'), null);
+    assert.equal(loaded.parseLocator("role=checkbox[name=Active"), null);
+    // A bare value may not smuggle a bracket past the grammar.
+    assert.equal(loaded.parseLocator("text=Create [GitHub] App"), null);
+  } finally {
+    await close();
+  }
+});
+
+test("a suggestion whose name contains a quote still resolves to it", async () => {
+  // Agent review round 1, R1-2: JSON.stringify quoting without unescaping made
+  // the suggestion parse to a TRUNCATED name and resolve to nothing.
+  const { loaded, close } = await load("src/driver/ax-locator.ts");
+  try {
+    const nodes = [
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "" }, childIds: ["2", "3", "4"] },
+      { nodeId: "2", backendDOMNodeId: 1, role: { value: "button" }, name: { value: 'Say "yes" now' }, childIds: [] },
+      { nodeId: "3", backendDOMNodeId: 2, role: { value: "button" }, name: { value: "back\\\\slash" }, childIds: [] },
+      { nodeId: "4", backendDOMNodeId: 3, role: { value: "button" }, name: { value: 'it\'s "both"' }, childIds: [] },
+    ];
+    for (const node of [nodes[1], nodes[2], nodes[3]]) {
+      const locator = loaded.locatorFor(node.role.value, node.name.value);
+      const parsed = loaded.parseLocator(locator);
+      assert.ok(parsed, `unparseable suggestion: ${locator}`);
+      const hit = loaded.resolveLocator(nodes, parsed);
+      assert.ok(hit, `suggestion resolved to nothing: ${locator}`);
+      assert.equal(hit.name, node.name.value, `${locator} resolved to ${hit.name}`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test("label*= and text*= are the documented substring spellings", async () => {
+  const { loaded, close } = await load("src/driver/ax-locator.ts");
+  try {
+    assert.deepEqual(loaded.parseLocator("label*=Home"), { kind: "label", name: "Home", substring: true });
+    assert.deepEqual(loaded.parseLocator("text*=Create"), { kind: "text", name: "Create", substring: true });
+    // The undocumented pre-review spelling is gone, and falls through to CSS.
+    assert.equal(loaded.parseLocator("label=*=Home"), null);
+  } finally {
+    await close();
+  }
+});
+
+test("a single-quoted suggestion escapes backslashes like a double-quoted one", async () => {
+  // Residual from round 2: the single-quote branch quoted a name containing `"`
+  // but did not escape `\`, while `readValue` unescapes under both quote styles,
+  // so `C:\path "quoted"` came back as `C:path "quoted"`.
+  const { loaded, close } = await load("src/driver/ax-locator.ts");
+  try {
+    const name = 'C:\\path "quoted"';
+    const nodes = [
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "" }, childIds: ["2"] },
+      { nodeId: "2", backendDOMNodeId: 7, role: { value: "button" }, name: { value: name }, childIds: [] },
+    ];
+    const locator = loaded.locatorFor("button", name);
+    assert.ok(locator.startsWith("role=button[name='"), locator);
+    const hit = loaded.resolveLocator(nodes, loaded.parseLocator(locator));
+    assert.ok(hit, locator);
+    assert.equal(hit.name, name);
+  } finally {
+    await close();
+  }
+});

@@ -288,7 +288,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # the field's own description to the doc — the deliberate cost of the value
     # never appearing in the transcript (incident: a literal password in `type`
     # reached a subagent's transcript, where no shape pass could see it).
-    "browser": 1316,
+    "browser": 1361,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
