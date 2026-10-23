@@ -980,6 +980,28 @@ def test_a_first_line_with_nothing_printable_falls_back_to_the_checkout() -> Non
     assert body["name"] == f"lop exec repo@{SHA[:7]}"
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # A lone combining acute: it attaches to the character before it, and
+        # here there is none, so the row would paint a blank name.
+        "\u0301",
+        "\u0301\u0302 \u20dd",
+        # Enclosing mark (Me) on its own is the same empty row.
+        "\u20dd",
+    ],
+)
+def test_a_first_line_of_only_marks_falls_back_to_the_checkout(prompt: str) -> None:
+    """N5 — a mark with no base character paints nothing, so it is not a name."""
+    assert RunSpec(**_fields(prompt=prompt)).to_body()["name"] == f"lop exec repo@{SHA[:7]}"
+
+
+def test_a_marked_letter_still_names_the_run() -> None:
+    """The fallback must not swallow a normal accented word: ``é`` decomposes."""
+    name = RunSpec(**_fields(prompt="cafe\u0301 review\nmore")).to_body()["name"]
+    assert name == "cafe\u0301 review"
+
+
 def test_a_given_name_is_carried_exactly_as_typed() -> None:
     given = "  audit · 日本  "
     assert RunSpec(**_fields(name=given)).to_body()["name"] == given
@@ -995,6 +1017,69 @@ def test_a_blank_or_oversize_given_name_is_refused(given: str) -> None:
     """
     with pytest.raises(ValueError, match="at most 100 bytes of UTF-8"):
         RunSpec(**_fields(name=given))
+
+
+def test_the_trim_this_client_measures_with_is_the_server_s_trim() -> None:
+    """N1 — ``str.strip`` is WIDER than Go's ``strings.TrimSpace``.
+
+    Python's ``isspace`` adds U+001C-U+001F, so a client that measured with
+    ``strip`` read ``"\\x1c" + "a"*100`` as exactly at the bound and sent 101
+    bytes, which the server answers with a 400. The measure has to be the
+    server's own set: Unicode White_Space.
+    """
+    for separator in "\x1c\x1d\x1e\x1f":
+        with pytest.raises(ValueError):
+            RunSpec(**_fields(name=separator + "a" * MAX_RUN_NAME_BYTES))
+        with pytest.raises(ValueError):
+            RunSpec(**_fields(name="a" * MAX_RUN_NAME_BYTES + separator))
+
+
+@pytest.mark.parametrize(
+    "whitespace",
+    [
+        "\t",
+        "\n",
+        "\v",
+        "\f",
+        "\r",
+        " ",
+        "\x85",
+        "\xa0",
+        "\u1680",
+        "\u2000",
+        "\u200a",
+        "\u2028",
+        "\u2029",
+        "\u202f",
+        "\u205f",
+        "\u3000",
+    ],
+)
+def test_every_white_space_code_point_the_server_trims_is_trimmed_here(
+    whitespace: str,
+) -> None:
+    """The other half of N1: a name padded with server-trimmed space is AT the
+    bound, not over it, and is still carried exactly as typed."""
+    given = whitespace * 5 + "a" * MAX_RUN_NAME_BYTES
+    assert RunSpec(**_fields(name=given)).to_body()["name"] == given
+    # And the padding does not buy room: one more character is still refused.
+    with pytest.raises(ValueError):
+        RunSpec(**_fields(name=whitespace * 5 + "a" * (MAX_RUN_NAME_BYTES + 1)))
+
+
+@pytest.mark.parametrize("given", ["a\nb", "a\x00b", "a\x1cb", "a\x7fb"])
+def test_a_given_name_must_be_one_line(given: str) -> None:
+    """Q3 — a run name is a single-line label, so an interior control character
+    is refused rather than shipped to every surface that lists runs."""
+    with pytest.raises(ValueError, match="a single line"):
+        RunSpec(**_fields(name=given))
+
+
+def test_a_given_name_may_be_padded_with_the_whitespace_the_server_trims() -> None:
+    """Q3's other edge: leading/trailing whitespace CONTROLS are trimmed by the
+    server, so they are not the interior newline the refusal is about."""
+    given = "\t \r\n audit \t"
+    assert RunSpec(**_fields(name=given)).to_body()["name"] == given
 
 
 def test_a_spec_with_optionals_sends_them() -> None:

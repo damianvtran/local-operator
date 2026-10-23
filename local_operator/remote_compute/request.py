@@ -127,8 +127,30 @@ MAX_RUN_NAME_BYTES = 100
 #: the whole prompt. It is reserved from the budget rather than added on top.
 RUN_NAME_TRUNCATION_MARK = "…"
 
+#: Unicode White_Space, which is exactly the set Go's ``strings.TrimSpace`` —
+#: the server's own trim — removes. PYTHON'S ``str.strip`` IS A WIDER SET: it
+#: follows ``str.isspace``, whose definition adds the file/group/record/unit
+#: separators U+001C-U+001F (bidirectional class ``B``), so it trims characters
+#: the far end keeps.
+_SERVER_WHITESPACE = (
+    frozenset("\t\n\v\f\r \x85\xa0\u1680\u2028\u2029\u202f\u205f\u3000")
+    # EN QUAD .. HAIR SPACE, the six Zs code points between them.
+    | frozenset(chr(code_point) for code_point in range(0x2000, 0x200B))
+)
+
+#: Categories that ATTACH to a preceding character rather than standing on their
+#: own: non-spacing (Mn) and enclosing (Me) marks. A first line made only of
+#: these paints nothing, so it names a run as badly as a lone NUL does.
+#:
+#: NOT ``Cf``/``Cc``: :func:`_printable_run_name` has already removed those, and
+#: NOT ``Mc`` either, because a spacing combining mark carries its own advance
+#: width and stays visible.
+_NON_SPACING_CATEGORIES = frozenset({"Mn", "Me"})
+
+
 #: The refusal for a name the server would not accept, as ONE message for
-#: both conditions because they have one remedy: leave ``--name`` out.
+#: every condition — blank, over the byte bound, more than one line — because
+#: they have one remedy: leave ``--name`` out.
 #:
 #: WHY NOT A KEYED SENTENCE OF ITS OWN. New English copy needs the five
 #: carried locales translated in the same change, and an unaudited
@@ -139,9 +161,38 @@ RUN_NAME_TRUNCATION_MARK = "…"
 #: in this class already uses, and the dedicated key belongs to the next
 #: translation wave.
 _BLANK_OR_LONG_NAME = (
-    f"a run name must be non-blank and at most {MAX_RUN_NAME_BYTES} bytes of UTF-8; "
+    "a run name must be a single line, non-blank and at most "
+    f"{MAX_RUN_NAME_BYTES} bytes of UTF-8; "
     "leave --name out and one is taken from the prompt"
 )
+
+
+def _server_trim(text: str) -> str:
+    """``text`` with the whitespace the SERVER trims removed from both ends.
+
+    THE MEASUREMENT HAS TO BE THE SERVER'S, or a name is accepted here and
+    refused there as a 400, after an idempotency key was minted. ``str.strip``
+    is wider than Go's ``strings.TrimSpace``: ``"\x1c" + "a"*100`` strips to
+    100 bytes client-side and reaches the far end as 101.
+    """
+    start, end = 0, len(text)
+    while start < end and text[start] in _SERVER_WHITESPACE:
+        start += 1
+    while end > start and text[end - 1] in _SERVER_WHITESPACE:
+        end -= 1
+    return text[start:end]
+
+
+def _has_standing_character(text: str) -> bool:
+    """Whether ``text`` has a character that paints on its own.
+
+    WHITESPACE DOES NOT COUNT, or the single space the collapse leaves between
+    two marks would read as printable content and the fallback would never fire.
+    """
+    return any(
+        unicodedata.category(character) not in _NON_SPACING_CATEGORIES and not character.isspace()
+        for character in text
+    )
 
 
 def _printable_run_name(text: str) -> str:
@@ -203,7 +254,10 @@ def short_repo_name(repo_url: str) -> str:
 
 
 def default_run_name(prompt: str, *, repo_url: str, repo_sha: str) -> str:
-    """The name a run gets when ``--name`` was absent or blank.
+    """The name a run gets when ``--name`` was ABSENT.
+
+    A name that was supplied but blank never reaches here — :func:`resolve_run_name`
+    refuses it — so the only way to this fallback is leaving the flag out.
 
     THE PROMPT'S FIRST LINE, because that is the part of a task an operator
     recognises in a list of runs: the first line is the request, what follows is
@@ -211,14 +265,15 @@ def default_run_name(prompt: str, *, repo_url: str, repo_sha: str) -> str:
     the label is one legible line, and the result is shortened on a character
     boundary so the bytes the server counts still fit.
 
-    THE FALLBACK NAMES THE CHECKOUT, not the operator: a first line that is
-    entirely non-printable (a lone NUL, say) still needs a label, and
+    THE FALLBACK NAMES THE CHECKOUT, not the operator: a first line with nothing
+    printable in it — a lone NUL, or nothing but combining marks that would
+    attach to no base character — still needs a label, and
     ``lop exec <repo>@<sha>`` is the one thing every run of this command has.
     """
     lines = prompt.splitlines()
     first_line = lines[0] if lines else ""
     collapsed = " ".join(_printable_run_name(first_line).split())
-    if collapsed:
+    if collapsed and _has_standing_character(collapsed):
         return _shorten_run_name(collapsed)
     return _shorten_run_name(f"lop exec {short_repo_name(repo_url)}@{repo_sha[:7]}")
 
@@ -236,16 +291,28 @@ def resolve_run_name(
     quietly trimmed or shortened it would be carrying a label the operator did
     not ask for. What it may not be is a name the server refuses, which arrives
     as a 400 after an idempotency key was minted and the work addressed to a
-    host: empty once trimmed, or over ``MAX_RUN_NAME_BYTES`` of UTF-8. Both are
-    refused here instead, and both share ONE sentence at the surface because
-    they share one remedy — leave ``--name`` out.
+    host: empty once trimmed, over ``MAX_RUN_NAME_BYTES`` of UTF-8, or more than
+    one line. All three are refused here instead, and share ONE sentence at the
+    surface because they share one remedy — leave ``--name`` out.
+
+    AN ABSENT NAME IS DERIVED, A BLANK ONE IS REFUSED. Those are different
+    requests: leaving the flag out says "name it for me", while
+    ``--name "$VAR"`` with an empty ``VAR`` says "name it this" and got a
+    substitute. The refusal is how the operator learns the variable was empty.
     """
     if name is None:
         return default_run_name(prompt, repo_url=repo_url, repo_sha=repo_sha)
     if not isinstance(name, str):
         raise ValueError(_BLANK_OR_LONG_NAME)
-    trimmed = name.strip()
+    trimmed = _server_trim(name)
     if not trimmed or len(trimmed.encode("utf-8")) > MAX_RUN_NAME_BYTES:
+        raise ValueError(_BLANK_OR_LONG_NAME)
+    # A RUN NAME IS A LABEL ON A LIST, so an interior control character is not a
+    # formatting choice: it breaks the row, or hides the rest of the label
+    # wherever the name is shown. Leading and trailing WHITESPACE control
+    # characters (\t, \r, \n) are fine because the server trims them; what is
+    # left after ``_server_trim`` is interior, and refused.
+    if any(unicodedata.category(character) == "Cc" for character in trimmed):
         raise ValueError(_BLANK_OR_LONG_NAME)
     return name
 
@@ -269,8 +336,9 @@ class RunSpec:
     default when absent. ``name`` is optional HERE AND REQUIRED THERE: the
     server trims the label and refuses an empty one or one over
     :data:`MAX_RUN_NAME_BYTES` of UTF-8, so a spec never leaves this class
-    without one — an explicit name is carried exactly as given, and an absent or
-    blank one is derived from the prompt by :func:`resolve_run_name`.
+    without one — an explicit name is carried exactly as given, and an absent
+    one is derived from the prompt by :func:`resolve_run_name`. A name that was
+    SUPPLIED but blank is refused, never replaced by a derived one.
     """
 
     prompt: str
@@ -326,11 +394,15 @@ class RunSpec:
         )
 
     def to_body(self) -> dict[str, Any]:
-        """The wire fields, with the two optional ones OMITTED when unset.
+        """The wire fields, with the one optional field OMITTED when unset.
 
         Omitted rather than sent as ``null``: an explicit null for ``budget_usd``
         reads as a choice (no budget) where absence reads as "use the server's
         admission default", and only one of those is what the caller meant.
+
+        ``name`` has no guard because it cannot be unset by the time a body
+        exists: ``__post_init__`` resolves it to a non-empty string, so the
+        conditional that used to sit here was unreachable.
         """
         body: dict[str, Any] = {
             "repo_url": self.repo_url,
@@ -341,8 +413,7 @@ class RunSpec:
             "size": self.size,
             "max_hours": self.max_hours,
         }
-        if self.name:
-            body["name"] = self.name
+        body["name"] = self.name
         if self.budget_usd is not None:
             body["budget_usd"] = self.budget_usd
         return body
