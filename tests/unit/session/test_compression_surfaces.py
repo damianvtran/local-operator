@@ -563,6 +563,7 @@ def test_a_read_only_open_refuses_rather_than_restoring_in_place(
 
     config, directory = archived
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+
     # What a full or unwritable cache volume does: the copy cannot be made. The
     # typed host error, not damage — m-1 split the two, and a read-only caller has
     # to be able to tell "free some space" from "this file is broken".
@@ -593,6 +594,7 @@ def test_the_writer_open_still_restores_when_the_cache_cannot_be_used(
 
     config, directory = archived
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+
     def no_room(*_args: object, **_kwargs: object) -> Path:
         raise compression.ArchiveCacheUnavailable("transcript.jsonl.gz: no room in the cache")
 
