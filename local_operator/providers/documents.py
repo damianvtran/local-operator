@@ -240,8 +240,15 @@ def document_native_ok(block: "DocumentContent", form: DocumentForm | None) -> b
     raw = _decoded(block)
     if raw is None or len(raw) > form.max_bytes:
         return False
+    if form.max_pages is None:
+        return True
     pages = pdf_page_count(raw, block.digest)
-    return pages is None or form.max_pages is None or pages <= form.max_pages
+    # An UNCOUNTABLE PDF is not native: if the page structure cannot be read
+    # here, a provider's own parser is at least as likely to refuse it, and
+    # "send and hope" is exactly what the contract forbids. The fallback then
+    # extracts (or degrades to a reference), which never spends a paid
+    # request on a shape the provider rejects.
+    return pages is not None and pages <= form.max_pages
 
 
 def document_injection(
