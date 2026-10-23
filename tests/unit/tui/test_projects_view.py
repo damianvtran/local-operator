@@ -1163,3 +1163,55 @@ async def test_the_page_declares_rows_the_registry_page_left_out(
     assert view._last is not None
     assert "live-row" in view._last.text.plain
     assert "+1 more not shown" in view._last.text.plain
+
+
+@pytest.mark.asyncio
+async def test_every_canvas_declares_the_registry_page_remainder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M3: board and timeline receive the page count too, not just the list."""
+    from local_operator import projects as projects_module
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_row(tmp_path, "aaa-dormant", "dormant-row", stamp_ns=1_700_000_000_000_000_000)
+    _write_row(tmp_path, "zzz-live", "live-row", stamp_ns=1_700_000_001_000_000_000)
+    session = _ProjectSession()
+    session.project_registry = ProjectRegistry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "live-row")
+        for key, canvas in (("2", "board"), ("3", "timeline")):
+            await pilot.press(key)
+            await pilot.pause()
+            assert view.view_type == canvas
+            assert view._last is not None
+            assert "+1 more not shown" in view._last.text.plain, canvas
+
+
+@pytest.mark.asyncio
+async def test_a_bare_terminal_page_reads_one_registry_for_views_and_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2: with no session registry the page reads the store ONCE.
+
+    ``_project_registry()`` builds a fresh registry on every call, so a second
+    read for the counts described a registry that had just been constructed —
+    zero rows on disk — and the page silently painted ``hidden_rows=0``. Views
+    and counts must come from the same call.
+    """
+    from local_operator import projects as projects_module
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_row(tmp_path, "aaa-dormant", "dormant-row", stamp_ns=1_700_000_000_000_000_000)
+    _write_row(tmp_path, "zzz-live", "live-row", stamp_ns=1_700_000_001_000_000_000)
+    session = _ProjectSession()
+    session.project_registry = None
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "live-row")
+
+    assert view._last is not None
+    assert "live-row" in view._last.text.plain
+    assert "+1 more not shown" in view._last.text.plain

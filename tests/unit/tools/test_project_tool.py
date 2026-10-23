@@ -925,7 +925,7 @@ async def test_the_listing_declares_the_rows_the_page_left_out(
     assert "live-row" in body
     assert "dormant-row" not in body
     assert "showing the 1 most recently active of 2 stored projects" in body
-    assert "1 dormant row is not listed here" in body
+    assert "1 row is not listed here" in body
     assert "op='show' name='<name>' still finds any project" in body
 
 
@@ -945,3 +945,25 @@ async def test_update_by_name_reaches_a_row_past_the_page(
     assert "updated project 'dormant-row'" in body
     fresh = ProjectRegistry(tmp_path)
     assert fresh.get_project("aaa-dormant").progress == "resumed from the tail"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_row_does_not_produce_a_truncation_note(
+    context: ToolContext, registry: ProjectRegistry
+) -> None:
+    """M4 / QA Q1: a torn row is not "hidden by the page", so no note claims it.
+
+    ``truncated`` and the note read the page cut only; an unreadable row keeps
+    its own warning and must never make the receipt promise that ``op='show'``
+    will find it.
+    """
+    from local_operator.projects import ProjectEdit
+
+    for name in ("alpha", "beta"):
+        registry.create_project(ProjectEdit(name=name))
+    (registry.projects_dir / "torn.json").write_text("{not json", encoding="utf-8")
+
+    body = await call(context, op="list")
+
+    assert "alpha" in body and "beta" in body
+    assert "not listed here" not in body

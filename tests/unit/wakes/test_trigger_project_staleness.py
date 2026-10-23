@@ -243,8 +243,8 @@ def test_the_row_page_is_ranked_by_recency_and_counts_its_tail(
     # Exact counts, not "more than N": a reader must be able to say how much of
     # the store this pass did not look at.
     assert "holds 2 rows" in caplog.text
-    assert "evaluating the 1 most recently active" in caplog.text
-    assert "leaving 1 dormant rows unevaluated" in caplog.text
+    assert "evaluating the 1 most recently written" in caplog.text
+    assert "leaving 1 quiet row unevaluated" in caplog.text
 
 
 def test_the_row_cap_mirrors_the_store() -> None:
@@ -252,3 +252,20 @@ def test_the_row_cap_mirrors_the_store() -> None:
     from local_operator.projects import _MAX_ROWS as STORE_MAX_ROWS
 
     assert project_staleness._MAX_ROWS == STORE_MAX_ROWS
+
+
+def test_the_tail_count_is_pluralised(tmp_path: Path, monkeypatch, caplog) -> None:
+    """n2: "1 dormant rows" read as a template that had never been seen."""
+    root = _root(tmp_path)
+    monkeypatch.setattr(project_staleness, "_MAX_ROWS", 1)
+    for index, project_id in enumerate(("aaa", "bbb", "ccc")):
+        _row(root, project_id, progress_updated_at=NOW_S - 9 * 3600)
+        path = root / "projects" / f"{project_id}.json"
+        os.utime(path, ns=(1_700_000_000_000_000_000 + index, 1_700_000_000_000_000_000 + index))
+
+    with caplog.at_level(
+        logging.WARNING, logger="local_operator.wakes.triggers.sources.project_staleness"
+    ):
+        assert [instance.key for instance in _evaluate(root)] == ["ccc"]
+
+    assert "leaving 2 quiet rows unevaluated" in caplog.text
