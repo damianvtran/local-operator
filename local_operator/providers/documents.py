@@ -16,7 +16,8 @@ failover attempt, because a ``/model`` switch must never send a PDF natively
 to a provider that cannot read it. The serializers therefore call
 :func:`document_form` with the wire they are about to speak.
 
-SOURCES (capability table verified 2026-10-23 from official docs):
+SOURCES (each URL was fetched and read on 2026-10-23; the row it supports is
+named beside it):
 
 - Anthropic PDF support (``document`` block, base64 source, 32 MB request,
   600 pages; 100 pages under a 1M-token context):
@@ -30,7 +31,7 @@ SOURCES (capability table verified 2026-10-23 from official docs):
   server-side and available to any model):
   https://openrouter.ai/docs/features/multimodal/pdfs
 - Mistral document QnA (``document_url`` part; 50 MB / 1000 pages):
-  https://docs.mistral.ai/capabilities/document/
+  https://docs.mistral.ai/studio/document-processing/document_qna
 
 ASSUMED rather than read verbatim from those pages, stated so a later reader
 knows what to re-check before changing a row:
@@ -117,6 +118,12 @@ class DocumentForm:
 DOCUMENT_FORMS: dict[str, DocumentForm] = {
     "anthropic": DocumentForm("anthropic", 32_000_000, 600, "anthropic"),
     "anthropic-key": DocumentForm("anthropic", 32_000_000, 600, "anthropic"),
+    # 32 MB here is the STORE'S UPLOAD CEILING, not a documented OpenAI limit:
+    # ``MAX_ATTACHMENT_UPLOAD_BYTES`` refuses a larger file before it can ever
+    # reach this row, so a bigger number would be unreachable. The file-inputs
+    # guide's <50 MB/file, 50 MB combined (the responses row below) is the
+    # provider side of the same gate; this row states the conservative
+    # per-request reading the contract's table carries.
     "openai": DocumentForm("openai_chat", 32_000_000, None, "openai"),
     "google": DocumentForm("google", 50_000_000, 1000, "google"),
     "openrouter": DocumentForm("openrouter", 32_000_000, None, "openrouter"),
