@@ -12,13 +12,13 @@
 //
 // U1/U6: the refusal is keyed on the typed code and passes the runtime's own copy
 // through, so the install step the copy names is not reworded here.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError, isAuthorityRefusalCode } from "./api";
 import { humanizeGateError } from "./components/gate-sheet";
 import { isAuthorityRefusal } from "./components/pending-card";
 import { SessionScreen } from "./screens/session-view";
-import type { SessionProjection } from "./types";
+import type { PendingRequest, SessionProjection } from "./types";
 
 /* The receipt shape these mocks answer with, typed here rather than inferred:
    a zero-argument `vi.fn` gives `mock.calls` an empty tuple, so the assertions
@@ -223,7 +223,9 @@ describe("the phone's gate sheet", () => {
 		   a claim the phone cannot make: a session with its own override is not
 		   changed by a default write. */
 		await waitFor(() =>
-			expect(screen.getByRole("status").textContent).toContain("the default is now auto"),
+			expect(screen.getByRole("status").textContent).toContain(
+				"the default for sessions that follow it is now auto",
+			),
 		);
 		expect(screen.getByRole("status").textContent).not.toContain("all sessions are now");
 	});
@@ -257,6 +259,70 @@ describe("the phone's gate sheet", () => {
 		expect(await screen.findByText(/cannot be set from this surface/)).toBeTruthy();
 		expect(screen.getByRole("dialog")).toBeTruthy();
 		expect(screen.queryByRole("status")).toBeNull();
+	});
+});
+
+describe("the sheet's effective-mode line (U2)", () => {
+	/* The sheet reads the mode off the projection's pending approval — the only
+	   place the runtime publishes it — so each case sets the pending the runtime
+	   would send and opens the sheet the reader actually uses. `within(dialog)`
+	   because the pending card underneath paints the same line; the assertion is
+	   about the SHEET's copy. */
+	function pendingApproval(overrides: Partial<PendingRequest>): PendingRequest {
+		return {
+			request_id: "req-approval",
+			kind: "approval",
+			title: "run shell command",
+			detail: "rm -rf build && make",
+			options: [],
+			secret: false,
+			question_index: 0,
+			question_total: 1,
+			...overrides,
+		};
+	}
+
+	it("says a session override and the global it overrides", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "ask",
+			approval_provenance: "session",
+		});
+		await openSheet();
+		expect(
+			within(screen.getByRole("dialog")).getByText(
+				"Approvals: Ask — session override; global Auto.",
+			),
+		).toBeTruthy();
+	});
+
+	it("says the global default", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "auto",
+			approval_provenance: "global",
+		});
+		await openSheet();
+		expect(
+			within(screen.getByRole("dialog")).getByText("Approvals: Auto — global default."),
+		).toBeTruthy();
+	});
+
+	it("separates a run pin from both saved scopes", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "auto",
+			approval_provenance: "pin",
+		});
+		await openSheet();
+		expect(
+			within(screen.getByRole("dialog")).getByText("Approvals: Auto — this run."),
+		).toBeTruthy();
+	});
+
+	it("omits the line when the owner publishes neither field", async () => {
+		/* The default fixture has no pending at all — the state of an owner older
+		   than these fields. The sheet must say nothing rather than invent a
+		   "global default". */
+		await openSheet();
+		expect(within(screen.getByRole("dialog")).queryByText(/^Approvals:/)).toBeNull();
 	});
 });
 

@@ -88,8 +88,8 @@ async def test_both_destinations_render_at_the_authored_widths(
         pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
         card = await _card(pilot, app)
         text = "\n".join(_lines(card))
-        assert "Set auto for this session [s]" in text
-        assert "Set auto for all sessions [g]" in text
+        assert "Set auto for this session [S]" in text
+        assert "Set auto for all sessions [G]" in text
         assert "Approvals: Ask — global default." in text
         await pilot.press("n")
         await asyncio.wait_for(pending, 2)
@@ -102,7 +102,7 @@ async def test_both_destinations_render_at_the_authored_widths(
         card = await _card(pilot, app)
         lines = _lines(card)
         # One combined row: the status and both destinations share it.
-        assert "[s]session" in lines[-1] and "[g]all sessions" in lines[-1]
+        assert "[S]session" in lines[-1] and "[G]all sessions" in lines[-1]
         await pilot.press("n")
         await asyncio.wait_for(pending, 2)
 
@@ -153,7 +153,7 @@ async def test_s_saves_this_session_and_leaves_the_request_parked(
         card = await _card(pilot, app)
         selected = card.state.selected
 
-        await pilot.press("s")
+        await pilot.press("S")
         await pilot.pause()
 
         assert not pending.done(), "a setting gesture answered the pending request"
@@ -197,7 +197,7 @@ async def test_g_sets_the_global_default_and_leaves_the_request_parked(
         pending = asyncio.ensure_future(_gate(session)("bash", "run: one"))
         card = await _card(pilot, app)
 
-        await pilot.press("g")
+        await pilot.press("G")
         await pilot.pause()
 
         assert not pending.done(), "a setting gesture answered the pending request"
@@ -233,7 +233,7 @@ async def test_a_refused_destination_leaves_the_card_answerable(
         pending = asyncio.ensure_future(_gate(session)("bash", "run: one"))
         card = await _card(pilot, app)
 
-        await pilot.press("s")
+        await pilot.press("S")
         await pilot.pause()
         await pilot.pause()
 
@@ -241,8 +241,8 @@ async def test_a_refused_destination_leaves_the_card_answerable(
         text = "\n".join(_lines(card))
         assert "This window cannot authorise auto." in text
         assert "Unchanged: Ask (global default)." in text
-        assert "Set auto for this session [s]" in text
-        assert "Set auto for all sessions [g]" in text
+        assert "Set auto for this session [S]" in text
+        assert "Set auto for all sessions [G]" in text
         assert app._explicit_approvals_mode is None
         assert _saved_override(config_dir) is None
 
@@ -303,7 +303,7 @@ async def test_a_setting_gesture_keeps_the_screen_unscrolled_at_60x16(
         # what the callout must not do is make it worse.
         before_virtual = app.screen.virtual_size.height
 
-        await pilot.press("s")
+        await pilot.press("S")
         await pilot.pause()
 
         assert card.size.height == before, "the saved acknowledgement grew the card"
@@ -448,7 +448,7 @@ async def test_a_failed_global_write_is_not_painted_as_saved(
             lambda auto: ("", "could not save default: OSError"),
         )
 
-        await pilot.press("g")
+        await pilot.press("G")
         await pilot.pause()
 
         assert not pending.done(), "a setting gesture answered the pending request"
@@ -480,7 +480,7 @@ async def test_a_session_save_failure_is_disclosed_not_hidden(
         card = await _card(pilot, app)
         monkeypatch.setattr(app, "_persist_approval_override", lambda source, mode: "OSError")
 
-        await pilot.press("s")
+        await pilot.press("S")
         await pilot.pause()
 
         assert not pending.done()
@@ -579,3 +579,160 @@ async def test_a_failed_default_write_keeps_the_conversation_record(
             app._approve_all is True
         ), "the gate moved even though its record could not be released"
         assert "NOT saved" in _notices(app)[-1]
+
+
+@pytest.mark.asyncio
+async def test_the_dense_rail_paints_the_third_label_inside_the_card(config_dir: Path) -> None:
+    """24x16 is the frame the height guard used to exclude from the dense plan.
+
+    The guard tested the TERMINAL height while the measurable box was the
+    screen's 14 rows, so the rail fell back to one line, painted 30 cells into
+    20, and ``A.Allow all`` clipped to a bare ``A`` that still answered while no
+    Allow-all label was visible. Assert on the COMPOSITED frame, not on the
+    renderer's string, because the clip happened at paint time (M2/Q2/D1).
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(24, 16)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
+        card = await _card(pilot, app)
+        await pilot.pause()
+
+        assert card.size.width == 20, card.size
+        region = card._body.region
+        strips = app.screen._compositor.render_strips()
+        painted = [
+            strip.text[region.x : region.x + region.width]
+            for strip in strips[region.y : region.y + region.height]
+        ]
+        rail = [row for row in painted if "y.Allow" in row]
+        assert rail, painted
+        assert any("n.Deny" in row for row in rail), rail
+        assert any("A.Allow all" in row for row in painted), painted
+        await pilot.press("n")
+        await asyncio.wait_for(pending, 2)
+
+
+@pytest.mark.asyncio
+async def test_the_allow_consequence_follows_the_saved_policy(config_dir: Path) -> None:
+    """A parked card must not describe the policy it was raised under after a save.
+
+    Pressing S/G changes what the NEXT request will do while this one still
+    asks; leaving "ask again next time" under Allow tells the reader the
+    opposite of the confirmation two rows above (U3/D3). The swap is
+    description-only: the card's height must not move.
+    """
+    from tests.unit.tui.test_approvals_ux import _submit
+
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
+        card = await _card(pilot, app)
+        # Wait for the ROOMY plan: the first frames after a mount can be
+        # measured while the dock is still growing, and the descriptions are
+        # the first thing the budget sheds (the card's own documented ladder).
+        before = ""
+        for _ in range(40):
+            await pilot.pause()
+            before = "\n".join(_lines(card))
+            if "run this call and ask again next time" in before:
+                break
+        assert "run this call and ask again next time" in before, before
+        before_rows = len(_lines(card))
+
+        await pilot.press("S")
+        await pilot.pause()
+        assert card._policy.mode == "auto", card._policy
+        after = "\n".join(_lines(card))
+        assert "run this call; later calls will not ask" in after, after
+        assert "run this call and ask again next time" not in after, after
+        assert len(_lines(card)) == before_rows, "the swap moved a row"
+
+        # The restore direction: tightening re-arms the prompt and the wording
+        # must say so again. Focus the composer first — Enter while the card
+        # holds focus ANSWERS it (that is the card's own Enter), not submits.
+        from local_operator.tui.widgets.editor import Editor
+
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        await _submit(pilot, app, "/approvals ask")
+        restored = ""
+        for _ in range(40):
+            await pilot.pause()
+            restored = "\n".join(_lines(card))
+            # Wait for the SETTLED frame: the first non-empty read after a
+            # command can still be the previous paint, and the claim here is
+            # about the wording the reader ends up with.
+            if "run this call and ask again next time" in restored:
+                break
+        assert "run this call and ask again next time" in restored, (
+            restored,
+            card.is_mounted,
+            card.display,
+            app._approval is card,
+        )
+        await pilot.press("n")
+        await asyncio.wait_for(pending, 2)
+
+
+@pytest.mark.asyncio
+async def test_a_clear_failure_with_no_record_does_not_claim_a_lost_choice(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """n1: "could not be cleared" is only true when something was stored.
+
+    A fresh conversation follows the file already, so a failed release of a
+    non-existent record changes nothing the user can lose. Saying their saved
+    choice could not be cleared would send them looking for a choice they never
+    made.
+    """
+    from tests.unit.tui.test_approvals_ux import _notices, _submit
+
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        assert app._explicit_approvals_mode is None
+
+        def _explode(*_args: object, **_kwargs: object) -> None:
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr("local_operator.session.approval_policy.write_override", _explode)
+        await _submit(pilot, app, "/approvals default ask")
+
+        receipt = _notices(app)[-1]
+        # The DEFAULT write landed; only the pointless no-choice document
+        # failed, and that is not a durability loss the reader needs told.
+        assert "tool approvals: ask — saved to" in receipt, receipt
+        assert "saved choice could not be cleared" not in receipt, receipt
+
+
+@pytest.mark.asyncio
+async def test_lowercase_letters_type_rather_than_change_the_gate(config_dir: Path) -> None:
+    """`s`/`g` are ordinary letters; only `S`/`G` reach the setting.
+
+    The lowercase pair were instant accelerators in the first cut, which made
+    the most common letters in a sentence write the machine-wide default with no
+    confirmation — the footgun `A` is already uppercase to avoid (agent review
+    round 1, M1). Lowercase must fall through to the composer and leave BOTH the
+    gate and the record untouched.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
+        await _card(pilot, app)
+
+        await pilot.press("s")
+        await pilot.press("g")
+        await pilot.pause()
+
+        assert app._approve_all is False, "a lowercase letter loosened the gate"
+        assert app._explicit_approvals_mode is None
+        assert _saved_override(config_dir) is None, "a lowercase letter wrote a record"
+
+        await pilot.press("n")
+        await asyncio.wait_for(pending, 2)

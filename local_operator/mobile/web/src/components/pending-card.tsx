@@ -74,7 +74,7 @@ import {
 import { cn } from "../lib/cn";
 import { PENDING_CARD_FRACTION, columnCap } from "../lib/column";
 import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
-import { setApprovalsPolicy } from "../lib/approval-policy";
+import { setApprovalsPolicy, approvalPolicyLine, globalDefaultReceipt } from "../lib/approval-policy";
 import { PairPromptSheet } from "../screens/pair";
 import type { PendingRequest } from "../types";
 
@@ -103,6 +103,18 @@ function humanizeError(message: string): string {
 		return "The session didn’t respond in time — try again.";
 	}
 	return message;
+}
+
+/** Make a receipt read as a sentence before the card appends its own.
+
+    The runtime's prose ends variably — "… (this session)", "… keep it",
+    occasionally with a period — and gluing " This call still needs your answer"
+    straight onto "…(this session)" produced a run-on the reader has to
+    re-parse. Terminal punctuation is the join, nothing else. */
+function asSentence(text: string): string {
+	const trimmed = text.trim();
+	if (!trimmed) return trimmed;
+	return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 /** Whether this refusal is the AUTHORITY one — the runtime saying a signature is
@@ -327,11 +339,24 @@ export function PendingCard({
 				setPolicyError(receipt.detail.trim() || "that was refused — nothing changed");
 				return;
 			}
-			setPolicyNotice(
+			/* THE RUNTIME'S SENTENCE IS THE RECEIPT (U1). This used to print a fixed
+			   "auto for all sessions" line whatever the runtime had answered —
+			   including a receipt that said a conversation with its own Ask keeps
+			   Ask, or one that refused. The detail is passed through for both
+			   scopes (the session write's prose names the session), and
+			   `globalDefaultReceipt` covers the global write's own accounting. */
+			const said = asSentence(
 				mode === "auto"
-					? "auto for this session — this call still needs your answer"
-					: "auto for all sessions — this call still needs your answer",
+					? receipt.detail.trim() || "this session is now auto"
+					: globalDefaultReceipt(receipt),
 			);
+			/* THE CARD'S OWN FACT, AND IT MUST NOT BE LOST IN THE RECEIPT. The
+			   runtime's sentence is about the GATE; this card is about a request
+			   that gate has not settled. Without the second sentence a successful
+			   tap reads as "handled", and the reader walks away from a session
+			   that is still blocked (`approval_answer` was never sent — see the
+			   block above `setPolicy`). */
+			setPolicyNotice(`${said} This call still needs your answer.`);
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
 				setPairPrompt(true);
@@ -357,6 +382,10 @@ export function PendingCard({
 	const inert = busy || error !== "";
 
 	const optionCount = pending.kind === "approval" ? 0 : pending.options.length;
+
+	/* The runtime's own answer about the gate, when it sends one (U2). Empty on
+	   an older owner and on every ask card, which renders no line. */
+	const policyLine = pending.kind === "approval" ? approvalPolicyLine(pending) : "";
 
 	return (
 		<>
@@ -448,6 +477,15 @@ export function PendingCard({
 			>
 				<div className="flex flex-col gap-0.5">
 					<span className="text-body font-medium">{pending.title}</span>
+					{policyLine ? (
+						/* WHAT THE GATE IS, not what this card will do about it. First line
+						   of the body because it qualifies the decision below it: a reader
+						   about to approve should know the session is already in a mode they
+						   (or an agent) set, and which scope set it. It scrolls with the
+						   question rather than being pinned, because it is context and the
+						   pinned row above already carries the card's identity. */
+						<span className="text-meta text-ink-muted">{policyLine}</span>
+					) : null}
 					{pending.detail ? (
 						<p className="text-body-sm text-ink-muted whitespace-pre-wrap">
 							{pending.detail}

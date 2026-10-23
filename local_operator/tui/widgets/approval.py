@@ -945,8 +945,15 @@ class ApprovalBlock(TranscriptBlock):
 #: Each row carries the CONSEQUENCE as its description, because that is what
 #: the user is actually deciding between, and the letter it answers to, so the
 #: keys stay discoverable now that they are no longer the only way in.
+#: The Allow consequence under a gate that will prompt again. Also the string
+#: :meth:`ApprovalPrompt._row_description` swaps for the auto wording below.
+ALLOW_ASK_CONSEQUENCE = "run this call and ask again next time"
+#: The same consequence once the gate is auto: telling the reader to expect a
+#: prompt that will not come is the stale-copy defect this pair removes.
+ALLOW_AUTO_CONSEQUENCE = "run this call; later calls will not ask"
+
 APPROVAL_CHOICES: tuple[tuple[str, str, str], ...] = (
-    ("Allow", "y", "run this call and ask again next time"),
+    ("Allow", "y", ALLOW_ASK_CONSEQUENCE),
     ("Deny", "n", "refuse this call; the turn continues"),
     ("Allow all", "A", "stop asking for this session"),
 )
@@ -1049,7 +1056,7 @@ class ApprovalSettingOutcome:
 #: the scope word the app layer receives. Held here rather than spelled inline
 #: in the key handler and the renderer, so the letter printed beside a target
 #: and the callback it invokes cannot disagree.
-SETTING_KEYS: dict[str, str] = {"s": "session", "g": "global"}
+SETTING_KEYS: dict[str, str] = {"S": "session", "G": "global"}
 
 #: The mode words as a human reads them. ``auto`` in the command vocabulary is
 #: "Auto" in prose; the same capitalisation the band and the receipts use.
@@ -1225,6 +1232,11 @@ class ApprovalPrompt(AskPickerScreen):
         what keeps one event to one sentence.
         """
         self._policy = policy
+        # The Allow consequence is policy-dependent (`run this call; later
+        # calls will not ask`), and the per-row wrap cache keys only on
+        # (index, width) — a mode move that kept the cache would repaint the
+        # new status above the old consequence.
+        self._invalidate_description_wraps()
         self._repaint()
 
     def show_setting_outcome(self, scope: str, outcome: ApprovalSettingOutcome) -> None:
@@ -1257,6 +1269,7 @@ class ApprovalPrompt(AskPickerScreen):
             status=status,
             detail=outcome.reason,
         )
+        self._invalidate_description_wraps()
         self._repaint()
 
     def _request_setting(self, scope: str) -> None:
@@ -1310,10 +1323,15 @@ class ApprovalPrompt(AskPickerScreen):
         rather than overdrawing a region it cannot paint.
         """
         budget = super()._body_rows(question_lines)
-        if self._dense(self._card_width()):
-            _, height = self._screen_size()
-            if 3 <= budget < 5 and height >= 16:
-                budget = 5
+        if self._dense(self._card_width()) and 3 <= budget < 5:
+            # No terminal-height guard here: at a 16-row terminal the SCREEN
+            # CONTENT box is 14, so a `height >= 16` test never engaged the
+            # dense plan the spec derives for that exact frame — the rail then
+            # painted 30 cells into 20 and `A.Allow all` clipped to a bare `A`
+            # that still answered (agent/QA/design round 1, M2/Q2/D1). The
+            # budget already encodes the physical room; removing the two
+            # padding rows is what makes the two extra rows affordable.
+            budget = 5
         # Remembered for `_layout`: the plan has to know how many rows it may
         # spend before it decides whether this frame can afford the callout at
         # all. `_layout` is the only caller, so this is a parameter passed
@@ -1528,37 +1546,37 @@ class ApprovalPrompt(AskPickerScreen):
         """
         if width >= self._HANDLES_FULL_MIN:
             parts = [
-                ("Set auto for this session [s]", "handle"),
+                ("Set auto for this session [S]", "handle"),
                 ("  ·  ", "state"),
-                ("Set auto for all sessions [g]", "handle"),
+                ("Set auto for all sessions [G]", "handle"),
             ]
         elif width >= self._HANDLES_MEDIUM_MIN:
             parts = [
-                ("[s] Auto for this session", "handle"),
+                ("[S] Auto for this session", "handle"),
                 (" · ", "state"),
-                ("[g] Auto for all sessions", "handle"),
+                ("[G] Auto for all sessions", "handle"),
             ]
         elif width >= self._HANDLES_SHORT_MIN:
             parts = [
-                ("[s] Session auto", "handle"),
+                ("[S] Session auto", "handle"),
                 (" · ", "state"),
-                ("[g] All-session auto", "handle"),
+                ("[G] All-session auto", "handle"),
             ]
         else:
             parts = [
                 ("auto ", "state"),
-                ("s:session", "handle"),
+                ("S:session", "handle"),
                 (" ", "state"),
-                ("g:all", "handle"),
+                ("G:all", "handle"),
             ]
         spans: list[tuple[int, int, str]] = []
         spent = 0
         for text, kind in parts:
             if kind == "handle":
-                # `[s]`/`s:session` are the SESSION forms; "sessions" also
+                # `[S]`/`S:session` are the SESSION forms; "sessions" also
                 # contains "session", so a substring test on the bare word
                 # mislabels the global destination.
-                scope = "session" if ("[s]" in text or text == "s:session") else "global"
+                scope = "session" if ("[S]" in text or text == "S:session") else "global"
                 spans.append((spent, spent + cell_len(text), scope))
             spent += cell_len(text)
         return parts, spans
@@ -1572,7 +1590,10 @@ class ApprovalPrompt(AskPickerScreen):
             # A refused destination keeps its text and underline (it stays an
             # identifiable target that repeats the explanation) but loses the
             # fg ink: the frame must not offer a loosening it cannot perform.
-            handle = Style(color=theme_mod.semantic_color("dim"), underline=True)
+            # `muted`, not `dim`: dim measures 2.72:1 light / 3.43:1 dark on
+            # this ground, below the 4.5 floor, and the refusal is exactly the
+            # sentence the reader must be able to read (design round 1, D4).
+            handle = Style(color=theme_mod.semantic_color("muted"), underline=True)
         for text, kind in parts:
             row.append(text, style=state if kind == "state" else handle)
         return row
@@ -1595,22 +1616,22 @@ class ApprovalPrompt(AskPickerScreen):
         if width >= self._COMBINED_FULL_MIN:
             parts = [
                 (f"{prefix} · auto: ", "state"),
-                ("[s]session", "handle"),
+                ("[S]session", "handle"),
                 (" ", "state"),
-                ("[g]all sessions", "handle"),
+                ("[G]all sessions", "handle"),
             ]
         else:
             parts = [
                 (f"{prefix} auto ", "state"),
-                ("s:session", "handle"),
+                ("S:session", "handle"),
                 (" ", "state"),
-                ("g:all", "handle"),
+                ("G:all", "handle"),
             ]
         spans = []
         spent = 0
         for text, kind in parts:
             if kind == "handle":
-                scope = "session" if ("[s]" in text or text == "s:session") else "global"
+                scope = "session" if ("[S]" in text or text == "S:session") else "global"
                 spans.append((spent, spent + cell_len(text), scope))
             spent += cell_len(text)
         if spent > width:
@@ -1624,6 +1645,21 @@ class ApprovalPrompt(AskPickerScreen):
             )
         return [self._styled(tuple(parts))], [(0, start, end, scope) for start, end, scope in spans]
 
+    def _row_description(self, index: int) -> str:
+        """The description under one option, in the mode that is actually in force.
+
+        A parked card can outlive the mode it was raised under: pressing `S`/`G`
+        makes the NEXT gate auto while this one still asks, and leaving "ask
+        again next time" under Allow states the opposite of the saved policy the
+        callout above just announced (UX/design round 1, U3/D3). Only the Allow
+        row changes; its replacement is shorter at every authored width, so no
+        row moves and no budget changes.
+        """
+        text = super()._row_description(index)
+        if self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
+            return ALLOW_AUTO_CONSEQUENCE
+        return text
+
     def _rail_rows(
         self, width: int, *, two_row_rail: bool
     ) -> tuple[list[Text], list[tuple[int, int, int, int]]]:
@@ -1636,17 +1672,20 @@ class ApprovalPrompt(AskPickerScreen):
         label, which hid the existence of Deny and Allow all at the sizes where
         the card is most constrained.
         """
+        # The ACCENT stays on the caret only: as a LABEL colour it measures
+        # 3.49:1 in the light theme (below 4.5), while fg+bold keeps the
+        # selected choice unmistakable and legible (design round 1, D2).
         accent = Style(color=theme_mod.semantic_color("accent"))
         ordinary = Style(color=theme_mod.semantic_color("fg"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
+        selected_ink = Style(color=theme_mod.semantic_color("fg"), bold=True)
         items: list[Text] = []
         for index in range(self.row_count):
             label = f"{self.row_key(index)}.{self.question.options[index].label}"
             selected = index == self.state.selected and not self.passive and not self._read_only
             item = Text(no_wrap=True, overflow="ellipsis")
             if selected:
-                item.append("❯ ", style=muted)
-                item.append(label, style=accent)
+                item.append("❯ ", style=accent)
+                item.append(label, style=selected_ink)
             else:
                 item.append(label, style=ordinary)
             items.append(item)
@@ -1657,7 +1696,10 @@ class ApprovalPrompt(AskPickerScreen):
             offset = 2 if item.plain.startswith("❯ ") else 0
             return (0, start + offset, start + cell_len(item.plain), index)
 
-        if not two_row_rail:
+        # The two-row form exists for the three approval choices; guard the
+        # indexing so a future question with fewer options falls back to the
+        # one-row rail instead of raising IndexError on a resize.
+        if not two_row_rail or len(items) < 3:
             row = Text(no_wrap=True, overflow="ellipsis")
             spans: list[tuple[int, int, int, int]] = []
             for position, item in enumerate(items):

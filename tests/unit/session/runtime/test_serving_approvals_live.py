@@ -216,8 +216,9 @@ async def test_a_disk_write_tightens_the_gate_and_the_next_decision_parks(tmp_pa
     assert handle._auto_approve is False
     pending = asyncio.ensure_future(handle._approval_gate("write", "a file"))
     await asyncio.sleep(0)
-    assert handle._fold.projection.pending is not None, "the tightened gate did not park a card"
-    request_id = handle._fold.projection.pending.request_id
+    parked_card = handle._fold.projection.pending
+    assert parked_card is not None, "the tightened gate did not park a card"
+    request_id = parked_card.request_id
     await handle.approval_answer(request_id, False, False)
     assert await pending is False
     await asyncio.sleep(0)
@@ -510,8 +511,9 @@ async def test_a_parked_prompt_is_left_for_the_human(tmp_path) -> None:
     await asyncio.sleep(0)
     assert handle._auto_approve is True
     assert not parked.done(), "a loosening auto-answered a card the human was looking at"
-    assert handle._fold.projection.pending is not None
-    assert handle._fold.projection.pending.request_id == pending.request_id
+    front = handle._fold.projection.pending
+    assert front is not None
+    assert front.request_id == pending.request_id
 
     # The human decides, and only then does the future settle.
     await handle.approval_answer(pending.request_id, False, False)
@@ -742,7 +744,9 @@ async def test_a_global_tightening_leaves_a_parked_prompt_for_the_human(tmp_path
     await asyncio.sleep(0)
     assert handle._auto_approve is True
     assert not parked.done()
-    assert handle._fold.projection.pending.request_id == pending.request_id
+    front = handle._fold.projection.pending
+    assert front is not None
+    assert front.request_id == pending.request_id
 
     _write_elsewhere(watcher.config_dir, "tool_approval_mode", "ask")
     watcher.poll_now()
@@ -791,7 +795,9 @@ async def test_a_recorded_choice_leaves_a_parked_prompt_alone(tmp_path) -> None:
     await asyncio.sleep(0)
     assert handle._auto_approve is False
     assert not parked.done()
-    assert handle._fold.projection.pending.request_id == pending.request_id
+    front = handle._fold.projection.pending
+    assert front is not None
+    assert front.request_id == pending.request_id
     assert any(
         "keeping tool approvals: ask" in t for t in [getattr(e, "text", "") for e in emitted]
     )
@@ -941,4 +947,75 @@ async def test_the_runtime_default_write_failure_says_nothing_was_saved(
     assert "every session" not in text, text
     assert ConfigManager(watcher.config_dir).get_config_value("tool_approval_mode") == "ask"
     assert handle._auto_approve is False
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_published_gate_carries_the_policy_and_its_provenance(tmp_path) -> None:
+    """The phone/desktop contract must say WHO set the rule, not just the mode.
+
+    A viewer cannot derive the effective policy: the conversation's own record
+    outranks config.yml, so "Ask — session override; global Auto" is only
+    possible if the publisher stamps both halves. This drives the real
+    publication seam with a stub store and checks the payload a viewer folds.
+    """
+    handle, session, _watcher, _emitted = _handle(tmp_path, auto_approve=False)
+
+    class _Store:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def mutate(self, **changes: Any) -> None:
+            self.calls.append(changes)
+
+    store = _Store()
+    session._frontend_state_store = store  # type: ignore[attr-defined]
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "probe"))
+    await asyncio.sleep(0)
+    handle._publish_pending_gate()
+
+    payload = store.calls[-1]["pending_gate"]
+    assert payload["approval_mode"] == "ask", payload
+    assert payload["approval_provenance"] == "global", payload
+
+    handle._explicit_approvals_mode = "auto"
+    handle._publish_pending_gate()
+    payload = store.calls[-1]["pending_gate"]
+    assert payload["approval_mode"] == "auto", payload
+    assert payload["approval_provenance"] == "session", payload
+
+    pending = handle._fold.projection.pending
+    assert pending is not None
+    await handle.approval_answer(pending.request_id, False, False)
+    assert await parked is False
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_phone_reads_a_successful_loosening_as_success(tmp_path) -> None:
+    """A successful loosening is tinted ``warning`` but is not a refusal.
+
+    ``_slash_receipt`` used to classify on the tint, so the phone showed every
+    successful ``auto`` / ``default auto`` as refused and kept the draft. The
+    structured ``data.ok`` is the verdict; the tint rule survives only for an
+    older runtime that sends none (agent review round 1, B1).
+    """
+    from local_operator.mobile.daemon import _slash_receipt
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, _session, _watcher, _emitted = _handle(tmp_path, auto_approve=False)
+
+    live = handle._approvals_slash(handle._session, "auto", SlashResult)
+    detail, _tone, refused = _slash_receipt(live.model_dump(mode="json"), "approvals")
+    assert live.data["ok"] is True
+    assert refused is False, detail
+
+    default = handle._approvals_default_slash("default auto", SlashResult)
+    detail, _tone, refused = _slash_receipt(default.model_dump(mode="json"), "approvals")
+    assert default.data["ok"] is True
+    assert refused is False, detail
+
+    # Legacy owner with no verdict keeps the old rule: a warning-shaped outcome
+    # with no structured success is a refusal.
+    assert _slash_receipt({"text": "x", "style": "warning"}, "approvals")[2] is True
     await handle.dispose()

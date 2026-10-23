@@ -40,8 +40,9 @@ import { HttpError, isAuthorityRefusalCode, sendCommandWithProof } from "../api"
 import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
 import { NotPairedError, storedCertificate } from "../lib/operator-device";
-import { globalDefaultReceipt, setApprovalsPolicy } from "../lib/approval-policy";
+import { globalDefaultReceipt, setApprovalsPolicy, approvalPolicyLine } from "../lib/approval-policy";
 import { PairPromptSheet } from "../screens/pair";
+import type { ApprovalMode, ApprovalProvenance } from "../types";
 
 type Mode = "ask" | "auto" | "default auto";
 
@@ -50,6 +51,8 @@ export function GateSheet({
 	onClose,
 	sessionId,
 	onReceipt,
+	approvalMode,
+	approvalProvenance,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -65,6 +68,14 @@ export function GateSheet({
 	    wrong owner for a receipt about something that already happened; the surface
 	    it closes back onto is the right one. */
 	onReceipt: (text: string) => void;
+	/** The mode IN FORCE for this conversation and where it came from, straight
+	    off the projection's pending approval (`types.PendingRequest`). Both are
+	    optional because an owner older than these fields sends neither, and the
+	    sheet then omits the line rather than guessing one — the sheet's copy
+	    already explains the two directions, and a state line is only worth a row
+	    when it is the runtime's answer. */
+	approvalMode?: ApprovalMode | "";
+	approvalProvenance?: ApprovalProvenance | "";
 }) {
 	const [busy, setBusy] = useState<Mode | null>(null);
 	const [error, setError] = useState("");
@@ -77,6 +88,10 @@ export function GateSheet({
 	   revoked still passes this check, which is why it HEADS THE DECISION rather
 	   than replaces the refusal. */
 	const paired = storedCertificate() !== null;
+	const policyLine = approvalPolicyLine({
+		approval_mode: approvalMode,
+		approval_provenance: approvalProvenance,
+	});
 
 	async function choose(mode: Mode) {
 		if (busy) return;
@@ -154,6 +169,14 @@ export function GateSheet({
 		<>
 			<Sheet open={open} onClose={onClose} title="Approvals in this session">
 				<div className="flex flex-col gap-3 p-3">
+					{policyLine ? (
+						/* THE STATE, BEFORE THE ACTIONS. Every other line here says what a
+						   choice WOULD do; this one says what the gate IS right now, in the
+						   runtime's terms, so the reader can tell an override from the
+						   machine default before pressing either. Omitted when the owner
+						   sends no provenance — see the prop's note. */
+						<p className="text-meta text-ink-muted">{policyLine}</p>
+					) : null}
 					<p className="text-body-sm text-ink-muted">
 						Ask parks every gated tool call until you answer its card. Auto lets them run
 						without asking. The first two choices change <strong>this session</strong> only; the

@@ -6221,6 +6221,13 @@ class OperatorApp(App[None]):
         # write moves the gate, which is what keeps the keep notice's "set with
         # /approvals in this session" true.
         self._explicit_approvals_mode: str | None = None
+        #: True only inside the card's own `G` gesture. The config write that
+        #: gesture performs is delivered synchronously to
+        #: `_follow_configured_approvals`, and its parked-prompt NOTE would be
+        #: a second acknowledgement of one press beside the inline status the
+        #: card is about to paint (and, at 60x16, extra question copy that can
+        #: buy a row). A change from ANOTHER process still annotates the card.
+        self._card_setting_gesture = False
         # Which TURN a stop belongs to, rather than a flag someone has to clear.
         # `_turn_epoch` counts turn boundaries; `_approvals_denied_epoch` records
         # the epoch a stop/teardown armed the deny latch in. An asker captures the
@@ -30084,23 +30091,6 @@ class OperatorApp(App[None]):
         armed = self._approvals_denied_epoch
         return armed is not None and epoch <= armed
 
-    def _answer_live_approval_as_allowed(self) -> None:
-        """Answer the visible prompt with YES, the way the ``A`` key does.
-
-        Through the widget rather than around it, so the row repaints as a
-        receipt (`✓ allowed ...`) instead of vanishing with no record of what the
-        user just authorised.
-        """
-        approval = self._approval
-        if approval is not None and not approval.answered:
-            # `y`, not `a`: the COMMAND is what changed the mode, and it prints
-            # its own notice. Answering as the `A` key would run the keystroke's
-            # latch hook too, so the frame carried the same statement twice in the
-            # loudest ink it has.
-            approval.resolve(True, answer="y")
-            self._unmount_prompt(approval)
-        self._approval = None
-
     def _allow_approvals_again(self) -> None:
         """Retire the deny latch so tools can ask questions again.
 
@@ -30232,7 +30222,7 @@ class OperatorApp(App[None]):
                 f"tool_approval_mode {mode_word(wanted_auto)}; this conversation follows it; "
                 "other conversations with their own choice keep it"
             )
-            if clear_problem:
+            if clear_problem and previous_override is not None:
                 receipt += (
                     f" — but this conversation's saved choice was not cleared ({clear_problem})"
                 )
@@ -30681,7 +30671,11 @@ class OperatorApp(App[None]):
         # write leaves the conversation's own record exactly as it was.
         previous_override = self._explicit_approvals_mode
         self._explicit_approvals_mode = None
-        _saved_to, save_problem = self._save_approvals_default(True)
+        self._card_setting_gesture = True
+        try:
+            _saved_to, save_problem = self._save_approvals_default(True)
+        finally:
+            self._card_setting_gesture = False
         if save_problem:
             # The acknowledgement is about the DEFAULT, and a default that was
             # not written is not one. `/approvals default` still moves the live
@@ -30700,7 +30694,7 @@ class OperatorApp(App[None]):
         problem = self._persist_approval_override(source, None)
         self._approvals_default_auto = True
         self._apply_approvals_default_live(True)
-        if problem:
+        if problem and previous_override is not None:
             # The default and this run are correct; what is not durable is this
             # conversation releasing its old record, which would outrank the
             # default on resume. Say applied-and-not-saved rather than claiming
@@ -30832,8 +30826,9 @@ class OperatorApp(App[None]):
                 ),
             )
             return
+        route_call = cast(Callable[[str, str, list[Any]], Awaitable[Any]], route)
         try:
-            outcome = await route("approvals", argument, [])
+            outcome = await route_call("approvals", argument, [])
         except Exception as error:  # noqa: BLE001 — a broken link is a refusal here
             card.show_setting_outcome(
                 scope,
@@ -41483,12 +41478,12 @@ class OperatorApp(App[None]):
         band, so the band cannot say something the gate does not do; the cached
         default moves FIRST so the band's ``always`` marker is computed against
         the new default. A prompt already on screen is deliberately NOT answered
-        here — ``_answer_live_approval_as_allowed`` is the ``/approvals auto``
-        COMMAND's gesture, where the human typed the loosening in this very pane
-        — but it IS repainted with a note, so the frame stops saying "every tool
-        runs without asking" two lines above "the agent needs your approval"
-        (UX round 1, U6). The deny latch is released on a tightening, since
-        "tools prompt again" is the promise being printed.
+        here — a mode change governs the NEXT request and is not the answer to
+        the one being displayed (2026-10-23) — but it IS repainted with a note,
+        so the frame stops saying "every tool runs without asking" two lines
+        above "the agent needs your approval" (UX round 1, U6). The deny latch
+        is released on a tightening, since "tools prompt again" is the promise
+        being printed.
         """
         values = getattr(change, "values", {})
         mode = str(values.get("tool_approval_mode", "")).strip().lower()
@@ -41606,7 +41601,7 @@ class OperatorApp(App[None]):
         card = self._approval
         if card is not None and isinstance(card, ApprovalPrompt) and not card.answered:
             card.set_policy(self._approval_policy_view())
-        if wanted_auto:
+        if wanted_auto and not self._card_setting_gesture:
             self._note_approvals_on_parked_prompt()
         if not announce or self._gate_is_owned_elsewhere():
             return _ApprovalsFollow("", False)
@@ -56618,7 +56613,7 @@ class OperatorApp(App[None]):
                 f"tool_approval_mode {mode_word(wanted_default)}; this conversation follows "
                 "it; other conversations with their own choice keep it"
             )
-            if clear_problem:
+            if clear_problem and previous_override is not None:
                 text += (
                     " — but this conversation's saved choice was not cleared " f"({clear_problem})"
                 )
