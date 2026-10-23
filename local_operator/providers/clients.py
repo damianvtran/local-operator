@@ -73,7 +73,8 @@ from local_operator.providers.context import bind_native_context
 from local_operator.providers.documents import (
     DocumentBudget,
     DocumentForm,
-    document_budget,
+    document_budget_for_messages,
+    document_budget_for_request,
     document_form,
     document_native_ok,
     fallback_document_text,
@@ -2339,6 +2340,8 @@ def _messages_to_openai_responses(
     model: ModelSpec | None = None,
     endpoint: str = "",
     scope: str | None = None,
+    *,
+    request: ChatRequest | None = None,
 ) -> list[dict[str, Any]]:
     """Render harness history as Responses input items, including tool turns."""
     # Request-time document policy: the same provider id reaches Chat OR
@@ -2355,8 +2358,14 @@ def _messages_to_openai_responses(
         else None
     )
     # The Responses guide's 50 MB is per file AND combined across files; one
-    # budget spans every message this body will carry (M1).
-    doc_budget = document_budget(doc_form)
+    # budget spans every message this body will carry, after the measured
+    # non-document payload is reserved (M1 / round-2 minor 2). The full
+    # request is preferred (system blocks and tool schemas spend the same
+    # ceiling); a caller that only has messages gets the message-only figure.
+    if request is not None:
+        doc_budget = document_budget_for_request(doc_form, request)
+    else:
+        doc_budget = document_budget_for_messages(doc_form, messages)
     items: list[dict[str, Any]] = []
     for message in _without_unrenderable_tool_calls(messages):
         if model is not None:
@@ -3000,15 +3009,16 @@ class OpenAICompatClient:
         endpoint = f"{self._base_url}/chat/completions"
         direct_deepseek = request.model.provider == "deepseek"
         # ONE budget for the whole request: the provider ceilings are per
-        # request/combined, so documents must be summed across messages
-        # (agent review round 1, M1).
+        # request/combined, so documents must be summed across messages AND
+        # the body's other bytes reserved first (agent review round 1 M1 /
+        # round 2 minor 2).
         chat_document_form = document_form(
             request.model.provider,
             "openai-chat",
             supports_images=request.model.supports_images,
             context_window=request.model.context_window,
         )
-        chat_document_budget = document_budget(chat_document_form)
+        chat_document_budget = document_budget_for_request(chat_document_form, request)
         messages = self._system_messages(request)
         # DeepSeek's thinking mode refuses the shape this builds when the echo is
         # missing (see ``ModelSpec.requires_reasoning_echo`` for what is measured
@@ -3353,7 +3363,11 @@ class OpenAICompatClient:
             "model": request.model.model_id,
             "stream": True,
             "input": _messages_to_openai_responses(
-                request.messages, request.model, endpoint or f"{self._base_url}/responses", scope
+                request.messages,
+                request.model,
+                endpoint or f"{self._base_url}/responses",
+                scope,
+                request=request,
             ),
         }
         if request.system_blocks:
@@ -4613,7 +4627,7 @@ class AnthropicClient:
             supports_images=request.model.supports_images,
             context_window=request.model.context_window,
         )
-        doc_budget = document_budget(doc_form)
+        doc_budget = document_budget_for_request(doc_form, request)
         messages: list[dict[str, Any]] = []
         for message in _without_unrenderable_tool_calls(request.messages):
             # Anthropic 400s on an assistant message whose content array is
@@ -4981,7 +4995,7 @@ class GoogleClient:
             supports_images=request.model.supports_images,
             context_window=request.model.context_window,
         )
-        doc_budget = document_budget(doc_form)
+        doc_budget = document_budget_for_request(doc_form, request)
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}

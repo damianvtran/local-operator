@@ -27,8 +27,8 @@ asserts that boundary in a subprocess probe.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Sequence
 
 from local_operator.harness.types import AgentMessage, CustomMessage, Message, ModelSpec

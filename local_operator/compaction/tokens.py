@@ -103,6 +103,7 @@ this module is held across a fetch.
 
 from __future__ import annotations
 
+import base64
 import itertools
 import json
 import logging
@@ -112,6 +113,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+from local_operator.harness.pdf_pages import pdf_page_count
 from local_operator.harness.types import (
     AttachmentContent,
     DocumentContent,
@@ -140,24 +142,48 @@ OFFLOAD_MIN_CHARS = 20_000
 #: independent of base64 payload length.
 IMAGE_TOKEN_ESTIMATE = 1200
 
-#: Ceiling for ONE document block's local token charge. A native PDF is priced
-#: by the provider's own page/pixel rules (no local ruler can reproduce them),
-#: and the fallback is page-marked TEXT bounded at 400k characters; charging
-#: either as an image would be wrong in both directions. The block's inline
-#: base64 is used as a cheap upper bound (1 char ~ 1 token is safe for ASCII),
-#: capped here so one 32 MB PDF cannot report an eight-million-token history
-#: and drive compaction into a loop. The cap is deliberately generous: a
-#: six-hundred-page PDF really can cost six figures of tokens.
-MAX_DOCUMENT_TOKEN_ESTIMATE = 100_000
+#: Tokens one PDF PAGE costs its provider, as a local planning estimate. Both
+#: native pricing and extraction pay per page: Anthropic renders each page as
+#: an image plus its text (roughly 1,500-3,000 tokens), the text fallback emits
+#: one page-marked chunk per page (~500-1,000 tokens for dense text), and a
+#: scanned page costs the most. 2,500 is the documented midpoint of the
+#: provider range and deliberately sits ABOVE the text fallback: this ruler
+#: exists to fire compaction BEFORE an oversized send, so over-counting a
+#: fallback is the safe direction, while undercounting a native PDF is what
+#: let a 100-page document pass the trigger (agent review round 2, minor 3).
+PDF_PAGE_TOKEN_ESTIMATE = 2_500
+
+#: Ceiling for ONE document block's local token charge, in the same unit. A
+#: thousand-page PDF at the per-page estimate would be 2.5M tokens, which is
+#: beyond every context this harness serves; the cap keeps one file from
+#: making the whole history's figure absurd while still being far above a
+#: context window, so the trigger fires and the pass does its job. It also
+#: bounds the BYTE-derived fallback (below) so a 32 MB base64 payload cannot
+#: report an eight-million-token history.
+MAX_DOCUMENT_TOKEN_ESTIMATE = 600 * PDF_PAGE_TOKEN_ESTIMATE
 
 
 def _document_token_estimate(block: DocumentContent) -> int:
-    """Tokens to charge for one document block (see the constant's note).
+    """Tokens to charge for one document block.
 
-    Deterministic and allocation-free: ``len(data)`` is already on the block,
-    and both ``_compute_tokens`` and ``messages_tokens_upper_bound`` must use
-    THIS rule or the upper bound stops being an upper bound.
+    Page count first, when the PDF can be parsed: a per-page charge is the
+    quantity providers actually bill and the only one that makes a long text
+    PDF visible to the trigger. The byte-derived charge (base64 length ~= one
+    token per character) is the fallback for an unparseable PDF and for
+    non-PDF documents, and is an over-estimate for both — the safe direction.
+
+    Both ``_compute_tokens`` and ``messages_tokens_upper_bound`` must call
+    THIS function or the upper bound stops being an upper bound.
     """
+    if block.mime_type == "application/pdf" and block.data:
+        try:
+            raw = base64.b64decode(block.data, validate=False)
+        except (ValueError, TypeError):
+            raw = None
+        if raw is not None:
+            pages = pdf_page_count(raw, block.digest)
+            if pages is not None:
+                return min(pages * PDF_PAGE_TOKEN_ESTIMATE, MAX_DOCUMENT_TOKEN_ESTIMATE)
     return min(len(block.data), MAX_DOCUMENT_TOKEN_ESTIMATE)
 
 

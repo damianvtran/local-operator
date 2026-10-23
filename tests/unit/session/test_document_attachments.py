@@ -779,14 +779,17 @@ def test_native_eligibility_compares_the_encoded_size(store) -> None:
     assert not document_native_ok(block, DocumentForm("anthropic", 32_000_000, 600, "anthropic"))
 
 
-def test_documents_share_one_request_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """M1: two files that each fit the per-file bound cannot both go native."""
-    from local_operator.providers import clients as clients_mod
-    from local_operator.providers import documents as documents_mod
+def test_documents_share_one_request_budget() -> None:
+    """M1 / round-2 minor 2: the request budget is shared and body-aware.
 
-    monkeypatch.setattr(documents_mod, "DOCUMENT_REQUEST_HEADROOM_BYTES", 0)
-    form = DocumentForm("openai_chat", 1000, None, "openai")
-    monkeypatch.setattr(clients_mod, "document_form", lambda *_args, **_kwargs: form)
+    Two files that each fit the per-file bound cannot both go native, and the
+    text the body already carries is reserved FIRST — so a document that fits
+    the provider ceiling alone still extracts when the rest of the body has
+    spent the room.
+    """
+    from local_operator.providers.documents import document_budget_for_request
+
+    form = DocumentForm("openai_chat", 1_500, None, "openai")
     raw = _tiny_pdf()
     block = DocumentContent(
         data=base64.b64encode(raw).decode("ascii"),
@@ -795,14 +798,33 @@ def test_documents_share_one_request_budget(monkeypatch: pytest.MonkeyPatch) -> 
         bytes=len(raw),
         digest="a" * 32,
     )
-    assert encoded_document_bytes(block) < 1000
-    assert encoded_document_bytes(block) * 2 > 1000
-    message = Message.user("two files", documents=[block, block])
-    parts = _message_to_openai(message, form, documents_mod.document_budget(form))["content"][1:]
+    encoded = encoded_document_bytes(block)
+    assert 2 * encoded < 1_500  # both would fit a document-only request
+
+    # 600 characters of prose plus the proportional envelope leave room for
+    # one document, not two.
+    message = Message.user("x" * 600, documents=[block, block])
+    request = ChatRequest(
+        model=ModelSpec(provider="openai", model_id="gpt-4o"),
+        messages=[message],
+    )
+    budget = document_budget_for_request(form, request)
+    assert budget is not None
+    parts = _message_to_openai(message, form, budget)["content"][1:]
     assert parts[0]["type"] == "file"
-    # The second no longer fits the REQUEST, so it takes the fallback rather
-    # than putting both on a wire the provider would refuse.
     assert parts[1]["type"] == "text"
+
+    # The control: the same two documents in an otherwise tiny body both go
+    # native, so the reservation is not simply refusing everything.
+    small = Message.user("hi", documents=[block, block])
+    small_request = ChatRequest(
+        model=ModelSpec(provider="openai", model_id="gpt-4o"),
+        messages=[small],
+    )
+    small_budget = document_budget_for_request(form, small_request)
+    assert small_budget is not None
+    small_parts = _message_to_openai(small, form, small_budget)["content"][1:]
+    assert [part["type"] for part in small_parts] == ["file", "file"]
 
 
 def test_anthropic_page_limit_narrows_below_a_million_tokens() -> None:
@@ -992,3 +1014,24 @@ def test_a_confined_document_without_a_store_copy_gets_the_confined_opening(
     assert isinstance(note, TextContent)
     assert "not available as a workspace file" in note.text
     assert "read or edit the file directly" not in note.text
+
+
+def test_a_document_is_charged_by_its_page_count(store) -> None:
+    """Round-2 minor 3: a long text PDF must be visible to the trigger.
+
+    The byte-derived charge counted base64 characters, so a 120-page PDF with
+    a small file size looked cheap while a provider bills 150k-300k tokens for
+    it; compaction could then be skipped before an oversized send.
+    """
+    from local_operator.compaction.tokens import (
+        PDF_PAGE_TOKEN_ESTIMATE,
+        _compute_tokens,
+        messages_tokens_upper_bound,
+    )
+
+    raw = _pdf_raw(pages=120)
+    message = Message.user("read", documents=[_pdf_block(raw)])
+    charge = _compute_tokens(message)
+    assert charge >= 120 * PDF_PAGE_TOKEN_ESTIMATE
+    # The cheap bound must never fall below the estimate it stands for.
+    assert messages_tokens_upper_bound([message]) >= charge
