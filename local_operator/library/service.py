@@ -84,6 +84,15 @@ class AssetNotFound(LookupError):
     """No asset with that id is in the catalog."""
 
 
+class LibraryUnavailable(Exception):
+    """The derived index cannot be read, and could not be rebuilt (HTTP 503).
+
+    Distinct from :class:`AssetNotFound`: the asset may well exist, the index
+    just cannot answer yet. A route maps it to the same ``unavailable``
+    envelope it already uses for an unwritable metadata store.
+    """
+
+
 class ContentUnavailable(Exception):
     """The bytes cannot be served. ``code`` is the wire machine token."""
 
@@ -387,6 +396,24 @@ def _scoped_tags(
     return [{**tag, "count": used[tag["id"]]} for tag in tags if tag["id"] in used]
 
 
+def _recover_index(config: Path) -> bool:
+    """One rebuild attempt after a corrupt derived index. Never raises.
+
+    Derived tables are discardable by design; this is the path that makes that
+    true at runtime instead of only in the module docstring. Metadata is
+    untouched, so names and tags survive. ``ensure_started`` then backfills,
+    because recovery resets ``backfill_done``.
+    """
+    try:
+        if not LibraryStore(config).recover_derived():
+            return False
+        ensure_started(config)
+        return True
+    except Exception:  # noqa: BLE001 - a failed recovery is a typed refusal
+        logger.warning("library: index recovery failed", exc_info=True)
+        return False
+
+
 def list_assets(
     config_dir: str | Path,
     query: Query,
@@ -409,6 +436,26 @@ def list_assets(
     # the index has to be able to start from a read. Idempotent and cheap.
     ensure_started(config)
     store = LibraryStore(config)
+    try:
+        return _list(config, store, query, display=display, home=home)
+    except library_store.IndexUnavailable:
+        # A corrupt/torn derived file is rebuildable by contract. Try once, then
+        # answer an empty BUILDING page: the indexer repopulates it and the next
+        # poll shows rows. A second failure is a 503, never a 500.
+        logger.warning("library: derived index unreadable; rebuilding", exc_info=True)
+        if not _recover_index(config):
+            raise LibraryUnavailable(str(config)) from None
+        return empty_listing("building")
+
+
+def _list(
+    config: Path,
+    store: LibraryStore,
+    query: Query,
+    *,
+    display: bool,
+    home: str,
+) -> dict[str, Any]:
     metadata = MetadataStore(config)
     # The cursor binds to BOTH halves: journals (the derived index) and the
     # metadata revision (names/descriptions/tags). A metadata edit moves a row
@@ -489,7 +536,13 @@ def get_asset(
     # One indexed row, its occurrences, and nothing else. The old miss rule
     # rebuilt the whole catalog here "in case the index was stale"; the index is
     # now kept fresh by a watcher, so a miss is a genuinely unknown id.
-    asset = LibraryStore(config).asset(asset_id)
+    try:
+        asset = LibraryStore(config).asset(asset_id)
+    except library_store.IndexUnavailable:
+        # Recover if we can, but do not pretend the row is missing: it is the
+        # index that cannot answer yet.
+        _recover_index(config)
+        raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
     store = MetadataStore(config)
@@ -523,7 +576,11 @@ def _known_asset(config_dir: Path, asset_id: str) -> library_index.Asset:
     """
     if not identity.is_asset_id(asset_id):
         raise AssetNotFound(asset_id)
-    asset = LibraryStore(config_dir).asset(asset_id)
+    try:
+        asset = LibraryStore(config_dir).asset(asset_id)
+    except library_store.IndexUnavailable:
+        _recover_index(config_dir)
+        raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
     # Writes key on the SQLite row; a detail/list read creates it for most
@@ -676,7 +733,11 @@ def _catalog_asset(config: Path, asset_id: str) -> library_index.Asset:
     """
     if not identity.is_asset_id(asset_id):
         raise AssetNotFound(asset_id)
-    asset = LibraryStore(config).asset(asset_id)
+    try:
+        asset = LibraryStore(config).asset(asset_id)
+    except library_store.IndexUnavailable:
+        _recover_index(config)
+        raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
     return asset
@@ -741,12 +802,16 @@ def thumbnail(config_dir: str | Path, asset_id: str, width: int = THUMB_MAX_WIDT
     if not identity.is_asset_id(asset_id):
         raise AssetNotFound(asset_id)
     store = LibraryStore(config)
-    asset = store.asset(asset_id)
+    try:
+        asset = store.asset(asset_id)
+        live = store.thumb_is_live(asset_id, width)
+    except library_store.IndexUnavailable:
+        _recover_index(config)
+        raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
     if asset.kind != "image":
         raise ContentUnavailable("not_an_image")
-    live = store.thumb_is_live(asset_id, width)
     if live is not None:
         return ContentRef(
             path=live,
@@ -755,7 +820,7 @@ def thumbnail(config_dir: str | Path, asset_id: str, width: int = THUMB_MAX_WIDT
             digest=asset.digest is not None,
             modified_at=live.stat().st_mtime,
         )
-    ensure_started(config).enqueue_thumbnail(asset_id)
+    ensure_started(config).enqueue_thumbnail(asset_id, width)
     return resolve_content(config, asset_id)
 
 
@@ -767,6 +832,7 @@ __all__ = [
     "DEFAULT_ORDER",
     "InvalidCursor",
     "InvalidFilter",
+    "LibraryUnavailable",
     "MAX_LIMIT",
     "ORDERS",
     "Query",

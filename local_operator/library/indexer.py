@@ -45,12 +45,12 @@ from local_operator.library import identity
 from local_operator.library import index as library_index
 from local_operator.library.metadata import MetadataStore
 from local_operator.library.store import (
-    LibraryStore,
     STATE_BACKFILL_DONE,
     STATE_BUILT_AT,
     STATE_LAST_RECONCILE,
     STATE_SESSIONS_SCANNED,
     STATE_SESSIONS_TOTAL,
+    LibraryStore,
 )
 from local_operator.session_files import service as files_service
 
@@ -67,6 +67,9 @@ MAX_COALESCE_S: Final = 2.0
 #: timer shorter than the idle value is the spin this module exists to avoid.
 RECONCILE_BACKFILL_S: Final = 60.0
 RECONCILE_IDLE_S: Final = 6 * 3600.0
+#: How often a READER-ONLY process retries the writer lock. One ``flock`` per
+#: bound: cheap enough to be frequent, slow enough not to spin.
+WRITER_RETRY_S: Final = 30.0
 
 #: Thumbnails: the same 480 px WebP the request path used to produce inline,
 #: moved off it. Quality 82 is the value the route shipped with.
@@ -331,9 +334,15 @@ class _JournalHandler:
         candidate = relative.parts[0]
         # One directory level under ``sessions/`` is a session; anything deeper
         # (a child journal, a roster sidecar, a thumbnail) belongs to that
-        # session. A file directly in ``sessions/`` is not a session of ours.
-        if len(relative.parts) == 1 and not (self.root / candidate).is_dir():
-            return None
+        # session. A plain FILE directly in ``sessions/`` is not a session —
+        # but a path that no longer EXISTS is: the removal event for a deleted
+        # conversation arrives after the directory is gone, and ``is_dir()``
+        # being false there is exactly the case that must still be queued, or
+        # the session's assets stay in the Library until the 6 h reconcile.
+        if len(relative.parts) == 1:
+            path = self.root / candidate
+            if not path.is_dir() and path.exists():
+                return None
         return candidate
 
 
@@ -345,14 +354,20 @@ class LibraryIndexer:
         self.home = home or str(Path.home())
         self.store = LibraryStore(self.config_dir)
         self._queue: queue.Queue[str] = queue.Queue()
-        self._thumb_queue: queue.Queue[str] = queue.Queue()
+        self._thumb_queue: queue.Queue[tuple[str, int]] = queue.Queue()
+        #: ``(asset_id, width)`` already queued: a grid asks for the same tile on
+        #: every poll and the queue must not grow by one entry per request.
+        self._thumb_pending: set[tuple[str, int]] = set()
+        self._thumb_pending_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._thumb_thread: threading.Thread | None = None
         self._observer: Any = None
         self._cwd_cache: dict[str, str] = {}
         self._deny: Any = None
-        self._lock = threading.Lock()
+        # Reentrant: ``start`` holds it while calling ``_start_thumb_worker``,
+        # which takes it again to stay race-free with a takeover.
+        self._lock = threading.RLock()
         #: Set when the observer could not start; drives the slow reconcile.
         self.observer_failed = False
 
@@ -380,20 +395,29 @@ class LibraryIndexer:
             self._thread = threading.Thread(target=self._run, name="library-indexer", daemon=True)
             self._thread.start()
             # NO thumbnail worker without the writer lock. It WRITES
-            # ``idx_assets`` and decodes every image; a reader-only process that
-            # ran it would break the single-writer rule and duplicate the owner's
-            # work on the same files.
-            if writer_available(self.config_dir):
-                self._thumb_thread = threading.Thread(
-                    target=self._run_thumbnails, name="library-thumbs", daemon=True
-                )
-                self._thumb_thread.start()
+            # ``idx_thumbnails`` and decodes every image; a reader-only process
+            # that ran it would break the single-writer rule and duplicate the
+            # owner's work on the same files.
+            self._start_thumb_worker()
+
+    def _start_thumb_worker(self) -> None:
+        """Start the thumbnail thread once, and only while this process is writer."""
+        with self._lock:
+            if not writer_available(self.config_dir):
+                return
+            if self._thumb_thread is not None and self._thumb_thread.is_alive():
+                return
+            self._thumb_thread = threading.Thread(
+                target=self._run_thumbnails, name="library-thumbs", daemon=True
+            )
+            self._thumb_thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
         # Unblock both queue waits without inventing work.
         self._queue.put("")
-        self._thumb_queue.put("")
+        # Same unblock, in the queue's own item type; the worker skips an empty id.
+        self._thumb_queue.put(("", 0))
         for thread in (self._thread, self._thumb_thread):
             if thread is not None and thread.is_alive():
                 thread.join(timeout)
@@ -424,12 +448,15 @@ class LibraryIndexer:
         self._deny = files_service.make_deny(self.config_dir)
         while not self._stop.is_set() and not _acquire_writer(self.config_dir):
             # Another process owns the writer. Keep serving READS from the
-            # database (that is what this process's surfaces need) and retry on
-            # the idle cadence — never in a tight loop.
+            # database and retry on a SHORT bound — one flock syscall, no path
+            # scan. Waiting the 6 h idle cadence left this process stale for its
+            # whole life after a desktop restart raced a TUI session.
             logger.info("library: another process owns the index; reader only")
-            self._stop.wait(RECONCILE_IDLE_S)
+            self._stop.wait(WRITER_RETRY_S)
         if self._stop.is_set():
             return
+        # We own it now: the thumbnail worker belongs to the writer.
+        self._start_thumb_worker()
         try:
             self.reconcile()
         except Exception:  # noqa: BLE001 - a first reconcile is best effort
@@ -555,9 +582,24 @@ class LibraryIndexer:
         return cwd
 
     def _forget(self, session_id: str) -> None:
+        """Drop one session's contributions, including its share of the totals.
+
+        ``sessions_total`` is set by reconcile, so without the decrement here a
+        delete left ``scan`` reporting 2/2 with one session gone — a progress
+        readout that never completes until the next reconcile.
+        """
         with self.store.write() as connection:
             affected = self.store.forget_session(connection, session_id)
+            row = connection.execute(
+                "SELECT 1 FROM idx_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
             connection.execute("DELETE FROM idx_sessions WHERE session_id = ?", (session_id,))
+            if row is not None:
+                connection.execute(
+                    "UPDATE idx_state SET value = CAST(MAX(CAST(value AS INTEGER) - 1, 0) AS TEXT) "
+                    "WHERE key = ?",
+                    (STATE_SESSIONS_TOTAL,),
+                )
             self.store.recompute_assets(connection, affected)
             self.store.bump_revision(connection)
 
@@ -622,14 +664,16 @@ class LibraryIndexer:
                 complete=bool(entry.get("complete")),
                 revision=revision,
             )
-            self.store.bump_revision(connection)
+            revision = self.store.bump_revision(connection)
         self._enqueue_thumbs(assets)
+        # The revision ``bump_revision`` returned, not a fresh read: that would
+        # open another connection per session (623 of them on a cold backfill).
         logger.info(
             "library: indexed %s (%d records, %d assets, revision %d)",
             session_id,
             len(rows),
             len(affected),
-            self.store.revision(),
+            revision,
         )
         self._maybe_finish_backfill()
         return True
@@ -747,41 +791,61 @@ class LibraryIndexer:
 
     # -- thumbnails ---------------------------------------------------------
 
-    def enqueue_thumbnail(self, asset_id: str) -> None:
-        """Ask for one thumbnail. Called from a read; the queue drops duplicates.
+    def enqueue_thumbnail(self, asset_id: str, width: int = THUMB_MAX_WIDTH) -> None:
+        """Ask for one thumbnail at one width. Called from a read.
 
-        Never blocks: the request path must not wait on an image decode, and the
-        worker re-checks liveness so a duplicate costs one stat.
+        Never blocks, and never queues the same ``(asset, width)`` twice: a grid
+        renders the same tile on every poll, and an undeduplicated queue grew by
+        one entry per request for the life of the process.
         """
-        if asset_id and self.running and writer_available(self.config_dir):
-            self._thumb_queue.put(asset_id)
+        if not asset_id or not self.running or not writer_available(self.config_dir):
+            return
+        if self._thumb_thread is None:
+            # Reader-only right now; the thread starts if we take the lock.
+            return
+        self._queue_thumb(asset_id, width)
+
+    def _queue_thumb(self, asset_id: str, width: int) -> None:
+        key = (asset_id, int(width))
+        with self._thumb_pending_lock:
+            if key in self._thumb_pending:
+                return
+            self._thumb_pending.add(key)
+        self._thumb_queue.put(key)
 
     def _enqueue_thumbs(self, assets: Iterable[str]) -> None:
-        """Queue freshly indexed images; the worker decides whether one is stale."""
+        """Queue freshly indexed images at the card width; stale ones are skipped."""
         try:
-            for asset_id in self.store.thumbnail_candidates(assets):
-                self._thumb_queue.put(asset_id)
+            for asset_id, width in self.store.thumbnail_candidates(assets):
+                self._queue_thumb(asset_id, width)
         except Exception:  # noqa: BLE001 - thumbnails are cosmetic
             logger.debug("library: thumbnail enqueue failed", exc_info=True)
 
     def _run_thumbnails(self) -> None:
+        # The startup sweep covers the CARD width only, kept images first: a
+        # migration run must not spend its first minutes decoding the whole
+        # image catalog before drawing anything. Any other width is generated on
+        # demand when a surface asks for it.
         try:
-            for asset_id in self.store.thumbnail_candidates():
-                self._thumb_queue.put(asset_id)
+            for asset_id, width in self.store.thumbnail_candidates(width=THUMB_MAX_WIDTH):
+                self._queue_thumb(asset_id, width)
         except Exception:  # noqa: BLE001 - a startup miss is retried per session
             logger.debug("library: thumbnail sweep failed", exc_info=True)
         while not self._stop.is_set():
             try:
-                asset_id = self._thumb_queue.get(timeout=60.0)
+                item = self._thumb_queue.get(timeout=60.0)
             except queue.Empty:
                 continue
-            if self._stop.is_set() or not asset_id:
+            if self._stop.is_set() or not item or not item[0]:
                 continue
+            asset_id, width = item
+            with self._thumb_pending_lock:
+                self._thumb_pending.discard((asset_id, int(width)))
             if not writer_available(self.config_dir):
                 # Ownership moved (or was never ours): stop writing, keep reading.
                 continue
             try:
-                self.store.ensure_thumbnail(asset_id, width=THUMB_MAX_WIDTH, quality=THUMB_QUALITY)
+                self.store.ensure_thumbnail(asset_id, width=int(width), quality=THUMB_QUALITY)
             except Exception:  # noqa: BLE001 - one bad image must not stop the queue
                 logger.debug("library: thumbnail failed for %s", asset_id, exc_info=True)
 

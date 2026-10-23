@@ -15,6 +15,7 @@ import pytest
 from local_operator.library import identity, indexer, service
 from local_operator.library.metadata import MetadataStore
 from local_operator.library.store import LibraryStore, fts_expression, search_tokens
+from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
     OTHER,
@@ -26,9 +27,9 @@ from ._fixtures import (
     user_row,
     write_rows,
 )
-from local_operator.session.attachments import cache_media
 
 THIRD = "111111111111"
+SECOND = "222222222222"
 
 
 def _row(**fields: Any) -> dict[str, Any]:
@@ -128,10 +129,14 @@ def test_search_matches_prefixes_across_names_descriptions_tags_and_titles(
     assert query(root, q="reporttypo")["total"] == 0
 
 
-def test_search_ignores_a_query_that_tokenises_to_nothing(tmp_path, monkeypatch) -> None:
+def test_a_query_with_no_token_matches_nothing(tmp_path, monkeypatch) -> None:
+    """``!!`` is a query, not an absence of one: it must not answer all rows."""
     root = config_root(monkeypatch, tmp_path)
     seed(root)
-    assert query(root, q="!!! ...")["total"] == query(root)["total"]
+    assert query(root)["total"] == 4
+    assert query(root, q="!!! ...")["total"] == 0
+    # An EMPTY q is still "no filter".
+    assert query(root, q="   ")["total"] == 4
     assert search_tokens("!!!") == []
     assert fts_expression("!!!") is None
     assert fts_expression("a b*c") == '"a"* AND "b"* AND "c"*'
@@ -421,6 +426,8 @@ def test_thumbnail_liveness_never_hashes_the_source(tmp_path, monkeypatch) -> No
     """One stat per request, never a full-file read of the image."""
     import hashlib
 
+    from local_operator.library.store import thumb_source_stamp
+
     root = config_root(monkeypatch, tmp_path)
     image = root.parent / "photo.png"
     image.write_bytes(png())
@@ -429,22 +436,13 @@ def test_thumbnail_liveness_never_hashes_the_source(tmp_path, monkeypatch) -> No
     asset_id = service.list_assets(root, service.Query())["rows"][0]["id"]
     store = LibraryStore(root)
 
-    with store.write() as connection:
-        connection.execute(
-            "UPDATE idx_assets SET thumb_path = ?, thumb_key = ?, thumb_src = ? WHERE asset_id = ?",
-            (str(root.parent / "cached.webp"), "0123456789abcdef-480", "stamp", asset_id),
-        )
     live = root.parent / "cached.webp"
     live.write_bytes(b"webp")
     with store.write() as connection:
         connection.execute(
-            "UPDATE idx_assets SET thumb_src = ? WHERE asset_id = ?",
-            (
-                __import__("local_operator.library.store", fromlist=["x"]).thumb_source_stamp(
-                    image
-                ),
-                asset_id,
-            ),
+            "INSERT OR REPLACE INTO idx_thumbnails(asset_id, width, path, key, src, created_at) "
+            "VALUES(?, ?, ?, ?, ?, ?)",
+            (asset_id, 480, str(live), "0123456789abcdef-480", thumb_source_stamp(image), 1.0),
         )
 
     def boom(*args, **kwargs):
@@ -452,5 +450,184 @@ def test_thumbnail_liveness_never_hashes_the_source(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(hashlib, "file_digest", boom)
     assert store.thumb_is_live(asset_id, 480) == live
-    # A different width is a different file, decided from the key alone.
+    # A width with no row is a miss, decided without touching the source.
     assert store.thumb_is_live(asset_id, 240) is None
+
+
+def test_two_widths_are_cached_and_served_separately(tmp_path, monkeypatch) -> None:
+    """A single slot per asset could only serve the width generated last."""
+    pytest.importorskip("PIL")
+    root = config_root(monkeypatch, tmp_path)
+    image = root.parent / "photo.png"
+    image.write_bytes(png())
+    session(root, SESSION, write_rows("w1", 1.0, image))
+    indexer.rebuild_now(root)
+    asset_id = service.list_assets(root, service.Query())["rows"][0]["id"]
+    store = LibraryStore(root)
+
+    first = store.ensure_thumbnail(asset_id, width=240, quality=82)
+    second = store.ensure_thumbnail(asset_id, width=480, quality=82)
+    assert first and second and first != second
+    assert first.endswith("-240.webp") and second.endswith("-480.webp")
+    assert Path(first).is_file() and Path(second).is_file()
+
+    # BOTH are served at their own width — the regression the review found.
+    assert service.thumbnail(root, asset_id, 240).path == Path(first)
+    assert service.thumbnail(root, asset_id, 480).path == Path(second)
+    assert service.thumbnail(root, asset_id, 240).content_type == "image/webp"
+
+
+def test_a_path_token_is_searchable(tmp_path, monkeypatch) -> None:
+    """``CameraRoll`` is a folder name: the old haystack matched the display path."""
+    root = config_root(monkeypatch, tmp_path)
+    folder = root.parent / "CameraRoll"
+    folder.mkdir()
+    photo = folder / "IMG_0001.png"
+    photo.write_bytes(png())
+    session(root, SESSION, write_rows("w1", 1.0, photo))
+    indexer.rebuild_now(root)
+
+    assert query(root, q="img")["total"] == 1
+    assert query(root, q="camera")["total"] == 1
+    assert query(root, q="cameraroll")["total"] == 1
+    assert query(root, q="nothing")["total"] == 0
+
+
+def test_name_sort_is_ascii_folded(tmp_path, monkeypatch) -> None:
+    """Pins the documented limitation: ``COLLATE NOCASE`` folds A-Z only."""
+    root = config_root(monkeypatch, tmp_path)
+    rows: list[dict[str, Any]] = []
+    for number, name in enumerate(("apple.txt", "Zebra.txt", "École.txt")):
+        path = root.parent / name
+        path.write_text("x")
+        rows += write_rows(f"w{number}", float(number + 1), path)
+    session(root, SESSION, rows)
+    indexer.rebuild_now(root)
+
+    ordered = [row["name"] for row in query(root, sort="name", order="asc", limit=10)["rows"]]
+    assert ordered[0] == "apple.txt"
+    assert ordered[1] == "Zebra.txt"
+    # Byte order, not Unicode case folding: the accented name sorts last.
+    assert ordered[-1] == "École.txt"
+
+
+def test_a_schema_version_move_discards_the_index_and_its_state(tmp_path, monkeypatch) -> None:
+    """A bump rebuilds the tables AND the counters, or the UI says ready on empty."""
+    from local_operator.library.store import SCHEMA_VERSION
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    store = LibraryStore(root)
+    assert query(root)["state"] == "ready"
+
+    # The lazy worker re-adds the readiness key from its own thread; stop it, or
+    # this test races the very cache it is exercising.
+    indexer.reset_for_tests()
+    with store.write() as connection:
+        connection.execute("UPDATE idx_state SET value = '99' WHERE key = 'schema_version'")
+        connection.execute("UPDATE idx_state SET value = '2' WHERE key = 'sessions_total'")
+    LibraryStore._ready_paths.discard(store._key)
+    store.ensure_schema()
+
+    # Read the STATE directly: a service call would start the indexer, which can
+    # backfill this tiny config before the assertion runs.
+    assert store.listing_state() == ("building", 0, 0)
+    assert store.query_page(service.Query(), limit=10)[1] == 0
+    assert store.state()["schema_version"] == str(SCHEMA_VERSION)
+    assert store.state()["backfill_done"] == "0"
+
+    # The version row is an upsert, so the NEXT start does not drop again: the
+    # index the previous process built survives.
+    indexer.rebuild_now(root)
+    before = query(root)["total"]
+    indexer.reset_for_tests()
+    LibraryStore._ready_paths.discard(store._key)
+    store.ensure_schema()
+    assert query(root)["total"] == before
+
+
+def test_recovery_drops_only_the_derived_tables(tmp_path, monkeypatch) -> None:
+    """A corrupt derived index rebuilds; names and tags are never lost."""
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    row = next(r for r in query(root)["rows"] if r["name"] == "notes.md")
+    service.update_asset(root, row["id"], {"name": "Kept"}, actor="user", source="user")
+    store = LibraryStore(root)
+    tag = MetadataStore(root).create_tag("kept-by-tag")
+    service.set_tags(root, row["id"], [tag["id"]])
+
+    with store.write() as connection:
+        connection.execute("DELETE FROM idx_assets")
+        connection.execute("DELETE FROM idx_counts")
+    assert query(root)["total"] == 0
+
+    assert store.recover_derived() is True
+    assert store.state()["backfill_done"] == "0"
+    indexer.rebuild_now(root)
+    frame = query(root)
+    assert next(r for r in frame["rows"] if r["id"] == row["id"])["name"] == "Kept"
+    assert frame["tags"] and frame["tags"][0]["name"] == "kept-by-tag"
+    assert MetadataStore(root).asset(row["id"])["name"] == "Kept"
+
+
+def test_an_aggregate_does_not_depend_on_scan_order(tmp_path, monkeypatch) -> None:
+    """Rescanning ONE session must not flip a shared asset's derived fields.
+
+    Two sessions name the same file differently. The aggregate must be a
+    function of the occurrence set ordered by TIME, not of which session was
+    scanned last — under ``ORDER BY rowid`` the rescan moved its rows to the end
+    and its record won.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    shared = root.parent / "shared.txt"
+    shared.write_text("x")
+    # The 1.0 session is indexed SECOND, so insertion order and time disagree.
+    session(root, SECOND, write_rows("w2", 2.0, shared))
+    session(root, OTHER, write_rows("w1", 1.0, shared))
+    indexer.rebuild_now(root)
+    asset_id = identity.asset_id(identity.key_for(str(shared), None))
+    store = LibraryStore(root)
+    before = store.asset(asset_id)
+    assert before is not None
+
+    # Re-insert the EARLIER session's rows with a DIFFERENT name: only its
+    # rowid moves, its time does not.
+    with store.write() as connection:
+        store.forget_session(connection, OTHER)
+        store.replace_session_occurrences(
+            connection,
+            OTHER,
+            [
+                {
+                    "asset_id": asset_id,
+                    "key": before.key,
+                    "session_id": OTHER,
+                    "title": "earlier",
+                    "origin": "written",
+                    "child_id": "",
+                    "label": None,
+                    "tool": "write",
+                    "intent": None,
+                    "first_ts": 1.0,
+                    "last_ts": 1.0,
+                    "first_seq": 1,
+                    "last_seq": 1,
+                    "touches": 1,
+                    "highlighted": False,
+                    "name": "from-the-earlier-session.txt",
+                    "path": str(shared),
+                    "kind": "text",
+                    "content_type": "text/plain",
+                    "size_bytes": 1,
+                    "width": None,
+                    "height": None,
+                    "duration_s": None,
+                }
+            ],
+        )
+        store.recompute_assets(connection, [asset_id])
+    after = store.asset(asset_id)
+    assert after is not None
+    # The 2.0 session is still the LAST in time, so it still names the asset.
+    assert after.derived_name == "shared.txt"
+    assert after.kind == before.kind

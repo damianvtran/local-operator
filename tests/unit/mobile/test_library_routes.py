@@ -169,7 +169,7 @@ def library(monkeypatch: pytest.MonkeyPatch) -> Any:
     # worker's own suite covers indexing.
     class _NoWorker:
         @staticmethod
-        def enqueue_thumbnail(_asset_id: str) -> None:
+        def enqueue_thumbnail(_asset_id: str, _width: int = 480) -> None:
             return None
 
     monkeypatch.setattr(

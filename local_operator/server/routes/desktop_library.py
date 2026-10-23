@@ -120,7 +120,11 @@ def _field_refusal(error: TagRefused) -> HTTPException:
 
 
 def _tag_refusal(error: TagRefused) -> HTTPException:
-    if error.code in ("unknown_tag", "tag_unknown"):
+    # ``tag_not_found`` is an id that no tag carries — a missing RESOURCE, not a
+    # malformed name. Mapping it to the name-grammar envelope ("Tag names are
+    # 1-24 characters") told a client to fix the spelling of an id it had
+    # copied, which is the wrong instruction for every caller.
+    if error.code in ("unknown_tag", "tag_unknown", "tag_not_found"):
         return HTTPException(404, _wd.library_tag_unknown().envelope(code="library_tag_unknown"))
     if error.code == "tag_limit":
         return HTTPException(
@@ -278,6 +282,8 @@ async def list_library_assets(
     config = _config_dir(request)
     try:
         answer = await asyncio.to_thread(service.list_assets, config, query)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.InvalidCursor:
         raise HTTPException(
             422,
@@ -292,6 +298,8 @@ async def list_library_assets(
 async def get_library_asset(asset_id: AssetID, request: Request):
     try:
         row = await asyncio.to_thread(service.get_asset, _config_dir(request), asset_id)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     return reply(row)
@@ -399,6 +407,8 @@ async def library_content(
     config = _config_dir(request)
     try:
         content = await asyncio.to_thread(service.resolve_content, config, asset_id)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except service.ContentUnavailable as error:
@@ -463,6 +473,8 @@ async def library_thumbnail(
     """Best-effort thumbnail. A non-image is a designed 404, not a blank pane."""
     try:
         content = await asyncio.to_thread(service.thumbnail, _config_dir(request), asset_id, w)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except service.ContentUnavailable as error:

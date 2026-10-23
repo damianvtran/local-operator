@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 #: The derived schema. Derived tables only: bumping this discards and rebuilds
 #: them, so it is not the metadata store's version and must not be compared to
 #: it.
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 
 #: Re-exported for the indexer and for ``library doctor``-style callers.
 DB_PATH_PARTS: Final = (DB_DIRNAME, DB_FILENAME)
@@ -212,7 +212,11 @@ def _fts_values(row: str) -> str:
         "CASE WHEN {row}.effective_name = {row}.derived_name "
         "THEN {row}.effective_name "
         "ELSE {row}.effective_name || ' ' || {row}.derived_name END, "
-        "{row}.description, {row}.tag_names, {row}.session_titles"
+        "{row}.description, {row}.tag_names, {row}.session_titles, "
+        # The absolute path, which the old haystack reached through
+        # ``display_path``: a folder name like ``CameraRoll`` is a token of it,
+        # and dropping the column silently made that search return nothing.
+        "{row}.path"
     ).format(row=row)
 
 
@@ -246,9 +250,6 @@ CREATE TABLE IF NOT EXISTS idx_assets(
     is_final INTEGER NOT NULL DEFAULT 0,
     tag_names TEXT NOT NULL DEFAULT '',
     session_titles TEXT NOT NULL DEFAULT '',
-    thumb_path TEXT,
-    thumb_key TEXT,
-    thumb_src TEXT,
     indexed_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_assets_recent ON idx_assets(last_ts DESC, asset_id);
@@ -323,10 +324,23 @@ CREATE TABLE IF NOT EXISTS idx_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS idx_counts(
     scope TEXT NOT NULL, bucket TEXT NOT NULL, value TEXT NOT NULL, n INTEGER NOT NULL,
     PRIMARY KEY(scope, bucket, value));
+-- One row PER WIDTH. A single slot on idx_assets could only ever serve the
+-- width the worker happened to generate last, so a `w=240` caller was handed
+-- the full-size original on every render. ``path`` is the cached WebP and
+-- ``src`` the source's stat identity (a moved source invalidates its row).
+CREATE TABLE IF NOT EXISTS idx_thumbnails(
+    asset_id TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    key TEXT NOT NULL,
+    src TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY(asset_id, width));
+CREATE INDEX IF NOT EXISTS idx_thumbnails_asset ON idx_thumbnails(asset_id);
 """,
         """
 CREATE VIRTUAL TABLE IF NOT EXISTS idx_assets_fts USING fts5(
-    name, description, tags, sessions,
+    name, description, tags, sessions, path,
     tokenize = 'unicode61 remove_diacritics 2');
 """,
         # -- counts, maintained by the database rather than by a caller --------
@@ -347,19 +361,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS idx_assets_fts USING fts5(
         + " END;",
         # -- full text ---------------------------------------------------------
         "CREATE TRIGGER IF NOT EXISTS idx_assets_fts_ins AFTER INSERT ON idx_assets BEGIN "
-        "INSERT INTO idx_assets_fts(rowid, name, description, tags, sessions) "
+        "INSERT INTO idx_assets_fts(rowid, name, description, tags, sessions, path) "
         "VALUES (NEW.rowid, {values}); END;".format(values=_fts_values("NEW")),
         "CREATE TRIGGER IF NOT EXISTS idx_assets_fts_del AFTER DELETE ON idx_assets BEGIN "
         "DELETE FROM idx_assets_fts WHERE rowid = OLD.rowid; END;",
         "CREATE TRIGGER IF NOT EXISTS idx_assets_fts_upd AFTER UPDATE ON idx_assets "
         "WHEN OLD.effective_name IS NOT NEW.effective_name "
         "OR OLD.derived_name IS NOT NEW.derived_name "
+        "OR OLD.path IS NOT NEW.path "
         "OR OLD.description IS NOT NEW.description "
         "OR OLD.tag_names IS NOT NEW.tag_names "
         "OR OLD.session_titles IS NOT NEW.session_titles "
         "BEGIN "
         "DELETE FROM idx_assets_fts WHERE rowid = OLD.rowid; "
-        "INSERT INTO idx_assets_fts(rowid, name, description, tags, sessions) "
+        "INSERT INTO idx_assets_fts(rowid, name, description, tags, sessions, path) "
         "VALUES (NEW.rowid, {values}); END;".format(values=_fts_values("NEW")),
         # -- authoritative metadata flows INTO the index -----------------------
         #
@@ -423,10 +438,31 @@ _TAG_REFRESH_SQL: Final = (
 #: drop never trips a trigger on a table that still exists.
 _DERIVED_TABLES: Final = (
     "idx_assets_fts",
+    "idx_thumbnails",
     "idx_counts",
     "idx_occurrences",
     "idx_sessions",
     "idx_assets",
+)
+
+
+#: Every trigger this module creates. ``recover_derived`` drops these BEFORE
+#: the tables: three of them live on the authoritative metadata tables, so
+#: dropping ``idx_assets`` alone would leave a rename trigger writing to a table
+#: that no longer exists and turn every metadata edit into an error.
+_DERIVED_TRIGGERS: Final = (
+    "idx_assets_counts_ins",
+    "idx_assets_counts_del",
+    "idx_assets_counts_upd",
+    "idx_assets_fts_ins",
+    "idx_assets_fts_del",
+    "idx_assets_fts_upd",
+    "meta_assets_idx_ins",
+    "meta_assets_idx_upd",
+    "meta_asset_tags_ins",
+    "meta_asset_tags_del",
+    "meta_asset_tags_upd",
+    "meta_tags_rename",
 )
 
 
@@ -548,13 +584,21 @@ class LibraryStore:
                 current = int(row) if row and row.isdigit() else None
                 if current is not None and current != SCHEMA_VERSION:
                     # These tables are derived: a version move discards them and
-                    # the indexer rebuilds. Never touched: metadata tables.
-                    for table in _DERIVED_TABLES:
-                        connection.execute(f"DROP TABLE IF EXISTS {table}")
+                    # the indexer rebuilds. Never touched: the metadata tables.
+                    self._drop_derived(connection)
+                    # The COUNTERS are derived too. Left behind, ``backfill_done``
+                    # still said "1" and ``sessions_total`` still described the
+                    # dropped rows, so a rebuilding index reported state=ready
+                    # with scanned=0 and the worker picked the 6 h cadence.
+                    for key in (STATE_REVISION, STATE_BACKFILL_DONE):
+                        connection.execute("DELETE FROM idx_state WHERE key = ?", (key,))
+                    for key in (STATE_SESSIONS_TOTAL, STATE_SESSIONS_SCANNED):
+                        connection.execute("DELETE FROM idx_state WHERE key = ?", (key,))
                     connection.commit()
                 connection.executescript(_schema_sql())
                 connection.execute(
-                    "INSERT OR IGNORE INTO idx_state(key, value) VALUES(?, ?)",
+                    "INSERT INTO idx_state(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (STATE_SCHEMA, str(SCHEMA_VERSION)),
                 )
                 connection.execute(
@@ -575,6 +619,55 @@ class LibraryStore:
                 raise IndexUnavailable(str(error)) from error
 
     @staticmethod
+    def _drop_derived(connection: sqlite3.Connection) -> None:
+        """Drop every derived table and trigger, leaving metadata untouched.
+
+        Triggers first: three of them hang off ``assets``/``asset_tags``/``tags``
+        and would reference a table that no longer exists.
+        """
+        for trigger in _DERIVED_TRIGGERS:
+            connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        for table in _DERIVED_TABLES:
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        connection.commit()
+
+    def recover_derived(self) -> bool:
+        """Discard the derived index and recreate an empty one. Never raises.
+
+        The module's contract is that everything under ``idx_*`` costs one
+        rebuild, never an error — but a corrupt or unreadable DERIVED database
+        (a full disk mid-write, a torn file) used to surface as
+        ``IndexUnavailable`` out of every read, and as a bare 500 on the route.
+        This is the rebuild path: drop, recreate, reset the counters so the
+        indexer backfills, and report whether it worked. AUTHORITATIVE tables
+        are never touched, so names, tags and favourites survive a corrupt index.
+        """
+        try:
+            # The cached readiness would short-circuit the DDL below.
+            self._ready_paths.discard(self._key)
+            with self._connect() as connection:
+                self._drop_derived(connection)
+                connection.executescript(_schema_sql())
+                for key, value in (
+                    (STATE_SCHEMA, str(SCHEMA_VERSION)),
+                    (STATE_REVISION, "0"),
+                    (STATE_BACKFILL_DONE, "0"),
+                    (STATE_SESSIONS_TOTAL, "0"),
+                    (STATE_SESSIONS_SCANNED, "0"),
+                ):
+                    connection.execute(
+                        "INSERT INTO idx_state(key, value) VALUES(?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (key, value),
+                    )
+                connection.commit()
+            self._ready_paths.add(self._key)
+            return True
+        except Exception:  # noqa: BLE001 - a failed recovery is a 503, not a crash
+            logger.warning("library: derived index recovery failed", exc_info=True)
+            return False
+
+    @staticmethod
     def _state_value(connection: sqlite3.Connection, key: str) -> str | None:
         try:
             row = connection.execute("SELECT value FROM idx_state WHERE key = ?", (key,)).fetchone()
@@ -586,10 +679,7 @@ class LibraryStore:
 
     def state(self) -> dict[str, str]:
         with self.read() as connection:
-            return {
-                str(row["key"]): str(row["value"])
-                for row in connection.execute("SELECT key, value FROM idx_state")
-            }
+            return self._state(connection)
 
     def set_state(self, connection: sqlite3.Connection, **values: Any) -> None:
         for key, value in values.items():
@@ -618,9 +708,13 @@ class LibraryStore:
         return value
 
     def listing_state(self) -> tuple[str, int, int]:
-        """``(state, sessions_scanned, sessions_total)`` for the list envelope."""
+        """``(state, sessions_scanned, sessions_total)`` for the list envelope.
+
+        One connection for all three: a second one could observe a different
+        moment and report ``scanned`` > ``total`` mid-write.
+        """
         with self.read() as connection:
-            state = self.state()
+            state = self._state(connection)
             scanned = self._count_sessions(connection, complete=True)
             total = self._int_state(state, STATE_SESSIONS_TOTAL)
         return (
@@ -628,6 +722,13 @@ class LibraryStore:
             scanned,
             total,
         )
+
+    @staticmethod
+    def _state(connection: sqlite3.Connection) -> dict[str, str]:
+        return {
+            str(row["key"]): str(row["value"])
+            for row in connection.execute("SELECT key, value FROM idx_state")
+        }
 
     def _count_sessions(self, connection: sqlite3.Connection, *, complete: bool) -> int:
         clause = " WHERE complete = 1" if complete else ""
@@ -792,13 +893,18 @@ class LibraryStore:
         for asset_id in asset_ids:
             rows = list(
                 connection.execute(
-                    "SELECT * FROM idx_occurrences WHERE asset_id = ? ORDER BY rowid",
+                    # ``rowid`` is insertion order, so rescanning ONE session
+                    # moved its rows to the end and flipped a shared asset's
+                    # last-wins fields (derived name, kind, content type) to
+                    # whatever that session recorded. The aggregate must be a
+                    # function of the occurrence SET, not of scan history.
+                    "SELECT * FROM idx_occurrences WHERE asset_id = ? "
+                    "ORDER BY first_ts, session_id, child_id",
                     (asset_id,),
                 )
             )
             existing = connection.execute(
-                "SELECT key, thumb_path, thumb_key, thumb_src FROM idx_assets WHERE asset_id = ?",
-                (asset_id,),
+                "SELECT key FROM idx_assets WHERE asset_id = ?", (asset_id,)
             ).fetchone()
             if not rows:
                 connection.execute("DELETE FROM idx_assets WHERE asset_id = ?", (asset_id,))
@@ -828,8 +934,7 @@ class LibraryStore:
                 "INSERT INTO idx_assets(asset_id, key, path, digest, derived_name, "
                 "effective_name, description, category, kind, content_type, origin, "
                 "origin_group, origins, highlighted, size_bytes, width, height, duration_s, "
-                "first_ts, last_ts, is_final, tag_names, session_titles, thumb_path, thumb_key, "
-                "thumb_src, indexed_at) "
+                "first_ts, last_ts, is_final, tag_names, session_titles, indexed_at) "
                 "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
                 # Tag names are the metadata store's, not the previous idx row's:
                 # an asset whose metadata row survived a rebuild must come back
@@ -837,9 +942,7 @@ class LibraryStore:
                 "  COALESCE((SELECT GROUP_CONCAT(t.name, ' ') FROM asset_tags at "
                 "            JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = ?), ''), "
                 "  ?, "
-                "  (SELECT thumb_path FROM idx_assets WHERE asset_id = ?), "
-                "  (SELECT thumb_key FROM idx_assets WHERE asset_id = ?), "
-                "  (SELECT thumb_src FROM idx_assets WHERE asset_id = ?), ?) "
+                "  ?) "
                 "ON CONFLICT(asset_id) DO UPDATE SET key = excluded.key, path = excluded.path, "
                 "digest = excluded.digest, derived_name = excluded.derived_name, "
                 "effective_name = excluded.effective_name, description = excluded.description, "
@@ -875,9 +978,6 @@ class LibraryStore:
                     1 if is_final(aggregate) else 0,
                     asset_id,
                     " ".join(aggregate.session_titles),
-                    asset_id,
-                    asset_id,
-                    asset_id,
                     time.time(),
                 ),
             )
@@ -894,6 +994,11 @@ class LibraryStore:
         """
         where, params = _where_clause(query)
         match = fts_expression(query.q)
+        if match is None and query.q.strip():
+            # A NON-EMPTY query with no searchable token ("!!", "…") matches
+            # NOTHING. Dropping the filter instead would answer "all rows" for
+            # something the user typed, which reads as the search being broken.
+            return [], 0
         if match is not None:
             where.append(
                 "i.rowid IN (SELECT rowid FROM idx_assets_fts WHERE idx_assets_fts MATCH ?)"
@@ -1063,23 +1168,41 @@ class LibraryStore:
 
     # -- thumbnails ---------------------------------------------------------
 
-    def thumbnail_candidates(self, asset_ids: Iterable[str] | None = None) -> list[str]:
-        """Image assets whose cached thumbnail file is missing.
+    def thumbnail_candidates(
+        self, asset_ids: Iterable[str] | None = None, *, width: int = 480
+    ) -> list[tuple[str, int]]:
+        """``(asset_id, width)`` pairs whose cached WebP is missing at that width.
+
+        ORDERED ``is_final DESC, last_ts DESC``: a migration run must spend its
+        first work on the images the operator actually kept, not on the oldest
+        scratch screenshot in the catalog.
 
         Staleness of the SOURCE is not decided here: that needs one stat per
-        row, and the cheap filter ("no file on disk") is what makes the startup
-        sweep bounded. :meth:`ensure_thumbnail` re-checks ``thumb_src`` and
-        regenerates when the source moved.
+        row, and the cheap filter ("no file on disk") is what keeps the sweep
+        bounded. :meth:`ensure_thumbnail` re-checks ``src`` and regenerates when
+        the source moved.
         """
-        clause = " AND asset_id IN (%s)" % ",".join("?" * len(list(asset_ids or [])))
         params = list(asset_ids or [])
-        sql = "SELECT asset_id, thumb_path FROM idx_assets WHERE category = 'image'" + (
-            clause if params else ""
-        )
+        # No clause at all when there are no ids: SQLite accepts ``IN ()`` as
+        # always-false, which silently turned the startup sweep into a no-op.
+        clause = (" AND i.asset_id IN (%s)" % ",".join("?" * len(params))) if params else ""
+        return self._missing_thumbnails(params, clause, width)
+
+    def _missing_thumbnails(
+        self, params: list[str], clause: str, width: int
+    ) -> list[tuple[str, int]]:
         with self.read() as connection:
-            rows = list(connection.execute(sql, params))
+            rows = list(
+                connection.execute(
+                    "SELECT i.asset_id, t.path AS thumb_path FROM idx_assets i "
+                    "LEFT JOIN idx_thumbnails t ON t.asset_id = i.asset_id AND t.width = ? "
+                    "WHERE i.category = 'image'" + clause + " "
+                    "ORDER BY i.is_final DESC, i.last_ts DESC",
+                    [width, *params],
+                )
+            )
         return [
-            str(row["asset_id"])
+            (str(row["asset_id"]), width)
             for row in rows
             if not row["thumb_path"] or not os.path.isfile(str(row["thumb_path"]))
         ]
@@ -1112,15 +1235,19 @@ class LibraryStore:
     def _thumb_row(self, asset_id: str) -> sqlite3.Row | None:
         with self.read() as connection:
             return connection.execute(
-                "SELECT asset_id, path, digest, derived_name, kind, content_type, thumb_path, "
-                "thumb_key, thumb_src FROM idx_assets WHERE asset_id = ?",
+                "SELECT asset_id, path, digest, derived_name, kind, content_type "
+                "FROM idx_assets WHERE asset_id = ?",
                 (asset_id,),
             ).fetchone()
 
     def thumb_is_live(self, asset_id: str, width: int) -> Path | None:
-        """The cached file when it is present AND still matches its source."""
-        row = self._thumb_row(asset_id)
-        if row is None or not row["thumb_path"] or not row["thumb_src"]:
+        """The cached file for THIS width when it is present and still matches."""
+        with self.read() as connection:
+            row = connection.execute(
+                "SELECT path, key, src FROM idx_thumbnails WHERE asset_id = ? AND width = ?",
+                (asset_id, width),
+            ).fetchone()
+        if row is None or not row["path"] or not row["src"]:
             return None
         source = self.thumbnail_source(asset_id)
         if source is None:
@@ -1128,25 +1255,22 @@ class LibraryStore:
         path, _content_type, suffix = source
         if suffix in (".svg", ".gif"):
             return None
-        target = Path(str(row["thumb_path"]))
+        target = Path(str(row["path"]))
         if not target.is_file():
             return None
-        if str(row["thumb_src"]) != thumb_source_stamp(path):
-            return None
-        # The width suffix in the KEY, never the key's content hash: recomputing
-        # the content hash here would read and sha256 the whole source image on
-        # every grid request, which is the cost this cache exists to remove.
-        # ``thumb_src`` already proves freshness from one stat.
-        if str(row["thumb_key"] or "").rsplit("-", 1)[-1] != str(width):
-            return None
-        return target
+        # ``src`` is the source's stat identity — one stat, never a content
+        # hash: re-reading a 4 MB image per grid request is the cost this cache
+        # exists to remove.
+        return target if str(row["src"]) == thumb_source_stamp(path) else None
 
     def ensure_thumbnail(self, asset_id: str, *, width: int, quality: int) -> str | None:
-        """Generate the cached WebP for one asset. Returns its path, or ``None``.
+        """Generate the cached WebP for one asset at one width.
 
         NEVER on a request path: the caller is the indexer's thumbnail thread.
-        A no-op when the live file already matches its source, which is what
-        makes the startup sweep cheap after the first run.
+        A no-op when a live file already exists at that width, and one row per
+        ``(asset, width)`` — a single slot per asset could only ever serve the
+        width generated last, which is what handed ``w=240`` callers the
+        full-size original.
         """
         live = self.thumb_is_live(asset_id, width)
         if live is not None:
@@ -1159,9 +1283,8 @@ class LibraryStore:
             # Rasterising an animated GIF or a vector loses the thing the user
             # wants; those are served original by the route.
             return None
-        try:
-            from PIL import Image  # type: ignore[import-not-found]
-        except ImportError:
+        Image = _image_module()
+        if Image is None:
             # Pillow is an optional extra. Serving the original is honest.
             return None
         cache_dir = self.config_dir / "cache" / "library" / "thumbs"
@@ -1186,9 +1309,11 @@ class LibraryStore:
         stamp = thumb_source_stamp(path)
         with self.write() as connection:
             connection.execute(
-                "UPDATE idx_assets SET thumb_path = ?, thumb_key = ?, thumb_src = ? "
-                "WHERE asset_id = ?",
-                (str(target), key, stamp, asset_id),
+                "INSERT INTO idx_thumbnails(asset_id, width, path, key, src, created_at) "
+                "VALUES(?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(asset_id, width) DO UPDATE SET path = excluded.path, "
+                "key = excluded.key, src = excluded.src, created_at = excluded.created_at",
+                (asset_id, width, str(target), key, stamp, time.time()),
             )
         return str(target)
 
@@ -1262,6 +1387,20 @@ class LibraryStore:
 # ---------------------------------------------------------------------------
 # SQL fragments
 # ---------------------------------------------------------------------------
+
+
+def _image_module() -> Any:
+    """Pillow's ``Image`` module, or ``None`` when the optional extra is absent.
+
+    A named seam rather than an inline import: the thumbnail tests need a fake
+    decoder, and swapping ``sys.modules["PIL"]`` for one leaked into later tests
+    (a real generation then fell back to "no Pillow").
+    """
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    return Image
 
 
 def thumb_source_stamp(path: Path) -> str:
@@ -1363,6 +1502,13 @@ def _order_clause(sort: str, order: str | None) -> str:
 
     ``order`` decides BOTH directions, exactly as the old ``reverse=`` did: the
     tie-break reversed with the sort key, so a page boundary stayed stable.
+
+    NAME ORDER IS ASCII-ONLY. ``COLLATE NOCASE`` folds A-Z and nothing else,
+    where the removed Python sort used ``str.lower()`` and ordered Unicode case
+    pairs ("École" before "école" here, after it there). Sorting in SQL is what
+    makes a name sort an index scan instead of a full materialisation; a
+    Unicode fold would need a stored ``casefold`` column kept in sync on every
+    rename. Documented here, pinned by a test.
     """
     # Mirrors ``service.DEFAULT_ORDER``: "name" and "kind" are A-Z by default
     # and everything else is newest/largest first. A caller that passes a Query
