@@ -355,6 +355,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     # The census document lives BESIDE the session directories (a store-level
     # file), never inside one: it is the audit baseline, not conversation
     # content, so a session travelling between devices carries none of it.
+    "local_operator/session/approval_policy.py": (
+        1,
+        "``OVERRIDE_FILENAME`` ('approvals.json'): the conversation's own policy "
+        "sidecar beside its transcript. Deliberately NOT an entry of the copy set "
+        "— a fork must start without the parent's choice, which is why `fork` "
+        "excludes it — and never a session-directory path; it names a FILE inside "
+        "one",
+    ),
     "local_operator/session/census.py": (
         1,
         "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "

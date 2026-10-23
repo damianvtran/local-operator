@@ -1225,7 +1225,9 @@ async def test_the_session_choice_survives_readoption_from_the_sidecar(
         # Exactly what a new process starts with: no memory, gate on the file.
         app._explicit_approvals_mode = None
         app._set_approve_all(False)
-        app._adopt_approval_override(session)
+        # A fresh process: the source has no in-memory mode yet, so the FIRST
+        # adoption is where the sidecar must win.
+        app._adopt_approval_override(session, first_adoption=True)
 
         assert app._explicit_approvals_mode == "auto"
         assert app._approve_all is True

@@ -12433,7 +12433,8 @@ class OperatorApp(App[None]):
         if source is None or source.retired:
             source = SessionInteraction(session)
             self._interactions[id(session)] = source
-        if source.draft.approve_all is None:
+        first_adoption = source.draft.approve_all is None
+        if first_adoption:
             source.draft.approve_all = (
                 self._approve_all
                 if self._interaction.session is None
@@ -12444,7 +12445,10 @@ class OperatorApp(App[None]):
         # on every adoption. Doing it here rather than at boot is what stops
         # one conversation's override leaking onto the next on `/resume` and
         # `/new`; a conversation with no record follows the machine default.
-        self._adopt_approval_override(session)
+        # The source's own in-memory mode is authoritative when it already has
+        # one (a temporary `A` latch, or the choice restored when it was last
+        # parked): switching away and back must not silently re-arm it.
+        self._adopt_approval_override(session, first_adoption=first_adoption)
         # Adoption is the other way a source becomes current (boot, `/resume`,
         # takeover), and the displayed session must never carry a deadline —
         # a source leased by prewarm and later adopted would otherwise keep the
@@ -30538,7 +30542,7 @@ class OperatorApp(App[None]):
         # round 2, U4): the two agree only by accident.
         return ApprovalPolicy(mode=mode, provenance=provenance, global_mode=global_mode)
 
-    def _adopt_approval_override(self, session: Any) -> None:
+    def _adopt_approval_override(self, session: Any, *, first_adoption: bool = True) -> None:
         """Load THIS conversation's recorded choice when it is adopted.
 
         Without it, resuming a conversation the user had hardened to ``ask``
@@ -30555,6 +30559,13 @@ class OperatorApp(App[None]):
         attached local session can show "session override"; a remote mesh
         session has no local directory, ``read_override`` answers "no record",
         and the card keeps the global default rather than inventing one.
+
+        ``first_adoption`` is False when the source already had an in-memory
+        ``draft.approve_all`` (a temporary `A` latch), and then the mode is NOT
+        moved: that latch is a decision about THIS conversation that was never
+        written to the sidecar, and switching away and back must not turn it
+        off. The record is still read for ``_explicit_approvals_mode`` so the
+        card's provenance line names the conversation's saved choice.
         """
         attached = self._gate_is_owned_elsewhere()
         self._explicit_approvals_mode = None
@@ -30563,7 +30574,7 @@ class OperatorApp(App[None]):
             source = SessionInteraction(session)
         directory = self._session_directory(source)
         if directory is None:
-            if not attached:
+            if not attached and first_adoption:
                 self._set_approve_all(self._approvals_default_auto)
             return
         from local_operator.session.approval_policy import read_override
@@ -30574,15 +30585,17 @@ class OperatorApp(App[None]):
             # this is "we could not read one", not "the human typed ask". The
             # policy module takes the same position on the runtime side.
             self._system_notice(warning, "warning")
-            if not attached:
+            if not attached and first_adoption:
                 self._set_approve_all(False)
             return
         if override is None:
-            if not attached:
+            if not attached and first_adoption:
                 self._set_approve_all(self._approvals_default_auto)
             return
+        # Provenance follows the record on EVERY adoption, even when an
+        # in-memory latch keeps the gate itself where it is.
         self._explicit_approvals_mode = override
-        if not attached:
+        if not attached and first_adoption:
             self._set_approve_all(override == "auto")
 
     def _persist_approval_override(self, source: SessionInteraction, mode: str | None) -> str:

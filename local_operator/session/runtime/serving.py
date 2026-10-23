@@ -6963,18 +6963,37 @@ class ServingSessionHandle(SessionHandle):
                 # explains why this gate is asking while the file says auto.
                 from local_operator.session.approval_policy import resolve_effective
 
-                global_mode = self._configured_approval_mode() or self._default_approvals_mode
-                mode, provenance = resolve_effective(
-                    self._explicit_approvals_mode,
-                    global_mode or "ask",
-                    pinned_auto=self._auto_approve if self._approval_pinned else None,
-                )
-                payload["approval_mode"] = mode
-                payload["approval_provenance"] = provenance
-                # The default the mode outranks, published separately: a
-                # session-ask card over a global-auto file would otherwise have
-                # to invent "global Ask" (the U4 defect).
-                payload["approval_global_mode"] = global_mode
+                # DEFENSIVE BY CONSTRUCTION: several tests (and any partially
+                # built handle) construct this class with `__new__` and only
+                # `_session`/`_projection`. A missing policy field must not
+                # abort the publish — the card is the reason this method runs,
+                # and the policy keys degrade to "not stated" rather than to a
+                # guessed mode.
+                explicit = getattr(self, "_explicit_approvals_mode", None)
+                remembered = getattr(self, "_default_approvals_mode", "")
+                try:
+                    configured = self._configured_approval_mode()
+                except Exception:  # noqa: BLE001 — a card is never worth failing
+                    configured = None
+                global_mode = configured if configured is not None else remembered
+                if global_mode or explicit is not None:
+                    live_auto = getattr(self, "_auto_approve", None)
+                    pinned = bool(getattr(self, "_approval_pinned", False))
+                    mode, provenance = resolve_effective(
+                        explicit,
+                        global_mode or ("auto" if live_auto else "ask"),
+                        pinned_auto=(bool(live_auto) if pinned else None),
+                    )
+                    payload["approval_mode"] = mode
+                    payload["approval_provenance"] = provenance
+                    # The default the mode outranks, published separately: a
+                    # session-ask card over a global-auto file would otherwise
+                    # have to invent "global Ask" (the U4 defect).
+                    payload["approval_global_mode"] = global_mode
+                else:
+                    payload["approval_mode"] = ""
+                    payload["approval_provenance"] = ""
+                    payload["approval_global_mode"] = ""
                 # The card gains the session's name so a DESKTOP banner for it
                 # can be triaged: "Waiting for approval" with three sessions
                 # open names none of them (design round 1, D3). Stamped here
