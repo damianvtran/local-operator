@@ -64,7 +64,11 @@ So, two rules, both enforced here and by tests:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -100,6 +104,12 @@ _RETIRED_CEILINGS = (
 #: actually read (``Config.values.get("session.reap_unused")`` — a flat
 #: dotted key). KEPT and pinned to False: see the module docstring.
 _REAP_UNUSED_FLAT = "session.reap_unused"
+
+#: The sidecar that records which setting paths the last launch saw, so the next
+#: one can say what went missing between them. Dot-prefixed machinery beside the
+#: config, never a setting: nothing reads it as configuration and ``/settings``
+#: does not list it.
+_KEY_INVENTORY_NAME = ".config-keys.json"
 
 
 def migrate_session_cleanup(config_dir: Path) -> list[str]:
@@ -189,9 +199,11 @@ def _migrate_session_cleanup_locked(config_dir: Path) -> list[str]:
     if session.get("reap_unused") is not False:
         session["reap_unused"] = False
         changes.append("session.reap_unused (nested) = false")
+    retired: list[str] = []
     for key in _RETIRED_CEILINGS:
         if key in values:
             del values[key]
+            retired.append(key)
             changes.append(f"removed {key}")
     cleanup = session.get("cleanup")
     if not isinstance(cleanup, dict):
@@ -222,7 +234,19 @@ def _migrate_session_cleanup_locked(config_dir: Path) -> list[str]:
     # every absent top-level default in, so the rewritten file carries keys
     # (``compaction``, ``web_fetch``, …) the original omitted. Same values,
     # spelled out — the backup keeps the user's original spelling.
-    manager._write_config(vars(manager.config))
+    #
+    # The retirements are DECLARED, and only for the keys this run actually
+    # removed: ``_write_config`` carries every disk value the payload does not
+    # model back through, so without the declaration the three keys the loop above
+    # just deleted would be read off disk and rewritten — a retirement that reports
+    # success and changes nothing.
+    manager._write_config(
+        vars(manager.config),
+        drop={
+            (key,): "retired session-retention ceiling; no reader at any shipped version"
+            for key in retired
+        },
+    )
 
     from local_operator.session.cleanup import SESSIONS_DIRNAME, mark_store
 
@@ -254,6 +278,155 @@ def _migrate_session_cleanup_locked(config_dir: Path) -> list[str]:
         backup,
     )
     return changes
+
+
+def _read_key_inventory(path: Path) -> "list[str] | None":
+    """The recorded setting paths, or ``None`` when there is no usable baseline.
+
+    ``None`` is "no baseline", not "nothing was lost": a missing sidecar, one that
+    cannot be read, a ``schema`` this build does not know, or a ``keys`` list that
+    is not all strings. A report built on a corrupt sidecar would name settings
+    that may never have existed, so the arm re-baselines instead — the same reason
+    a restore from backup is migrated again rather than skipped (module docstring).
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("schema") != 1:
+        return None
+    keys = raw.get("keys")
+    if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
+        return None
+    return keys
+
+
+def _write_key_inventory(path: Path, keys: "list[str]") -> None:
+    """Record ``keys`` atomically, 0600, best-effort.
+
+    Temp file in the SAME directory plus ``os.replace``, for the reason
+    ``ConfigManager._write_config`` documents at length: a crash between a
+    truncate and a flush would leave a half-written sidecar, and the next launch
+    would read that as "no baseline" and silently re-baseline over the very loss
+    this file exists to remember. 0600 because the paths are as private as the
+    config they describe (they name provider endpoints, hub hosts, team sessions).
+
+    Best-effort on ``OSError``: a read-only config root or a full disk must not
+    stop ``lop`` from starting, and this module's doctrine is that every arm is.
+    """
+    payload = {
+        "schema": 1,
+        "keys": sorted(keys),
+        "recorded_at": datetime.now().isoformat(),
+    }
+    handle: "int | None" = None
+    temp_path: "Path | None" = None
+    try:
+        handle, raw_path = tempfile.mkstemp(
+            dir=str(path.parent), prefix=".config-keys.", suffix=".tmp"
+        )
+        temp_path = Path(raw_path)
+        os.chmod(raw_path, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            handle = None
+            json.dump(payload, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(raw_path, path)
+        temp_path = None
+    except OSError:
+        logger.debug("config key inventory: could not record %s", path, exc_info=True)
+    finally:
+        if handle is not None:
+            try:
+                os.close(handle)
+            except OSError:
+                pass
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+def report_config_key_shrink(config_dir: Path, *, surface: str = "cli") -> "list[str]":
+    """Say what the last launch's config had and this one does not.
+
+    THE INCIDENT THIS EXISTS FOR (2026-10-23). A QA rig wrote 34 bytes over the
+    operator's 26-key ``config.yml`` at 04:21:42 and the next launch expanded it
+    to the shipped defaults, so the file afterwards looked like a config somebody
+    had freshly created — no error, no diff, and the nine top-level keys and every
+    nested user value gone. Nothing in the product could have told them: the loss
+    happened BEFORE this build's writers ran. A per-launch leaf-path inventory is
+    the only place that remembers.
+
+    LEAF paths, not top-level keys, because the migration then back-fills the
+    top-level defaults (``retry``, ``subagents``, …): a top-level inventory would
+    see them return and report nothing, while ``retry.fallbackChains.default`` and
+    ``subagents.models.hi`` stayed gone.
+
+    THREE DECISIONS, each of which has an incident behind it:
+
+    * A 0-BYTE file is unreadable-as-absent, not "all keys lost". A truncation
+      (an interrupted write, a ``> config.yml``) would otherwise report the whole
+      file as lost AND, worse, re-baseline to nothing — erasing the record of what
+      the file used to hold. Only a PARSED, NON-EMPTY ``values`` mapping rewrites
+      the inventory.
+    * The inventory is rewritten ONLY when the key set differs, so an unchanged
+      read-only launch (``lop config list``, ``--version``, the TUI's boot) puts
+      no write on the disk. "Reading is writing" is the defect the whole migration
+      seam was moved out of ``_load_config`` to end.
+    * ``surface="daemon"`` logs at DEBUG and leaves the inventory ALONE. A daemon
+      launch is nobody's answer to "did I lose my settings?", and re-baselining
+      there would make the loss permanent before the operator ever saw it — the
+      next human launch must still be able to report it.
+
+    ``config.yml`` is never touched here. Returns the missing paths, so a caller
+    (and the tests) can assert on what was reported without parsing the message.
+    """
+    from local_operator.config import _dotted, _leaf_paths, read_config_values
+
+    config_file = config_dir / "config.yml"
+    try:
+        if not config_file.is_file() or config_file.stat().st_size == 0:
+            return []
+    except OSError:
+        return []
+    values = read_config_values(config_dir)
+    if values is None:
+        # Unreadable right now (a torn save, a permissions problem): keep the
+        # baseline rather than treating a bad read as "everything unset".
+        return []
+    # DOTTED STRINGS, the spelling the message uses and the sidecar stores: a JSON
+    # list of path tuples would read back as lists (`[["retry", "maxRetries"]]`),
+    # which compares equal to nothing and renders as nested arrays in the log.
+    current = sorted(_dotted(path) for path in _leaf_paths(values))
+    current_set = set(current)
+    inventory_path = config_dir / _KEY_INVENTORY_NAME
+    previous = _read_key_inventory(inventory_path)
+    if previous is None:
+        if current:
+            _write_key_inventory(inventory_path, current)
+        return []
+    missing = sorted(set(previous) - current_set - set(_RETIRED_CEILINGS) - {_REAP_UNUSED_FLAT})
+    if missing:
+        message = (
+            f"{config_file} lost {len(missing)} setting(s) since the last launch: "
+            f"{', '.join(missing)}; a writer outside this build removed them — "
+            "restore from a config.yml.bak-* backup if you did not."
+        )
+        if surface == "daemon":
+            logger.debug("%s", message)
+            return missing
+        logger.warning("%s", message)
+        if surface in ("tui", "cli"):
+            print(message, file=sys.stderr)
+        return missing
+    if current and current_set != set(previous):
+        # Additions (the cleanup migration's own keys, a new release's defaults)
+        # re-baseline silently; only the missing set is ever reported.
+        _write_key_inventory(inventory_path, current)
+    return []
 
 
 def run_startup_migrations(
@@ -294,6 +467,14 @@ def run_startup_migrations(
     before the next pass reads it. See ``_NO_WRITE_COMMANDS``; nothing else
     in the tree promises no-write, so nothing else is carved out.
     """
+    try:
+        # FIRST, and before the cleanup migration: that migration back-fills every
+        # absent top-level default (``_load_config`` does), so a shrink reported
+        # after it would see those keys present and name none of them.
+        report_config_key_shrink(config_dir, surface=surface)
+    except Exception as exc:  # noqa: BLE001 — never a reason not to start
+        logger.warning("config migration: key inventory check skipped: %s", exc)
+        logger.debug("config migration: traceback", exc_info=True)
     try:
         migrate_session_cleanup(config_dir)
     except Exception as exc:  # noqa: BLE001 — never a reason not to start

@@ -3,6 +3,7 @@ import logging
 import tempfile
 from argparse import Namespace
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -10,7 +11,12 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from local_operator.config import DEFAULT_CONFIG, Config, ConfigManager
+from local_operator.config import (
+    DEFAULT_CONFIG,
+    Config,
+    ConfigManager,
+    ConfigWriteRefused,
+)
 
 
 @pytest.fixture
@@ -1153,12 +1159,22 @@ def test_update_config_without_updates_is_a_flush_not_a_merge(tmp_path: Path) ->
     must write the in-memory state as it stands; had the reload been applied to it
     too, the delete would be read back off disk and written again, silently
     undoing every ``reset_setting`` on a flat-dotted key.
+
+    Since deep preservation, the flush also has to DECLARE the key it removed:
+    an undeclared gap in the payload is a setting the write did not model, and
+    ``_write_config`` keeps those on purpose. Both halves are asserted here — the
+    declaration lands the delete, the omission alone does not.
     """
     manager = ConfigManager(tmp_path)
     manager.set_config_value("display.shimmer", False)
 
     del manager.get_config().values["display.shimmer"]  # the shape `_delete` uses
-    manager.update_config({}, write=True)
+    manager.update_config({}, write=True)  # undeclared: preservation keeps it
+
+    assert ConfigManager(tmp_path).get_config().values["display.shimmer"] is False
+
+    del manager.get_config().values["display.shimmer"]
+    manager.update_config({}, write=True, drop={("display.shimmer",): "reset by /settings"})
 
     assert "display.shimmer" not in ConfigManager(tmp_path).get_config().values
 
@@ -1328,3 +1344,425 @@ def test_a_tier_mapping_survives_writers_that_skip_coerce(
     # A bare selector is unchanged by the normalisation.
     settings_io.write_setting(ConfigManager(tmp_path), setting, "openai/gpt-5-mini")
     assert stored() == "openai/gpt-5-mini"
+
+
+# ---------------------------------------------------------------------------
+# A write must not model LESS than the file holds
+# ---------------------------------------------------------------------------
+
+#: The operator's live config at the 2026-10-23 incident, cut to the keys the loss
+#: was measured on: the top-level ``values`` keys no schema models (``language``,
+#: ``keymap.quick_send``, ``team_bridge``, ``tui``, ``compaction``, ``fork``,
+#: ``hub``, ``network``, ``supplements``), the nested user values a defaults-shaped
+#: write erased (``retry.fallbackChains``/``pinnedFallback``, ``subagents.*``),
+#: and two value changes (``model_effort``, ``web_search.providers``).
+_INCIDENT_USER_VALUES: dict[str, Any] = {
+    "language": "de",
+    "keymap.quick_send": "ctrl+j",
+    "team_bridge": {"session": "f007224f570c"},
+    "tui": {"theme": "gruvbox"},
+    "compaction": {"threshold": 0.7},
+    "fork": {"enabled": True},
+    "hub": {"url": "https://hub.example"},
+    "network": {"advertise_hosts": ["203.0.113.7:4097"]},
+    "supplements": {"enabled": False},
+    "retry": {
+        "maxRetries": 4,
+        "usageAwareFallback": True,
+        "pinnedFallback": "openai/gpt-5",
+        "fallbackChains": {"default": ["openai/gpt-5", "openrouter/deepseek/deepseek-chat"]},
+    },
+    "subagents": {
+        "model_choice": "med",
+        "models": {"hi": "openai/gpt-5", "med": "openrouter/x", "lo": "local/y"},
+    },
+    "web_search": {"providers": ["exa"], "enabled": True},
+    "model_effort": "high",
+}
+
+#: The exact 34 bytes a QA rig wrote over the live config (2026-10-23 04:21:42).
+#: Byte-identical to ``config.yml.pre-cleanup-migration.20261023-043540``.
+_INCIDENT_EXTERNAL_WRITE = b"values:\n  tool_approval_mode: ask\n"
+
+
+def _write_incident_config(config_dir: Path) -> Path:
+    """The 26-key-shaped config the external write replaced, on disk."""
+    path = config_dir / "config.yml"
+    values = {**deepcopy(DEFAULT_CONFIG.values), **_INCIDENT_USER_VALUES}
+    values["session"] = {**values["session"], "reap_unused": False}
+    document = {
+        "version": "0.1.0",
+        "metadata": {"created_at": "x", "last_modified": "x", "description": "d"},
+        "values": values,
+    }
+    path.write_text(yaml.safe_dump(document))
+    return path
+
+
+def _disk_values(path: Path) -> dict[str, Any]:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["values"]
+
+
+@pytest.fixture
+def preserved_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty the once-per-process preserved-path memo (see ``config._PRESERVED_WARNED``)."""
+    from local_operator import config as config_mod
+
+    monkeypatch.setattr(config_mod, "_PRESERVED_WARNED", set())
+
+
+def test_unknown_values_keys_survive_every_writer_in_this_build(tmp_path: Path) -> None:
+    """The keys a schema does not model are carried through, not erased.
+
+    The incident's nine top-level keys live INSIDE ``values`` (``language``,
+    ``keymap.quick_send``, ``team_bridge``, …), which is a different shape from
+    the unmodelled TOP-LEVEL carry-through pinned above. The external QA write is
+    what removed them on 2026-10-23; this pins the writers in this build, so a
+    later change to any of them cannot quietly introduce the same loss.
+    """
+    from local_operator import settings_io
+    from local_operator.cli import config_create_command
+    from local_operator.config_migrations import migrate_session_cleanup
+
+    path = _write_incident_config(tmp_path)
+    expected = {
+        "language": "de",
+        "keymap.quick_send": "ctrl+j",
+        "team_bridge": {"session": "f007224f570c"},
+    }
+
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["model_name"], "m-1")
+    assert {key: _disk_values(path)[key] for key in expected} == expected
+
+    ConfigManager(tmp_path)._write_config(vars(ConfigManager(tmp_path).config))
+    assert {key: _disk_values(path)[key] for key in expected} == expected
+
+    assert migrate_session_cleanup(tmp_path), "the migration must do its own work here"
+    assert {key: _disk_values(path)[key] for key in expected} == expected
+
+    # `lop config create` on an existing readable file preserves it.
+    monkeypatch_env = {"LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path)}
+    with patch.dict("os.environ", monkeypatch_env):
+        with patch("pathlib.Path.home", lambda: tmp_path):
+            assert config_create_command() == 0
+    assert {key: _disk_values(path)[key] for key in expected} == expected
+
+
+def test_a_default_shaped_subtree_write_keeps_nested_user_values(tmp_path: Path) -> None:
+    """A writer whose dict is DEFAULT-SHAPED must not flatten the nested user keys.
+
+    This is the September 2026 class (a run collapsed ``subagents.models`` to
+    ``{}`` and killed the tier it fed) and it is what ``web_search/service.py``
+    and ``web_fetch/service.py`` do on every save: they hand ``set_config_value``
+    the pydantic model's own field set, not the user's mapping. The writer's own
+    value still lands — preservation is for the keys it never mentioned.
+    """
+    path = _write_incident_config(tmp_path)
+    manager = ConfigManager(tmp_path)
+
+    retry = dict(DEFAULT_CONFIG.values["retry"])
+    retry["maxRetries"] = 3  # the writer's own change, which must land
+    manager.set_config_value("retry", retry)
+
+    subagents = dict(DEFAULT_CONFIG.values["subagents"])  # {} — the collapsing shape
+    manager.set_config_value("subagents", subagents)
+
+    values = _disk_values(path)
+    assert values["retry"]["maxRetries"] == 3
+    assert values["retry"]["pinnedFallback"] == "openai/gpt-5"
+    assert values["retry"]["fallbackChains"] == {
+        "default": ["openai/gpt-5", "openrouter/deepseek/deepseek-chat"]
+    }
+    assert values["subagents"]["model_choice"] == "med"
+    assert values["subagents"]["models"]["hi"] == "openai/gpt-5"
+
+    # And the same through the migration, which rewrites the whole file.
+    from local_operator.config_migrations import migrate_session_cleanup
+
+    assert migrate_session_cleanup(tmp_path), "the migration must rewrite the file here"
+    values = _disk_values(path)
+    assert values["retry"]["fallbackChains"]["default"][0] == "openai/gpt-5"
+    assert values["subagents"]["models"]["hi"] == "openai/gpt-5"
+    assert values["web_search"]["providers"] == ["exa"]
+
+
+def test_a_manager_that_never_read_the_file_cannot_write_defaults_over_it(
+    tmp_path: Path,
+) -> None:
+    """``_fresh_default_config`` must never be the base of a write.
+
+    A manager constructed while the config dir was empty holds defaults and knows
+    it never read the file. If a populated ``config.yml`` appears before it
+    writes (another process, a restore, an editor), dumping those defaults over
+    it is the same 2026-10-23 loss with a different author. It refuses instead —
+    naming the settings it would have removed — and leaves the bytes untouched.
+    """
+    manager = ConfigManager(tmp_path)
+    path = _write_incident_config(tmp_path)
+    before = path.read_bytes()
+
+    with pytest.raises(ConfigWriteRefused) as refused:
+        manager._write_config(vars(manager.config))
+
+    assert refused.value.code == "config-write-refused"
+    assert "language" in str(refused.value)
+    assert "subagents.models.hi" in str(refused.value)
+    assert path.read_bytes() == before
+
+    # The flush path too: `update_config({})` writes the in-memory snapshot.
+    with pytest.raises(ConfigWriteRefused):
+        manager.update_config({}, write=True)
+    assert path.read_bytes() == before
+
+
+def test_a_document_with_only_metadata_counts_as_never_read(tmp_path: Path) -> None:
+    """A truthy document is not a document that carried SETTINGS.
+
+    ``version:``/``metadata:`` with no ``values:`` parses to a non-empty mapping, so
+    a truthiness test would let this manager believe it read the operator's settings
+    — while its snapshot is the shipped defaults. Populate the file afterwards and
+    the write would restore every default over them with no refusal: the same class
+    as the missing-file case, one shape over.
+    """
+    path = tmp_path / "config.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "version": "0.1.0",
+                "metadata": {"created_at": "x", "last_modified": "x", "description": "d"},
+            }
+        )
+    )
+    manager = ConfigManager(tmp_path)  # no `values:` to read
+
+    _write_incident_config(tmp_path)  # ...and something populates it afterwards
+    before = path.read_bytes()
+
+    with pytest.raises(ConfigWriteRefused) as refused:
+        manager._write_config(vars(manager.config))
+
+    assert "language" in str(refused.value)
+    assert path.read_bytes() == before
+
+
+def test_an_undeclared_missing_setting_is_preserved_and_reported(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    preserved_fresh: None,
+) -> None:
+    """Preserved keys are reported; a declared drop is the ONLY way to remove one.
+
+    Preservation without accounting would make every removal look like a silent
+    failure. Each write says which paths it kept because it did not model them,
+    and a caller that means to remove one declares it — with a reason, which is
+    what turns "the key is gone" into an audit trail.
+    """
+    path = _write_incident_config(tmp_path)
+    manager = ConfigManager(tmp_path)
+    retry = dict(manager.get_config_value("retry"))
+    retry.pop("fallbackChains")
+    retry.pop("pinnedFallback")
+
+    with caplog.at_level(logging.WARNING):
+        manager.set_config_value("retry", retry)
+
+    after = _disk_values(path)["retry"]
+    assert after["fallbackChains"]["default"][0] == "openai/gpt-5"
+    assert after["pinnedFallback"] == "openai/gpt-5"
+    preserved = [r.getMessage() for r in caplog.records if "did not model" in r.getMessage()]
+    assert preserved, "the preserved keys must be named"
+    assert "retry.fallbackChains" in preserved[0]
+    assert "retry.pinnedFallback" in preserved[0]
+
+    caplog.clear()
+    # A fresh snapshot, because the first write committed the preserved keys into
+    # the manager's live mapping (and into the dict it was handed — see
+    # ``_write_config``: preservation is applied to the payload in place).
+    remaining = dict(ConfigManager(tmp_path).get_config_value("retry"))
+    remaining.pop("fallbackChains")
+    remaining.pop("pinnedFallback")
+    with caplog.at_level(logging.WARNING):
+        manager.set_config_value(
+            "retry",
+            remaining,
+            drop={("retry", "fallbackChains"): "chains are managed by the cascade page"},
+        )
+    assert "fallbackChains" not in _disk_values(path)["retry"]
+    dropped = [
+        r.getMessage()
+        for r in caplog.records
+        if "chains are managed by the cascade page" in r.getMessage()
+    ]
+    assert dropped and "retry.fallbackChains" in dropped[0]
+
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="reason"):
+        manager.set_config_value("retry", remaining, drop={("retry", "pinnedFallback"): " "})
+    # A drop path that is also IN the payload is a contradiction, not a removal.
+    with pytest.raises(ValueError, match="still present"):
+        manager.set_config_value(
+            "retry",
+            {**retry, "fallbackChains": {}},
+            drop={("retry", "fallbackChains"): "x"},
+        )
+    assert path.read_bytes() == before
+
+
+def test_the_startup_report_names_the_settings_an_external_write_removed(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The 2026-10-23 incident, end to end.
+
+    A baseline inventory exists; an external writer drops the file to the exact
+    34 bytes the QA rig wrote; the next launch names what went missing, on
+    stderr, before the cleanup migration's back-filled defaults can mask it. A
+    daemon launch must NOT consume the notice: it logs at DEBUG and leaves the
+    inventory as it was, so the next human surface reports it.
+    """
+    from local_operator.config_migrations import run_startup_migrations
+
+    path = _write_incident_config(tmp_path)
+    inventory = tmp_path / ".config-keys.json"
+
+    # First launch records the baseline (silently), the second settles it after
+    # the cleanup migration's own additive keys.
+    run_startup_migrations(tmp_path, surface="cli")
+    run_startup_migrations(tmp_path, surface="cli")
+    assert inventory.exists()
+    recorded = json.loads(inventory.read_text(encoding="utf-8"))
+    assert recorded["schema"] == 1
+    assert "subagents.models.hi" in recorded["keys"]
+
+    path.write_bytes(_INCIDENT_EXTERNAL_WRITE)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        run_startup_migrations(tmp_path, surface="cli")
+
+    err = capsys.readouterr().err
+    assert "lost" in err
+    for named in (
+        "language",
+        "keymap.quick_send",
+        "team_bridge.session",
+        "subagents.models.hi",
+        "retry.fallbackChains.default",
+    ):
+        assert named in err, named
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("lost" in message for message in warned)
+    # It must NOT re-baseline over the loss, or the next launch would be silent.
+    assert json.loads(inventory.read_text(encoding="utf-8")) == recorded
+
+    # A daemon launch leaves the notice for the next human surface.
+    path.write_bytes(_INCIDENT_EXTERNAL_WRITE)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        run_startup_migrations(tmp_path, surface="daemon")
+    assert "lost" not in capsys.readouterr().err
+    assert not [
+        r for r in caplog.records if r.levelno >= logging.WARNING and "lost" in r.getMessage()
+    ]
+    assert [r for r in caplog.records if r.levelno == logging.DEBUG and "lost" in r.getMessage()]
+    assert json.loads(inventory.read_text(encoding="utf-8")) == recorded
+    assert recorded["keys"] and recorded["recorded_at"]
+
+    # ...and the next CLI launch gets it.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        run_startup_migrations(tmp_path, surface="cli")
+    assert "language" in capsys.readouterr().err
+
+
+def test_the_key_inventory_is_not_rewritten_when_nothing_changed(tmp_path: Path) -> None:
+    """An unchanged launch stays WRITE-FREE once a baseline exists.
+
+    ``lop config list``, ``--version`` and the TUI all run the startup seam, so an
+    unconditional rewrite would put a file write (and a new ``recorded_at``) on
+    every read-only command — the same "reading is writing" defect the migration
+    seam was built to end.
+    """
+    from local_operator.config_migrations import run_startup_migrations
+
+    _write_incident_config(tmp_path)
+    # The cleanup migration ADDS keys after the first launch's inventory is
+    # recorded (its own belt), so the first two launches legitimately re-baseline.
+    # That is the "set differs" path this test is not about; run until it settles.
+    for _ in range(3):
+        run_startup_migrations(tmp_path, surface="cli")
+    inventory = tmp_path / ".config-keys.json"
+    before = inventory.read_bytes()
+    before_mtime = inventory.stat().st_mtime_ns
+
+    run_startup_migrations(tmp_path, surface="cli")  # a read-only launch
+
+    assert inventory.read_bytes() == before
+    assert inventory.stat().st_mtime_ns == before_mtime
+
+
+def test_a_zero_byte_config_is_not_a_shrink_and_leaves_the_inventory_alone(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Truncation is unreadable-as-absent, not "every key was lost".
+
+    An interrupted write (the pre-atomic-write window) or a ``> config.yml``
+    leaves 0 bytes. Reporting 25 lost settings would be wrong, and re-baselining
+    on it would erase the one record that says what the file used to hold.
+    """
+    from local_operator.config_migrations import run_startup_migrations
+
+    path = _write_incident_config(tmp_path)
+    run_startup_migrations(tmp_path, surface="cli")
+    run_startup_migrations(tmp_path, surface="cli")
+    inventory = tmp_path / ".config-keys.json"
+    before = inventory.read_bytes()
+    before_mtime = inventory.stat().st_mtime_ns
+
+    path.write_bytes(b"")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        run_startup_migrations(tmp_path, surface="cli")
+
+    assert "lost" not in capsys.readouterr().err
+    assert not [
+        r for r in caplog.records if r.levelno >= logging.WARNING and "lost" in r.getMessage()
+    ]
+    assert inventory.read_bytes() == before
+    assert inventory.stat().st_mtime_ns == before_mtime
+
+
+def test_the_migration_retires_only_its_own_keys(tmp_path: Path) -> None:
+    """The migration's own job still happens, and it declares what it removes.
+
+    Its deletion of the retired ceilings is now an explicit ``drop``: without the
+    declaration, deep preservation would copy the three keys straight back from
+    disk and the retirement would become a no-op that looks like it worked.
+    """
+    from local_operator.config_migrations import (
+        _RETIRED_CEILINGS,
+        migrate_session_cleanup,
+    )
+
+    path = _write_incident_config(tmp_path)
+    values = _disk_values(path)
+    for key in _RETIRED_CEILINGS:
+        values[key] = 7
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["values"] = values
+    path.write_text(yaml.safe_dump(document))
+
+    changes = migrate_session_cleanup(tmp_path)
+
+    after = _disk_values(path)
+    assert [f"removed {key}" for key in _RETIRED_CEILINGS if f"removed {key}" in changes]
+    assert not set(_RETIRED_CEILINGS) & set(after)
+    assert after["session"]["reap_unused"] is False
+    assert after["session.reap_unused"] is False
+    assert after["session"]["cleanup"]["enabled"] is False
+    assert after["language"] == "de"
+    assert after["retry"]["fallbackChains"]["default"][0] == "openai/gpt-5"
+    assert after["subagents"]["models"]["hi"] == "openai/gpt-5"
