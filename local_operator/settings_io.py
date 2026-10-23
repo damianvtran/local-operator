@@ -556,6 +556,18 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         _t(_ws.session_cleanup_description()),
     ),
+    # The THIRD storage control, and a section of its own for the same reason the
+    # two cleanup classes are: it is a different promise (history is KEPT, only
+    # stored smaller) and it needs its own title, description and copy. Scope is
+    # NEW_LAUNCH, truthfully: the policy is read by the store-maintenance pass at
+    # launch and by its hourly sweep (``session_factory._store_maintenance_thread
+    # _main``), and never by a ``/new``.
+    Section(
+        "session_compression",
+        _t(_ws.session_compression_title()),
+        Scope.NEW_LAUNCH,
+        _t(_ws.session_compression_description()),
+    ),
     # LIVE, and its own section rather than a row under ``session``: the cap is
     # read on EVERY pad write (``scratchpad.scratchpad_budget_bytes``), so the
     # value applies to a running session on the very next write. ``session`` is
@@ -3116,6 +3128,47 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.session_cleanup_remove_empty_choice_false_description()),
         ),
         gated_by="session.cleanup.enabled",
+    ),
+    # -- transcript compression ----------------------------------------------
+    # The consumer is ``session/compression.py``, which reads this path back
+    # through ``ConfigManager.get_nested_value`` on the SAME tuple
+    # (``COMPRESSION_PATH``) — the arrangement ``session.cleanup.*`` documents
+    # above, and for the same reason: the earlier opt-out that was written
+    # nested here and read flat there never worked. The row's default must equal
+    # the consumer's constant, which ``test_settings_io.py``'s
+    # ``test_every_default_matches_its_consumer`` enforces.
+    #
+    # ON by default, unlike ``session.cleanup.enabled``. The risk profile is the
+    # opposite one: nothing is removed, a verified archive replaces the file, and
+    # every read path resolves the archive. The day threshold is what "old"
+    # means, and it is gated by the switch because it is inert without it.
+    Setting(
+        key="session.compression.enabled",
+        path=("session", "compression", "enabled"),
+        section="session_compression",
+        label=_t(_ws.session_compression_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.session_compression_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.session_compression_enabled_choice_true_description()),
+            _t(_ws.session_compression_enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="session.compression.after_days",
+        path=("session", "compression", "after_days"),
+        section="session_compression",
+        label=_t(_ws.session_compression_after_days_label()),
+        kind=Kind.INT,
+        default=30,
+        # Both bounds and the default live in the help because the page paints
+        # help but not min/max (the ``delegated.max_age_hours`` precedent).
+        help=_t(_ws.session_compression_after_days_help()),
+        minimum=1,
+        maximum=3650,
+        unit="days",
+        gated_by="session.compression.enabled",
     ),
     # -- delegated-work retention --------------------------------------------
     # Nested one level deeper (``session.cleanup.delegated.*``) so the parent

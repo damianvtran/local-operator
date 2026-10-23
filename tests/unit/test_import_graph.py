@@ -980,11 +980,19 @@ def test_delegated_retention_import_is_light(delegated_retention_modules: set[st
     ):
         _assert_absent(delegated_retention_modules, top, why)
     ours = sorted(m for m in delegated_retention_modules if m.startswith("local_operator"))
+    # ``session.compression`` is here through ``session.cleanup``'s new
+    # codec-aware guards, and it is allowed for the reason the list above is
+    # about: it is stdlib-only at MODULE scope by its own contract (see its
+    # module docstring's import discipline), so it carries no engine, no loop and
+    # no front end onto the maintenance thread. It is NOT the ``resume`` class
+    # of import — anything heavier arriving here has to change this list
+    # deliberately.
     assert ours == [
         "local_operator",
         "local_operator.procstate",
         "local_operator.session",
         "local_operator.session.cleanup",
+        "local_operator.session.compression",
         "local_operator.session.delegated_retention",
         "local_operator.session.retention",
     ], ours

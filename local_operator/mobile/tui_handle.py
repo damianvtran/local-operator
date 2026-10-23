@@ -2050,12 +2050,13 @@ def _load_subagent_detail(
     full child history here only to discard it duplicated, per child, the exact
     work the /history endpoint already does on fetch, so it is not built.
     """
-    from local_operator.session.transcript import (
-        TRANSCRIPT_FILENAME,
-        read_latest_custom,
-    )
+    from local_operator.session import compression
+    from local_operator.session.transcript import read_latest_custom
 
-    path = Path(session_dir) / TRANSCRIPT_FILENAME
+    # The fingerprint is of the PHYSICAL source — the archive for a compressed
+    # child, stamped with the journal's own mtime — so "did it change during
+    # hydration" is still answerable, while the rows come from the resolver.
+    path = compression.transcript_source(Path(session_dir))[0]
     before = path.stat()
     # One bounded backward scan instead of a whole ``Transcript`` construction:
     # hydration runs per child per event, and the reader stops at the newest

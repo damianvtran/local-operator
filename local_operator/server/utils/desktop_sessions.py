@@ -146,7 +146,6 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
-    TRANSCRIPT_FILENAME,
     read_latest_custom,
     read_latest_custom_entry,
     validate_page_request,
@@ -7948,7 +7947,13 @@ class DesktopSessions:
                 # both is "re-read the tail and dedupe by id" (review round 1,
                 # R1-3).
                 return _absent_child_page("gone", before_id=before_id)
-            if not (child_dir / TRANSCRIPT_FILENAME).exists():
+            from local_operator.session import compression
+
+            if not compression.has_transcript(child_dir):
+                # "pending" means the row exists but its transcript has not been
+                # written YET; a compressed transcript has been written, and
+                # reading it as pending made a real child look like a build in
+                # flight forever.
                 return _absent_child_page("pending", before_id=before_id)
             return child_dir
 

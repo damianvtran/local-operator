@@ -2680,7 +2680,12 @@ def settle_promoted_handoff(root: Path, session_id: str) -> bool:
     if str(entry.get("phase") or "") != "handing-off":
         return False
     target = Path(root) / "sessions" / session_id
-    if not (target / "transcript.jsonl").is_file():
+    # ANY physical form: the destination HAS arrived when its transcript exists,
+    # and a compressed copy is a arrived conversation, not a missing one. The
+    # plain name would leave the finished handoff entry in flight forever.
+    from local_operator.session import compression
+
+    if not compression.has_transcript(target):
         return False
     from local_operator.network import sync as sync_mod
 
@@ -3714,6 +3719,38 @@ def _source_prepare(
             "message": incomplete.message,
             "session_id": session_id,
         }
+    # THE ARCHIVE IS MADE PLAIN BEFORE ANY MEMBER IS DIGESTED (review round 3, M-1).
+    # The digest below runs while the source can still be writing — that ordering is
+    # what keeps the stop short — and the bytes it must describe are the ones the
+    # WIRE carries, which are plain (``sync.restore_transcript``). A compressed
+    # session digested before the restore stamped ``transcript.jsonl.gz`` as the
+    # transcript member; ``stamps_valid`` then saw the restore retire that archive
+    # and answered ``busy`` on every attempt, so the move could never complete. The
+    # completeness check above runs first, so this restores only a session this
+    # device has already agreed to carry. Cost: the decompression the plan would
+    # have paid one step later anyway.
+    session_directory = Path(server.root) / "sessions" / session_id
+    if not sync_mod.restore_transcript(session_directory):
+        from local_operator.session import compression
+
+        archive = compression.archive_path(session_directory)
+        if archive is not None:
+            # THE ARCHIVE IS THERE AND DID NOT DECODE. Nothing has been journaled,
+            # stopped or deleted yet, so this is a clean refusal — and it must not
+            # fall through to the plan's own "no transcript yet, try again in a few
+            # seconds", which for a damaged archive never comes true.
+            reason = compression.unreadable_archive_error(session_directory)
+            return {
+                "result": "refused",
+                "code": "transcript_unreadable",
+                "message": (
+                    f"{session_id} holds a compressed transcript this device could not "
+                    f"decode ({reason or archive.name}), so it was not moved. The file is "
+                    "untouched; restoring a copy of it from a backup, or reading it with "
+                    "the build that compressed it, is the way to recover it."
+                ),
+                "session_id": session_id,
+            }
     # THE CWD IS READ BEFORE THE RETIRE, because one of its three sources is the
     # runtime's own discovery record: after the retire there is no process left to
     # ask, and a queued move that resumes here would then lose the only value a

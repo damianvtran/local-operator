@@ -859,10 +859,23 @@ async def test_settings_projection_carries_the_bounded_duration_contract(desktop
         8 * 1024 * 1024 * 1024,
         "bytes",
     )
-    unit_rows = {hours["key"], scratchpad["key"]}
+    # The compression age is the third bounded row whose unit a renderer needs:
+    # it arrived with the compression setting, and "after 30" is only renderable
+    # as days. Pinned here so the projection's unit set stays CLOSED rather than
+    # "whatever the registry most recently added".
+    compression_age = rows["session.compression.after_days"]
+    assert (
+        compression_age["kind"],
+        compression_age["minimum"],
+        compression_age["maximum"],
+        compression_age["unit"],
+    ) == ("int", 1, 3650, "days")
+    assert compression_age["default"] == 30
+    assert compression_age["gated_by"] == "session.compression.enabled"
+    unit_rows = {hours["key"], scratchpad["key"], compression_age["key"]}
     assert all(
         row["unit"] == "" for key, row in rows.items() if key not in unit_rows
-    ), "only the hours and scratchpad rows declare a unit"
+    ), "only the hours, bytes and days rows declare a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):
