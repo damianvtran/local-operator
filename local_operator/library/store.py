@@ -70,6 +70,10 @@ STATE_SESSIONS_TOTAL: Final = "sessions_total"
 STATE_SESSIONS_SCANNED: Final = "sessions_scanned"
 STATE_BUILT_AT: Final = "built_at"
 STATE_LAST_RECONCILE: Final = "last_reconcile_at"
+#: Set when recovery found the AUTHORITATIVE tables unreadable. Persisted so the
+#: NEXT process cannot bootstrap an empty derived index and serve it as
+#: "building" with every asset 404 (QA Q-R5-1).
+STATE_RECOVERY_FAILED: Final = "recovery_failed"
 
 #: Count buckets the sidebar asks for, and the scope each listing uses.
 COUNT_SCOPES: Final = ("all", "final")
@@ -642,6 +646,16 @@ class LibraryStore:
                 # refusal, not as a bare ``ProgrammingError``.
                 connection.execute("PRAGMA journal_mode=WAL")
                 self._clean_stale_rebuilds()
+                if self._state_value(connection, STATE_RECOVERY_FAILED) == "1":
+                    # A previous process refused this file. Prove the metadata is
+                    # readable BEFORE serving: a repaired file clears the flag and
+                    # continues; a still-torn one is the typed 503, never an empty
+                    # "building" page with every asset 404 (QA Q-R5-1).
+                    if not self._probe_authoritative():
+                        self._failed_paths.add(self._key)
+                        raise IndexUnavailable("library metadata is unreadable", corrupt=True)
+                    self._persist_recovery_failure(False)
+                    self._failed_paths.discard(self._key)
                 # The metadata tables are AUTHORITATIVE and owned by
                 # ``MetadataStore``; three triggers below attach to them, so they
                 # must exist before this script runs. A derived table may never
@@ -721,6 +735,14 @@ class LibraryStore:
 
         AUTHORITATIVE tables are never discarded, so names, tags, favourites and
         edits survive a corrupt index.
+
+        The authoritative tables are read BEFORE anything is dropped. If they
+        cannot be read, the derived tables are left exactly as they were and the
+        refusal is written to ``idx_state``: dropping them first is what made the
+        NEXT process bootstrap an empty index and serve it as "building" with
+        every asset 404 (QA Q-R5-1). Given a readable metadata half, only the
+        derived half is rebuilt; the whole-file rebuild is for the case where the
+        derived tables cannot even be dropped.
         """
         try:
             # The cached readiness would short-circuit the schema work.
@@ -729,10 +751,19 @@ class LibraryStore:
             # ``MetadataStore`` owns them.
             if not MetadataStore(self.config_dir).ensure_schema():
                 return False
+            if not self._probe_authoritative():
+                # Do NOT touch the derived tables: leaving the last index in
+                # place is what keeps the NEXT process on the typed-503 path.
+                # Dropping them here is how a relaunch ended up serving an empty
+                # "building" catalog with 404s (QA Q-R5-1).
+                self._refuse("authoritative tables are unreadable")
+                return False
             self._recreate_derived()
-            self._probe_authoritative()
+            if not self._integrity_ok():
+                raise sqlite3.DatabaseError("integrity check failed after recreating the index")
             self._ready_paths.add(self._key)
             self._failed_paths.discard(self._key)
+            self._persist_recovery_failure(False)
             logger.info("library: derived index rebuilt after an unreadable file")
             return True
         except sqlite3.DatabaseError as error:
@@ -747,10 +778,14 @@ class LibraryStore:
             return False
         rebuilt = self._rebuild_database()
         if not rebuilt:
-            # Nothing can answer from this file: refuse instead of serving an
-            # empty catalog forever. The next recovery attempt clears it.
-            self._failed_paths.add(self._key)
+            self._refuse("the database cannot be rebuilt from its metadata")
         return rebuilt
+
+    def _refuse(self, reason: str) -> None:
+        """Refuse every read AND leave the refusal on disk for the next process."""
+        self._failed_paths.add(self._key)
+        self._persist_recovery_failure(True)
+        logger.warning("library: index unavailable (%s); answering 503", reason)
 
     def _clean_stale_rebuilds(self) -> None:
         """Remove rebuild temp files a crash left beside the database.
@@ -772,15 +807,19 @@ class LibraryStore:
             except OSError:
                 continue
 
-    def _probe_authoritative(self) -> None:
-        """Read one row from EVERY authoritative table. Raises ``DatabaseError``.
+    def _probe_authoritative(self) -> bool:
+        """Can the authoritative tables be READ? ``False`` on any database failure.
 
         DDL never reads rows, so a torn ``assets`` b-tree survives DROP+CREATE
         and the fast path would report a successful recovery while serving an
-        empty library forever (R4-1). One bounded read per table is what tells
-        "the schema exists" apart from "the data is readable".
+        empty library forever (R4-1). A probe that cannot even run its SELECT is
+        a refusal, not a pass — hence the ``except`` here rather than letting the
+        caller distinguish.
         """
-        connection = sqlite3.connect(self.path, timeout=5.0)
+        try:
+            connection = sqlite3.connect(self.path, timeout=5.0)
+        except sqlite3.Error:
+            return False
         try:
             connection.execute("PRAGMA busy_timeout=5000")
             for table in AUTHORITATIVE_TABLES:
@@ -788,14 +827,61 @@ class LibraryStore:
                 # the latter without ever reading the table's own b-tree, which
                 # is exactly where the damage is.
                 connection.execute(f"SELECT * FROM {table} LIMIT 1").fetchone()
-            # Then one bounded integrity pass. DDL and a leftmost-leaf read both
-            # miss damage deeper in a tree, and this is the only check that
-            # walks every authoritative page. It runs ONCE per recovery.
+            return True
+        except sqlite3.DatabaseError:
+            return False
+        finally:
+            connection.close()
+
+    def _integrity_ok(self) -> bool:
+        """Whole-file ``quick_check``. Run only AFTER the derived tables exist.
+
+        It walks every page, so it is the check that separates "the metadata
+        reads" from "the file is healthy". It is deliberately NOT part of the
+        pre-drop probe: a torn DERIVED page is repairable by recreating those
+        tables, and letting the check refuse first would leave the rebuild path
+        unreachable for the case it was written for. Gated to recovery: 1.24 s
+        measured on a 38 MB index is too much for a healthy request.
+        """
+        try:
+            connection = sqlite3.connect(self.path, timeout=5.0)
+        except sqlite3.Error:
+            return False
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
             rows = connection.execute("PRAGMA quick_check(1)").fetchall()
-            if not rows or str(rows[0][0]) != "ok":
-                raise sqlite3.DatabaseError(
-                    "; ".join(str(row[0]) for row in rows[:3]) or "integrity check failed"
-                )
+            return bool(rows) and str(rows[0][0]) == "ok"
+        except sqlite3.DatabaseError:
+            return False
+        finally:
+            connection.close()
+
+    def _persist_recovery_failure(self, failed: bool) -> None:
+        """Record the refusal in ``idx_state`` so it survives the process.
+
+        ``_failed_paths`` is a class attribute: the NEXT launch bootstraps the
+        derived tables successfully (DDL never reads rows), its read path only
+        touches those empty tables, and the app served 200/building with every
+        asset 404 for as long as it ran (QA Q-R5-1). The flag makes the next
+        process prove the metadata before it may serve. Best effort — an
+        unwritable or absent ``idx_state`` leaves the in-process refusal.
+        """
+        try:
+            connection = sqlite3.connect(self.path, timeout=5.0)
+        except sqlite3.Error:
+            return
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute(
+                "INSERT INTO idx_state(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (STATE_RECOVERY_FAILED, "1" if failed else "0"),
+            )
+            connection.commit()
+        except sqlite3.Error:
+            # A fresh or damaged file may have no idx_state at all; the flag is
+            # an optimisation for the next process, never the only guard.
+            pass
         finally:
             connection.close()
 
@@ -869,9 +955,11 @@ class LibraryStore:
                 # rebuilt the file. If the DDL now runs, the repair is done and
                 # a second copy would only churn the disk.
                 self._recreate_derived()
-                self._probe_authoritative()
+                if not self._integrity_ok():
+                    raise sqlite3.DatabaseError("authoritative tables are unreadable")
                 self._ready_paths.add(self._key)
                 self._failed_paths.discard(self._key)
+                self._persist_recovery_failure(False)
                 return True
             except sqlite3.DatabaseError:
                 pass
