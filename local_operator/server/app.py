@@ -189,6 +189,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 — a warm-up must never be the failure
         logger.debug("index prewarm unavailable at startup", exc_info=True)
 
+    # THE LIBRARY INDEXER, started with the same rule as the warms above: a
+    # raise inside ``lifespan`` fails startup, and a derived index is never
+    # worth that. It is a daemon thread plus a journal observer, so the first
+    # ``GET /v1/desktop/library/assets`` after a boot finds a warm database
+    # instead of paying the 26.5 s cold scan inside the request that opened the
+    # Library page. Its first run backfills newest-first and reports
+    # ``state=building`` with real session counts until it catches up.
+    try:
+        from local_operator.library.indexer import ensure_started
+
+        ensure_started(config_dir)
+    except Exception:  # noqa: BLE001 — indexing must never be the failure
+        logger.debug("library indexer unavailable at startup", exc_info=True)
+
     # Honour LOCAL_OPERATOR_HOME and create it at the point of use, matching the
     # CLI session path. The literal ``~/local-operator-home`` here ignored the
     # override, so a relocated home still had a stray workspace created in the

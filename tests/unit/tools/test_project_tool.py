@@ -9,6 +9,7 @@ that keeps both tools out of a session with no store behind them.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -884,3 +885,85 @@ async def test_linking_a_filed_session_moves_it_to_working(registry, context) ->
     cleaned = registry.get_project_by_name("alpha")
     assert cleaned is not None
     assert cleaned.sessions == [] and cleaned.coordination_sessions == []
+
+
+# -- the store's recency PAGE: declared in the receipt, never in the way --------
+
+
+def _write_row(registry: ProjectRegistry, project_id: str, name: str, *, stamp_ns: int) -> None:
+    """Write one valid row straight to the store with an EXPLICIT mtime.
+
+    Direct writes, never ``create_project``: the mtime is the page's ranking, so
+    it must be stated rather than inherited from write order.
+    """
+    from local_operator.projects import Project
+
+    registry.projects_dir.mkdir(parents=True, exist_ok=True)
+    row = Project(id=project_id, name=name)
+    path = registry.projects_dir / f"{project_id}.json"
+    path.write_text(json.dumps(row.model_dump(mode="json", by_alias=True)))
+    os.utime(path, ns=(stamp_ns, stamp_ns))
+
+
+@pytest.mark.asyncio
+async def test_the_listing_declares_the_rows_the_page_left_out(
+    context: ToolContext, registry: ProjectRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SET that is partial must say so: "not listed" is not "not there".
+
+    The store's cap is pinned to 1 here so the assertion is about the sentence a
+    model reads, not about seeding 2001 files.
+    """
+    from local_operator import projects as projects_module
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_row(registry, "aaa-dormant", "dormant-row", stamp_ns=1_700_000_000_000_000_000)
+    _write_row(registry, "zzz-live", "live-row", stamp_ns=1_700_000_001_000_000_000)
+
+    body = await call(context, op="list")
+
+    assert "live-row" in body
+    assert "dormant-row" not in body
+    assert "showing the 1 most recently active of 2 stored projects" in body
+    assert "1 row is not listed here" in body
+    assert "op='show' name='<name>' resolves any project the store can read" in body
+
+
+@pytest.mark.asyncio
+async def test_update_by_name_reaches_a_row_past_the_page(
+    context: ToolContext, registry: ProjectRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ordinal-502 path end to end: name resolution is never truncated."""
+    from local_operator import projects as projects_module
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_row(registry, "aaa-dormant", "dormant-row", stamp_ns=1_700_000_000_000_000_000)
+    _write_row(registry, "zzz-live", "live-row", stamp_ns=1_700_000_001_000_000_000)
+
+    body = await call(context, op="update", name="dormant-row", progress="resumed from the tail")
+
+    assert "updated project 'dormant-row'" in body
+    fresh = ProjectRegistry(tmp_path)
+    assert fresh.get_project("aaa-dormant").progress == "resumed from the tail"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_row_does_not_produce_a_truncation_note(
+    context: ToolContext, registry: ProjectRegistry
+) -> None:
+    """M4 / QA Q1: a torn row is not "hidden by the page", so no note claims it.
+
+    ``truncated`` and the note read the page cut only; an unreadable row keeps
+    its own warning and must never make the receipt promise that ``op='show'``
+    will find it.
+    """
+    from local_operator.projects import ProjectEdit
+
+    for name in ("alpha", "beta"):
+        registry.create_project(ProjectEdit(name=name))
+    (registry.projects_dir / "torn.json").write_text("{not json", encoding="utf-8")
+
+    body = await call(context, op="list")
+
+    assert "alpha" in body and "beta" in body
+    assert "not listed here" not in body

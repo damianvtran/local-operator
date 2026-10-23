@@ -3083,6 +3083,60 @@ async def test_one_attachment_transition_journals_exactly_one_row(tmp_config_dir
 
 
 @pytest.mark.asyncio
+async def test_the_env_block_carries_the_session_id_and_never_the_name(
+    tmp_config_dir: Path,
+) -> None:
+    """Self-identity rides the byte-stable prefix: the ID, never the NAME.
+
+    The incident: an agent could not recognise its own row in the
+    ``sessions`` listing, read it as a peer on the same topic, and spawned a
+    duplicate. The id now sits in the env block, which the model reads every
+    turn. The name is deliberately absent — auto-naming and user renames would
+    otherwise anchor a stale name for the run or force a stable-prefix rebuild
+    on every rename (see ``_env_details``).
+
+    Stability is the other half: two prepares hand back byte-identical blocks,
+    write ONE ``system_prefix`` entry, and journal no ``[session-state]``
+    environment delta — the id is captured once, so it cannot reprice the
+    cached prefix mid-session.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.resume import write_session_title
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        session_id = session._transcript.directory.name
+        title = "a name the stable prefix must never carry"
+        # A real rename, through the writer the listings read — the point is
+        # that the prefix does not follow it, whatever route the name takes.
+        write_session_title(session._transcript.directory, title, user_set=True, past_names=[])
+
+        first = await session._prepare_system_blocks()
+        env = first[2]
+        assert f"Session ID: {session_id}" in env
+        assert title not in env
+
+        second = await session._prepare_system_blocks()
+        assert second[2] == env, "the env block moved between two prepares"
+
+        prefixes = [
+            entry
+            for entry in session._transcript.entries()
+            if str(entry.payload.get("custom_type", "")) == "system_prefix"
+        ]
+        assert len(prefixes) == 1, "a second prefix epoch was persisted"
+        assert _session_state_rows(session) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
     tmp_config_dir: Path,
 ) -> None:
@@ -3140,6 +3194,111 @@ async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
     assert "No interface is attached to the session this run was delegated from" in unattached_body
     assert "An interface is attached" not in unattached_body
     assert "`ask`" not in unattached_body
+
+
+@pytest.mark.asyncio
+async def test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own(
+    tmp_config_dir: Path,
+) -> None:
+    """R1-3: pin BOTH halves of the fork residual, so it stays deliberate.
+
+    ``_prepare`` has no fork branch — a fork passes its own id like any session.
+    What suppresses it is the INHERITED frozen prefix: the fork loads the
+    parent's ``system_prefix`` byte-for-byte (so the parent's provider cache
+    still hits), the wire block therefore keeps the PARENT's ``Session ID``
+    line, and the fork id reaches the same request as a ``[session-state] ##
+    Environment`` delta. Two identity surfaces disagreeing is the class this PR
+    exists to fix; this records the bound — the state record is the newer
+    authority and is in context before the first model call — and that the
+    delta is written once, not per turn.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.fork import fork_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        # FREEZE the parent's prefix in its own transcript — that is the entry
+        # the clone carries and the fork inherits.
+        await parent._prepare_system_blocks()
+        parent_id = parent._transcript.directory.name
+    finally:
+        await parent.dispose()
+
+    fork_id = await asyncio.to_thread(fork_session, Path(tmp_config_dir), parent_id)
+    fork = await create_session(
+        _args(hosting="test", model="test", yolo=True, resume=fork_id),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(fork, Session)
+    try:
+        assert fork._transcript.directory.name == fork_id
+        first = await fork._prepare_system_blocks()
+        assert f"Session ID: {parent_id}" in first[2], first[2]
+        assert f"Session ID: {fork_id}" not in first[2], first[2]
+
+        second = await fork._prepare_system_blocks()
+        assert second[2] == first[2]
+
+        rows = [row for row in _session_state_rows(fork) if fork_id in str(row.payload)]
+        assert len(rows) == 1, [str(row.payload) for row in rows]
+        changed = (rows[0].payload.get("details") or {}).get("blocks") or {}
+        # Section index 2 IS the environment block — the fork's own id, delivered
+        # as the delta rather than as a prefix rebuild.
+        assert list(changed) == ["2"], changed
+    finally:
+        await fork.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_childs_env_block_carries_its_own_session_id(tmp_config_dir: Path) -> None:
+    """The child shape is a session too, and it holds the ``sessions`` tool.
+
+    ``_construct_child_session`` builds its own blocks (the factory is not
+    reused), so threading the id into the factory's provider alone would have
+    left a delegated child — the shape ``.github/workflows/ci.yml`` records as
+    ~93% of sessions, the reason children get their own context ratchet — with
+    the old three-line env block and no way to recognise its own row. The id
+    here is the same field its ToolContext carries, so the prompt and the
+    listing agree byte-for-byte.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-self-id",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+            child_id = child._transcript.directory.name
+            assert child_id != parent._transcript.directory.name
+            assert f"Session ID: {child_id}" in blocks[2]
+            # The parent's id must not leak in as the child's identity.
+            assert f"Session ID: {parent._transcript.directory.name}" not in blocks[2]
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
 
 
 @pytest.mark.asyncio

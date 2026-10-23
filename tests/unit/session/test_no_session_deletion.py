@@ -76,6 +76,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
     # that mkstemp file. Neither operation accepts a session directory/name.
+    # -- the promotion index: a DEVICE-level store at the config root ---------
+    # ``_atomic_write`` publishes the rotated index by renaming a sibling mkstemp
+    # REGULAR FILE over ``<config>/role-provenance.jsonl``; the file name is a
+    # module constant (PROVENANCE_FILENAME) built on the config ROOT, never on a
+    # session id or a path under ``sessions/``. The unlink clears that same
+    # mkstemp sibling when the write fails, so neither call can name a session
+    # directory or a transcript.
+    (
+        "local_operator/role_provenance.py::_atomic_write",
+        "os.replace",
+        "Rotates the device-level index at the config root; both paths are sibling regular files.",
+    ),
+    (
+        "local_operator/role_provenance.py::_atomic_write",
+        "<path>.unlink",
+        "Clears the failed sibling mkstemp regular file; never a session path.",
+    ),
     (
         "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
         "os.replace",
@@ -2939,9 +2956,44 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "tmp FILE -> <config>/cache/library/index.json FILE; cache-derived, never sessions/",
     ),
     (
-        "local_operator/library/service.py::thumbnail",
+        "local_operator/library/indexer.py::LibraryIndexer._drop_legacy_index",
+        "<path>.unlink",
+        "removes <config>/cache/library/index.json and its .lock: the superseded "
+        "derived catalog, never a session directory",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore.ensure_thumbnail",
         "os.replace",
-        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/; never sessions/",
+        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/thumbs; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._swap_in_database",
+        "os.replace",
+        "a fresh copy of <config>/library/library.sqlite3 replaces the unreadable "
+        "database in the same directory; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._swap_in_database",
+        "<path>.unlink",
+        "removes the old file's stale -wal/-shm siblings BEFORE the replace "
+        "(after it they would attach to the new file); never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._clean_stale_rebuilds",
+        "<path>.unlink",
+        "removes another process's crashed database-rebuild temp file beside "
+        "<config>/library/library.sqlite3; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._rebuild_database",
+        "<path>.unlink",
+        "removes the rebuild temp file before writing it and again on failure; " "never sessions/",
+        2,
+    ),
+    (
+        "local_operator/library/service.py::waveform",
+        "os.replace",
+        "tmp FILE -> a peaks cache FILE under <config>/cache/library/peaks/; never sessions/",
     ),
     # The Library VIEW's flagged calls are heap/Textual operations, not
     # filesystem ones: the viewport cursor is an in-memory integer, the

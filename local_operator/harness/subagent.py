@@ -3995,7 +3995,16 @@ async def _construct_child_session(
             "\n\n".join(
                 filter(None, (knowledge, mcp.catalogue(prompt) if mcp is not None else ""))
             ),
-            _env_details(cwd),
+            # The CHILD's own id, the same field the ToolContext above carries
+            # (``transcript.directory.name``), so a child can recognise its own
+            # row in ``sessions(op='list')`` too. A child is ~93% of sessions —
+            # the figure ``.github/workflows/ci.yml`` records as the reason the
+            # subagent context budget has its own ratchet — and it holds
+            # ``sessions`` itself; leaving this call id-less would make the
+            # commonest session shape the one that cannot tell itself apart from
+            # a peer, and the listing marker would be the only half of the fix it
+            # ever saw.
+            _env_details(cwd, transcript.directory.name),
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,
             # ...and its LIFECYCLE STATE, so a goal the parent has already

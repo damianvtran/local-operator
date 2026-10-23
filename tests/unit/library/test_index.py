@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from local_operator import resume
-from local_operator.library import identity, index, service
+from local_operator.library import identity, index
 from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
@@ -380,7 +380,13 @@ def test_catalog_for_read_never_caches_assets_under_a_newer_file_stat(
 
     refreshed = index.build_catalog(root, refresh=True)
     assert any(asset.id == asset_id for asset in refreshed.assets)
-    assert service.get_asset(root, asset_id)["name"] == "extra.txt"
+    # The observer is the catalog, not ``service.get_asset``: the service reads
+    # the SQLite index now (``library/store.py``) and no longer consults this
+    # JSON aggregate at all, so asserting through it would test a path that no
+    # longer exists. What this test pins — the rebuilt aggregate contains the
+    # extra asset with its derived name — is unchanged.
+    served = next(asset for asset in refreshed.assets if asset.id == asset_id)
+    assert served.derived_name == "extra.txt"
 
 
 def test_a_retracted_child_survives_a_partial_merge(tmp_path, monkeypatch) -> None:
@@ -598,8 +604,9 @@ def test_build_never_caches_assets_under_a_stat_from_a_racing_writer(tmp_path, m
     assert fired, "the racing writer must have fired"
     assert index._cached(index._cache_key(root)) is None, "stale assets must not be cached"
     raced_id = identity.asset_id(identity.key_for(str(raced), None))
-    assert any(asset.id == raced_id for asset in index.catalog_for_read(root).assets)
-    assert service.get_asset(root, raced_id)["name"] == "raced.txt"
+    served = [asset for asset in index.catalog_for_read(root).assets if asset.id == raced_id]
+    # Same observer rule as above: the service no longer reads this aggregate.
+    assert served and served[0].derived_name == "raced.txt"
 
 
 def test_a_truncated_partial_index_is_not_ready_even_when_its_rows_are(

@@ -2697,6 +2697,11 @@ class ProjectionFold:
                 # supplement-free projections to the parent's bytes).
                 if event.sounds:
                     beat["sounds"] = [dict(item) for item in event.sounds]
+                # The bound's disclosure is part of the list: 200 shown + no count
+                # reads as a complete list on the phone until a cold open restores
+                # the row's own ``sounds_more``. Same absence rule (zero is no fact).
+                if event.sounds_more:
+                    beat["sounds_more"] = int(event.sounds_more)
                 p.supplements[event.anchor] = beat
         # Unknown events are dropped by design: the fold renders a SUBSET of
         # the harness taxonomy (the phone has no use for wake/loop internals),

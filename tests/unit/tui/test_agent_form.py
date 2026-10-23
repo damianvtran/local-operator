@@ -164,7 +164,9 @@ async def test_reserved_and_escaped_names_and_autocomplete(tmp_path, monkeypatch
         await _boot(pilot, app)
         rows = app._agent_argument_choices(_PickerEditor("/agent "))
         names = [row.name for row in rows]
-        assert names[-3:] == ["class", "new", "edit"]
+        # Four reserved verbs since LOH-9 S4 added `promote`; they stay LAST so
+        # a bare Tab still completes a profile.
+        assert names[-4:] == ["class", "new", "edit", "promote"]
         assert "=new" in names and "=edit" in names and "==foo" in names
         assert not app._agent_argument_choices(_PickerEditor("/agent new "))
         edit = app._agent_argument_choices(_PickerEditor("/agent edit "))

@@ -487,8 +487,10 @@ class AttachmentContent(BaseModel):
     width: int | None = None
     height: int | None = None
     duration_s: float | None = None
-    #: A short human handle for labels and file-actions ("flux-dev-01.png").
-    #: Never a filesystem path: an artifact is not a file on the user's disk.
+    #: A short human handle for labels and file-actions, derived from the
+    #: REQUEST that produced the bytes (the prompt or an agent-supplied
+    #: filename stem) — never from a model id, and never a filesystem path:
+    #: an artifact is not a file on the user's disk.
     name: str | None = None
 
 
@@ -1517,7 +1519,10 @@ class DurableWriteIntent:
     #: ``sync`` is here because syncing rewrites installed account rows and its
     #: hub arm fetches account definitions — both are account mutations the
     #: seam is asked about, even though the tool's own verb is a different one.
-    operation: Literal["create", "update", "delete", "install", "reset", "sync"]
+    #: ``promote`` is the verb that copies a CONVERSATION definition into the
+    #: account (LOH-9 S4): the tool may propose it, and only the user's own
+    #: surface can authorise it, which is exactly what the seam answers.
+    operation: Literal["create", "update", "delete", "install", "reset", "sync", "promote"]
     name: str
     #: Always ``global`` today: a conversation-scoped write never asks. Kept
     #: explicit so a future scope cannot be read as "no consent needed" by
@@ -2986,6 +2991,11 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     components: list[dict[str, Any]] = Field(default_factory=list)
     #: Like files, stored turn audio is ready at decided; do not wait for graphics.
     sounds: list[dict[str, Any]] = Field(default_factory=list)
+    #: How many sounds the row's ``SOUNDS_MAX`` bound (and the panel strip's byte
+    #: budget) held back -- the row's own disclosure, ``files_more``'s sound twin.
+    #: Zero means "nothing held back" and is OMITTED on the wire like the fields
+    #: above, so a beat from a turn inside the bound stays byte-identical.
+    sounds_more: int = 0
     model: str = ""
     model_source: str = ""
     attempts: list[str] = Field(default_factory=list)
@@ -2999,7 +3009,7 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     ) -> dict[str, Any]:
         """Old event fixtures remain byte-identical when no new facts were observed."""
         value = handler(self)
-        for key in ("model", "model_source", "attempts", "detail", "sounds"):
+        for key in ("model", "model_source", "attempts", "detail", "sounds", "sounds_more"):
             if not value.get(key):
                 value.pop(key, None)
         return value

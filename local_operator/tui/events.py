@@ -639,6 +639,7 @@ class SupplementProgress(SessionEvent):
         error: str = "",
         error_type: str = "",
         sounds: list[dict[str, object]] | None = None,
+        sounds_more: int = 0,
     ) -> None:
         super().__init__()
         self.anchor = anchor
@@ -650,6 +651,7 @@ class SupplementProgress(SessionEvent):
         self.files = list(files or [])
         self.components = list(components or [])
         self.sounds = list(sounds or [])
+        self.sounds_more = int(sounds_more)
         self.error = error
         self.error_type = error_type
 
@@ -672,6 +674,8 @@ class SupplementProgress(SessionEvent):
         }
         if self.sounds:
             details["sounds"] = list(self.sounds)
+        if self.sounds_more > 0:
+            details["sounds_more"] = self.sounds_more
         return details
 
 
@@ -1349,6 +1353,7 @@ class EventController:
                 event.error,
                 event.error_type,
                 [dict(item) for item in event.sounds],
+                event.sounds_more,
             )
         )
 
