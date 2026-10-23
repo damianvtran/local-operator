@@ -19,9 +19,14 @@
  *   * `auto` — loosen this session. Authority-increasing: `loosen` challenge.
  *   * `default auto` — loosen the GLOBAL default, which applies to every session
  *     following it. Also authority-increasing, and it takes the SAME challenge
- *     action (`loosen`) and the same proof fields: the runtime decides what a
- *     signature is accepted for from the frame it is deciding, so a signature
- *     minted for one scope cannot be presented as the other.
+ *     action (`loosen`) and the same proof fields. The signature is bound to
+ *     that action and to the request id (empty on both phone scopes), NOT to
+ *     the scope: before its challenge is consumed, a signature minted for one
+ *     of these two commands would be accepted on the other. That is deliberate
+ *     — both are the same authority-increasing loosening gesture, and the
+ *     challenge is single-use — but it means the signature proves the operator
+ *     consented to A loosening, not WHICH scope was chosen. The scope is the
+ *     frame's claim, and the receipt reports what the runtime actually did.
  *   * `default ask` — tighten globally, no proof. Not offered by any phone
  *     surface today; it is left out of the union on purpose so a caller cannot
  *     land an unproven global write behind a typo.
