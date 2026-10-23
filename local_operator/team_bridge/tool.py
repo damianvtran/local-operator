@@ -14,7 +14,8 @@ WHAT THE COS MAY DO with a delivered bridge message, per contract:
   stealing a successor's claim.
 - **send / reply** — outbound notes/questions/requests through the durable
   outbox (write-intent-first, §6.2). ``reply`` is the §13.5 pairing: thread_id
-  AND to always together.
+  AND to always together. ``state=sent`` means server acceptance into the
+  legacy peer inbox, not conversation delivery or recipient agent execution.
 - **NO decide** — the ``decide`` op does not exist here BY DESIGN: only H5b's
   answer path (a trusted human Approve/Deny) may call ``/decide`` (§10.3,
   #125). The schema omits it and the executor refuses the word if a model
@@ -71,7 +72,11 @@ from local_operator.harness.types import AgentTool, TextContent, ToolContext, To
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
-from .types import CONVERSATION_ID_PATTERN
+from .types import (
+    CONVERSATION_ID_PATTERN,
+    InvalidSendRecipient,
+    validate_send_recipient,
+)
 
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
@@ -146,6 +151,20 @@ class ChannelMemberParams(BaseModel):
     display_label: str = ""
 
 
+class EndpointRecipientParams(BaseModel):
+    """One closed endpoint destination; never interpreted as a conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+    endpoint_id: str = Field(min_length=1)
+
+
+class AccountRecipientParams(BaseModel):
+    """One closed account destination, resolved by the pair-inbox server."""
+
+    model_config = ConfigDict(extra="forbid")
+    account_id: str = Field(min_length=1)
+
+
 class BridgeToolParams(BaseModel):
     """Bridge args; ``extra="forbid"`` makes a hallucinated field a refusal."""
 
@@ -164,7 +183,9 @@ class BridgeToolParams(BaseModel):
     message_id: str = ""
     body_sha256: str = ""
     state: Literal["working", "done"] | None = None
-    to: dict[str, str] | None = None
+    # Disjoint closed models advertise the same one-of as the shared runtime
+    # guard. An open dictionary would still invite unsupported nested fields.
+    to: EndpointRecipientParams | AccountRecipientParams | None = None
     type: Literal["note", "question", "request"] = "note"
     text: str = ""
     thread_id: str | None = None
@@ -294,6 +315,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     fence = owner_fence_refusal(runtime)
     if fence is not None:
         return _error(fence["error"], code=fence["code"])
+    # Refuse unsupported destinations before even scheduling admission I/O.
+    # The local authority fence keeps precedence; no invalid destination can
+    # create an outbox intent, send a message, or trigger a status request.
+    recipient: dict[str, str] = {}
+    if op in ("send", "reply"):
+        try:
+            recipient = validate_send_recipient(args.get("to"))
+        except InvalidSendRecipient as failure:
+            return _error(str(failure), code=failure.code)
     # ADMISSION GATE, second: only a SETTLED "admitted" may act. A non-admitted
     # state refuses THIS op typed and schedules the same single-flight boundary
     # read (fire-and-forget — never waits, never posts). ``take_up`` is a FETCH
@@ -377,11 +407,6 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         return {"ok": True, "state": "done", "message_id": params.message_id}
 
     if params.op in ("send", "reply"):
-        if (
-            not params.to
-            or len([k for k in ("endpoint_id", "account_id") if params.to.get(k)]) != 1
-        ):
-            return _error("send/reply name `to` as exactly one of endpoint_id/account_id")
         if not params.text.strip():
             return _error("send/reply need non-empty text")
         if params.op == "reply" and not (params.thread_id or "").strip():
@@ -391,7 +416,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         outbox = Outbox(runtime.config_dir)
         intent = outbox.record_send(
             runtime.key(),
-            to=params.to,
+            to=recipient,
             type=params.type,
             text=params.text,
             thread_id=params.thread_id,
@@ -404,6 +429,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         except Exception as failure:
             return _error(f"the send did not confirm: {failure}", code="send_unconfirmed")
         message = (result or {}).get("message") or {}
+        # Compatibility: "sent" confirms server acceptance into the pair inbox,
+        # NOT conversation history or recipient agent execution. Even a later
+        # server read ACK precedes the recipient's local wake handoff.
         return {"ok": True, "message_id": str(message.get("id") or ""), "state": "sent"}
 
     if params.op == "channels":

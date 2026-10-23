@@ -22,9 +22,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, NewType
 from urllib.parse import quote, unquote
+from uuid import UUID
 
 __all__ = [
     "CONVERSATION_ID_PATTERN",
+    "InvalidSendRecipient",
+    "is_account_id",
+    "validate_send_recipient",
     "SCREENING_CATEGORIES",
     "ACK_TARGETS",
     "AckTarget",
@@ -111,6 +115,53 @@ SCREENING_CATEGORIES = (
 
 class TeamBridgeTypeError(ValueError):
     """A record violated its contract shape. Fail closed: callers refuse."""
+
+
+class InvalidSendRecipient(TeamBridgeTypeError):
+    """A caller supplied an unsupported destination; never persist or send it."""
+
+    code = "invalid_request"
+
+
+def validate_send_recipient(value: Any) -> dict[str, str]:
+    """Return the closed pair-inbox destination without coercion or field loss.
+
+    A nested ``to.kind`` once survived tool validation but disappeared when the
+    client rebuilt the HTTP body. That made an unsupported delivery request look
+    successful. Both the tool (BEFORE its durable outbox) and the wire client
+    use this check, so neither can silently reinterpret a destination. This is
+    the existing pair-inbox contract, not conversation routing or a human fallback.
+    Refusals deliberately do not quote caller-controlled keys or values.
+    """
+    if not isinstance(value, Mapping) or len(value) != 1:
+        raise InvalidSendRecipient("send/reply require exactly one endpoint_id or account_id")
+    key = next(iter(value))
+    if key not in ("endpoint_id", "account_id"):
+        raise InvalidSendRecipient("send/reply recipient contains an unsupported field")
+    identifier = value[key]
+    if not isinstance(identifier, str) or not identifier or identifier != identifier.strip():
+        raise InvalidSendRecipient("send/reply recipient must be a non-empty unpadded string")
+    return {key: identifier}
+
+
+def is_account_id(value: Any) -> bool:
+    """Accept legacy account IDs and the account service's canonical UUID shape.
+
+    Keep this identity guard in the dependency-light types module: desktop read
+    queries and conversation path guards must agree without importing an HTTP
+    client at server boot. UUID parsing plus canonical-form comparison follows
+    the Radient client's identifier guard; no braced, compact, URN, whitespace,
+    or path/query spellings are admitted. Case is accepted, not normalized:
+    authorization still compares the caller's actual identity, unchanged.
+    """
+    if not isinstance(value, str):
+        return False
+    if re.fullmatch(r"acc_[A-Za-z0-9_-]{1,64}", value) is not None:
+        return True
+    try:
+        return value.lower() == str(UUID(value))
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
