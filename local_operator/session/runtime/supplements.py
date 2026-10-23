@@ -697,7 +697,7 @@ class SupplementRunner:
             datasets=tuple(datasets),
             user_text=user_text,
             answer_text=answer_text,
-            sounds=tuple(sounds[:3]),
+            sounds=tuple(sounds),
         )
         self._remember(inputs)
         previous = self._task
@@ -1124,7 +1124,7 @@ class SupplementRunner:
                     else []
                 ),
                 sounds=(
-                    [dict(item) for item in (details.get("sounds") or [])][:3]
+                    [dict(item) for item in (details.get("sounds") or [])]
                     if state in ("decided", "done")
                     else []
                 ),

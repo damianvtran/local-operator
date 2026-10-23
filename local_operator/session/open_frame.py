@@ -211,6 +211,7 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
 
     from local_operator.redaction_shapes import scrub_shapes
     from local_operator.supplements.contract import (
+        SOUNDS_MAX,
         SupplementComponent,
         SupplementDetails,
         SupplementFile,
@@ -240,7 +241,10 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         "files": (SupplementFile, 16),
         "components": (SupplementComponent, 3),
         "images": (SupplementImage, 3),
-        "sounds": (SupplementSound, 3),
+        # The row writer's own bound, reused rather than re-chosen: a strip that cut
+        # lower would take sounds off a page the durable row already carries in full,
+        # which is exactly the "the collage shows three" defect one layer down.
+        "sounds": (SupplementSound, SOUNDS_MAX),
     }
     for key in SupplementDetails.__annotations__:
         value = details.get(key)
