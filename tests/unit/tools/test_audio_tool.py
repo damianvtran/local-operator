@@ -1495,11 +1495,16 @@ async def test_a_resumed_batch_waits_out_the_work_a_stop_abandoned(monkeypatch):
 
         sounds = [{"prompt": f"sound-{n}", "duration_s": 0.5} for n in range(14)]
         stop_signal = AbortSignal()
-        batch = asyncio.create_task(
-            audio_tool.execute_generate_sound_effect(
+
+        # The guarded tool entry is typed ``Awaitable`` (the decorator wraps it),
+        # and ``create_task`` wants a coroutine — so the batch runs through this
+        # thin async adapter, never through a cast.
+        async def run_batch() -> Any:
+            return await audio_tool.execute_generate_sound_effect(
                 "first", {"sounds": sounds}, stop_signal, None, None
             )
-        )
+
+        batch = asyncio.create_task(run_batch())
         # Deterministic stop point: item 11 has completed and BOTH tail calls
         # are in flight at the vendor — exactly what the report describes.
         await asyncio.wait_for(server.eleven_done.wait(), timeout=10)
