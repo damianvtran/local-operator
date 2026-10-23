@@ -290,6 +290,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="ancestors",
                 blurb="The chain from the element up to <html> (depth <= 16, default 12).",
             ),
+            ToolDocOp(
+                op="query",
+                blurb="Read-only DOM query: CSS in, element descriptors out.",
+            ),
             ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
             ToolDocOp(
                 op="inspect_ownership",
