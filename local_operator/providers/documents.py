@@ -40,9 +40,18 @@ knows what to re-check before changing a row:
   guide but its exact acceptance varies by model; we gate it on
   ``ModelSpec.supports_images``, the closest capability signal the spec
   carries.
-- The byte/page ceilings copied from each page are per REQUEST for Anthropic
-  and per FILE for the others; this module treats them all as per-file,
-  which is the conservative reading.
+- Mistral's base64 ``document_url`` spelling (a ``data:`` URL rather than the
+  public/signed https URL the document-QnA page shows) is documented on the
+  basic-OCR page, which states "encoding them in base64 and passing them as a
+  data url": https://docs.mistral.ai/studio/document-processing/basic_ocr
+- WHERE EACH CEILING APPLIES, because getting this backwards is permissive
+  rather than conservative: Anthropic's 32 MB is the WHOLE REQUEST (its page
+  says "both limits are on the entire request payload, including any other
+  content sent alongside PDFs"), and OpenAI's 50 MB is the COMBINED total
+  across files as well as the per-file bound. `document_native_ok` therefore
+  compares the ENCODED length (base64 inflates 4/3) and a per-request
+  :class:`DocumentBudget` sums every document a request will send; a block
+  that no longer fits falls back to extraction.
 
 Every row defaults to the FALLBACK: an unknown provider, an unknown wire, or
 a payload outside the row's limits gets extracted text or a reference block,
@@ -56,7 +65,7 @@ import binascii
 import hashlib
 import io
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -67,6 +76,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DOCUMENT_FORMS",
+    "DOCUMENT_REQUEST_HEADROOM_BYTES",
+    "DocumentBudget",
     "DocumentForm",
     "admission_wire",
     "document_form",
@@ -95,6 +106,20 @@ MAX_FALLBACK_TEXT_CHARS = 400_000
 #: cannot change for a digest, and a session resends its history on every
 #: turn.
 _PAGE_COUNT_CACHE: dict[str, int | None] = {}
+
+#: Anthropic documents are capped at 600 pages, but only 100 when the request's
+#: context window is under 1M tokens (its PDF page states both). A model whose
+#: window is unknown is treated as SMALL: the conservative direction is the
+#: one that falls back to extraction rather than a paid 400.
+ANTHROPIC_LARGE_CONTEXT_WINDOW = 1_000_000
+ANTHROPIC_SMALL_CONTEXT_MAX_PAGES = 100
+
+#: Reserved out of a request-scoped limit for everything that is not a
+#: document: text, images, tool schemas and the JSON envelope. 1 MiB is a
+#: stated allowance, not a measurement — the session's own wire-byte budget
+#: keeps the whole request smaller than this in practice, and the point here
+#: is that documents never claim the provider's entire ceiling.
+DOCUMENT_REQUEST_HEADROOM_BYTES = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -134,6 +159,34 @@ DOCUMENT_FORMS: dict[str, DocumentForm] = {
 #: cannot live in the id-keyed map above.
 _OPENAI_RESPONSES = DocumentForm("openai_responses", 50_000_000, None, "openai")
 
+
+@dataclass
+class DocumentBudget:
+    """The request-scoped byte room documents may still claim.
+
+    Lives for ONE render pass (one provider body build), because the limits it
+    models are per request. ``take`` both checks and consumes, so two documents
+    that each fit the per-file bound cannot together exceed the combined one:
+    the second falls back to extraction instead of putting both on one
+    oversized wire.
+    """
+
+    remaining: int
+
+    def take(self, encoded: int) -> bool:
+        if encoded <= 0 or encoded > self.remaining:
+            return False
+        self.remaining -= encoded
+        return True
+
+
+def document_budget(form: DocumentForm | None) -> DocumentBudget | None:
+    """A fresh per-request budget for ``form``, or ``None`` without a row."""
+    if form is None:
+        return None
+    return DocumentBudget(max(0, form.max_bytes - DOCUMENT_REQUEST_HEADROOM_BYTES))
+
+
 #: MIME prefixes/suffixes the fallback can read as text. PDF is handled by
 #: extraction first; these are the "text-ish" second arm of contract §3.
 _TEXT_MIMES = frozenset(
@@ -149,7 +202,13 @@ def _is_text_mime(mime_type: str) -> bool:
     return mime_type.startswith("text/") or mime_type in _TEXT_MIMES
 
 
-def document_form(provider: str, wire: str, *, supports_images: bool = True) -> DocumentForm | None:
+def document_form(
+    provider: str,
+    wire: str,
+    *,
+    supports_images: bool = True,
+    context_window: int | None = None,
+) -> DocumentForm | None:
     """The native form for this provider ON THIS WIRE, or ``None`` for fallback.
 
     ``wire`` names the API the caller is building (``openai-chat``,
@@ -157,16 +216,25 @@ def document_form(provider: str, wire: str, *, supports_images: bool = True) -> 
     provider. ``supports_images`` is the capability gate the table names for
     the OpenAI rows: a text-only model under the same provider id must not be
     handed a file part.
+
+    ``context_window`` narrows Anthropic's 600-page ceiling to the documented
+    100-page sub-limit when the request's model is under 1M tokens. ``None``
+    (a caller that cannot name the model, e.g. the legacy ``/v1/chat`` door)
+    takes the SMALL limit: unknown is not evidence of a large window, and the
+    cost of guessing wrong in the other direction is a paid provider 400.
     """
     form = DOCUMENT_FORMS.get(provider)
     if provider == "openai" and wire == "openai-responses":
-        return _OPENAI_RESPONSES if supports_images else None
+        form = _OPENAI_RESPONSES if supports_images else None
+        return form
     if form is None or form.wire not in _WIRE_FOR_REQUEST:
         return None
     if _WIRE_FOR_REQUEST[form.wire] != wire:
         return None
     if form.wire in {"openai_chat", "openai_responses"} and not supports_images:
         return None
+    if form.wire == "anthropic" and (context_window or 0) < ANTHROPIC_LARGE_CONTEXT_WINDOW:
+        form = replace(form, max_pages=ANTHROPIC_SMALL_CONTEXT_MAX_PAGES)
     return form
 
 
@@ -233,7 +301,26 @@ def _decoded(block: "DocumentContent") -> bytes | None:
         return None
 
 
-def document_native_ok(block: "DocumentContent", form: DocumentForm | None) -> bool:
+def encoded_document_bytes(block: "DocumentContent") -> int:
+    """The bytes this block occupies ON THE WIRE (base64), not decoded size.
+
+    The provider ceilings are about the request payload, and base64 inflates a
+    PDF by 4/3: a 25 MB file is 33.3 MB encoded and no longer fits Anthropic's
+    32 MB request cap. Comparing the decoded size — the first version of this
+    check did — accepts exactly the payload the provider refuses.
+    """
+    raw = _decoded(block)
+    if raw is None:
+        return 0
+    return 4 * ((len(raw) + 2) // 3)
+
+
+def document_native_ok(
+    block: "DocumentContent",
+    form: DocumentForm | None,
+    *,
+    budget: DocumentBudget | None = None,
+) -> bool:
     """Whether ``block`` may take ``form``'s NATIVE shape, limits included.
 
     The single eligibility test every serializer consults, so the admission
@@ -241,21 +328,33 @@ def document_native_ok(block: "DocumentContent", form: DocumentForm | None) -> b
     about what "native" means. ``False`` for a non-PDF: the table's native rows
     are document-input rows for PDFs, and a text file sent as a "document" part
     is the send-and-hope this contract forbids.
+
+    ``budget`` is the REQUEST's remaining document room. A successful check
+    CONSUMES the encoded size, so every caller must pass the same budget for
+    every document of one body build and call this exactly once per block.
+    Without one, only the per-block ceiling applies (a single-document
+    question, which is what the admission label asks).
     """
     if form is None or block.mime_type != "application/pdf":
         return False
     raw = _decoded(block)
-    if raw is None or len(raw) > form.max_bytes:
+    if raw is None:
         return False
-    if form.max_pages is None:
-        return True
-    pages = pdf_page_count(raw, block.digest)
-    # An UNCOUNTABLE PDF is not native: if the page structure cannot be read
-    # here, a provider's own parser is at least as likely to refuse it, and
-    # "send and hope" is exactly what the contract forbids. The fallback then
-    # extracts (or degrades to a reference), which never spends a paid
-    # request on a shape the provider rejects.
-    return pages is not None and pages <= form.max_pages
+    encoded = encoded_document_bytes(block)
+    if encoded > form.max_bytes:
+        return False
+    if form.max_pages is not None:
+        pages = pdf_page_count(raw, block.digest)
+        # An UNCOUNTABLE PDF is not native: if the page structure cannot be
+        # read here, a provider's own parser is at least as likely to refuse
+        # it, and "send and hope" is exactly what the contract forbids. The
+        # fallback then extracts (or degrades to a reference), which never
+        # spends a paid request on a shape the provider rejects.
+        if pages is None or pages > form.max_pages:
+            return False
+    if budget is not None and not budget.take(encoded):
+        return False
+    return True
 
 
 def document_injection(
@@ -265,9 +364,11 @@ def document_injection(
 
     Stamped on the block at admission as historical metadata (contract §3):
     the transcript can then state how the turn actually reached the model,
-    without claiming a later request used the same path.
+    without claiming a later request used the same path. The label is asked
+    as a ONE-DOCUMENT request (a fresh budget), which is the closest answer
+    available before the real body exists.
     """
-    if document_native_ok(block, form):
+    if document_native_ok(block, form, budget=document_budget(form)):
         return "native"
     if block.mime_type == "application/pdf" or _is_text_mime(block.mime_type):
         return "extracted"
@@ -377,19 +478,21 @@ def _write_cached_text(digest: str, text: str) -> None:
 def _reference_text(block: "DocumentContent", *, reason: str | None = None) -> str:
     """The last-resort arm: metadata the model can act on, never an empty part.
 
-    The path is included because the contract's reference arm exists to let a
-    model with file tools open the file itself. Confinement is the SESSION's
-    policy and is applied by the path hint that follows every user turn
-    (``session/attachment_hints.py``); this sentence is the same facts a hint
-    would carry, and a confined session's notice tells the model not to
-    search for the file.
+    NO PATH HERE, deliberately (agent review round 1, M3). This sentence is
+    rendered by a serializer, which has no session and therefore no
+    confinement boundary; the contract's reference arm used to name the origin
+    path here, and a confined session then told the model the controller's
+    absolute path and invited it to open a file its own tools must refuse.
+    Paths are the hint's job: ``session/attachment_hints.py`` renders the
+    retained copy only when it is inside the session's world and the origin
+    path under the same test. The reference block states the facts that are
+    true everywhere; the trailing note says where the file actually is.
     """
-    where = f"; original path: {block.path}" if block.path else ""
     why = f" ({reason})" if reason else ""
     return (
-        f"[Document reference: {block.filename} ({block.mime_type}, {block.bytes} bytes)"
-        f"{where}. The full contents were not inlined{why}; open it with a tool if the "
-        "session has one.]"
+        f"[Document reference: {block.filename} ({block.mime_type}, {block.bytes} bytes). "
+        f"The full contents were not inlined{why}. The attachment note after this message "
+        "names the retained copy when it is reachable from this session.]"
     )
 
 

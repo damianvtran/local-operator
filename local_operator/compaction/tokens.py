@@ -112,7 +112,12 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from local_operator.harness.types import AttachmentContent, Message, TextContent
+from local_operator.harness.types import (
+    AttachmentContent,
+    DocumentContent,
+    Message,
+    TextContent,
+)
 from local_operator.optional import missing_extra_error
 
 logger = logging.getLogger(__name__)
@@ -134,6 +139,27 @@ OFFLOAD_MIN_CHARS = 20_000
 #: chunks, and a flat estimate keeps the estimator deterministic and
 #: independent of base64 payload length.
 IMAGE_TOKEN_ESTIMATE = 1200
+
+#: Ceiling for ONE document block's local token charge. A native PDF is priced
+#: by the provider's own page/pixel rules (no local ruler can reproduce them),
+#: and the fallback is page-marked TEXT bounded at 400k characters; charging
+#: either as an image would be wrong in both directions. The block's inline
+#: base64 is used as a cheap upper bound (1 char ~ 1 token is safe for ASCII),
+#: capped here so one 32 MB PDF cannot report an eight-million-token history
+#: and drive compaction into a loop. The cap is deliberately generous: a
+#: six-hundred-page PDF really can cost six figures of tokens.
+MAX_DOCUMENT_TOKEN_ESTIMATE = 100_000
+
+
+def _document_token_estimate(block: DocumentContent) -> int:
+    """Tokens to charge for one document block (see the constant's note).
+
+    Deterministic and allocation-free: ``len(data)`` is already on the block,
+    and both ``_compute_tokens`` and ``messages_tokens_upper_bound`` must use
+    THIS rule or the upper bound stops being an upper bound.
+    """
+    return min(len(block.data), MAX_DOCUMENT_TOKEN_ESTIMATE)
+
 
 #: Fallback ratio when tiktoken is unavailable: ~4 chars per token.
 _CHARS_PER_TOKEN_FALLBACK = 4
@@ -803,6 +829,12 @@ def _compute_tokens(message: Message) -> int:
             # (agent review round 1, F4). Zero, explicitly, beside the wire
             # reader's own zero below.
             continue
+        elif isinstance(block, DocumentContent):
+            # NOT an image: see ``_document_token_estimate``. The previous
+            # fall-through charged a flat image estimate, which is wrong for
+            # both delivery paths and hid the block from any document-aware
+            # accounting (QA round 1 sweep).
+            total += _document_token_estimate(block)
         else:
             total += IMAGE_TOKEN_ESTIMATE
 
@@ -898,6 +930,10 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
                 # will, because its bytes live in the store.
                 continue
             else:
+                # Documents included: ``block.data`` is the base64 payload,
+                # which IS the wire size of a native part; a fallback renders
+                # less than that, so this stays the safe (over-)estimate the
+                # byte budget wants.
                 total += len(block.data)
         for call in message.tool_calls or ():
             # Prefer the provider's own rendering when we kept it: that string
@@ -1230,6 +1266,11 @@ def messages_tokens_upper_bound(messages: Sequence[Message]) -> int:
                 text = block.text
                 total += len(text) if text.isascii() else 4 * len(text)
                 text_blocks += 1
+            elif isinstance(block, DocumentContent):
+                # MUST mirror ``_compute_tokens`` exactly: this function's one
+                # contract is never being below it, and a document charged
+                # differently here would break that invariant silently.
+                total += _document_token_estimate(block)
             else:
                 total += IMAGE_TOKEN_ESTIMATE
         # _compute_tokens encodes the text blocks as ONE "\n"-joined string, so

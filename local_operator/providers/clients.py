@@ -71,7 +71,9 @@ from local_operator.model.speed import (
 from local_operator.providers.account_affinity import set_wire_hint
 from local_operator.providers.context import bind_native_context
 from local_operator.providers.documents import (
+    DocumentBudget,
     DocumentForm,
+    document_budget,
     document_form,
     document_native_ok,
     fallback_document_text,
@@ -2182,7 +2184,11 @@ def _echo_reasoning_content(entry: dict[str, Any]) -> bool:
     return True
 
 
-def _document_chat_part(block: DocumentContent, form: DocumentForm | None) -> dict[str, Any]:
+def _document_chat_part(
+    block: DocumentContent,
+    form: DocumentForm | None,
+    budget: DocumentBudget | None = None,
+) -> dict[str, Any]:
     """One document block as an OpenAI-COMPATIBLE chat content part.
 
     Two shapes live behind that word, and which one is sent is ``form.wire``'s
@@ -2195,7 +2201,7 @@ def _document_chat_part(block: DocumentContent, form: DocumentForm | None) -> di
     fallback extraction — never a skipped block: a provider that cannot read
     the file must still receive what the file says.
     """
-    if document_native_ok(block, form):
+    if document_native_ok(block, form, budget=budget):
         data_url = f"data:{block.mime_type};base64,{block.data}"
         if form is not None and form.wire == "mistral":
             return {"type": "document_url", "document_url": data_url}
@@ -2207,7 +2213,9 @@ def _document_chat_part(block: DocumentContent, form: DocumentForm | None) -> di
 
 
 def _message_to_openai(
-    message: Message, document_form_: DocumentForm | None = None
+    message: Message,
+    document_form_: DocumentForm | None = None,
+    document_budget_: DocumentBudget | None = None,
 ) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
@@ -2264,7 +2272,7 @@ def _message_to_openai(
             # the parts array, because ``plain_only`` would otherwise join the
             # extraction into one string and lose the per-file framing.
             plain_only = False
-            parts.append(_document_chat_part(block, document_form_))
+            parts.append(_document_chat_part(block, document_form_, document_budget_))
         elif isinstance(block, AudioContent):
             plain_only = False
             wire_format = stt_audio.format_for_model_wire(block.mime_type)
@@ -2337,10 +2345,18 @@ def _messages_to_openai_responses(
     # Responses depending on credentials/config, so this wire asks for ITS row
     # (contract amendment 6) rather than reading the admission label.
     doc_form = (
-        document_form(model.provider, "openai-responses", supports_images=model.supports_images)
+        document_form(
+            model.provider,
+            "openai-responses",
+            supports_images=model.supports_images,
+            context_window=model.context_window,
+        )
         if model is not None
         else None
     )
+    # The Responses guide's 50 MB is per file AND combined across files; one
+    # budget spans every message this body will carry (M1).
+    doc_budget = document_budget(doc_form)
     items: list[dict[str, Any]] = []
     for message in _without_unrenderable_tool_calls(messages):
         if model is not None:
@@ -2398,7 +2414,7 @@ def _messages_to_openai_responses(
                     }
                 )
             elif isinstance(block, DocumentContent):
-                if document_native_ok(block, doc_form):
+                if document_native_ok(block, doc_form, budget=doc_budget):
                     content.append(
                         {
                             "type": "input_file",
@@ -2983,6 +2999,16 @@ class OpenAICompatClient:
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
         endpoint = f"{self._base_url}/chat/completions"
         direct_deepseek = request.model.provider == "deepseek"
+        # ONE budget for the whole request: the provider ceilings are per
+        # request/combined, so documents must be summed across messages
+        # (agent review round 1, M1).
+        chat_document_form = document_form(
+            request.model.provider,
+            "openai-chat",
+            supports_images=request.model.supports_images,
+            context_window=request.model.context_window,
+        )
+        chat_document_budget = document_budget(chat_document_form)
         messages = self._system_messages(request)
         # DeepSeek's thinking mode refuses the shape this builds when the echo is
         # missing (see ``ModelSpec.requires_reasoning_echo`` for what is measured
@@ -2991,7 +3017,9 @@ class OpenAICompatClient:
         # reasoning always wins over the placeholder.
         echo_turns = 0
         for message in _without_unrenderable_tool_calls(request.messages):
-            entry = self._replay_chat_message(message, request.model, endpoint, scope)
+            entry = self._replay_chat_message(
+                message, request.model, endpoint, scope, chat_document_budget
+            )
             # DeepSeek tool requests replay ALL prior native reasoning, even a
             # reasoning-only turn. Validate provenance before retaining it: a
             # display-only thought or another model/account's payload is not
@@ -3171,11 +3199,21 @@ class OpenAICompatClient:
 
     @staticmethod
     def _replay_chat_message(
-        message: Message, model: ModelSpec, endpoint: str, scope: str | None
+        message: Message,
+        model: ModelSpec,
+        endpoint: str,
+        scope: str | None,
+        document_budget_: DocumentBudget | None = None,
     ) -> dict[str, Any]:
         entry = _message_to_openai(
             message,
-            document_form(model.provider, "openai-chat", supports_images=model.supports_images),
+            document_form(
+                model.provider,
+                "openai-chat",
+                supports_images=model.supports_images,
+                context_window=model.context_window,
+            ),
+            document_budget_,
         )
         native = replay_items(message, model, endpoint, "openai-chat", scope)
         if native:
@@ -4417,7 +4455,9 @@ class AnthropicClient:
 
     @staticmethod
     def _message_blocks(
-        message: Message, document_form_: DocumentForm | None = None
+        message: Message,
+        document_form_: DocumentForm | None = None,
+        document_budget_: DocumentBudget | None = None,
     ) -> list[dict[str, Any]]:
         """Render one message's content blocks for the Anthropic wire.
 
@@ -4459,7 +4499,7 @@ class AnthropicClient:
                 # eligible (a non-PDF, an over-limit file, a model row that
                 # does not exist) becomes extracted text here, so the model
                 # always has SOMETHING to read (contract §3).
-                if document_native_ok(block, document_form_):
+                if document_native_ok(block, document_form_, budget=document_budget_):
                     blocks.append(
                         {
                             "type": "document",
@@ -4485,7 +4525,9 @@ class AnthropicClient:
 
     @staticmethod
     def _tool_result_blocks(
-        message: Message, document_form_: DocumentForm | None = None
+        message: Message,
+        document_form_: DocumentForm | None = None,
+        document_budget_: DocumentBudget | None = None,
     ) -> list[dict[str, Any]]:
         """Render a tool result's content as Anthropic blocks.
 
@@ -4493,7 +4535,7 @@ class AnthropicClient:
         image-only results survive; an empty result is backfilled because
         Anthropic 400s on empty ``tool_result`` content.
         """
-        blocks = AnthropicClient._message_blocks(message, document_form_)
+        blocks = AnthropicClient._message_blocks(message, document_form_, document_budget_)
         if not blocks:
             return [{"type": "text", "text": EMPTY_TOOL_RESULT_TEXT}]
         return blocks
@@ -4569,7 +4611,9 @@ class AnthropicClient:
             request.model.provider,
             "anthropic-messages",
             supports_images=request.model.supports_images,
+            context_window=request.model.context_window,
         )
+        doc_budget = document_budget(doc_form)
         messages: list[dict[str, Any]] = []
         for message in _without_unrenderable_tool_calls(request.messages):
             # Anthropic 400s on an assistant message whose content array is
@@ -4579,7 +4623,7 @@ class AnthropicClient:
             if _is_empty_assistant(message):
                 continue
             if message.role == "assistant" and message.tool_calls:
-                content = self._message_blocks(message, doc_form)
+                content = self._message_blocks(message, doc_form, doc_budget)
                 content.extend(
                     {
                         "type": "tool_use",
@@ -4596,7 +4640,7 @@ class AnthropicClient:
                     {
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id or "",
-                        "content": self._tool_result_blocks(message, doc_form),
+                        "content": self._tool_result_blocks(message, doc_form, doc_budget),
                         **({"is_error": True} if message.is_error else {}),
                     }
                 ]
@@ -4609,7 +4653,7 @@ class AnthropicClient:
                 else:
                     messages.append({"role": "user", "content": content})
             else:
-                blocks = self._message_blocks(message, doc_form)
+                blocks = self._message_blocks(message, doc_form, doc_budget)
                 if not blocks:
                     # Every block was blank, so there is no content left to
                     # send — but the message still OCCUPIES A ROLE, and that is
@@ -4935,7 +4979,9 @@ class GoogleClient:
             request.model.provider,
             "google-content",
             supports_images=request.model.supports_images,
+            context_window=request.model.context_window,
         )
+        doc_budget = document_budget(doc_form)
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
@@ -4973,7 +5019,7 @@ class GoogleClient:
                         {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
                     )
                 elif isinstance(block, DocumentContent):
-                    if document_native_ok(block, doc_form):
+                    if document_native_ok(block, doc_form, budget=doc_budget):
                         parts.append(
                             {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
                         )

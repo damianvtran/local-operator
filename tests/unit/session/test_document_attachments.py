@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,9 +43,13 @@ from local_operator.providers.clients import (
     _messages_to_openai_responses,
 )
 from local_operator.providers.documents import (
+    DocumentForm,
     document_form,
     document_injection,
+    document_native_ok,
+    encoded_document_bytes,
     extract_document_text,
+    fallback_document_text,
 )
 from local_operator.session.attachment_hints import with_attachment_hints
 from local_operator.session.attachments import AttachmentStore, sniff_document_mime
@@ -735,3 +740,241 @@ async def test_a_pdf_files_send_reaches_message_content_end_to_end(tmp_path: Pat
         assert "data" not in document_row
     finally:
         await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: provider limits on the encoded/request quantity (M1, M2)
+# ---------------------------------------------------------------------------
+
+
+def _tiny_pdf() -> bytes:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def test_native_eligibility_compares_the_encoded_size(store) -> None:
+    """M1: Anthropic's 32 MB is the REQUEST payload; base64 inflates 4/3.
+
+    A 24 MiB PDF is under 32 MB decoded but ~33.5 MB on the wire — the exact
+    payload the provider refuses. The first implementation compared decoded
+    bytes and accepted it.
+    """
+    raw = _tiny_pdf() + b"\n%" + b"x" * (24 * 1024 * 1024)
+    block = DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="application/pdf",
+        filename="big.pdf",
+        bytes=len(raw),
+        digest="a" * 32,
+    )
+    assert len(raw) < 32_000_000
+    assert encoded_document_bytes(block) > 32_000_000
+    assert not document_native_ok(block, DocumentForm("anthropic", 32_000_000, 600, "anthropic"))
+
+
+def test_documents_share_one_request_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M1: two files that each fit the per-file bound cannot both go native."""
+    from local_operator.providers import clients as clients_mod
+    from local_operator.providers import documents as documents_mod
+
+    monkeypatch.setattr(documents_mod, "DOCUMENT_REQUEST_HEADROOM_BYTES", 0)
+    form = DocumentForm("openai_chat", 1000, None, "openai")
+    monkeypatch.setattr(clients_mod, "document_form", lambda *_args, **_kwargs: form)
+    raw = _tiny_pdf()
+    block = DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="application/pdf",
+        filename="a.pdf",
+        bytes=len(raw),
+        digest="a" * 32,
+    )
+    assert encoded_document_bytes(block) < 1000
+    assert encoded_document_bytes(block) * 2 > 1000
+    message = Message.user("two files", documents=[block, block])
+    parts = _message_to_openai(message, form, documents_mod.document_budget(form))["content"][1:]
+    assert parts[0]["type"] == "file"
+    # The second no longer fits the REQUEST, so it takes the fallback rather
+    # than putting both on a wire the provider would refuse.
+    assert parts[1]["type"] == "text"
+
+
+def test_anthropic_page_limit_narrows_below_a_million_tokens() -> None:
+    """M2: 600 pages only with a 1M context; 100 otherwise, unknown included."""
+    small = document_form("anthropic", "anthropic-messages", context_window=200_000)
+    large = document_form("anthropic", "anthropic-messages", context_window=1_000_000)
+    unknown = document_form("anthropic", "anthropic-messages")
+    assert small is not None and small.max_pages == 100
+    assert large is not None and large.max_pages == 600
+    assert unknown is not None and unknown.max_pages == 100
+
+    raw = _pdf_raw(pages=150)
+    block = DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="application/pdf",
+        filename="long.pdf",
+        bytes=len(raw),
+    )
+    assert not document_native_ok(block, small)
+    assert document_native_ok(block, large)
+
+
+def test_the_reference_fallback_never_names_the_origin_path() -> None:
+    """M3: the block text is model-visible and has no confinement boundary."""
+    block = DocumentContent(
+        data=base64.b64encode(b"PK\x03\x04").decode(),
+        mime_type="application/octet-stream",
+        filename="secrets.docx",
+        path="/Users/damian/private/secrets.docx",
+        bytes=4,
+    )
+    text = fallback_document_text(block)
+    assert "secrets.docx" in text
+    assert "/Users/damian/private" not in text
+    assert "retained" in text  # points the model at the confined hint
+
+
+def test_the_confined_hint_without_a_retained_copy_uses_the_confined_opening(store) -> None:
+    """n3: no resolvable copy + a boundary must not promise a readable file."""
+    block = DocumentContent(
+        data=base64.b64encode(b"not stored").decode(),
+        mime_type="application/pdf",
+        filename="unwritten.pdf",
+        bytes=10,
+        path="/tmp/unwritten.pdf",
+    )
+    hinted = with_attachment_hints(
+        [Message.user("read", documents=[block])], world_root=tempfile.mkdtemp()
+    )
+    note = hinted[0].content[-1]
+    assert isinstance(note, TextContent)
+    assert "do not search" in note.text
+    assert "read or edit" not in note.text
+
+
+# ---------------------------------------------------------------------------
+# QA round 1: the request key / measurement path (Q1, Q2, Q3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_request_key_measures_a_document_block(store) -> None:
+    """Q1/Q2: this raised ``'DocumentContent' object has no attribute 'text'``.
+
+    ``measure_request`` runs before every provider dispatch, so the defect
+    killed the document's own turn AND every later turn in the session.
+    """
+    from local_operator.providers.context import _message_key, measure_request
+
+    raw = _pdf_raw()
+    message = Message.user("read", documents=[_pdf_block(raw)])
+    key = _message_key(message)
+    assert isinstance(key, tuple)
+    request = ChatRequest(
+        model=ModelSpec(provider="openai", model_id="gpt-4o", supports_images=True),
+        messages=[message],
+    )
+    measured = measure_request(request)
+    assert measured.tokens > 0
+    # A changed filename changes the fallback header, so it must re-measure.
+    renamed = Message.user("read", documents=[_pdf_block(raw, filename="renamed.pdf")])
+    assert _message_key(renamed) != key
+
+
+@pytest.mark.asyncio
+async def test_a_document_turn_measures_and_renders_before_the_provider(
+    tmp_path: Path, store
+) -> None:
+    """The full turn re-runs the real pre-dispatch seam with a document.
+
+    ``measure_request`` is what the session calls before every stream request
+    (``model/configure.py``), and the wire render is what the recorder sees.
+    Both are exercised here through a real ``Session``; the stream wrapper is
+    the provider boundary, so a document can no longer pass a green suite
+    without reaching either.
+    """
+    import asyncio
+
+    from local_operator.providers.clients import MockClient
+    from local_operator.providers.context import measure_request
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from tests.e2e.harness import E2E_ORACLE_MODEL, build_session
+
+    raw = _pdf_raw()
+    ref = store.put_bytes(raw, "application/pdf")
+    assert ref is not None
+    seen: dict[str, object] = {}
+
+    async def stream(request, api_key=None, oauth_access=None):
+        # The real seam: this is what model/configure.py awaits before dispatch.
+        seen["measure"] = measure_request(request)
+        user = next(m for m in reversed(request.messages) if m.role == "user")
+        seen["part"] = _message_to_openai(
+            user,
+            document_form(
+                request.model.provider,
+                "openai-chat",
+                context_window=request.model.context_window,
+            ),
+        )["content"][1]
+        async for event in MockClient().stream(request, api_key, oauth_access):
+            yield event
+
+    session = build_session(tmp_path / "recorder", stream, model=E2E_ORACLE_MODEL)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        await handle.prompt(
+            "Summarise the agreement",
+            files=[{"digest": ref.digest, "name": "report.pdf", "bytes": len(raw)}],
+            command_id="c-recorder-1",
+            wait_complete=True,
+        )
+    finally:
+        await session.dispose()
+
+    measured = seen["measure"]
+    assert measured.tokens > 0
+    part = seen["part"]
+    assert isinstance(part, dict)
+    assert part["type"] == "file"
+    assert part["file"]["filename"] == "report.pdf"
+    assert part["file"]["file_data"].startswith("data:application/pdf;base64,")
+
+
+def test_the_socket_refuses_more_than_eight_or_malformed_refs() -> None:
+    """n2: the socket path inherits the wire model's bound and refusal rule."""
+    from local_operator.session.runtime.server import document_blocks
+
+    refs = [{"digest": "a" * 32, "name": f"{index}.pdf"} for index in range(9)]
+    with pytest.raises(ValueError, match="at most 8"):
+        document_blocks(refs)
+    with pytest.raises(ValueError, match="must be an object"):
+        document_blocks([["not-a-dict"]])  # type: ignore[list-item]
+
+
+def test_a_confined_document_without_a_store_copy_gets_the_confined_opening(
+    tmp_path: Path, store
+) -> None:
+    """n3: no readable copy means no "read the file directly" promise."""
+    message = Message(
+        role="user",
+        content=[
+            TextContent(text="read this"),
+            DocumentContent(
+                data=base64.b64encode(b"hello").decode("ascii"),
+                mime_type="text/plain",
+                filename="note.txt",
+                bytes=5,
+            ),
+        ],
+    )
+    world = tmp_path / "world"
+    world.mkdir()
+    (hinted,) = with_attachment_hints([message], world_root=str(world))
+    note = hinted.content[-1]
+    assert isinstance(note, TextContent)
+    assert "not available as a workspace file" in note.text
+    assert "read or edit the file directly" not in note.text

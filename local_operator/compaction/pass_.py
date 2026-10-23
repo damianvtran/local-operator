@@ -27,6 +27,7 @@ asserts that boundary in a subprocess probe.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, Sequence
 
@@ -123,6 +124,7 @@ async def run_compaction_pass(
     last_activity_ms: int,
     provider_context_tokens: int | None = None,
     respect_threshold: bool = True,
+    world_root: str | Path | None = None,
 ) -> CompactionPassResult:
     """Run one pass over ``messages`` and return the list to send next.
 
@@ -141,6 +143,11 @@ async def run_compaction_pass(
     ``summarize`` may be ``None`` only when the resolved strategy is
     snapcompact (which archives locally); a context-full pass without a
     summarizer refuses as ``summarizer-failed`` rather than inventing one.
+
+    ``world_root`` is the confined session's boundary, used only to withhold
+    an unreachable origin path from the attachments manifest (contract
+    amendment 8). ``None`` for an unconfined host; a confined caller must pass
+    its root or the persisted manifest can name a controller path.
     """
     working: list[Message] = list(messages)
     if not settings.enabled or settings.strategy == "off":
@@ -282,7 +289,7 @@ async def run_compaction_pass(
     # survive a compaction. ``to_summarize`` carries both live document blocks
     # and the previous marker's manifest, which ``collect_attachment_manifest``
     # merges.
-    preserve_data = with_attachment_manifest(preserve_data, to_summarize)
+    preserve_data = with_attachment_manifest(preserve_data, to_summarize, world_root=world_root)
     marker = build_compaction_marker(summary, preserve_data)
     rendered = render_compaction_marker(marker, entry_id=marker.id)
     rebuilt: list[Message] = [rendered, *kept]
