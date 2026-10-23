@@ -527,7 +527,20 @@ def test_a_pdf_extraction_is_page_marked_and_cached(store) -> None:
     assert text.count("--- page ") == 3
     cached = store.root / f"{'d' * 32}.txt"
     assert cached.exists()
-    assert cached.read_text(encoding="utf-8") == text
+    # The cache holds the EXTRACTION, not the display header: the same bytes
+    # re-attached under another filename must not replay the old name.
+    assert cached.read_text(encoding="utf-8") in text
+    assert "--- page 1 ---" in cached.read_text(encoding="utf-8")
+    # Same bytes under a new name: the cached extraction is reused but the
+    # header names the filename this send actually carries.
+    renamed = DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="application/pdf",
+        filename="renamed.pdf",
+        bytes=len(raw),
+        digest="d" * 32,
+    )
+    assert extract_document_text(renamed).startswith("[Document: renamed.pdf")
     # A malformed PDF degrades to a reference naming the file, never nothing.
     broken = DocumentContent(
         data=base64.b64encode(b"%PDF-1.4 not really").decode(),
