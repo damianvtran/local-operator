@@ -7116,6 +7116,144 @@ async def test_a_dismissal_receipt_does_not_clear_a_stop_but_a_decline_does(tmp_
     assert Session._is_stopped_work_residue([row("answered")]) is False
 
 
+def test_the_dismissal_batch_predicate_is_shared_by_both_rules():
+    """SA-D4: the idle delivery arm and the residue rule ask ONE question.
+
+    A batch that mixes a dismissal with anything else is not a dismissal batch:
+    the rest of it is fresh intent, and both callers must see that.
+    """
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+    from local_operator.session.session import Session
+
+    def row(status: str, kind: str = ASK_RESPONSE_MESSAGE_TYPE) -> CustomMessage:
+        return CustomMessage(
+            custom_type=kind,
+            attribution="user",
+            id=f"ask-response-{status}",
+            details={"ask_id": "a-1", "status": status},
+        )
+
+    assert Session._is_dismissal_batch([row("dismissed")]) is True
+    assert Session._is_dismissal_batch([row("dismissed"), row("dismissed")]) is True
+    assert Session._is_dismissal_batch([]) is False
+    assert Session._is_dismissal_batch([row("dismissed"), row("declined")]) is False
+    mixed = [row("dismissed"), row("x", kind=JOB_RESULT_MESSAGE_TYPE)]
+    assert Session._is_dismissal_batch(mixed) is False
+    # The residue rule agrees on the same rows, which is the point of sharing.
+    assert Session._is_stopped_work_residue([row("dismissed"), row("declined")]) is False
+
+
+@pytest.mark.asyncio
+async def test_an_idle_dismissal_is_held_without_a_turn(tmp_path):
+    """SA-D4: an idle live runtime takes the receipt durably and buys NO turn.
+
+    The dismissal is a tidy-up; spending a paid turn so the agent can say "noted"
+    is work nobody asked for. The row still reaches the model — the next real turn
+    reads it out of the live context — which the e2e covers end to end; this cell
+    pins the cost (zero provider calls) and the durability.
+    """
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+    from local_operator.session.session import Session
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(2)])
+    session = make_session(tmp_path, stream)
+    try:
+        receipt = CustomMessage(
+            custom_type=ASK_RESPONSE_MESSAGE_TYPE,
+            attribution="user",
+            id="ask-response-a-1",
+            details={"ask_id": "a-1", "status": "dismissed", "reason": "moot"},
+        )
+        await session.deliver_ask_messages([receipt])
+        # Held, not run: no provider call, no turn lock, no agent start.
+        await asyncio.sleep(0.1)
+        assert stream.requests == [], "a dismissal must not spend a turn"
+        assert not session._turn_lock.locked()
+        assert session.transcript.has_entry("ask-response-a-1")
+        assert Session._is_dismissal_batch([receipt]) is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_answer_still_opens_its_turn(tmp_path):
+    """The idle arm is DISMISSAL-ONLY. An answer is fresh intent and keeps the
+    turn that delivers it (the pre-SA-D4 behaviour, unchanged)."""
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(2)])
+    session = make_session(tmp_path, stream)
+    try:
+        await session.deliver_ask_messages(
+            [
+                CustomMessage(
+                    custom_type=ASK_RESPONSE_MESSAGE_TYPE,
+                    attribution="user",
+                    id="ask-response-a-2",
+                    details={"ask_id": "a-2", "status": "answered", "answers": {"q0": ["yes"]}},
+                )
+            ]
+        )
+        for _ in range(200):
+            if stream.requests:
+                break
+            await asyncio.sleep(0.02)
+        assert stream.requests, "an answer must still open the turn that delivers it"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_user_message_stamp_counts_only_the_operators_own_words(tmp_path):
+    """SA-D7: the ask card's count is over ADMITTED operator messages.
+
+    Typed prompts and steers count; harness chrome (a goal continuation, an
+    injected loop prompt) does not, and one row admitted twice counts once.
+    """
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    try:
+        asked_at = int(time.time() * 1000)
+        assert session.ask_context_line(asked_at) is None, "no messages yet -> no line"
+
+        await session.prompt("first")
+        await session.prompt("second")
+        pair = session.ask_context_line(asked_at)
+        assert pair is not None
+        since, latest = pair
+        assert since == 2, pair
+        assert latest == session.latest_user_message_at()
+        assert latest is not None and latest >= asked_at
+
+        # A message stamped as harness-injected is not the operator writing.
+        injected = Message.user("spooled owner prompt")
+        injected.provider_payload = {RENDERED_INJECTION_KEY: True}
+        session._note_admitted_user_message(injected)
+        assert session.ask_context_line(asked_at)[0] == 2  # type: ignore[index]
+
+        # The same row admitted twice counts once (two admission sites).
+        steer = Message.user("third")
+        session._note_admitted_user_message(steer)
+        session._note_admitted_user_message(steer)
+        assert session.ask_context_line(asked_at)[0] == 3  # type: ignore[index]
+
+        # An ask OLDER than every admission counts them all, exactly — the ring
+        # has dropped nothing, so the answer is a fact rather than "unknown".
+        newest = session.latest_user_message_at() or 0
+        assert session.ask_context_line(asked_at - 10_000_000) == (3, newest)
+        # And an ask NEWER than every message is exactly zero (the ask is the
+        # newest thing in the conversation).
+        assert session.ask_context_line(newest + 1) == (0, newest)
+        # Once the ring has dropped an entry, an ask older than what it retains is
+        # no longer countable and says so rather than undercounting.
+        session._user_message_stamp_truncated = True
+        assert session.ask_context_line(asked_at - 10_000_000) is None
+    finally:
+        await session.dispose()
+
+
 @pytest.mark.asyncio
 async def test_ask_agent_running_is_false_only_for_a_stopped_idle_session(tmp_path):
     """D6 predicate: pending abort AND no turn in flight. Idle-without-abort and

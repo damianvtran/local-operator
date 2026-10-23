@@ -1413,14 +1413,23 @@ class AskQueue:
 
         A TIMED-OUT ask is view-only, as before: what it can still OWE is the
         deadline notice it had not delivered (fork A, §14). An OPEN ask is
-        accepted only while this session is STOPPED (D6, design §15), and then
-        owes the agent an ``ask-response-<id>`` row that the reconcile
-        :meth:`_settled` schedules delivers like a decline's — without a turn,
-        because the stopped-work residue rule keeps it from clearing the stop.
-        The refusal comes from :func:`asks.render.dismiss_refusal`, shared with the
-        cold door (``asks/dismiss.py``), so a surface cannot tell which one
-        answered it. ``reason`` is the operator's word for why (``moot`` when
-        missing); an unknown one is refused before anything is written.
+        accepted on EVERY live session (SA-D4, 2026-10-23, replacing §15's D6),
+        and owes the agent an ``ask-response-<id>`` row that the reconcile
+        :meth:`_settled` schedules delivers like a decline's: mid-turn it rides
+        the steering queue to the next tool boundary of the SAME turn, and an
+        idle session holds it durably with no turn (``Session
+        .deliver_ask_messages``). The refusal comes from
+        :func:`asks.render.dismiss_refusal`, shared with the cold door
+        (``asks/dismiss.py``), so a surface cannot tell which one answered it.
+        ``reason`` is the operator's word for why (``moot`` when missing); an
+        unknown one is refused before anything is written.
+
+        NO RUNTIME PROBE, deliberately: the queue used to fail CLOSED on a
+        session that could not report whether work was running, which refused
+        the dismissal exactly while the operator was chatting — the case the
+        feature exists for. Nothing about the write depends on it: the log is
+        appended the same way in every state, and the DELIVERY is the session's
+        decision (see ``Session.deliver_ask_messages``).
 
         A RELAY'S DISMISSAL IS LOCAL (#2673, R1-2): the dismissal is a view act on
         this session's card, so the row written here is the whole fact — the
@@ -1434,7 +1443,7 @@ class AskQueue:
             return {"ok": False, "error": render.DISMISS_BAD_REASON}
         now = self._now()
         record = self._find(ask_id, now)
-        refusal = render.dismiss_refusal(record, agent_running=self._agent_running())
+        refusal = render.dismiss_refusal(record)
         if refusal:
             return {"ok": False, "error": refusal}
         payload = {
@@ -1449,22 +1458,6 @@ class AskQueue:
             return {"ok": False, "error": "the dismissal could not be recorded."}
         self._settled(ask_id)
         return {"ok": True}
-
-    def _agent_running(self) -> bool:
-        """Whether agent work may be running on this queue's session (D6).
-
-        FAILS CLOSED: a session that cannot say (no ``ask_agent_running``) counts as
-        running, so an open ask is never dismissed behind a turn this queue cannot
-        see. ``Session.ask_agent_running`` holds the predicate and its sources.
-        """
-        probe = getattr(self._session, "ask_agent_running", None)
-        if not callable(probe):
-            return True
-        try:
-            return bool(probe())
-        except Exception:  # noqa: BLE001 — an unreadable runtime is "running"
-            logger.debug("ask: could not read the runtime state", exc_info=True)
-            return True
 
     def withdraw(
         self,
@@ -2383,7 +2376,21 @@ class AskQueue:
                 if drafts and status == store.STATUS_OPEN
                 else None
             )
-            rows.append(store.pending_row(record, draft))
+            # SA-D7 (2026-10-23): the card's context line — "3 messages from you
+            # since this was asked (last 19:36)" — rides the row as two INTs so
+            # no surface has to re-derive them from a session it may not hold
+            # (the desktop and the phone read rows, not sessions). Absent when
+            # this runtime cannot count them exactly (see ``_card_context``),
+            # which is also the shape every older runtime sends.
+            since, last_user_at = self._card_context(record)
+            rows.append(
+                store.pending_row(
+                    record,
+                    draft,
+                    user_messages_since=since,
+                    last_user_message_at=last_user_at,
+                )
+            )
         rows.sort(
             key=lambda row: (
                 row.get("status") != store.STATUS_OPEN,
@@ -2391,6 +2398,37 @@ class AskQueue:
             )
         )
         return rows[: policy.PROJECTION_CAP]
+
+    def _card_context(self, record: Mapping[str, Any]) -> tuple[int | None, int | None]:
+        """The ask card's context pair, from the session's user-message stamp.
+
+        ``(user_messages_since, last_user_message_at)``, or ``(None, None)`` when
+        the session cannot answer — a queue over a double or a reduced host with
+        no stamp, a session that has admitted no operator message yet, or an ask
+        older than the runtime's retained window. ABSENCE IS THE CONTRACT: every
+        surface renders the line only when the count is there, so "cannot count"
+        must never be sent as ``0`` (SA-D7; the same rule the ``attachments`` key
+        follows).
+
+        Probed, not assumed: ``AskQueue`` is constructed by the session but also
+        by tests and embedders over small doubles, and a duck-typed absence is
+        the difference between "no line" and an AttributeError on a per-frame
+        path.
+        """
+        probe = getattr(self._session, "ask_context_line", None)
+        if not callable(probe):
+            return None, None
+        try:
+            # ``probe`` came from a getattr, so its return is not statically known;
+            # the contract is the session's ``tuple[int, int] | None``.
+            pair: Any = probe(int(record.get("created_at") or 0))
+        except Exception:  # noqa: BLE001 — a repaint is never worth a failure
+            logger.debug("ask: could not read the user-message stamp", exc_info=True)
+            return None, None
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            return None, None
+        since, last_user_at = pair
+        return int(since), int(last_user_at)
 
     def _refresh(self, now_ms: int | None = None) -> None:
         """Rewrite the derived index. Best-effort by contract, like ``wakes/``."""

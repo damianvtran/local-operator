@@ -10,14 +10,17 @@ stopped conversation was BOOTED, and the boot reconcile delivered a row the
 dismissal had not cancelled yet, which started a paid turn (measured end to end;
 the architect's E1).
 
-WHAT IT ACCEPTS (D6, design §15): a TIMED-OUT ask, and an OPEN one — the cold
-session is exactly "no agent work is running", the only state in which an open ask
-may be dismissed. Nothing HERE starts, wakes or injects; the agent hears at the
-next boot of a runtime. THAT BOOT COSTS A TURN, stated plainly: any engage
-(including a warm-up that only opens the conversation) reconciles and delivers
-``ask-response-<id>`` into an idle runtime with no pending abort, which runs ONE
-paid turn — the same cost §14 already accepted for a timed-out ask's notice. Only
-a STOPPED live runtime holds the row without a turn (D2).
+WHAT IT ACCEPTS (D6, amended by SA-D4, design §15): a TIMED-OUT ask, and an
+OPEN one. The cold session is "no agent work is running", so an open ask may be
+dismissed there; the LIVE doors accept one in every live state too (mid-turn the
+response row rides the steering queue, idle it is held with no turn), which is
+why this module's rule is the fold's alone and not a runtime fact. Nothing HERE
+starts, wakes or injects; the agent hears at the next boot of a runtime. THAT
+BOOT COSTS A TURN, stated plainly: any engage (including a warm-up that only
+opens the conversation) reconciles and delivers ``ask-response-<id>`` into an
+idle runtime with no pending abort, which runs ONE paid turn — the same cost
+§14 already accepted for a timed-out ask's notice. Only a STOPPED or IDLE live
+runtime holds the row without a turn (D2, SA-D4).
 
 THE OWNER-CHECK -> APPEND -> WAKE-CANCEL WINDOW now applies to open asks too: a
 runtime that boots in that gap can republish the wake list with
@@ -34,8 +37,8 @@ THREE PROPERTIES MAKE WRITING FROM HERE SAFE, and each one is a check below:
   append under a running session can be lost, or can deliver a row without the
   turn the row is for. The caller falls back to the dial on ``ask_owner_present``
   — and ONLY on that, because every other refusal is an answer rather than a
-  reason to boot something. (The live door then applies the stopped-session
-  rule of D6 itself.)
+  reason to boot something. (The live door applies the queue's own fold rule in
+  whatever state the owner is in: SA-D4 retired D6's stopped-session gate.)
 * **The fold decides, in the queue's own words.** The refusal sentence comes from
   :func:`asks.render.dismiss_refusal`, the same function ``AskQueue.dismiss``
   calls, so a surface cannot tell which door answered it by the wording.
