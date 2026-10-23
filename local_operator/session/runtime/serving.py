@@ -8598,6 +8598,26 @@ class ServingSessionHandle(SessionHandle):
         """
         registry = getattr(session, "team_registry", None)
         if arg:
+            # ``promote`` is a RESERVED first token, exactly as ``class`` is on
+            # the ``/agent`` side and for the same reason: a live terminal's
+            # line lands HERE, not in the app (`/team` is authoritative-session),
+            # so reading the verb as a team name answered "no team named
+            # 'promote'" to a user who had just been offered the verb (QA round
+            # 1, Q1). The shared grammar lives in ``promote_slash``, below both
+            # hosts, so the two cannot word the confirmation differently.
+            # ``=promote`` still reaches a team literally named ``promote`` via
+            # the escape the attach path applies.
+            first, _, rest = arg.partition(" ")
+            if first.strip().casefold() == "promote":
+                from local_operator.promote_slash import promote_receipt
+
+                return promote_receipt(
+                    session,
+                    "team",
+                    rest.strip(),
+                    SlashResult,
+                    agents=getattr(session, "agent_registry", None),
+                )
             # Routed BEFORE the availability guard below (agent review round 1,
             # NIT-3): the DETACH verb needs the SESSION (``attach_team(None)``)
             # and not the registry, so a session whose registry read is
@@ -8851,12 +8871,15 @@ class ServingSessionHandle(SessionHandle):
         instructions ride the volatile tail) and nothing consumed the
         ``agent_mutate`` receipt, so `/agent <name>` on a viewer was silent.
 
-        ``class`` is a RESERVED first token here for the same reason it is one
-        in ``tui/app.py::_cmd_agent``: ``/agent`` is authoritative-session, so
-        a live (attached) terminal's command lands in THIS method — the
-        TUI-local branch only runs where nothing routes. The two implement one
-        grammar (review/UX round 1, U1: the switch was unreachable live because
-        only the local half existed).
+        ``class`` and ``promote`` are RESERVED first tokens here for the same
+        reason they are in ``tui/app.py::_cmd_agent``: ``/agent`` is
+        authoritative-session, so a live (attached) terminal's command lands in
+        THIS method — the TUI-local branch only runs where nothing routes. The
+        two implement one grammar (review/UX round 1, U1: the class switch was
+        unreachable live because only the local half existed; QA round 1, Q1
+        repeated that history for ``promote``). Both tokens now dispatch to
+        package-level code the local half also calls, so no second
+        implementation is left to drift.
         """
         # Imported here rather than at module scope, matching every other
         # ``session.errors`` reader on this path (see ``_team_slash``'s
@@ -8889,6 +8912,15 @@ class ServingSessionHandle(SessionHandle):
         first, _, rest = arg.partition(" ")
         if first.strip().casefold() == "class":
             return await self._agent_class_slash(session, rest.strip(), SlashResult)
+        if first.strip().casefold() == "promote":
+            # The second reserved token here, and reserved for the same reason as
+            # ``class``: this is the method a live terminal's line reaches, so a
+            # grammar implemented only beside the app's own handler is
+            # unreachable (QA round 1, Q1). ``=promote`` still names a role
+            # literally called ``promote`` through the escape below.
+            from local_operator.promote_slash import promote_receipt
+
+            return promote_receipt(session, "agent", rest.strip(), SlashResult)
         name, _, request = arg.partition(" ")
         name = name.strip()
         # The ``=`` escape, mirroring ``_team_attach_slash`` and the TUI-local

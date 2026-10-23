@@ -33,5 +33,6 @@
   "tui.team_authoring.new_hint": "Tạo nhóm",
   "tui.team_authoring.edit_hint": "Sửa nhóm đã cài",
   "tui.team_authoring.subcommand": "lệnh con",
-  "tui.team_authoring.talk_hint": "trò chuyện với nhóm · {detail}"
+  "tui.team_authoring.talk_hint": "trò chuyện với nhóm · {detail}",
+  "tui.team_authoring.promote_hint": "Sao chép nhóm của cuộc trò chuyện này vào tài khoản của bạn"
 }

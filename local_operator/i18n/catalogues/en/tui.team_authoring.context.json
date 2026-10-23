@@ -173,5 +173,10 @@
     "role": "team form guidance, field label or receipt",
     "tone": "brief, calm, keyboard-first",
     "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.promote_hint": {
+    "role": "argument-picker row hint",
+    "tone": "brief, verb-first, no jargon",
+    "note": "Describes /team promote in the reserved-verb rows. 'account' is the product word for the everywhere-store; the row is a subcommand, so keep it one line at 60 columns."
   }
 }
