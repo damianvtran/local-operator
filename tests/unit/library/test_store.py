@@ -92,22 +92,26 @@ def query(root: Path, **kwargs: Any) -> dict[str, Any]:
     return service.list_assets(root, service.Query(**kwargs))
 
 
-def tear_root_page(store) -> None:
-    """Overwrite the root page of ``idx_occurrences`` with 0xff, for real.
+def tear_root_page(store, table: str = "idx_occurrences") -> None:
+    """Overwrite the root page of ``table`` with 0xff, for real.
 
     A root-page tear is the shape SQLite cannot DROP: the free-list walk needs
-    the page header that no longer parses. Everything else in the file, the
-    authoritative tables included, stays readable.
+    the page header that no longer parses. Everything else in the file stays
+    readable.
     """
     with store.read() as connection:
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    page_size = int(sqlite3.connect(store.path).execute("PRAGMA page_size").fetchone()[0])
-    with sqlite3.connect(store.path) as raw:
+    # Explicitly closed: ``with sqlite3.connect(...)`` commits, it does NOT
+    # close, and a leaked handle keeps the old inode (and its -shm) alive — a
+    # later byte-copy substitution then answers "disk I/O error".
+    raw = sqlite3.connect(store.path)
+    try:
+        page_size = int(raw.execute("PRAGMA page_size").fetchone()[0])
         root_page = int(
-            raw.execute(
-                "SELECT rootpage FROM sqlite_master WHERE name = 'idx_occurrences'"
-            ).fetchone()[0]
+            raw.execute("SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)).fetchone()[0]
         )
+    finally:
+        raw.close()
     with open(store.path, "r+b") as handle:
         handle.seek((root_page - 1) * page_size)
         handle.write(b"\xff" * page_size)
@@ -931,3 +935,68 @@ def test_a_crashed_rebuild_temp_file_is_collected(tmp_path, monkeypatch) -> None
 
     assert not stale.exists(), "another process's temp must be collected"
     assert live.exists(), "this process's in-flight temp must be left alone"
+
+
+def test_an_unreadable_authoritative_table_refuses_after_a_restart(tmp_path, monkeypatch) -> None:
+    """QA Q-R5-1: the refusal must survive the process, and heal when repaired.
+
+    The first process refused correctly but had already dropped the derived
+    tables; the NEXT one bootstrapped them empty, DDL never reads rows, and the
+    app served 200/building with every asset 404. Nothing here starts the
+    indexer: the question is what the STORE answers, and a background scan would
+    only add timing noise.
+    """
+    import shutil
+
+    from local_operator.library.store import IndexUnavailable
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    row = next(r for r in query(root)["rows"] if r["name"] == "notes.md")
+    service.update_asset(root, row["id"], {"name": "Kept"}, actor="user", source="user")
+    indexer.reset_for_tests()
+    store = LibraryStore(root)
+    with store.read() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    backup = tmp_path / "before.db"
+    shutil.copyfile(store.path, backup)
+    tear_root_page(store, "assets")
+
+    # Process A: refuses, and leaves the derived index alone.
+    assert store.recover_derived() is False
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, row["id"])
+
+    # Process B: every process-local cache is gone; the file is the same.
+    LibraryStore._ready_paths.clear()
+    LibraryStore._failed_paths.clear()
+    MetadataStore._ready_paths.clear()
+    restarted = LibraryStore(root)
+    with pytest.raises(IndexUnavailable):
+        with restarted.read():
+            pass
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, row["id"])
+
+    # Repair ONLY the torn page from the byte copy: the persisted flag must
+    # clear and the catalog must serve again with its metadata intact.
+    for suffix in ("-wal", "-shm"):
+        (root / "library" / f"library.sqlite3{suffix}").unlink(missing_ok=True)
+    shutil.copyfile(backup, store.path)
+    LibraryStore._ready_paths.clear()
+    LibraryStore._failed_paths.clear()
+    MetadataStore._ready_paths.clear()
+
+    healed = LibraryStore(root)
+    assert "recovery_failed" not in {key for key, value in healed.state().items() if value == "1"}
+    frame = service.list_assets(root, service.Query())
+    assert frame["state"] == "ready" and frame["total"] == 4
+    kept = next(r for r in frame["rows"] if r["id"] == row["id"])
+    assert kept["name"] == "Kept"
+
+
+def test_a_healthy_empty_store_starts_ready(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    indexer.reset_for_tests()
+    frame = service.list_assets(root, service.Query())
+    assert frame["state"] == "ready" and frame["rows"] == [] and frame["total"] == 0
