@@ -20,17 +20,32 @@ FILES=('tests/worker_code_identity.py','tests/unit/test_worker_code_identity.py'
 
 def semantic(text):
     tree=ast.parse(text)
-    # isort changes ONLY import order, including imports inside functions.
+    # Only contiguous import groups normalize; executable/docstring barriers
+    # and every other AST node stay exact. Duplicate binding order is unsafe.
+    def group(statements):
+        normalized=[];bound=set()
+        for statement in statements:
+            for alias in statement.names:
+                if alias.name=='*':raise ValueError('ambiguous import STOP')
+                name=alias.asname or (alias.name.split('.')[0] if isinstance(statement,ast.Import) else alias.name)
+                if name in bound:raise ValueError('duplicate import binding STOP')
+                bound.add(name)
+                item=ast.alias(name=alias.name,asname=alias.asname)
+                normalized.append(ast.Import(names=[item]) if isinstance(statement,ast.Import) else ast.ImportFrom(module=statement.module,names=[item],level=statement.level))
+        return sorted(normalized,key=lambda item:ast.dump(item,include_attributes=False))
     def normalize(node):
         for key,value in ast.iter_fields(node):
             if isinstance(value,list):
-                imports=[x for x in value if isinstance(x,(ast.Import,ast.ImportFrom))]
-                if imports:
-                    imports.sort(key=lambda x:ast.dump(x,include_attributes=False))
-                    iterator=iter(imports)
-                    value[:]=[next(iterator) if isinstance(x,(ast.Import,ast.ImportFrom)) else x for x in value]
                 for child in value:
                     if isinstance(child,ast.AST):normalize(child)
+                output=[];pending=[]
+                for child in value:
+                    if isinstance(child,(ast.Import,ast.ImportFrom)):pending.append(child)
+                    else:
+                        if pending:output.extend(group(pending));pending=[]
+                        output.append(child)
+                if pending:output.extend(group(pending))
+                value[:]=output
             elif isinstance(value,ast.AST):normalize(value)
     normalize(tree)
     return ast.dump(tree,include_attributes=False)
@@ -160,14 +175,18 @@ def main():
     commands=[['isort',*FILES],['black','--workers','1',*FILES],
               ['black','--check','--workers','1',*FILES],['isort','--check-only',*FILES],['flake8','--jobs','1',*FILES]]
     run_tools(commands,work,deadline,PROOF,out)
-    PROOF['stage']='COMPATIBILITY'
+    PROOF['stage']='READBACK'
     after={p:(work/p).read_text() for p in FILES}
-    for p in FILES:
+    for index,p in enumerate(FILES):
+        PROOF['stage']='AST_COMPARE_'+str(index)
         if semantic(before[p])!=semantic(after[p]):raise ValueError('AST semantics STOP')
     for name in ('test_s2_send_to_agent_end_keeps_the_loop_under_the_bar','_SlowListing'):
+        PROOF['stage']='PROTECTED_S2' if name.startswith('test_') else 'PROTECTED_SLOW'
         if protected(before[FILES[2]],name)!=protected(after[FILES[2]],name):
             raise ValueError('protected body bytes STOP')
+    PROOF['stage']='PATCH_BUILD'
     patch=''.join(''.join(difflib.unified_diff(before[p].splitlines(keepends=True),after[p].splitlines(keepends=True),fromfile='a/'+p,tofile='b/'+p)) for p in FILES)
+    PROOF['stage']='PATCH_CAP'
     if len(patch.encode())>262144:raise ValueError('patch cap STOP')
     PROOF['stage']='PATCH_READY'
     (out/'format.patch').write_text(patch)

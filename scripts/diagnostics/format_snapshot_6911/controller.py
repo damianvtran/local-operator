@@ -23,7 +23,7 @@ def read_worker_proof(out,expected_before):
         success={'ast_compatible','protected_byte_equal','patch_sha256','before','after'}
         if type(proof) is not dict or type(proof.get('qualified')) is not bool:return unknown
         if set(proof)!=(base|success if proof['qualified'] else base):return unknown
-        if proof['stage'] not in ('SOURCE_SETUP','TOOLS','COMPATIBILITY','PATCH_READY','COMPLETE'):return unknown
+        if proof['stage'] not in ('SOURCE_SETUP','TOOLS','COMPATIBILITY','READBACK','AST_COMPARE_0','AST_COMPARE_1','AST_COMPARE_2','AST_COMPARE_3','PROTECTED_S2','PROTECTED_SLOW','PATCH_BUILD','PATCH_CAP','PATCH_READY','COMPLETE'):return unknown
         labels=('isort-format','black-format','black-check','isort-check','flake8-check')
         tools=proof['tools']
         if type(tools) is not list or len(tools)!=5:return unknown
