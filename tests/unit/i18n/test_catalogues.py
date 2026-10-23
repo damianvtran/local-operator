@@ -177,12 +177,14 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # only once its independent audit row passed against the current en bytes,
     # and its argument contract is checked with the catalogue checker's own
     # rule (a locale may render an en `number` as an ICU plural; see
-    # `arguments_match`).
+    # `arguments_match`). `namespaces()` returns the namespace files sorted,
+    # so `relay.asks` sorts before `relay.session.tags` — the tuple below is
+    # that order, not the order the slices landed in.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
-        "relay.session.tags",
         "relay.asks",
+        "relay.session.tags",
         "tui.authoring",
         "tui.projects_edit",
         "tui.review",

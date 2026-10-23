@@ -1,4 +1,4 @@
-"""Recognition and negotiation do not activate the held Chinese/Urdu waves."""
+"""Recognition and negotiation activate only shipped waves; Chinese stays held."""
 
 from __future__ import annotations
 
@@ -12,25 +12,31 @@ from local_operator.server.routes import capabilities, i18n
 
 
 @pytest.mark.parametrize(
-    "tag, canonical, direction",
+    "tag, canonical, direction, resolved",
     [
-        ("zh_CN.UTF-8", "zh-CN", "ltr"),
-        ("zh-Hans", "zh-CN", "ltr"),
-        ("zh-cn", "zh-CN", "ltr"),
-        ("ur_PK.UTF-8", "ur", "rtl"),
-        ("ur_IN", "ur", "rtl"),
-        ("zh-Hant", None, "ltr"),
-        ("unknown", None, "ltr"),
-        (None, None, "ltr"),
+        ("zh_CN.UTF-8", "zh-CN", "ltr", "en"),
+        ("zh-Hans", "zh-CN", "ltr", "en"),
+        ("zh-cn", "zh-CN", "ltr", "en"),
+        ("ur_PK.UTF-8", "ur", "rtl", "ur"),
+        ("ur_IN", "ur", "rtl", "ur"),
+        ("zh-Hant", None, "ltr", "en"),
+        ("unknown", None, "ltr", "en"),
+        (None, None, "ltr", "en"),
     ],
 )
-def test_recognition_direction_and_closed_activation(tag, canonical, direction) -> None:
+def test_recognition_direction_and_closed_activation(tag, canonical, direction, resolved) -> None:
     assert resolve.normalise_locale(tag) == canonical
     assert locale_direction(tag) == direction
-    assert resolve.resolve_language(tag, environ={}, system="Linux") == "en"
+    # Recognition alone never decides activation: the SHIPPED set does. Urdu's
+    # relay.asks wave shipped, so its tags now resolve; Chinese normalises the
+    # same way but stays absent from shipped.json (security hold), so every
+    # zh-* tag still lands on en.
+    assert resolve.resolve_language(tag, environ={}, system="Linux") == resolved
     assert "zh-CN" not in resolve.shipped_locales()
-    assert "ur" not in resolve.shipped_locales()
-    assert {value for value, _ in resolve.language_options()}.isdisjoint({"zh-CN", "ur"})
+    assert "ur" in resolve.shipped_locales()
+    options = {value for value, _ in resolve.language_options()}
+    assert "zh-CN" not in options
+    assert "ur" in options
 
 
 @pytest.mark.parametrize("count", [0, 1, 2, 11, 101, 1.5])
@@ -49,8 +55,13 @@ def test_existing_formats_use_rfc_latin_digits(tag) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tag, expected", [("ur_PK", "en"), ("zh-Hans", "en"), ("fr", "fr")])
-async def test_mounted_capabilities_metadata_and_catalogue_gate(monkeypatch, tag, expected) -> None:
+@pytest.mark.parametrize(
+    "tag, expected, direction",
+    [("ur_PK", "ur", "rtl"), ("zh-Hans", "en", "ltr"), ("fr", "fr", "ltr")],
+)
+async def test_mounted_capabilities_metadata_and_catalogue_gate(
+    monkeypatch, tag, expected, direction
+) -> None:
     monkeypatch.setattr(resolve, "config_value", lambda: tag)
     app = FastAPI()
     app.include_router(capabilities.router)
@@ -62,12 +73,25 @@ async def test_mounted_capabilities_metadata_and_catalogue_gate(monkeypatch, tag
         assert response.status_code == 200
         result = response.json()["result"]
         assert result["language"] == expected
-        assert result["language_direction"] == "ltr"
-        for held in ("zh-CN", "ur"):
+        assert result["language_direction"] == direction
+        # The security hold is still closed at the wire: no zh-CN byte is
+        # reachable, so even a conditional request cannot activate held copy.
+        for namespace in ("relay.asks", "wire.exec"):
             blocked = await client.get(
-                f"/v1/i18n/catalogues/{held}/wire.exec", headers={"If-None-Match": "*"}
+                f"/v1/i18n/catalogues/zh-CN/{namespace}", headers={"If-None-Match": "*"}
             )
             assert blocked.status_code == 404
+        # Urdu shipped with the relay.asks namespace only, so its audited
+        # catalogue serves (a matching ETag revalidates to 304) while the
+        # namespace it never carried is a plain inventory 404, not a hold.
+        served = await client.get(
+            "/v1/i18n/catalogues/ur/relay.asks", headers={"If-None-Match": "*"}
+        )
+        assert served.status_code == 304
+        absent = await client.get(
+            "/v1/i18n/catalogues/ur/wire.exec", headers={"If-None-Match": "*"}
+        )
+        assert absent.status_code == 404
         control = await client.get(
             "/v1/i18n/catalogues/en/wire.exec", headers={"If-None-Match": "*"}
         )
@@ -94,8 +118,19 @@ async def test_capabilities_resolves_once_for_consistent_direction(monkeypatch) 
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("tag", ["zh-cn", "zh-Hans", "zh_CN.UTF-8", "ur_PK", "ur_IN"])
+@pytest.mark.parametrize("tag", ["zh-cn", "zh-Hans", "zh_CN.UTF-8"])
 def test_os_alias_cannot_activate_an_unshipped_locale(tag) -> None:
+    # The security hold, end to end: every Chinese alias normalises to zh-CN,
+    # the OS reader sees it, and the shipped filter still refuses it.
     environ = {"LANG": tag}
-    assert resolve.os_language(system="Linux", environ=environ) in {"zh-CN", "ur"}
+    assert resolve.os_language(system="Linux", environ=environ) == "zh-CN"
     assert resolve.resolve_language("auto", system="Linux", environ=environ) == "en"
+
+
+@pytest.mark.parametrize("tag", ["ur_PK", "ur_IN"])
+def test_os_alias_activates_the_shipped_urdu_wave(tag) -> None:
+    # Urdu's relay.asks wave shipped, so the same alias now activates it end to
+    # end; the old "unshipped" expectation for these tags would be a lie.
+    environ = {"LANG": tag}
+    assert resolve.os_language(system="Linux", environ=environ) == "ur"
+    assert resolve.resolve_language("auto", system="Linux", environ=environ) == "ur"
