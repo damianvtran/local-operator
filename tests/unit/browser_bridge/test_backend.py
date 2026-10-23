@@ -242,3 +242,70 @@ def test_a_replaced_wire_is_not_reported_as_an_absent_browser() -> None:
     # absent-browser answer, which is what a genuinely closed browser gets.
     plain = BridgeError(ErrorCode.EXTENSION_DISCONNECTED, "extension not connected")
     assert "no browser is attached" in format_error(plain)
+
+
+# --- element_not_found diagnostics -------------------------------------------
+#
+# The measured failure: nine CSS guesses on a framework-generated form, each a
+# whole tool call, each answering only "element not found" — so the agent learned
+# nothing and guessed again. A host that can see the accessibility tree attaches
+# the elements that DO exist; the copy below is what turns that into one
+# correction. `format_error` is the single place both hosts' text comes from.
+
+
+def test_a_miss_names_the_closest_elements_and_the_locator_for_each() -> None:
+    error = BridgeError(
+        ErrorCode.ELEMENT_NOT_FOUND,
+        'no element matches role=checkbox[name="Actve"]',
+        {
+            "candidates": [
+                {"role": "checkbox", "name": "Active", "locator": 'role=checkbox[name="Active"]'},
+                {
+                    "role": "button",
+                    "name": "Create GitHub App",
+                    "locator": 'text="Create GitHub App"',
+                },
+            ]
+        },
+    )
+
+    text = format_error(error, action="click")
+
+    assert "Closest matches in the accessibility tree" in text
+    assert 'checkbox "Active"  →  role=checkbox[name="Active"]' in text
+    assert 'button "Create GitHub App"  →  text="Create GitHub App"' in text
+    assert "Retry with one of those locators" in text
+    # The old advice ("take a new snapshot") is wrong for a locator: a ref is not
+    # what the caller typed, and the candidates are the direct answer.
+    assert "Take a new snapshot" not in text
+
+
+def test_a_miss_without_candidates_keeps_the_historical_copy() -> None:
+    text = format_error(BridgeError(ErrorCode.ELEMENT_NOT_FOUND, "snapshot ref is stale"))
+    assert text == (
+        "element not found: snapshot ref is stale. Take a new snapshot and retry with a fresh ref."
+    )
+
+
+def test_an_invalid_selector_is_not_advised_to_take_a_snapshot() -> None:
+    """A syntax mistake is not a stale handle; naming the locator forms is the fix."""
+    text = format_error(BridgeError(ErrorCode.ELEMENT_NOT_FOUND, "selector input[ is not valid"))
+    assert "Fix the selector" in text
+    assert 'role=checkbox[name="Active"]' in text
+    assert "Take a new snapshot" not in text
+
+
+def test_at_most_five_candidates_are_named_and_malformed_entries_dropped() -> None:
+    # A malformed entry rides beside the well-formed ones on purpose: the host is
+    # the untrusted side of the wire, and the renderer must drop it rather than
+    # raise. Typed as `object` so the annotation matches what the wire can carry.
+    candidates: list[object] = [
+        {"role": "button", "name": f"Action {n}", "locator": f'text="Action {n}"'} for n in range(9)
+    ]
+    candidates.insert(0, "not-a-dict")
+    error = BridgeError(
+        ErrorCode.ELEMENT_NOT_FOUND, "selector #x matched nothing", {"candidates": candidates}
+    )
+    text = format_error(error)
+    assert text.count("  →  ") == 5
+    assert '"Action 5"' not in text
