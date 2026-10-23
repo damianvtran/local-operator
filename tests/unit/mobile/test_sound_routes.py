@@ -118,16 +118,15 @@ def session() -> dict[str, Any]:
 
 def test_sound_family_requires_authentication(session: dict[str, Any]) -> None:
     client = TestClient(build_app(MobileDaemon(port=0, password="pw123")))
-    assert (
-        client.get(f"/api/sessions/{SESSION_ID}/sound", params={"digest": session["digest"]})
-        .status_code
-        == 401
-    )
-    assert (
-        client.get(f"/api/sessions/{SESSION_ID}/waveform", params={"digest": session["digest"]})
-        .status_code
-        == 401
-    )
+    for path in ("sound", "waveform"):
+        denied = client.get(
+            f"/api/sessions/{SESSION_ID}/{path}", params={"digest": session["digest"]}
+        )
+        assert denied.status_code == 401
+        # The family policy rides refusals too (qa round 1, Q1): an error body
+        # must not become a sniffing surface either.
+        assert denied.headers["x-content-type-options"] == "nosniff"
+        assert denied.headers["cross-origin-resource-policy"] == "same-origin"
 
 
 def test_sound_bytes_full_and_ranged(session: dict[str, Any]) -> None:
@@ -178,14 +177,21 @@ def test_sound_bytes_misses_and_bad_shapes(session: dict[str, Any]) -> None:
 
     # Absent digest, unroutable digest shape, absent bytes, unknown session: each
     # refusal is distinguishable, so a player can tell "malformed" from "gone".
-    assert client.get(url, params={"digest": "0" * 32}).status_code == 404
-    assert client.get(url, params={"digest": "NOTHEX"}).status_code == 400
-    assert client.get(url, params={}).status_code == 400
-    assert (
-        client.get("/api/sessions/not-a-session/sound", params={"digest": session["digest"]})
-        .status_code
-        == 404
+    for params, status in (
+        ({"digest": "0" * 32}, 404),
+        ({"digest": "NOTHEX"}, 400),
+        ({}, 400),
+    ):
+        refused = client.get(url, params=params)
+        assert refused.status_code == status
+        # Every answer from the family carries the pair (qa round 1, Q1).
+        assert refused.headers["x-content-type-options"] == "nosniff"
+        assert refused.headers["cross-origin-resource-policy"] == "same-origin"
+    unknown_session = client.get(
+        "/api/sessions/not-a-session/sound", params={"digest": session["digest"]}
     )
+    assert unknown_session.status_code == 404
+    assert unknown_session.headers["x-content-type-options"] == "nosniff"
 
 
 def test_sound_bytes_require_a_reference_in_this_session(session: dict[str, Any]) -> None:
@@ -255,6 +261,8 @@ def test_sound_bytes_refuse_non_audio_sidecars(session: dict[str, Any]) -> None:
     assert response.status_code == 404
     assert "text/html" not in response.headers.get("content-type", "")
     assert b"<script>" not in response.content
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cross-origin-resource-policy"] == "same-origin"
 
 
 def test_sound_bytes_default_mime_when_sidecar_states_none(session: dict[str, Any]) -> None:
@@ -291,6 +299,7 @@ def test_session_waveform_sidecar_and_absence(session: dict[str, Any]) -> None:
     absent = client.get(url, params={"digest": bare.digest})
     assert absent.status_code == 404
     assert absent.headers["cache-control"] == "no-store"
+    assert absent.headers["x-content-type-options"] == "nosniff"
 
     assert client.get(url, params={"digest": "NOTHEX"}).status_code == 400
     assert (

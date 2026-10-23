@@ -6383,13 +6383,13 @@ def build_app(daemon: MobileDaemon):
         """
         denied = gate(request)
         if denied is not None:
-            return denied
+            return _sound_response(denied)
         session_id = str(request.path_params["session_id"])
         digest = request.query_params.get("digest", "")
         from local_operator.supplements.contract import is_digest
 
         if not is_digest(digest):
-            return JSONResponse({"error": "bad digest"}, status_code=400)
+            return _sound_response(JSONResponse({"error": "bad digest"}, status_code=400))
 
         def load() -> tuple[bytes, str] | None:
             from local_operator.session.attachments import AttachmentStore
@@ -6407,20 +6407,16 @@ def build_app(daemon: MobileDaemon):
 
         found = await asyncio.to_thread(load)
         if found is None:
-            return JSONResponse({"error": "no such sound"}, status_code=404)
+            return _sound_response(JSONResponse({"error": "no such sound"}, status_code=404))
         data, mime_type = found
         if mime_type == "application/octet-stream":
             mime_type = "audio/mpeg"
         if not mime_type.startswith("audio/"):
             # NEVER a page: a component's text/html blob must not become
             # executable content at this origin, whatever row references it.
-            return JSONResponse({"error": "no such sound"}, status_code=404)
-        headers = {
-            "Cache-Control": "public, max-age=31536000, immutable",
-            "X-Content-Type-Options": "nosniff",
-            "Cross-Origin-Resource-Policy": "same-origin",
-        }
-        return _ranged_media_response(request, data, mime_type, headers)
+            return _sound_response(JSONResponse({"error": "no such sound"}, status_code=404))
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        return _sound_response(_ranged_media_response(request, data, mime_type, headers))
 
     async def api_session_waveform(request: Request) -> Response:
         """One supplement sound's waveform sidecar, keyed by the same digest.
@@ -6445,16 +6441,18 @@ def build_app(daemon: MobileDaemon):
         """
         denied = gate(request)
         if denied is not None:
-            return denied
+            return _sound_response(denied)
         session_id = str(request.path_params["session_id"])
         digest = request.query_params.get("digest", "")
         from local_operator.supplements.contract import is_digest
 
         if not is_digest(digest):
-            return JSONResponse(
-                {"error": "bad digest"},
-                status_code=400,
-                headers={"Cache-Control": "no-store"},
+            return _sound_response(
+                JSONResponse(
+                    {"error": "bad digest"},
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
             )
 
         def load() -> dict[str, Any] | None:
@@ -6474,12 +6472,14 @@ def build_app(daemon: MobileDaemon):
 
         payload = await asyncio.to_thread(load)
         if payload is None:
-            return JSONResponse(
-                {"error": "no waveform"},
-                status_code=404,
-                headers={"Cache-Control": "no-store"},
+            return _sound_response(
+                JSONResponse(
+                    {"error": "no waveform"},
+                    status_code=404,
+                    headers={"Cache-Control": "no-store"},
+                )
             )
-        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+        return _sound_response(JSONResponse(payload, headers={"Cache-Control": "no-store"}))
 
     # -- the supplement read family (memo §2.7; RFC D5) ----------------------------------
     #
@@ -6531,6 +6531,19 @@ def build_app(daemon: MobileDaemon):
             if any(match == needle for match in _ATTACHMENT_REF.findall(line)):
                 return True
         return False
+
+    def _sound_response(response: Response) -> Response:
+        """Stamp the sound family's policy on EVERY answer, refusals included.
+
+        ``nosniff`` and ``same-origin`` are not only success-path facts: an error
+        body must not become a sniffing surface either, and a policy attached only
+        to the 200 is silently absent exactly where a caller is probing. One
+        spelling, the supplement family's own ``_supplement_response`` pattern
+        (qa round 1, Q1).
+        """
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        return response
 
     def _journal_references_sound(payload: bytes, digest: str) -> bool:
         """Whether a ``supplement_v1`` row's ``sounds[]`` names ``digest``.
