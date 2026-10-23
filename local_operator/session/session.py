@@ -20719,6 +20719,11 @@ class Session:
         ``stale_projects_fingerprint``). A fresh user
         turn re-arms it (see ``_run_turn_pipeline``).
 
+        PAGE-SCOPED: the stale set is derived from the store's recency page
+        (``stale_projects_for_session``), so a project that has aged off the
+        page is never nudged here. That is the same bound every listing
+        carries; addressed reads (``project op='show'``) still resolve it (m2).
+
         Budget: shares ``max_follow_up_continuations`` with the todo producer
         through the ONE hook below (``_guardrail_continuations``), so the
         loop's batch rule — a mixed todos+projects batch re-enters once,
