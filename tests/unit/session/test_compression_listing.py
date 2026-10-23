@@ -313,3 +313,99 @@ def test_a_truncated_window_drops_only_the_fragment(tmp_path: Path) -> None:
     assert truncated is True
     ids = [entry.get("id") for entry in resume._tail_entries(directory)]
     assert "first001" not in ids
+
+
+# ---------------------------------------------------------------------------
+# Round 2 M1 — the seed ranks the window that is NEWER
+# ---------------------------------------------------------------------------
+
+
+def _renamed_legacy_body(*, filler_rows: int = 900) -> bytes:
+    """A legacy journal: an auto-name at the head, ``/rename`` long after it.
+
+    The filler is what makes the case real. It is >2x ``TITLE_SCAN_BYTES``
+    (128 KiB), so the late title is outside the HEAD window and the auto-name is
+    outside the TAIL one: the two windows disagree about which row is newest,
+    which is the shape a tail-then-head concatenation gets backwards.
+    """
+    rows = [_title_row("Early auto name")]
+    rows.extend(
+        _message_row("user", f"filler {index} " + "harbour " * 20, f"fill{index:04d}")
+        for index in range(filler_rows)
+    )
+    rows.append(_title_row("Late rename"))
+    rows.append(_message_row("assistant", "renamed near the end", "lastrow"))
+    return b"".join(rows)
+
+
+def test_compression_seeds_the_late_rename_not_the_opening_name(tmp_path: Path) -> None:
+    """THE REPRO (review M1): a legacy session renamed mid-conversation.
+
+    Seeding ``title.json`` from ``tail + head`` made ``found[-1]`` the HEAD
+    title, so compressing a renamed session permanently renamed it back — and
+    the title backfill then skips it, because ``title.json`` now exists. The
+    seed must agree with ``stored_session_title``: the last row in FILE order.
+    The 260 KB journal here is the reviewer's 602 KB one in miniature, sized so
+    the two windows are disjoint.
+    """
+    config = _store(tmp_path)
+    directory = _session(config, "rename01", _renamed_legacy_body())
+    # The plain twin's answer, from the window scan's own rule.
+    assert resume.stored_session_title(directory) == "Late rename"
+
+    assert compression.compress_session(directory).status == "compressed"
+
+    sidecar = json.loads((directory / resume.TITLE_SIDECAR_NAME).read_text())
+    assert sidecar["text"] == "Late rename"
+    assert "Early auto name" in sidecar["names"]
+    assert resume.stored_session_title(directory) == "Late rename"
+
+
+def test_the_backfill_scan_ranks_a_late_rename_in_an_archive(tmp_path: Path) -> None:
+    """``_scan_all_titles`` must stream an archive, not answer from its head.
+
+    Its caller ranks ``titles[-1]`` as the newest, so a head-only answer for an
+    archive names the session with its oldest title and writes that sidecar.
+    Only an archive with NO ``title.json`` reaches it, and streaming one once
+    ever is the price of the answer being right.
+    """
+    config = _store(tmp_path)
+    directory = _session(config, "rename02", _renamed_legacy_body())
+    assert compression.compress_session(directory).status == "compressed"
+    # The state that reaches the scan: an archive from a build without the seed.
+    (directory / resume.TITLE_SIDECAR_NAME).unlink()
+
+    titles = resume._scan_all_titles(directory)
+    assert [text for text, _user_set in titles] == ["Early auto name", "Late rename"]
+
+    # And the caller therefore writes the late name, not the opening one.
+    assert resume.backfill_session_titles(config) == 1
+    assert resume.stored_session_title(directory) == "Late rename"
+
+
+# ---------------------------------------------------------------------------
+# Round 2 n2 — the sidecar records the cap it cut at
+# ---------------------------------------------------------------------------
+
+
+def test_a_caller_asking_for_more_than_the_sidecar_stores_reads_the_tail(
+    tmp_path: Path,
+) -> None:
+    """A 200-char sidecar cannot answer a 500-char request; the tail can."""
+    config = _store(tmp_path)
+    long_answer = "the crane arrives at dawn and the second one at dusk " * 8
+    plain = _session(config, "wide01", _body("Harbour plan", long_answer))
+    archived = _session(config, "wide02", _body("Harbour plan", long_answer))
+    expected_narrow = resume.session_preview(plain, max_chars=120)
+    expected_wide = resume.session_preview(plain, max_chars=500)
+    assert len(expected_wide) > resume.PREVIEW_MAX_CHARS
+
+    assert compression.compress_session(archived).status == "compressed"
+    sidecar = json.loads((archived / compression.PREVIEW_SIDECAR_NAME).read_text())
+    assert sidecar["max_chars"] == resume.PREVIEW_MAX_CHARS
+
+    # Under the cap: the sidecar answers, byte-identical to the plain twin.
+    assert resume.session_preview(archived, max_chars=120) == expected_narrow
+    # Over it: the stored text was already cut, so the answer comes from the
+    # bounded tail read — the same answer, not a silently shorter one.
+    assert resume.session_preview(archived, max_chars=500) == expected_wide

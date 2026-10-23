@@ -445,6 +445,16 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # completeness check would have to account for a file that is meaningful
     # only where it was taken.
     ".transcript.lock": "a per-device writer lock, meaningful only where it was taken",
+    # The listing cache written beside an archive at compression time
+    # (``session/compression.PREVIEW_SIDECAR_NAME``): two condensed strings
+    # ABOUT the transcript's tail, derived from bytes the copy carries anyway.
+    # Excluded rather than copied because it is a cache, not a fact about the
+    # conversation: a destination that restores and appends DELETES it, and one
+    # that never compresses would keep a document describing an archive it did
+    # not write. The cost of leaving it behind is one bounded tail read on the
+    # first listing; the cost of carrying it is a second source of truth about
+    # a transcript.
+    "preview.json": "a listing cache derived from the archive's tail; the destination rewrites it",
 }
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading

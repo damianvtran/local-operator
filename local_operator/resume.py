@@ -1182,19 +1182,19 @@ def _scan_all_titles(session_dir: Path) -> list[tuple[str, bool]]:
     Tolerant like every reader here: an unreadable transcript or a half-written
     final line yields what it could parse, never an exception.
 
-    ``compression.iter_lines`` STREAMS a PLAIN journal. An ARCHIVE is read from
-    its HEAD window only: compression guarantees ``title.json`` holds the newest
-    title before the plain file goes away (``_ensure_title_sidecar``), so a
-    backfill that re-decompressed the whole archive to recover older names would
-    pay the cost M1 measured for data the sidecar already carries. The names a
-    window can still offer are the opener's; anything renamed into the middle of
-    a now-compressed journal was captured in the sidecar's ``names`` at the time
-    it was written.
+    ``compression.iter_lines`` STREAMS a PLAIN journal AND decompresses an
+    ARCHIVE, which is what this must ask for in both cases. A head-window answer
+    for an archive was tried and is unsound: the caller ranks ``titles[-1]`` as
+    the newest, and a rename made late in a long conversation lives in the TAIL,
+    so a head-only list names the session with its OLDEST title and the
+    backfill then writes that as the in-force one. The cost is a decompression
+    per archived session — paid ONCE ever, because the backfill skips any
+    session that already has ``title.json``, and compression writes that sidecar
+    before the plain file goes away (``_ensure_title_sidecar``). So the only
+    archive that reaches this stream is one with no sidecar to read, where a
+    window scan would be wrong for free rather than cheap.
     """
     try:
-        if compression.archive_path(session_dir) is not None:
-            head = compression.read_head(session_dir, TITLE_SCAN_BYTES)
-            return _titles_in_lines(head.decode("utf-8", "replace").splitlines())
         return _titles_in_lines(compression.iter_lines(session_dir))
     except (OSError, compression.ArchiveError):
         return []
@@ -1235,10 +1235,18 @@ def title_seed_for_sidecar(session_dir: Path) -> tuple[str, bool, list[str]] | N
 
     Called by the compression pass while the transcript is still PLAIN: after
     compression the title is read from the archive's head window only, so the
-    newest name must be captured while the tail is still a cheap seek. The
-    windows are read tail-first, exactly as :func:`stored_session_title` ranks
-    them, so the last ``(text, user_set)`` is the title in force and the rest
-    become ``write_session_title``'s ``past_names``.
+    newest name must be captured while the tail is still a cheap seek. The last
+    ``(text, user_set)`` is the title in force and the rest become
+    ``write_session_title``'s ``past_names``.
+
+    THE ORDER IS HEAD FIRST, THEN TAIL, and that is the whole correctness of
+    this function: each window is in file order, so concatenating them in file
+    order makes the last element the newest row. Tail-first (the first version)
+    put the head's titles last and seeded a renamed session with the name it
+    OPENED under — ``stored_session_title`` ranks the opposite way for exactly
+    this reason ("The tail is searched FIRST and wins: a rename made late in a
+    long session is the newest title"), and the wrong seed is unrecoverable:
+    the title backfill skips a session that has ``title.json``.
 
     ``None`` when neither window holds a title row; the caller then writes
     nothing and the opener still names the row from the head window.
@@ -1248,8 +1256,8 @@ def title_seed_for_sidecar(session_dir: Path) -> tuple[str, bool, list[str]] | N
         tail = compression.read_tail(session_dir, TITLE_SCAN_BYTES)
     except (OSError, compression.ArchiveError):
         return None
-    found = _titles_in_lines(tail.decode("utf-8", "replace").splitlines())
-    found += _titles_in_lines(head.decode("utf-8", "replace").splitlines())
+    found = _titles_in_lines(head.decode("utf-8", "replace").splitlines())
+    found += _titles_in_lines(tail.decode("utf-8", "replace").splitlines())
     if not found:
         return None
     text, user_set = found[-1]
@@ -3976,12 +3984,18 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
     For an ARCHIVE the answer comes from the sidecar compression wrote beside it
     (:func:`compression.read_listing_preview`) — one stat and a sub-kilobyte
     read, where reading the transcript's tail would decompress the whole archive
-    once per listing row. An archive from a build that predates the sidecar
-    falls back to the tail window once, which is what this function always cost.
+    once per listing row. The sidecar stores text cut at :data:`PREVIEW_MAX_CHARS`
+    and records that cap, so a caller asking for MORE than it was cut at takes
+    the tail read instead of a silently shorter answer
+    (:func:`_from_listing_sidecar`). An archive from a build that predates the
+    sidecar falls back to the tail window once, which is what this function
+    always cost.
     """
     sidecar = compression.read_listing_preview(session_dir)
     if sidecar is not None:
-        return _condense(str(sidecar.get("preview") or ""), max_chars)
+        stored = _from_listing_sidecar(sidecar, "preview", max_chars)
+        if stored is not None:
+            return stored
     return _preview_from_entries(_tail_entries(session_dir), max_chars)
 
 
@@ -4020,17 +4034,41 @@ def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_C
     back to the house sentence.
 
     For an ARCHIVE the answer comes from the sidecar compression wrote beside it
-    (see :func:`session_preview`): one small read instead of a decompression, and
-    the same fallback for an archive that predates it.
+    (see :func:`session_preview`): one small read instead of a decompression, the
+    same ``max_chars`` ceiling rule, and the same fallback for an archive that
+    predates the sidecar.
     """
     sidecar = compression.read_listing_preview(session_dir)
     if sidecar is not None:
-        return _condense(str(sidecar.get("failure") or ""), max_chars)
+        stored = _from_listing_sidecar(sidecar, "failure", max_chars)
+        if stored is not None:
+            return stored
     return _failure_from_entries(_tail_entries(session_dir), max_chars)
 
 
-def listing_preview_from_tail(window: bytes, *, truncated: bool) -> dict[str, str]:
-    """The two listing fields, computed from ONE tail window.
+def _from_listing_sidecar(sidecar: dict[str, Any], key: str, max_chars: int) -> str | None:
+    """One field of an archive's listing sidecar, or ``None`` to read the tail.
+
+    The sidecar stores its text already condensed at ``PREVIEW_MAX_CHARS``, so
+    it can never answer a caller that asks for MORE than that — answering the
+    cut string would make an archived session's row shorter than its plain
+    twin's for the same call. The cap the text was cut at travels beside it
+    (``max_chars``), and a caller above it gets ``None``, which sends the caller
+    to the bounded tail read: slower, and the same answer the plain file gives.
+
+    A sidecar without ``max_chars`` is one this build cannot reason about — an
+    unknown cap is assumed too small, so it falls back too. Correct is worth
+    more than fast here; every current caller asks for 120 or the 200 default,
+    i.e. at or under the cap, so none of them pays for this.
+    """
+    cap = sidecar.get("max_chars")
+    if not isinstance(cap, int) or max_chars > cap:
+        return None
+    return _condense(str(sidecar.get(key) or ""), max_chars)
+
+
+def listing_preview_from_tail(window: bytes, *, truncated: bool) -> dict[str, Any]:
+    """The listing fields, computed from ONE tail window.
 
     Called by the compression pass before it retires the plain transcript: the
     sidecar it writes must answer exactly what :func:`session_preview` and
@@ -4038,6 +4076,11 @@ def listing_preview_from_tail(window: bytes, *, truncated: bool) -> dict[str, st
     run the SAME entry scan and the SAME two field readers. A second copy of
     these rules is how a compressed row's preview would drift from its plain
     twin's — the property the surface suite pins.
+
+    ``max_chars`` is part of the answer, not an implementation detail: the two
+    strings are cut at :data:`PREVIEW_MAX_CHARS`, and a reader asking for more
+    than that must know the text cannot serve it and fall back to a tail read
+    (:func:`_from_listing_sidecar`).
 
     ``truncated`` says whether the window starts mid-row (see
     :func:`compression.read_tail_window`); passing it in keeps that decision in
@@ -4047,6 +4090,7 @@ def listing_preview_from_tail(window: bytes, *, truncated: bool) -> dict[str, st
     return {
         "preview": _preview_from_entries(entries, PREVIEW_MAX_CHARS),
         "failure": _failure_from_entries(entries, PREVIEW_MAX_CHARS),
+        "max_chars": PREVIEW_MAX_CHARS,
     }
 
 

@@ -1982,10 +1982,15 @@ class Transcript:
         if read_only:
             # No lock and no restore: rows come from the bounded cache
             # (``compression.transcript_for_read``), which is what keeps a read
-            # from rewriting the store. An archive this build cannot decode
-            # raises the resolver's typed error here rather than loading an
-            # empty conversation — the same honesty the writer path gets below.
-            resolved = compression.transcript_for_read(self.directory)
+            # from rewriting the store. ``read_only=True`` is passed THROUGH:
+            # without it the resolver's last resort is ``restore_for_write``,
+            # which publishes the plain file back into the store without the
+            # lock — a viewing device would silently undo the compression, on
+            # the very device whose cache-miss path is a full disk. An archive
+            # this build cannot decode (or cannot copy for want of space) raises
+            # the resolver's typed error here rather than loading an empty
+            # conversation — the same honesty the writer path gets below.
+            resolved = compression.transcript_for_read(self.directory, read_only=True)
             self.path = resolved if resolved is not None else self.directory / TRANSCRIPT_FILENAME
         else:
             self.path = self.directory / TRANSCRIPT_FILENAME
