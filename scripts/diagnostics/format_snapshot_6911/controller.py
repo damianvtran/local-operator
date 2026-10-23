@@ -9,21 +9,21 @@ import subprocess
 import sys
 import time
 from scripts.diagnostics.lfs_pair_6911.controller import finish_owned, owned, table
-from scripts.diagnostics.format_snapshot_6911.worker import check_sources, read_observation
+from scripts.diagnostics.format_snapshot_6911.worker import check_sources, read_observation, read_isort_context
 ROOT=Path(__file__).resolve().parents[3]
 
 
-def read_worker_proof(out,expected_before):
+def read_worker_proof(out,expected_before,expected_config):
     unknown=dict(qualified=False,stage='UNKNOWN',tools=None)
     try:
         path=out/'format.json'
         if path.is_symlink() or not path.is_file() or path.stat().st_size>65536:return unknown
         proof=json.loads(path.read_bytes())
-        base={'qualified','stage','tools','observation'}
+        base={'qualified','stage','tools','observation','context'}
         success={'ast_compatible','protected_byte_equal','patch_sha256','before','after'}
         if type(proof) is not dict or type(proof.get('qualified')) is not bool:return unknown
         if set(proof)!=(base|success if proof['qualified'] else base):return unknown
-        if proof['stage'] not in ('SOURCE_SETUP','TOOLS','COMPATIBILITY','READBACK','AST_COMPARE_0','AST_COMPARE_1','AST_COMPARE_2','AST_COMPARE_3','PROTECTED_S2','PROTECTED_S2_EXTRACT_BEFORE','PROTECTED_S2_EXTRACT_AFTER','PROTECTED_S2_COMPARE','PROTECTED_SLOW','PATCH_BUILD','PATCH_CAP','PATCH_READY','COMPLETE'):return unknown
+        if proof['stage'] not in ('SOURCE_SETUP','ISORT_CONTEXT','TOOLS','COMPATIBILITY','READBACK','AST_COMPARE_0','AST_COMPARE_1','AST_COMPARE_2','AST_COMPARE_3','PROTECTED_S2','PROTECTED_S2_EXTRACT_BEFORE','PROTECTED_S2_EXTRACT_AFTER','PROTECTED_S2_COMPARE','PROTECTED_SLOW','PATCH_BUILD','PATCH_CAP','PATCH_READY','COMPLETE'):return unknown
         labels=('isort-format','black-format','black-check','isort-check','flake8-check')
         tools=proof['tools']
         if type(tools) is not list or len(tools)!=5:return unknown
@@ -41,9 +41,12 @@ def read_worker_proof(out,expected_before):
             if item['reason'] not in ('PASS','TOOL_FAILURE','LAUNCH_FAILURE','TIMEOUT','OUTPUT_CAP','MONITOR_FAILURE','SETTLEMENT_FAILURE'):return unknown
             if item['reason']=='PASS' and not (item['rc']==0 and type(item['rc']) is int and all(item[k] for k in ('launched','completed','reaped','settled')) and not any(item[k] for k in ('timeout','cap','monitor_failed'))):return unknown
         observed=read_observation(proof['observation'],out)
+        context=read_isort_context(proof['context'],expected_config)
         if not proof['qualified']:
             if proof['stage']=='COMPLETE':return unknown
-            return dict(qualified=False,stage=proof['stage'],tools=tools,observation=observed)
+            return dict(qualified=False,stage=proof['stage'],tools=tools,observation=observed,context=context)
+        if context is None:return unknown
+        read_isort_context(context,expected_config,require_canonical=True)
         if observed is None or observed['compare_ok'] is not True or observed['byte_equal'] is not True:return unknown
         if proof['stage']!='COMPLETE' or any(x['reason']!='PASS' for x in tools):return unknown
         if proof['ast_compatible'] is not True or proof['protected_byte_equal'] is not True:return unknown
@@ -93,7 +96,7 @@ def main():
     except Exception:pass
     finally:
         state=finish_owned(child,observe,kill,lambda:shutil.rmtree(root) if root.exists() else None)
-        proof=read_worker_proof(out,{k:v for k,v in manifest['snapshot'].items() if k.endswith('.py')})
+        proof=read_worker_proof(out,{k:v for k,v in manifest['snapshot'].items() if k.endswith('.py')},manifest['snapshot']['pyproject.toml'])
         proof['qualified']=proof['qualified'] is True and completed and not state['errors'] and state['synthetic_root_removed'] and state['rc']==0
         proof['lifecycle']={k:state[k] for k in ('rc','reaped','owned_settled','synthetic_root_removed')}
         (out/'format.json').write_text(json.dumps(proof)+'\n')
