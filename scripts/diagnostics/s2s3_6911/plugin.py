@@ -6,14 +6,13 @@ not a product seam. No releaser thread or timed-success release is permitted.
 """
 import asyncio
 import json
-import gc
 import os
 import re
 import threading
 import time
 
 import pytest
-from scripts.diagnostics.s2s3_6911.oracle import MODES, span_record, held_record, restore_all, project
+from scripts.diagnostics.s2s3_6911.oracle import MODES, span_record, held_record, restore_all, project, RecordBudget
 
 child_identity = None
 record_lock = threading.RLock()
@@ -21,16 +20,13 @@ record_lock = threading.RLock()
 S2 = "tests/unit/test_tui_responsiveness.py::test_s2_send_to_agent_end_keeps_the_loop_under_the_bar"
 S3 = "tests/unit/test_tui_responsiveness.py::test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free"
 MODE = os.environ.get("S2S3_MODE")
-records = []
+record_budget = RecordBudget()
 report = {"call": None, "assertion": None, "setup_ok": False}
 
 
 def rec(kind, **values):
     with record_lock:
-        row = dict(kind=kind, **values)
-        if len(records) >= 250 or len(json.dumps(records + [row]).encode()) > 180000:
-            raise RuntimeError("diagnostic output bound")
-        records.append(row)
+        record_budget.add(kind, **values)
 
 
 def clock():
@@ -204,15 +200,6 @@ def pytest_runtest_call(item):
             if task is not None:
                 await task
 
-    gc_started = {}
-    def gc_event(phase, info):
-        thread = threading.get_ident()
-        if phase == "start":
-            gc_started[thread] = clock()
-        elif thread in gc_started:
-            span("gc", gc_started.pop(thread), generation=info.get("generation"),
-                 is_loop=None if loop_thread is None else thread == loop_thread)
-
     def settle_task():
         if task is None:
             return
@@ -244,11 +231,8 @@ def pytest_runtest_call(item):
         if MODE == "s3-held":
             patch(module._SlowListing, "__call__", held_listing)
         if MODE == "s2-original":
-            gc.callbacks.append(gc_event)
-        yield
+            yield
     finally:
-        if gc_event in gc.callbacks:
-            gc.callbacks.remove(gc_event)
         errors = restore_all(restorations, gate.set, settle_task, completed)
         rec("cleanup", worker_function_completed=finished.is_set(),
             task_settled=task is None or task.done(), errors=errors)
@@ -258,7 +242,10 @@ def pytest_runtest_call(item):
 
 def pytest_sessionfinish(session, exitstatus):
     from scripts.diagnostics.s2s3_6911.driver import identity
-    payload = dict(mode=MODE, exitstatus=int(exitstatus), records=records, identity=child_identity, **report)
+    rec("outcome", exitstatus=int(exitstatus), **report)
+    with record_lock:
+        observed_records = record_budget.snapshot()
+    payload = dict(mode=MODE, exitstatus=int(exitstatus), records=observed_records, identity=child_identity, **report)
     encoded = json.dumps(project(payload))
     if len(encoded.encode()) > 200000:
         raise RuntimeError("diagnostic evidence bound")
