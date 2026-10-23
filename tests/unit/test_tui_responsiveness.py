@@ -1613,7 +1613,9 @@ async def test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free(
         except BaseException as exc:  # noqa: BLE001 - reported below
             cleanup_error = cleanup_error or exc
         try:
-            configure.refresh_model_info_background = original_refresh_entry  # type: ignore[assignment]
+            configure.refresh_model_info_background = (  # type: ignore[assignment]
+                original_refresh_entry
+            )
         except BaseException as exc:  # noqa: BLE001 - reported below
             cleanup_error = cleanup_error or exc
         try:

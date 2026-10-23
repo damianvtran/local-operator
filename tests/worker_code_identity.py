@@ -23,6 +23,7 @@ def source_allowlist(root, relative_paths=("local_operator/tui/app.py",)):
     for relative in relative_paths:
         path = root / relative
         tree = ast.parse(path.read_text())
+
         def visit(nodes, prefix=""):
             for node in nodes:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -98,12 +99,14 @@ class WorkerCodeIdentity:
             ACTIVE = self
             return self  # No guessed patching against a different producer API.
         registry = self
+
         def init(worker, node, work, *args, **kwargs):
             original_init(worker, node, work, *args, **kwargs)
             if type(worker) is not Worker:
                 registry.counts["unsupported"] += 1
                 return
             registry.retain(registry.workers, worker, registry.code_id(work))
+
         def start(worker, app, done_callback=None):
             if type(worker) is not Worker:
                 registry.counts["unsupported"] += 1

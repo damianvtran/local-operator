@@ -64,6 +64,7 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         try:
             registry.install(FakeWorker)
+
             class Subclass(FakeWorker):
                 pass
             Subclass(None, first)
@@ -88,6 +89,7 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
         class Hostile:
             def __getattribute__(self, name):
                 raise AssertionError('attribute inspected')
+
             def __repr__(self):
                 raise AssertionError('repr inspected')
         registry = identity.WorkerCodeIdentity(allowlist())
@@ -137,6 +139,7 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_setup_failure_restores_first_hook(self):
         old_init = FakeWorker.__init__
         real_patch, calls = identity.patch, []
+
         class FaultPatch:
             @staticmethod
             def object(*args):
