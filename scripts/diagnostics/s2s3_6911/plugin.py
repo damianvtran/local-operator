@@ -76,6 +76,7 @@ def pytest_runtest_call(item):
     finished.set()
     lock = threading.Lock()
     active = 0
+    causal_released = False
     loop = task = None
     loop_thread = None
     injected = False
@@ -113,6 +114,16 @@ def pytest_runtest_call(item):
                 raise RuntimeError("real listing worker is not independently observed off-loop")
             if not gate.wait(3):
                 raise RuntimeError("held worker bound: no causal loop release")
+            if not causal_released:
+                # Cleanup's gate.set() is not the loop-side witness: sleeping
+                # through the fixture here would only mask the protocol defect.
+                raise RuntimeError("held worker released without causal loop witness")
+            # The held control observes WHO runs the worker and that the loop
+            # keeps ticking meanwhile; the fixture's own 5 s latency after that
+            # is irrelevant and would outlive completed()'s 3 s bound. Shorten it
+            # through the test's own mutable latency_s, exactly as its teardown
+            # does (the original test is not edited). Controlled variant only.
+            self.latency_s = 0.0
             return original_listing(self, *args, **kwargs)
         finally:
             with lock:
@@ -124,6 +135,16 @@ def pytest_runtest_call(item):
             rec("worker_function_completed", thread=thread)
 
     async def held_witness():
+        nonlocal causal_released
+        created = time.perf_counter()
+        # The refresh worker is spawned by the app's own ~1 Hz background harvest,
+        # not by this test's pauses: observed ~1.96 s after this task was created
+        # (run 39960859806). The tick window must therefore start at worker ENTRY,
+        # with a separate fail-closed bound on entry itself.
+        while not entered.is_set():
+            if time.perf_counter() - created > 6:
+                raise RuntimeError("held worker never entered")
+            await asyncio.sleep(0.005)
         deadline = time.perf_counter() + 2
         ticks = 0
         while time.perf_counter() < deadline:
@@ -134,6 +155,7 @@ def pytest_runtest_call(item):
                 if ticks == 3:
                     witness = held_record(ticks, requests, threading.get_ident())
                     rec(witness.pop("kind"), **witness)
+                    causal_released = True
                     gate.set()
                     return
         raise RuntimeError("held worker/tick witness missing")

@@ -19,3 +19,7 @@ Actualproducer uses sharedRecordBudget:250TOTAL includes234optional+14critical+s
 ## Budget delta
 
 Only numeric: child12→20s, outer60→100s (grace5, reap3 unchanged). job5min/setup120s/1024MiB/250records/256KiB/4cases/original CPU500,wall2000,noise,calibration and Native512/UI7.8 policies unchanged. No automatic further raise/retry.
+
+## Held-control protocol repair (run 39960859806)
+
+Observed: s2-original PASS (43/250 records), s3-split expected old-500 wall control, s3-held protocol FAIL, synthetic CPU case NOT RUN. Source-derived (not a logged cause): the held witness deadline began at the first pause although the refresh worker entered ~1.96 s later; the 5 s SlowListing outlived completed()'s 3 s wait; cleanup, not the loop, released the gate. Repair: witness tick window starts at worker entry (separate 6 s entry bound, fail-closed); only the loop-side witness (causal_released) may release the worker, cleanup release fails closed; the held control zeroes the fixture's own mutable latency_s after the causal release (as the original test's teardown does; original blob unedited); case order s2-original, s3-split, synthetic, s3-held; held protocol failures are labelled HELD PROTOCOL DEFECT, distinct from product observations. No bar, budget, cap or original-test change. Unverified until an actual run.
