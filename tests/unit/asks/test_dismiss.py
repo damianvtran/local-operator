@@ -182,6 +182,27 @@ def test_a_cold_dismiss_refuses_an_ask_this_session_never_queued(tmp_path: Path)
     assert _kinds(directory) == [store.EVENT_QUEUED]
 
 
+def test_every_cold_refusal_carries_the_sentence_a_surface_renders(tmp_path: Path):
+    """The route's last-resort string is never what a user reads (agent review
+    round 1, R1-5): every refusal this door can produce already IS a sentence, so
+    the desktop's fallback is a contract-break guard rather than user copy.
+
+    Pinned here rather than in the route because the door is the producer: if a
+    refusal ever grew an empty ``error``, the desktop would say "the dismissal was
+    refused" in an untranslated English string instead of the ask's own words.
+    """
+    unknown_reason = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, reason="because", now_ms=NOW))
+    directory = _session(tmp_path)
+    unknown_ask = _run(dismiss_cold(tmp_path, SESSION, "a-nowhere", by="phone", now_ms=NOW))
+    already = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
+    assert already.get("ok") is True, already
+    twice = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
+    for outcome in (unknown_reason, unknown_ask, twice):
+        assert outcome.get("ok") is False, outcome
+        assert str(outcome.get("error") or "").strip(), outcome
+    assert _kinds(directory)[-1] == store.EVENT_DISMISSED
+
+
 def test_a_cold_dismiss_drops_the_deadline_wake_row(tmp_path: Path):
     """THE WAKE ROW IS WHY THIS CAN BOOT NOTHING.
 

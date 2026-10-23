@@ -50,7 +50,7 @@ import tempfile
 import time
 import uuid
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -697,6 +697,32 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
         ASK_TIMEOUT_MESSAGE_TYPE,
     }
 )
+
+#: How many admitted operator messages the ask card's context line can count
+#: (SA-D7, design §15). Bounded for the reason every ring in this file is: a long
+#: conversation must not grow the stamp without limit. An ask that predates the
+#: window is answered ``None`` — "cannot count" — rather than with a number the
+#: runtime cannot stand behind, and every surface already treats absence as "no
+#: line".
+_USER_MESSAGE_STAMP_CAP = 256
+
+
+def _is_dismissal_receipt(message: Any) -> bool:
+    """Whether this row is the operator PUTTING AN ASK AWAY (D2, SA-D4).
+
+    One definition for the two rules that read it: the stopped-work residue rule
+    (a dismissal must not clear a stop) and the idle delivery arm (a dismissal
+    alone must not buy a paid turn). They ask the same question of the same rows,
+    so they must not be able to disagree about a batch that mixes a dismissal
+    with something else.
+    """
+    return (
+        isinstance(message, CustomMessage)
+        and message.custom_type == ASK_RESPONSE_MESSAGE_TYPE
+        and isinstance(message.details, dict)
+        and message.details.get("status") == "dismissed"
+    )
+
 
 #: Inputs that are another SESSION talking (see ``harness/message_types.py``
 #: for the full reasoning and membership): imported rather than re-declared so
@@ -3900,6 +3926,19 @@ class Session:
         # settled by the decrement happening at the same drain the delivery
         # does.
         self._courtesy_wake_count = 0
+        # THE USER-MESSAGE STAMP (SA-D7, design §15): ``(message id, admitted at
+        # ms)`` for every operator message this runtime has admitted, oldest first
+        # and capped. It answers the two facts an ask card's context line needs —
+        # "how many messages from you since this was asked" and "when was the
+        # last one" — and it is the stamp PR-3's open-asks section re-anchors on.
+        # Seeded from replayed history below, because a resumed runtime starts
+        # with the conversation it resumed rather than with this process.
+        self._user_messages: deque[tuple[str, int]] = deque(maxlen=_USER_MESSAGE_STAMP_CAP)
+        #: Whether the stamp has ever DROPPED an entry — the ring filled and a
+        #: newer message pushed the oldest out. Only then can an old ask's count be
+        #: fewer than the truth; see :meth:`ask_context_line`.
+        self._user_message_stamp_truncated = False
+        self._seed_user_message_stamp()
         # Peer-arrival signal behind ToolContext.peer_arrival, so a blocking
         # `wait` can park on "a message reached my mailbox" alongside its job
         # settle events. Owned by the session because the ToolContext is
@@ -10118,6 +10157,16 @@ class Session:
         carrying the whole batch, so N asks settling together cost one paid turn
         rather than N.
 
+        A DISMISSAL-ONLY batch on an idle session is the one exception (SA-D4,
+        2026-10-23): it is written durably and parked with NO turn, through
+        :meth:`_hold_deliveries_at_admission`. The operator putting an ask away is
+        a tidy-up, and spending a paid turn so the agent can say "noted" is work
+        nobody asked for — while the row still reaches the model, because the
+        next real turn reads it out of the live context (and a resume replays it).
+        MID-TURN batches are untouched: a dismissal rides the steering queue to
+        the running turn's next boundary, which is the whole point of allowing it
+        while the agent works (SA-D4).
+
         The wake-a-parked-``wait`` mark goes in AFTER the queue puts, for the
         lost-wakeup reason ``_deliver_wake`` records: the woken tool returns into
         a drain, and the drain has to find the messages already queued.
@@ -10129,6 +10178,9 @@ class Session:
                 self._courtesy_wake_count += 1
                 self._steering_queue.put_nowait(message)
             self._peer_arrival.mark(messages[-1].custom_type)
+            return
+        if self._is_dismissal_batch(messages):
+            await self._hold_deliveries_at_admission(list(messages))
             return
         self._spawn_background(self._prompt_messages(list(messages)))
 
@@ -12076,9 +12128,12 @@ class Session:
     def dismiss_ask(
         self, ask_id: str, *, by: str = "unknown", reason: str | None = None
     ) -> dict[str, Any]:
-        """Put an ask away from the view. Starts no turn, ever.
+        """Put an ask away from the view.
 
-        An OPEN ask is accepted only while :meth:`ask_agent_running` is False (D6).
+        An OPEN ask is accepted in every live state (SA-D4): mid-turn the response
+        row rides the steering queue to the running turn's next boundary through
+        :meth:`deliver_ask_messages`, and an idle session holds it durably with no
+        turn. A TIMED-OUT ask stays view-only, as before.
         """
         queue = self.ask_queue()
         if queue is None:
@@ -12086,7 +12141,17 @@ class Session:
         return queue.dismiss(ask_id, by=by, reason=reason)
 
     def ask_agent_running(self) -> bool:
-        """Whether agent work may be running — the D6 gate for dismissing an OPEN ask.
+        """Whether agent work may be running.
+
+        No longer a dismissal gate (SA-D4 retired §15's D6, which consulted this to
+        refuse an open ask while work ran), and no production caller is left — the
+        queue's probe and its ``_agent_running`` were deleted with that rule. KEPT,
+        deliberately (agent review round 1, R1-4): it is the one named spelling of
+        "stopped" (this method's three-part rule), and the ask e2e reads it to tell
+        an IDLE live session from a stopped one, which is the difference between
+        the SA-D4 arm and D2's residue arm. Deleting it would move
+        ``_abort_requested`` / ``_is_streaming`` / ``_turn_lock`` knowledge into
+        those cells, where the question would be re-derived instead of asked.
 
         The session is STOPPED (so not running) when the operator's stop is pending
         and no turn is in flight: ``_abort_requested`` is set by :meth:`abort`
@@ -12100,6 +12165,158 @@ class Session:
         if self._abort_requested and not self._is_streaming and not self._turn_lock.locked():
             return False
         return True
+
+    # -- the user-message stamp (SA-D7, design §15) ---------------------------
+
+    def latest_user_message_at(self) -> int | None:
+        """When the last admitted operator message arrived (ms), or ``None``.
+
+        THE STAMP, as one named accessor, because two readers need exactly this
+        fact and neither may re-derive it: the ask card's context line (below) and
+        PR-3's ``<open-asks>`` section, whose "as of" re-anchor is this value. A
+        session that has admitted no operator message answers ``None`` — the
+        honest answer for a fresh or replayed-empty runtime, and the one every
+        surface reads as "no line".
+        """
+        return self._user_messages[-1][1] if self._user_messages else None
+
+    def ask_context_line(self, asked_at_ms: int) -> tuple[int, int] | None:
+        """``(messages since, last at ms)`` for an ask card, or ``None``.
+
+        The pair the card's context line renders — "3 messages from you since this
+        was asked (last 19:36)" — computed here rather than on each surface: the
+        operator's words are a fact about THIS runtime, and the desktop and the
+        phone hold rows, not sessions.
+
+        ``None`` means CANNOT COUNT, and it is exactly one shape: the ask predates
+        the OLDEST stamp the ring still holds after it has dropped one (more
+        operator messages have arrived than ``_USER_MESSAGE_STAMP_CAP`` keeps, so
+        the true count since that ask is larger than the ring can say). Nothing is
+        sent in that case — the caller omits the field — so no surface shows a
+        number the runtime cannot stand behind.
+
+        A session that has admitted no operator message at all also answers
+        ``None``: there is no "last" to name and a line reading "0 messages"
+        states nothing.
+
+        A count of 0 IS an answer (the ask is newer than every message in the
+        window, or older than all of them): ``pending_row`` carries it, and a
+        surface renders the line only when the count is above zero.
+        """
+        if not self._user_messages:
+            return None
+        if self._user_message_stamp_truncated and asked_at_ms < self._user_messages[0][1]:
+            return None
+        since = sum(1 for _, at in self._user_messages if at > asked_at_ms)
+        return since, self._user_messages[-1][1]
+
+    def _note_admitted_user_message(self, message: AgentMessage) -> None:
+        """Stamp one message as an ADMITTED operator message (SA-D7).
+
+        Called at the two points that hand a user row to the model — the turn's
+        initial loop (a typed prompt) and the boundary steer drain — so
+        "admitted" means "became part of a request", which is the fact the card
+        counts rather than what a composer happened to hold.
+
+        HARNESS CHROME IS NOT THE OPERATOR. A goal continuation, a connectivity
+        retry or a spooled owner prompt is minted by the harness and would
+        otherwise inflate "messages from you since this was asked"; the structural
+        marker (``RENDERED_INJECTION_KEY``) and the shared text predicate together
+        are the same two rules every surface uses to decide what to paint as the
+        operator's own words, so the count and the transcript agree.
+        """
+        if not isinstance(message, Message) or message.role != "user":
+            return
+        if (message.provider_payload or {}).get(RENDERED_INJECTION_KEY):
+            return
+        from local_operator.harness.rows import is_harness_chrome
+
+        if is_harness_chrome(message.text):
+            return
+        key = str(getattr(message, "id", "") or "")
+        # A row handed to two admission sites in one runtime must count once. The
+        # scan is over the bounded stamp, so it is O(cap) per admitted message.
+        if key and any(existing == key for existing, _ in self._user_messages):
+            return
+        if len(self._user_messages) == _USER_MESSAGE_STAMP_CAP:
+            self._user_message_stamp_truncated = True
+        self._user_messages.append((key, self._operator_message_stamp_ms(message)))
+
+    def _operator_message_stamp_ms(self, message: AgentMessage) -> int:
+        """The ONE clock an admitted operator message is stamped from.
+
+        The live stamp and the restart seed must produce the SAME number for the
+        same row: the count is compared with ``>`` against an ask's ``created_at``,
+        so a millisecond of drift across a restart could flip a message that
+        arrived in the ask's own millisecond (agent review round 1, R1-3 — QA had
+        measured the 1 ms gap). Both sides therefore read the row's durable
+        ``ts``: the seed from the replayed entry, this path from
+        ``latest_user_entry()``, the index the append just updated.
+
+        A message this runtime did NOT write (an initial that was already durable,
+        where a newer user row exists) falls back to the wall clock — which is the
+        transcript's own ``time.time()``, at a slightly later instant. Same source,
+        never a second clock.
+        """
+        row_id = str(getattr(message, "id", "") or "")
+        latest = self._transcript.latest_user_entry()
+        if row_id and latest is not None and latest.id == row_id:
+            return int(latest.ts * 1000)
+        return int(time.time() * 1000)
+
+    def _seed_user_message_stamp(self) -> None:
+        """Fill the stamp from the replayed conversation (SA-D7).
+
+        A resumed runtime's window opens with the history it resumed, not with the
+        moment this process was constructed: an ask raised before the restart
+        still has to say how much the operator has said since. The scan is over the
+        rows the transcript ALREADY replayed into memory, keeps the newest
+        ``_USER_MESSAGE_STAMP_CAP`` user rows, and applies the live path's exact
+        predicate — so a replayed goal continuation is not counted either. The
+        stamp is ``int(entry.ts * 1000)``, the SAME field the live path reads
+        (:meth:`_operator_message_stamp_ms`), so a restart cannot move a count.
+
+        WHAT CANNOT DROP THESE ROWS (agent review round 1, open question a):
+        ``Transcript.compact_file`` drops only superseded collapsible CUSTOM
+        entries and folds PRUNE journals (whose targets are tool rows), and an
+        in-context compaction appends a marker that ``build_llm_history`` reads
+        — it never rewrites ``_entries``. So a user message entry survives both,
+        and the seed keeps reading a durable source rather than a best-effort
+        guess.
+
+        Best-effort in the one way that matters: a stamp is a hint on a card, and
+        no surface should fail to open a conversation over it.
+        """
+        try:
+            entries = self._transcript.entries()
+        except Exception:  # noqa: BLE001 — a repaint fact is never worth a failure
+            logger.debug("ask: could not read the transcript for the user stamp", exc_info=True)
+            return
+        from local_operator.harness.rows import is_harness_chrome
+        from local_operator.session.transcript import ENTRY_MESSAGE
+
+        for entry in entries[-_USER_MESSAGE_STAMP_CAP * 8 :]:
+            if entry.type != ENTRY_MESSAGE:
+                continue
+            payload = entry.payload
+            if str(payload.get("role") or "") != "user":
+                continue
+            if (payload.get("provider_payload") or {}).get(RENDERED_INJECTION_KEY):
+                continue
+            text = "".join(
+                str(block.get("text") or "")
+                for block in (payload.get("content") or ())
+                if isinstance(block, Mapping) and "text" in block
+            )
+            if is_harness_chrome(text):
+                continue
+            if len(self._user_messages) == _USER_MESSAGE_STAMP_CAP:
+                self._user_message_stamp_truncated = True
+            self._user_messages.append((str(entry.id), int(entry.ts * 1000)))
+        # A journal longer than the scanned slice may hold operator messages this
+        # seed never saw, so the ring is truncated by construction in that case.
+        if len(entries) > _USER_MESSAGE_STAMP_CAP * 8:
+            self._user_message_stamp_truncated = True
 
     def withdraw_ask(
         self,
@@ -16246,6 +16463,25 @@ class Session:
     # -- turn machinery --------------------------------------------------------
 
     @staticmethod
+    def _is_dismissal_batch(initial: Sequence[AgentMessage]) -> bool:
+        """Whether EVERY row in this batch is an operator DISMISSAL receipt.
+
+        The one predicate behind two decisions that must not drift: D2's stopped
+        work residue rule (a dismissal must not clear a stop) and SA-D4's idle
+        arm (a dismissal alone must not buy a paid turn). They ask the same
+        question of the same rows, so the answer is computed once — the D2 rule
+        used to spell it inline, and a second spelling is how the two would come to
+        disagree about a mixed batch.
+
+        A batch that mixes a dismissal with anything else is NOT a dismissal
+        batch: the rest of it is fresh intent (an answer, a decline, a job
+        result), and both callers must treat it as such.
+        """
+        if not initial:
+            return False
+        return all(_is_dismissal_receipt(message) for message in initial)
+
+    @staticmethod
     def _is_stopped_work_residue(initial: list[AgentMessage]) -> bool:
         """Whether this arrival is the echo of stopped work rather than new intent.
 
@@ -16268,11 +16504,7 @@ class Session:
                 # D2 (design §15): the receipt of the operator tidying an ask is not
                 # a new instruction, so it must not clear the stop and restart work.
                 # A decline stays fresh intent (it hands the decision back).
-                or (
-                    message.custom_type == ASK_RESPONSE_MESSAGE_TYPE
-                    and isinstance(message.details, dict)
-                    and message.details.get("status") == "dismissed"
-                )
+                or _is_dismissal_receipt(message)
             )
             for message in initial
         )
@@ -16870,6 +17102,12 @@ class Session:
                     and message.role == "user"
                     and not is_harness_chrome(message.text)
                 ):
+                    # THE USER-MESSAGE STAMP (SA-D7) rides the SAME decision: what
+                    # every surface paints as the operator's own words is what the
+                    # ask card counts, so an ask raised in this turn says how much
+                    # the operator has said since it was asked. The helper applies
+                    # the structural harness marker on top of this predicate.
+                    self._note_admitted_user_message(message)
                     await self._emit(MessageStartEvent(message=message))
 
             # Belt-and-braces for peer delivery: consume any inbox rows spooled
@@ -17349,9 +17587,9 @@ class Session:
             await self._deliver_deferred_job_results()
             # ...and whatever a busy latch parked for "the next boundary" on a
             # turn that never reached one again (see ``_flush_parked_deliveries``).
-            self._flush_parked_deliveries()
+            await self._flush_parked_deliveries()
 
-    def _flush_parked_deliveries(self) -> None:
+    async def _flush_parked_deliveries(self) -> None:
         """Hand over what a busy latch parked, now that the turn has ended.
 
         THE HOLE THIS CLOSES, measured on CI (run 37980552652, macos e2e).
@@ -17401,6 +17639,21 @@ class Session:
         arm), and an ask is not lost to the skip -- its answer is durable in
         the log and the next runtime's boot reconcile re-delivers it.
 
+        A DISMISSAL-ONLY BATCH IS HELD, NOT SPAWNED (SA-D4; agent review round 1,
+        R1-1). ``deliver_ask_messages``' idle arm already refuses to buy a turn for
+        the operator tidying a card, and this flush is the OTHER way such a row
+        reaches a turn: a dismissal parked for a boundary the turn never reached
+        would otherwise be handed to ``_prompt_messages`` -- one paid turn to say
+        "noted". It takes the same idle arm instead, through the same
+        ``_is_dismissal_batch`` predicate, so the two doors cannot disagree. A
+        batch with a plain steer in it is NOT dismissal-only: the steer needs the
+        run, and the dismissal rides beside it.
+
+        AWAITED rather than spawned, for the reason ``_deliver_deferred_job_results``
+        above is: the durability write of a held batch must land before the turn
+        releases its lock, and a spawned write is exactly what ``dispose`` cancels
+        in flight.
+
         One baked-in premise rides a flushed row (agent review round 1,
         MINOR-2): the busy-resume note some busy arms attach at hand-off
         (``_append_busy_resume_note`` -- the wake, monitor and resume-catch-up
@@ -17429,6 +17682,17 @@ class Session:
                 # else will read it: open its consumer now (see the tail-parked
                 # paragraph above).
                 self._ensure_steering_wake()
+            return
+        if self._is_dismissal_batch(parked) and all(
+            isinstance(item, CustomMessage) for item in drained
+        ):
+            # SA-D4 (agent review round 1, R1-1): held durably, no turn. Nothing
+            # needs re-queueing -- the dismissal-only case takes every drained
+            # item -- and the take changed the queue fold, so the snapshot is
+            # refreshed exactly as the spawned path below does.
+            await self._hold_deliveries_at_admission(list(parked))
+            self._courtesy_wake_count = 0
+            self.refresh_frontend_state()
             return
         # PARITY WITH THE PEER ARMS (agent review round 1, MINOR-1): both
         # ``receive_peer_message`` arms spawn with ``carried_prompt=True``,
@@ -20517,6 +20781,12 @@ class Session:
             # the steering front end's optimistic echo is matched by content.
             for message in messages:
                 if isinstance(message, Message) and message.role == "user":
+                    # THE USER-MESSAGE STAMP (SA-D7): a steer is the operator's
+                    # words too, and it is admitted HERE — at the boundary that
+                    # hands it to the model — so the card's count follows the same
+                    # rule a typed prompt follows. The helper drops harness chrome
+                    # (a spooled owner prompt, a goal continuation).
+                    self._note_admitted_user_message(message)
                     await self._emit(MessageStartEvent(message=message))
             self.refresh_frontend_state()
         # §14.3: a drained message became part of THIS run's inputs the moment

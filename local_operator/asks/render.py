@@ -394,16 +394,6 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
     return "this ask is no longer open."
 
 
-#: The refusal an OPEN-ask dismissal gets while the agent is working (D6, design
-#: §15). Dismissal is "hear at the next boot": it never starts, wakes or
-#: injects into running work, so it is offered only on a cold or STOPPED session.
-#: On a running one the operator's route is the conversation itself, where the
-#: agent is already reading.
-DISMISS_AGENT_RUNNING = (
-    "the agent is still running — reply in chat to settle this ask, "
-    "or stop the session first and dismiss it then."
-)
-
 #: A dismissal aimed at a LATE ask: ``refusal_copy`` accepts a late ask (it can be
 #: answered again), but dismissing one is a different act and the answer is in.
 DISMISS_ALREADY_ANSWERED = "this ask was already answered."
@@ -436,22 +426,21 @@ DISMISS_BRIDGE_OPEN = (
 DISMISS_ALREADY_DISMISSED = "you already dismissed this."
 
 
-def dismiss_refusal(
-    record: Mapping[str, Any] | None,
-    *,
-    agent_running: bool = False,
-) -> str:
+def dismiss_refusal(record: Mapping[str, Any] | None) -> str:
     """Why a dismissal was refused, or ``""`` when it is ACCEPTED.
 
     ``record`` is the FOLDED ask (``None`` when the log holds no such ask). The
-    decision is a property of the log plus ONE runtime fact, which is what lets
-    the cold door hold a runtime-less session to exactly the rule a live one
-    applies — and why this is one function rather than two.
+    decision is a property of the LOG ALONE, which is what lets the cold door
+    hold a runtime-less session to exactly the rule a live one applies — and why
+    this is one function rather than two.
 
-    ``agent_running`` is that fact (D6, design §15): True when a runtime is up and
-    NOT stopped. The cold door has no runtime and passes False; the live door
-    passes what the session reports. It only matters for an OPEN ask — a timed-out
-    one is accepted on every door, as before.
+    NO RUNTIME FACT ENTERS HERE (SA-D4, 2026-10-23). §15's D6 refused an open ask
+    while agent work was running, on the grounds that a dismissal could not reach
+    it; a dismissal now rides the steering queue to the running turn's next
+    boundary (``Session.deliver_ask_messages``), so the one state that used to be
+    refused is the one the operator most often wants. Retiring the parameter is
+    deliberate over keeping it inert: a caller could otherwise pass it and
+    believe it still decided something.
     """
     from local_operator.asks import store
 
@@ -469,7 +458,7 @@ def dismiss_refusal(
             if isinstance(question, Mapping)
         ):
             return DISMISS_BRIDGE_OPEN
-        return DISMISS_AGENT_RUNNING if agent_running else ""
+        return ""
     if status == store.STATUS_DISMISSED:
         # THE REPEAT TAP: a dismissed ask is not a live one, and this is the
         # sentence that says what the user did.

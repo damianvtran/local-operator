@@ -8,6 +8,7 @@ than left to whoever writes the next renderer.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
@@ -449,12 +450,11 @@ def test_the_refusal_table():
     from local_operator.asks import store
 
     assert render.dismiss_refusal(_dismiss_record(store.STATUS_TIMED_OUT)) == ""
-    assert render.dismiss_refusal(_dismiss_record(store.STATUS_TIMED_OUT), agent_running=True) == ""
+    # SA-D4: an OPEN ask is accepted in EVERY runtime state — there is no
+    # ``agent_running`` fact left for a caller to pass, and none could decide
+    # anything if it did.
     assert render.dismiss_refusal(_dismiss_record(store.STATUS_OPEN)) == ""
-    assert (
-        render.dismiss_refusal(_dismiss_record(store.STATUS_OPEN), agent_running=True)
-        == render.DISMISS_AGENT_RUNNING
-    )
+    assert not hasattr(render, "DISMISS_AGENT_RUNNING")
     assert render.dismiss_refusal(_dismiss_record(store.STATUS_DISMISSED)) == (
         render.DISMISS_ALREADY_DISMISSED
     )
@@ -468,6 +468,10 @@ def test_the_refusal_table():
     )
     assert render.dismiss_refusal(None) == render.refusal_copy(None)
     assert not hasattr(render, "DISMISS_NOT_LAPSED")
+    signature = inspect.signature(render.dismiss_refusal)
+    assert list(signature.parameters) == [
+        "record"
+    ], "the retired ``agent_running`` parameter must not linger as an inert one"
 
 
 def test_a_bridge_request_is_dismissible_only_after_it_times_out():
@@ -515,9 +519,5 @@ def test_an_open_relay_is_dismissible_only_after_it_times_out():
     relay = {"ask_id": "a-r", "questions": [], "relay": {"session_id": "s", "ask_id": "a"}}
     assert render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}) == (
         render.DISMISS_RELAY_OPEN
-    )
-    assert (
-        render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}, agent_running=False)
-        == render.DISMISS_RELAY_OPEN
     )
     assert render.dismiss_refusal({**relay, "status": store.STATUS_TIMED_OUT}) == ""
