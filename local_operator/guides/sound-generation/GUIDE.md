@@ -110,9 +110,16 @@ login picks them up at the NEXT session start.
   duration, because a sound record with no length renders with **no player at
   all** — a generated clip the user cannot play, and no error to explain it.
 - A busy platform answers the submit with "Audio generation is busy right
-  now." (`audio_rate_limited`); the harness retries that a few times with
-  backoff, then reports it as a busy—not a quota—failure. A job that hits a
-  vendor rate limit after admission fails with the same word and zero cost.
+  now." (`audio_rate_limited`). The harness retries that refusal four times
+  with backoff — attempts at 0, 10, 30 and 65 s — then reports it as a busy
+  failure (not a quota one), with the window it waited out in the receipt
+  (`4 attempts over 65 s`; a batch adds jitter, so up to ~75 s). The 65 s is
+  sized against the server's own
+  45 s hold on a running vendor call (`ElevenLabsSpeechTimeout`), not guessed:
+  a shorter ladder exhausted inside that window. Only the admission refusal is
+  retried (it creates no job and charges nothing); timeouts, network errors and
+  post-admission rate limits fail straight through. A job that hits a vendor
+  rate limit after admission fails with the same word and zero cost.
 - BYOK voice ids: `female` / `male` map to the vendors' canonical voices;
   a vendor id (an ElevenLabs voice id, an OpenAI voice name) passes through.
   A voice id for one vendor is not copied onto another during failover.
@@ -139,6 +146,31 @@ server, and the receipt says what the server said:
 Nothing is resumed after a stop: call again for a fresh generation. Retrying
 while the same job may still be running can pay twice — the receipt tells you
 which case you are in.
+
+### A stopped batch can leave the platform briefly full
+
+The provider has no cancel API, and the audio server deliberately does NOT
+abort a running vendor call when a client cancels. So a **batch** you stop does
+not free its capacity instantly: the calls already in flight keep their
+per-account slots until the provider's own 45 s timeout
+(`ElevenLabsSpeechTimeout`) expires. That is invisible by design — the next
+batch you call (for example, the remaining items of a 14-item batch stopped
+at 11) waits out the hold and retries instead of failing:
+
+- A submit refused while those slots are held is retried at 0, 10, 30 and
+  65 s. Since 65 s clears the 45 s hold, the resumed items are admitted without
+  the caller needing to know slots exist.
+- An exhausted ladder reads `Audio platform at capacity: 4 attempts over 65 s.`
+  — that sentence is the receipt on a single call and on each batch row, whose
+  details carry the attempt list and `error_type: audio_rate_limited`. It is
+  what distinguishes a genuinely sustained shortage from a one-off stop.
+- Jitter between parallel workers only ever LENGTHENS a wait (1.0–1.15×), so a
+  desynchronised retry cannot land back inside the hold.
+
+The trade: a batch is still bounded by one 225 s tool call, and under constant
+capacity a long batch could spend its budget waiting for admission. A 3-item
+resume waits at least 65 s — up to about 75 s with jitter — plus one
+generation.
 
 ## Naming the result
 
