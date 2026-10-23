@@ -437,6 +437,14 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # (``process._EXIT_REQUEST_FRESH_S``). Carried to the destination it would be an
     # instruction from another device to stop a conversation that device does not own.
     "runtime-exit-request.json": "an exit request addressed to the runtime that wrote it",
+    # THE TRANSCRIPT COMPRESSION LOCK (``session/compression.LOCK_NAME``): the
+    # advisory lock a runtime holds while it has the session open (and the
+    # compressor takes non-blocking before it rewrites anything). Copied, it
+    # would be the SOURCE device's claim that this session is in use — a
+    # destination would read its own copy as contended, and a deleting move's
+    # completeness check would have to account for a file that is meaningful
+    # only where it was taken.
+    ".transcript.lock": "a per-device writer lock, meaningful only where it was taken",
 }
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading
@@ -953,9 +961,17 @@ def referenced_attachments_in(directory: Path) -> list[str]:
     staging or replica copy. ``_member_stamps`` hashes the blob set this returns,
     so the two ends only agree if they derive the set the same way.
     """
+    from local_operator.session import compression
+
+    # The resolver, not the plain name: a compressed session's references are in
+    # the archive, and a scanner that read nothing would report "no attachments"
+    # for a conversation that names several. This is a READ, so it never restores.
     try:
-        payload = (Path(directory) / TRANSCRIPT_NAME).read_bytes()
-    except OSError:
+        resolved = compression.transcript_for_read(Path(directory))
+        if resolved is None:
+            return []
+        payload = resolved.read_bytes()
+    except (OSError, compression.ArchiveError):
         return []
     return sorted({match.decode("ascii") for match in _ATTACHMENT_REF.findall(payload)})
 
@@ -1293,6 +1309,7 @@ def plan_id(
     a move, whose transcript is carried every byte (see ``_safe_region``).
     """
     store = Path(attachments_dir) if attachments_dir is not None else Path(root) / "attachments"
+    _restore_for_serving(session_dir(root, session_id))
     return _content_digest(
         session_dir(root, session_id),
         session_id,
@@ -1349,6 +1366,34 @@ def _attested_digest(files: dict[str, str], links: tuple[str, ...], session_id: 
     return _content_digest_from(stamps, session_id)
 
 
+def _restore_for_serving(directory: Path) -> bool:
+    """Make ``directory``'s transcript PLAIN before the replication layer reads it.
+
+    THE DECISION THIS ENCODES. Sync is a byte protocol: a plan publishes offsets
+    and digests into ``transcript.jsonl``, a fetch serves ranges of that file, and
+    an append splices at ``prefix_bytes``. A compressed archive has none of those
+    properties — it is not addressable by plain-journal offsets — so the layer
+    keeps operating on plain transcripts, and the device that HOLDS the session
+    restores it before serving. The alternative (teaching the wire the archive
+    format) would change the protocol for every peer, including ones that predate
+    compression.
+
+    Best effort and idempotent: ``True`` when a plain transcript exists afterwards
+    — already plain, restored, or nothing to restore (``False``, and the caller's
+    own read reports the absence in its usual words). A decode failure leaves the
+    archive untouched and answers ``False``; the caller then refuses with the
+    read error rather than serving an empty plan.
+    """
+    from local_operator.session import compression
+
+    try:
+        return compression.restore_for_write(directory)
+    except OSError:
+        # restore_for_write already folds its own failures; this covers a path
+        # that vanished under it, which the caller reports as a missing session.
+        return False
+
+
 def build_manifest(
     root: Path,
     session_id: str,
@@ -1372,9 +1417,14 @@ def build_manifest(
     the previous shape read the whole copy set twice for the same plan (once for the
     id, once for the items) and then re-read it on every chunk.
     """
+    from local_operator.session import compression
+
     have = have or {}
     directory = session_dir(root, session_id)
-    transcript = directory / TRANSCRIPT_NAME
+    _restore_for_serving(directory)
+    # ``plain_path`` rather than a second spelling of the name: the restore
+    # above has just made the plain journal the file this plan describes.
+    transcript = compression.plain_path(directory)
     try:
         raw = transcript.read_bytes()
     except OSError as exc:
@@ -1952,6 +2002,23 @@ def pull(
     have = have or {}
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    # THE REPLICATION LAYER WRITES PLAIN TRANSCRIPTS. A destination that holds a
+    # COMPRESSED replica must turn it back into the plain file before an append:
+    # the plan's ``prefix_bytes`` are byte offsets into the plain journal, and
+    # appending to a decompressed copy that is published under no name would
+    # either lose the prefix or splice it twice. Restoring first keeps the wire
+    # protocol untouched — both ends still speak plain transcript bytes.
+    from local_operator.session import compression
+
+    if not _restore_for_serving(dest_dir) and compression.archive_path(dest_dir) is not None:
+        # REFUSE, DO NOT SHADOW. Writing the plain name beside an archive this
+        # build cannot decode would leave a truncated journal that every reader
+        # prefers over the archive holding the rest of the conversation.
+        raise SyncRefused(
+            "no_session",
+            f"{session_id} holds an archived transcript this device cannot decode, "
+            "so it cannot be appended to",
+        )
     # THE PLAN IS ASKED FOR AGAIN WHEN IT CANNOT DESCRIBE THIS DESTINATION. An
     # "append" plan is a claim that this destination already holds the source's
     # first ``prefix_bytes``; if the file here is not that long, the claim is
@@ -1975,7 +2042,13 @@ def pull(
         if str(transcript.get("mode") or "replace") != "append":
             break
         start = int(transcript.get("prefix_bytes") or 0)
-        existing = (dest_dir / TRANSCRIPT_NAME).stat().st_size if transcript_exists(dest_dir) else 0
+        try:
+            # The PLAIN file, which ``_restore_for_serving`` above guarantees when
+            # a transcript is held at all; an absent one reads as "no prefix",
+            # which re-plans this as a full copy (``have``'s cursor is dropped).
+            existing = compression.plain_path(dest_dir).stat().st_size
+        except OSError:
+            existing = 0
         if existing == start:
             break
         have = {key: value for key, value in (have or {}).items() if key != "cursor"}
@@ -2098,7 +2171,17 @@ def pull(
 
 
 def transcript_exists(directory: Path) -> bool:
-    return (Path(directory) / TRANSCRIPT_NAME).is_file()
+    """Whether this device holds a transcript for the session in ``directory``.
+
+    ANY physical form (:func:`compression.has_transcript`): a compressed replica
+    is still a replica this device holds — the resolver restore below turns it
+    back into the plain file a sync writes, so answering "not held" here would
+    make the destination re-plan a full copy of a session it already has, and
+    make a move's source look empty.
+    """
+    from local_operator.session import compression
+
+    return compression.has_transcript(directory)
 
 
 def _destination_for(dest_dir: Path, attachments_root: Path, name: str) -> Path | None:
@@ -2864,7 +2947,12 @@ class SyncWatcher(threading.Thread):
         pushed: list[tuple[str, str]] = []
         for session_id, holders in self._replicated().items():
             try:
-                stat = (Path(self._server.root) / "sessions" / session_id / TRANSCRIPT_NAME).stat()
+                from local_operator.session import compression
+
+                source, _codec = compression.transcript_source(
+                    Path(self._server.root) / "sessions" / session_id
+                )
+                stat = source.stat()
             except OSError:
                 read_stamp(self._server.root, session_id)
                 continue
