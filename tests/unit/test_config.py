@@ -1702,6 +1702,28 @@ def test_the_key_inventory_is_not_rewritten_when_nothing_changed(tmp_path: Path)
     assert inventory.stat().st_mtime_ns == before_mtime
 
 
+def test_a_change_nothing_command_does_not_write_the_inventory(tmp_path: Path) -> None:
+    """``agents sync --check`` promises to change nothing; a sidecar is still a write.
+
+    ``_NO_WRITE_COMMANDS`` already skips the seed-update arm for exactly this
+    reason. The startup inventory is a NEW write on the same seam, so it takes the
+    same exemption: it still REPORTS a shrink — that is a read — but it does not
+    re-baseline under a command whose own contract is that nothing moves.
+    """
+    from local_operator.config_migrations import run_startup_migrations
+
+    _write_incident_config(tmp_path)
+    inventory = tmp_path / ".config-keys.json"
+
+    run_startup_migrations(tmp_path, surface="cli", command="agents sync")
+
+    assert not inventory.exists()
+
+    # A normal launch is unaffected: the baseline appears.
+    run_startup_migrations(tmp_path, surface="cli")
+    assert inventory.exists()
+
+
 def test_a_zero_byte_config_is_not_a_shrink_and_leaves_the_inventory_alone(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,

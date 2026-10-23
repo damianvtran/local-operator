@@ -349,7 +349,9 @@ def _write_key_inventory(path: Path, keys: "list[str]") -> None:
                 pass
 
 
-def report_config_key_shrink(config_dir: Path, *, surface: str = "cli") -> "list[str]":
+def report_config_key_shrink(
+    config_dir: Path, *, surface: str = "cli", record: bool = True
+) -> "list[str]":
     """Say what the last launch's config had and this one does not.
 
     THE INCIDENT THIS EXISTS FOR (2026-10-23). A QA rig wrote 34 bytes over the
@@ -381,6 +383,11 @@ def report_config_key_shrink(config_dir: Path, *, surface: str = "cli") -> "list
       there would make the loss permanent before the operator ever saw it — the
       next human launch must still be able to report it.
 
+    ``record=False`` reports but never writes the sidecar, for the startup commands
+    whose own contract is "change nothing" (``_NO_WRITE_COMMANDS``). Reporting is a
+    read and stays; re-baselining would be the startup write those commands are
+    exempt from, and a sidecar is still a write.
+
     ``config.yml`` is never touched here, and neither is a config write lock: two
     launches racing re-baseline atomically and the later one wins, which is the
     same answer either would have reached a moment apart. Returns the missing
@@ -408,7 +415,7 @@ def report_config_key_shrink(config_dir: Path, *, surface: str = "cli") -> "list
     inventory_path = config_dir / _KEY_INVENTORY_NAME
     previous = _read_key_inventory(inventory_path)
     if previous is None:
-        if current:
+        if current and record:
             _write_key_inventory(inventory_path, current)
         return []
     missing = sorted(set(previous) - current_set - set(_RETIRED_CEILINGS) - {_REAP_UNUSED_FLAT})
@@ -425,7 +432,7 @@ def report_config_key_shrink(config_dir: Path, *, surface: str = "cli") -> "list
         if surface in ("tui", "cli"):
             print(message, file=sys.stderr)
         return missing
-    if current and current_set != set(previous):
+    if record and current and current_set != set(previous):
         # Additions (the cleanup migration's own keys, a new release's defaults)
         # re-baseline silently; only the missing set is ever reported.
         _write_key_inventory(inventory_path, current)
@@ -474,7 +481,12 @@ def run_startup_migrations(
         # FIRST, and before the cleanup migration: that migration back-fills every
         # absent top-level default (``_load_config`` does), so a shrink reported
         # after it would see those keys present and name none of them.
-        report_config_key_shrink(config_dir, surface=surface)
+        #
+        # ``record`` honours ``_NO_WRITE_COMMANDS``: those commands promise to
+        # change nothing, and this arm's sidecar is a write on the same seam.
+        report_config_key_shrink(
+            config_dir, surface=surface, record=command not in _NO_WRITE_COMMANDS
+        )
     except Exception as exc:  # noqa: BLE001 — never a reason not to start
         logger.warning("config migration: key inventory check skipped: %s", exc)
         logger.debug("config migration: traceback", exc_info=True)
