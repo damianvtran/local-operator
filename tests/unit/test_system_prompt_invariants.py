@@ -47,6 +47,27 @@ def test_a_receipt_is_not_consent(queued: str) -> None:
     assert "run nothing the ask was meant to authorise" in queued
 
 
+def test_settling_a_stale_ask_is_stated_in_the_queued_arm_only(queued: str) -> None:
+    """§16/SA-D1: the settle rule a model cannot infer — an answered or mooted
+    ask is settled in the SAME turn, and an answer is never recorded as a moot.
+    Model-facing English, and true only of the queued arm: the blocking call
+    already returned the answer, so the inline paragraph must not carry it."""
+    assert "settle every ask the user's messages answered" in queued
+    assert "(`moot`: they redirected or handed the work off" in queued
+    assert "or you decided it under a timeout)" in queued
+    assert "When you report open asks, settle the stale ones in that same turn" in queued
+    assert "An answer, even a paraphrase, is `answered_in_chat` — never `moot`" in queued
+    assert "Use 24 h only for a decision that stays valid for a day" in queued
+    inline = _flat({"ask_queued": False, "ask_inline": True})
+    for line in (
+        "settle every ask the user's messages answered",
+        "settle the stale ones in that same turn",
+        "An answer, even a paraphrase",
+        "stays valid for a day",
+    ):
+        assert line not in inline
+
+
 def test_destructive_actions_need_explicit_named_approval(queued: str) -> None:
     assert "require explicit user approval" in queued
     assert "never extends to a destructive or irreversible step by implication" in queued

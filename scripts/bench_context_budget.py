@@ -1650,7 +1650,29 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #   head  91,231 chars = ~32,817 billed  +62
 # Ceiling = measured head + the 55 band. Do not pick either side of a budget
 # conflict: re-measure the composed tree.
-BUDGET_BILLED_TOKENS = 32_872
+#
+# RAISED 32,872 -> 33,233 for STALE ASKS (PR-1, design ask-nonblocking §16 /
+# SA-D1): the guidance that tells a model WHEN to settle an ask it no longer
+# needs. Measured by THIS script on both trees with an isolated HOME, one run
+# each — tree 1 is origin/main eb21bbb5d, tree 2 this branch:
+#   base (origin/main eb21bbb5d)  91,310 chars = ~32,845 billed  PASS, 27 headroom
+#   head (this branch)            92,235 chars = ~33,178 billed
+#   delta                           +925 chars = ~+333
+# The whole delta is deliberate copy, in two blocks:
+#   +414 chars of instructions — ``system.md``'s queued-ask paragraph gains the
+#     settle rule (settle what the chat answered or mooted in the same turn, an
+#     answer is never a `moot`, 24 h only for a day-long decision). It is the
+#     one place a model can learn WHEN, and the investigation measured 16 of 40
+#     asks left open until prompted without it;
+#   +511 chars of ``tool_schemas`` — one clause on the ``ask`` queued
+#     description, the moot cases and the empty-list recipe on
+#     ``ask_withdraw``'s description, and the ids rule on
+#     ``AskWithdrawParams.answers``. The child arm does not carry either tool.
+# Both blocks are model-facing English (no i18n keys). The copy was trimmed
+# once; what remains states facts a model cannot infer, and the alternative —
+# keeping the floor by not saying them — is the defect the PR exists to fix.
+# Ceiling = measured head + the 55 band (33,178 + 55).
+BUDGET_BILLED_TOKENS = 33_233
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1784,7 +1806,18 @@ BUDGET_BILLED_TOKENS = 32_872
 # COMPOSED WITH LOH-9 S4 promotion on the same moved base: the SAME +63 billed
 # tokens as the top arm (both authoring tools ride every surface, children
 # included), measured 82,821 chars = ~29,792. Ceiling = 29,792 + the 55 band.
-BUDGET_CHILD_BILLED_TOKENS = 29_847
+#
+# RAISED (with the top arm, same day, same trees) 29,847 -> 30,024 for STALE
+# ASKS (PR-1, design ask-nonblocking §16 / SA-D1): the child arm carries neither
+# ``ask`` nor ``ask_withdraw``, so ``tool_schemas`` does NOT move and every char
+# of this arm's delta is the shared ``system.md`` paragraph:
+#   base (origin/main eb21bbb5d)  82,900 chars = ~29,820 billed  PASS, 27 headroom
+#   head (this branch)            83,314 chars = ~29,969 billed
+#   delta                           +414 chars = ~+149
+# The +414 is the same +414 the top arm's instructions block moves by — the
+# check that the child delta is that one paragraph and nothing else.
+# Ceiling = measured head + the 55 band (29,969 + 55).
+BUDGET_CHILD_BILLED_TOKENS = 30_024
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

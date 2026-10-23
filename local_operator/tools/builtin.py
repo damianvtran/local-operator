@@ -30524,6 +30524,7 @@ _ASK_DESCRIPTION_QUEUED = (
     "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
     "(floor 2 min); on a timeout notice take your own recommendation and say what "
     "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "Settle one with `ask_withdraw` the moment it stops mattering. "
     "To re-raise another session's pending ask instead, pass that one ask's "
     "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "
     "Credentials: secret=true on that question (see `read tool://ask`)."
@@ -30843,7 +30844,10 @@ class AskWithdrawParams(BaseModel):
         description=(
             "answered_in_chat only: the user's words verbatim, one cell per "
             "question the message answers and an empty list for a question it "
-            "does not cover. Every question id must appear."
+            "does not cover — an empty list closes that question unanswered in "
+            "the same write, so re-ask any you still need. Every question id "
+            "must appear, spelled exactly as it was asked; a key that is not a "
+            "question id is refused."
         ),
     )
 
@@ -30856,13 +30860,17 @@ class AskWithdrawParams(BaseModel):
 _ASK_WITHDRAW_DESCRIPTION = (
     "Close a queued ask you no longer need answered — the asker's own settle. "
     "reason='moot': the question stopped mattering (you found the answer "
-    "yourself, the work moved on); it settles as withdrawn and nothing more is "
-    "delivered for it. reason='answered_in_chat': the user's latest chat "
-    "message IS the answer — record their words VERBATIM in `answers`; the "
-    "standard response arrives as usual. If the user's message answers a "
-    "queued ask, settle it with this tool rather than leaving the ask reading "
-    "as waiting. A secret question cannot be settled from chat — its card is "
-    "the only path. A settled ask is refused with its own words; do not retry."
+    "yourself, the work moved on, or the user redirected or handed off the "
+    "work); it settles as withdrawn and nothing more is delivered for it. "
+    "reason='answered_in_chat': the user's latest chat message IS the answer — "
+    "an answer, even a paraphrase, is `answered_in_chat`, never `moot`: record "
+    "their words VERBATIM in `answers`; the standard response arrives as usual. "
+    "To settle only some of its questions, put the user's words in their cells "
+    "and an empty list on the rest — those close unanswered; re-ask any you "
+    "still need. If the user's message answers a queued ask, settle it with "
+    "this tool rather than leaving the ask reading as waiting. A secret "
+    "question cannot be settled from chat — its card is the only path. A "
+    "settled ask is refused with its own words; do not retry."
 )
 
 
