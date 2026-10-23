@@ -30770,7 +30770,21 @@ async def execute_ask(
             str(outcome.get("text") or ""),
             details=dict(outcome.get("details") or {}),
         )
-    answers = await ask_user(questions)
+    # A HOST THAT KNOWS IT CANNOT ASK REFUSES IN WORDS (review round 1,
+    # MINOR-1 / QA Q1). ``AskUnavailableError`` is raised only by the
+    # queued-only ask surface when something awaits it with the engine off;
+    # left to ``_guard`` it reached the model as "Tool 'ask' failed
+    # unexpectedly" plus a traceback of our own paths, which is the register
+    # ``_guard`` reserves for defects, not for a host stating a fact. Same
+    # reasoning as ``ApprovalUnavailableError``'s call sites. Imported here
+    # rather than at module scope for the reason every engine import in this
+    # function is: the runtime package is not on the tool module's path.
+    from local_operator.session.runtime.serving import AskUnavailableError
+
+    try:
+        answers = await ask_user(questions)
+    except AskUnavailableError as exc:
+        return _error(tool_call_id, "ask", str(exc))
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):
         # One outcome, whether the host answered None (escaped) or handed back
         # a mapping with nothing in it (confirmed an empty multi-select): the
