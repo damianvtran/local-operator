@@ -2,8 +2,8 @@
 import asyncio
 import hashlib
 import importlib.metadata
+import importlib
 import json
-import marshal
 import os
 from pathlib import Path
 import sys
@@ -23,20 +23,32 @@ def native_sources():
     return {p: hashlib.sha256(Path(dist.locate_file(p)).read_bytes()).hexdigest() for p in API}
 
 
-def compiled_hash():
-    # Independent static compilation BEFORE importing the producer; same exact
-    # source filename as the module loader, no arbitrary runtime frame access.
-    code = compile((ROOT / RELATIVE).read_bytes(), str(ROOT / RELATIVE), 'exec')
-    run = next(x for x in code.co_consts if type(x) is types.CodeType and x.co_name == 'run')
-    return hashlib.sha256(marshal.dumps(run)).hexdigest()
+def compiled_equal(actual, source, filename, source_sha):
+    if type(actual) is not types.FunctionType or type(actual.__code__) is not types.CodeType:
+        return False
+    if hashlib.sha256(source).hexdigest() != source_sha or actual.__code__.co_filename != filename:
+        return False
+    module = compile(source, filename, 'exec', flags=0, dont_inherit=True,
+                     optimize=sys.flags.optimize)
+    runs = [c for c in module.co_consts if type(c) is types.CodeType and c.co_name == 'run']
+    return len(runs) == 1 and actual.__code__ == runs[0]
+
+
+def observed_stage(stage, key, operation):
+    global STAGE
+    STAGE = stage
+    value = operation()
+    OBSERVED[key] = True
+    return value
 
 
 STAGE = 'SOURCE'
+OBSERVED = {}
 
 
-def build_return(identity, native, compiled, loaded, data):
+def build_return(identity, native, source_sha, equal, loaded, data):
     # Called only AFTER asyncio.run returns and thread closure is checked.
-    return dict(identity=identity, native_sources=native, compiled_producer=compiled,
+    return dict(identity=identity, native_sources=native, producer_source_sha256=source_sha, compiled_equal=equal,
                 loaded=loaded, data=data, executor_settled=True, threads_settled=True)
 
 
@@ -46,15 +58,18 @@ def main():
     for p, sha in expected['sources'].items():
         if hashlib.sha256((ROOT / p).read_bytes()).hexdigest() != sha:
             raise ValueError('source STOP')
-    if native_sources() != expected['native_sources'] or compiled_hash() != expected['compiled_producer']:
+    if native_sources() != expected['native_sources']:
         raise ValueError('native/compiled source STOP')
     for key in ('HOME','LOCAL_OPERATOR_CONFIG_DIR','TMPDIR','LOCAL_OPERATOR_RUNTIME_ROOT'):
         if not Path(os.environ[key]).resolve().is_relative_to(Path(os.environ['NATIVE_WORKER_ROOT']).resolve()):
             raise ValueError('isolation STOP')
-    STAGE = 'NATIVE_IMPORT'
-    from scripts.diagnostics.native_worker_6911 import producer
-    from tests import worker_code_identity, loop_callback_spans
-    from textual import worker, app, dom, timer, _work_decorator
+    producer = observed_stage('IMPORT_PRODUCER', 'producer_imported',
+        lambda: importlib.import_module('scripts.diagnostics.native_worker_6911.producer'))
+    worker_code_identity, loop_callback_spans = observed_stage('IMPORT_HELPERS', 'helpers_imported',
+        lambda: tuple(importlib.import_module(p) for p in ('tests.worker_code_identity','tests.loop_callback_spans')))
+    worker, app, _work_decorator, dom, timer = observed_stage('IMPORT_TEXTUAL', 'textual_imported',
+        lambda: tuple(importlib.import_module(p.replace('/', '.')[:-3]) for p in API))
+    STAGE = 'REPO_PATHS'
     modules = {'tests/worker_code_identity.py': worker_code_identity,
                'tests/loop_callback_spans.py': loop_callback_spans, RELATIVE: producer}
     loaded = {}
@@ -63,14 +78,21 @@ def main():
         if path != ROOT / p:
             raise ValueError('actual loaded source path STOP')
         loaded[p] = hashlib.sha256(path.read_bytes()).hexdigest()
+    OBSERVED['repo_paths'] = True
+    STAGE = 'NATIVE_PATHS'
     dist = importlib.metadata.distribution('textual')
     for label, module in zip(API, (worker, app, _work_decorator, dom, timer)):
         path = Path(module.__file__).resolve()
         if path != Path(dist.locate_file(label)).resolve():
             raise ValueError('actual native path STOP')
-    actual_code = hashlib.sha256(marshal.dumps(producer.run.__code__)).hexdigest()
-    if actual_code != expected['compiled_producer']:
-        raise ValueError('loaded compiled producer STOP')
+    OBSERVED['native_paths'] = True
+    STAGE = 'COMPILED_COMPARE'
+    source = (ROOT / RELATIVE).read_bytes()
+    source_sha = hashlib.sha256(source).hexdigest()
+    equal = compiled_equal(producer.run, source, str(ROOT / RELATIVE), expected['producer_source_sha256'])
+    if equal is not True:
+        raise ValueError('compiled structural comparison STOP')
+    OBSERVED['compiled_equal'] = True
     STAGE = 'IDENTITY'
     identity = dict(python=list(sys.version_info[:3]),
         executable_sha256=hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest(),
@@ -86,7 +108,7 @@ def main():
     if threading.active_count() != 1:
         raise ValueError('owned live Python threads STOP')
     STAGE = 'COMPLETE'
-    return build_return(identity, native_sources(), actual_code, loaded, result)
+    return build_return(identity, native_sources(), source_sha, equal, loaded, result)
 
 
 if __name__ == '__main__':
@@ -94,7 +116,7 @@ if __name__ == '__main__':
         proof = main()
         code = 0
     except BaseException:
-        proof = {'stage': STAGE}
+        proof = {'stage': STAGE, 'observed': dict(OBSERVED)}
         code = 1
     raw = json.dumps(proof)
     if len(raw.encode()) > 262144:
