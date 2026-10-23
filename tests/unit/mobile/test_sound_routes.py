@@ -219,8 +219,9 @@ def test_sound_bytes_require_a_reference_in_this_session(session: dict[str, Any]
         == 404
     )
     assert (
-        client.get(f"/api/sessions/{OTHER_SESSION}/sound", params={"digest": unreferenced.digest})
-        .status_code
+        client.get(
+            f"/api/sessions/{OTHER_SESSION}/sound", params={"digest": unreferenced.digest}
+        ).status_code
         == 200
     )
 
@@ -303,8 +304,9 @@ def test_session_waveform_sidecar_and_absence(session: dict[str, Any]) -> None:
 
     assert client.get(url, params={"digest": "NOTHEX"}).status_code == 400
     assert (
-        client.get("/api/sessions/not-a-session/waveform", params={"digest": session["digest"]})
-        .status_code
+        client.get(
+            "/api/sessions/not-a-session/waveform", params={"digest": session["digest"]}
+        ).status_code
         == 404
     )
 
