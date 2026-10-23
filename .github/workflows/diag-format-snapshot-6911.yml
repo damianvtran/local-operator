@@ -34,6 +34,7 @@ jobs:
           path: |
             ${{ runner.temp }}/format-delivery-6911/format.patch
             ${{ runner.temp }}/format-delivery-6911/format.json
+            ${{ runner.temp }}/format-delivery-6911/protected-s2-observation.txt
           retention-days: 3
       - name: Remove delivered local outputs after artifact handoff
         if: always()

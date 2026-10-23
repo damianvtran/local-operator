@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from scripts.diagnostics.lfs_pair_6911.controller import finish_owned, owned, table
-from scripts.diagnostics.format_snapshot_6911.worker import check_sources
+from scripts.diagnostics.format_snapshot_6911.worker import check_sources, read_observation
 ROOT=Path(__file__).resolve().parents[3]
 
 
@@ -19,11 +19,11 @@ def read_worker_proof(out,expected_before):
         path=out/'format.json'
         if path.is_symlink() or not path.is_file() or path.stat().st_size>65536:return unknown
         proof=json.loads(path.read_bytes())
-        base={'qualified','stage','tools'}
+        base={'qualified','stage','tools','observation'}
         success={'ast_compatible','protected_byte_equal','patch_sha256','before','after'}
         if type(proof) is not dict or type(proof.get('qualified')) is not bool:return unknown
         if set(proof)!=(base|success if proof['qualified'] else base):return unknown
-        if proof['stage'] not in ('SOURCE_SETUP','TOOLS','COMPATIBILITY','READBACK','AST_COMPARE_0','AST_COMPARE_1','AST_COMPARE_2','AST_COMPARE_3','PROTECTED_S2','PROTECTED_SLOW','PATCH_BUILD','PATCH_CAP','PATCH_READY','COMPLETE'):return unknown
+        if proof['stage'] not in ('SOURCE_SETUP','TOOLS','COMPATIBILITY','READBACK','AST_COMPARE_0','AST_COMPARE_1','AST_COMPARE_2','AST_COMPARE_3','PROTECTED_S2','PROTECTED_S2_EXTRACT_BEFORE','PROTECTED_S2_EXTRACT_AFTER','PROTECTED_S2_COMPARE','PROTECTED_SLOW','PATCH_BUILD','PATCH_CAP','PATCH_READY','COMPLETE'):return unknown
         labels=('isort-format','black-format','black-check','isort-check','flake8-check')
         tools=proof['tools']
         if type(tools) is not list or len(tools)!=5:return unknown
@@ -40,9 +40,11 @@ def read_worker_proof(out,expected_before):
             if item['rc'] is not None and type(item['rc']) is not int:return unknown
             if item['reason'] not in ('PASS','TOOL_FAILURE','LAUNCH_FAILURE','TIMEOUT','OUTPUT_CAP','MONITOR_FAILURE','SETTLEMENT_FAILURE'):return unknown
             if item['reason']=='PASS' and not (item['rc']==0 and type(item['rc']) is int and all(item[k] for k in ('launched','completed','reaped','settled')) and not any(item[k] for k in ('timeout','cap','monitor_failed'))):return unknown
+        observed=read_observation(proof['observation'],out)
         if not proof['qualified']:
             if proof['stage']=='COMPLETE':return unknown
-            return dict(qualified=False,stage=proof['stage'],tools=tools)
+            return dict(qualified=False,stage=proof['stage'],tools=tools,observation=observed)
+        if observed is None or observed['compare_ok'] is not True or observed['byte_equal'] is not True:return unknown
         if proof['stage']!='COMPLETE' or any(x['reason']!='PASS' for x in tools):return unknown
         if proof['ast_compatible'] is not True or proof['protected_byte_equal'] is not True:return unknown
         def sha(v):return type(v) is str and len(v)==64 and all(c in '0123456789abcdef' for c in v)
