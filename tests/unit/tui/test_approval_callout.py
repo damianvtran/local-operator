@@ -650,7 +650,12 @@ async def test_the_allow_consequence_follows_the_saved_policy(config_dir: Path) 
     opposite of the confirmation two rows above (U3/D3). The swap is
     description-only: the card's height must not move.
     """
+    from local_operator.config import ConfigManager
     from tests.unit.tui.test_approvals_ux import _submit
+
+    # Pin the FILE's mode: the app reads it at boot, and a leaked default would
+    # change which wording is correct, not merely when it arrives.
+    ConfigManager(config_dir).set_config_value("tool_approval_mode", "ask")
 
     session = GatedSession()
     app = OperatorApp(lambda: _factory(session))
@@ -658,22 +663,36 @@ async def test_the_allow_consequence_follows_the_saved_policy(config_dir: Path) 
         await _boot(pilot, app)
         pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
         card = await _card(pilot, app)
-        # Wait for the ROOMY plan: the first frames after a mount can be
-        # measured while the dock is still growing, and the descriptions are
-        # the first thing the budget sheds (the card's own documented ladder).
-        before = ""
-        for _ in range(40):
-            await pilot.pause()
-            before = "\n".join(_lines(card))
-            if "run this call and ask again next time" in before:
-                break
+
+        async def _roomy(needle: str, *, seconds: float = 10.0) -> str:
+            """The settled ROOMY frame containing ``needle``, or a real failure.
+
+            A fixed number of pauses bet on how fast the dock grows under CI
+            load; the observable is the geometry plus the expected copy. The
+            card's own ladder sheds descriptions while the budget is brief, so
+            a timeout here is either a real layout regression or a plan that
+            never got its width — name both in the failure.
+            """
+            deadline = asyncio.get_running_loop().time() + seconds
+            text = ""
+            while True:
+                await pilot.pause(0.05)
+                text = "\n".join(_lines(card))
+                if needle in text and card.size.width >= 96:
+                    return text
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError(
+                        f"{needle!r} never reached a roomy frame: size={card.size} "
+                        f"region={card._body.region} lines={_lines(card)}"
+                    )
+
+        before = await _roomy("run this call and ask again next time")
         assert "run this call and ask again next time" in before, before
         before_rows = len(_lines(card))
 
         await pilot.press("S")
-        await pilot.pause()
         assert card._policy.mode == "auto", card._policy
-        after = "\n".join(_lines(card))
+        after = await _roomy("run this call; later calls are auto")
         assert "run this call; later calls are auto" in after, after
         assert "run this call and ask again next time" not in after, after
         assert len(_lines(card)) == before_rows, "the swap moved a row"
@@ -686,21 +705,7 @@ async def test_the_allow_consequence_follows_the_saved_policy(config_dir: Path) 
         app.query_one(Editor).focus()
         await pilot.pause()
         await _submit(pilot, app, "/approvals ask")
-        restored = ""
-        for _ in range(40):
-            await pilot.pause()
-            restored = "\n".join(_lines(card))
-            # Wait for the SETTLED frame: the first non-empty read after a
-            # command can still be the previous paint, and the claim here is
-            # about the wording the reader ends up with.
-            if "run this call and ask again next time" in restored:
-                break
-        assert "run this call and ask again next time" in restored, (
-            restored,
-            card.is_mounted,
-            card.display,
-            app._approval is card,
-        )
+        await _roomy("run this call and ask again next time")
         await pilot.press("n")
         await asyncio.wait_for(pending, 2)
 
