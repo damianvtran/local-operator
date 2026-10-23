@@ -863,6 +863,18 @@ def empty_listing(query: Query, *, state: str = "ready") -> dict[str, Any]:
 #: A name this long is a prompt, not a label. Longer is cut BEFORE the extension is fixed.
 _NAME_MAX_CHARS: Final = 80
 _SAFE_CHARS: Final = re.compile(r"[^A-Za-z0-9._ -]+")
+
+
+def _safe_stem(text: str) -> str:
+    """Replace anything but unicode alphanumerics and ``._ -`` with ``_``.
+
+    A function rather than the ASCII character class used for extensions: ``str.isalnum``
+    is unicode-aware, so a request-derived name keeps its letters (D1) while separators,
+    NUL and punctuation still collapse.
+    """
+    return "".join(ch if (ch.isalnum() or ch in "._ -") else "_" for ch in text)
+
+
 #: ``mimetypes`` maps ``image/jpeg`` to ``.jpe`` on some platforms; prefer the spellings people
 #: expect, and only fall back to the registry for the rest.
 _PREFERRED_EXT: Final = {
@@ -882,14 +894,19 @@ def sanitise_name(name: str | None, digest: str, content_type: str | None) -> st
     """A single safe path component for a materialised artifact.
 
     The name originates in a provider-influenced transcript row, so it is treated as hostile:
-    only its last path component survives (``../../x.png`` -> ``x.png``), everything outside
-    ``[A-Za-z0-9._ -]`` becomes ``_``, leading dots are stripped (no hidden files, no ``..``),
-    and the EXTENSION is re-derived from the MIME type so ``photo.png`` holding JPEG bytes is
-    saved as ``photo.jpg``. An empty result falls back to ``artifact-<digest[:8]>``.
+    only its last path component survives (``../../x.png`` -> ``x.png``), characters outside
+    unicode alphanumerics and ``._ -`` become ``_``, leading dots are stripped (no hidden
+    files, no ``..``), and the EXTENSION is re-derived from the MIME type (ASCII-only) so
+    ``photo.png`` holding JPEG bytes is saved as ``photo.jpg``. An empty result falls back to
+    ``artifact-<digest[:8]>``.
+
+    Unicode is kept in the STEM on purpose: the Library shows the request-derived label, so
+    a CJK or accented name must round-trip to a readable file rather than ``artifact-<digest>``
+    (design review D1). The extension stays ASCII because it is a MIME fact, not prose.
     """
     raw = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
     stem, ext = os.path.splitext(raw)
-    stem = _SAFE_CHARS.sub("_", stem).strip(" .-_")[:_NAME_MAX_CHARS] or f"artifact-{digest[:8]}"
+    stem = _safe_stem(stem).strip(" .-_")[:_NAME_MAX_CHARS] or f"artifact-{digest[:8]}"
     mime = (content_type or "").split(";")[0].strip().lower()
     chosen = _PREFERRED_EXT.get(mime) or mimetypes.guess_extension(mime) or ""
     if not chosen:

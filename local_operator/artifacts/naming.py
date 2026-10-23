@@ -45,7 +45,7 @@ from __future__ import annotations
 import mimetypes
 import re
 
-__all__ = ["media_filename"]
+__all__ = ["media_filename", "media_stem"]
 
 #: Preferred extensions per content type. The lanes' surfaces and stores key
 #: off these spellings, and ``mimetypes`` alone disagrees on some of them
@@ -59,6 +59,11 @@ _CONTENT_TYPE_EXTENSIONS = {
     "audio/mp3": ".mp3",
     "audio/wav": ".wav",
     "audio/x-wav": ".wav",
+    "audio/flac": ".flac",
+    "audio/x-flac": ".flac",
+    "audio/ogg": ".ogg",
+    "audio/opus": ".opus",
+    "audio/webm": ".weba",
     "video/mp4": ".mp4",
     "video/webm": ".webm",
     "video/quicktime": ".mov",
@@ -81,14 +86,20 @@ _MAX_STEM_CHARS = 60
 _LEADING_ARTICLE = re.compile(r"^(?:a|an|the)[\s,;:.!?_-]+", re.IGNORECASE)
 
 
-def _slug(text: str) -> str:
+def _slug(text: str, *, strip_article: bool = False) -> str:
     """Lowercase alnum runs joined by single ``-``; ``""`` when nothing is left.
 
     Unicode letters/digits survive (``.casefold()`` then ``isalnum``), which
     keeps a Japanese or accented prompt recognisable; everything else — path
     separators, NUL, punctuation, underscores — collapses to the separator.
+
+    ``strip_article`` is for the PROMPT path only. A prompt is a sentence, and
+    a leading "A"/"An"/"The" is noise in a filename; a suggested stem is a
+    name the caller already chose, so ``the-great-wave`` keeps its article.
     """
-    folded = _LEADING_ARTICLE.sub("", text.casefold(), count=1)
+    folded = text.casefold()
+    if strip_article:
+        folded = _LEADING_ARTICLE.sub("", folded, count=1)
     joined = "".join(ch if ch.isalnum() else "-" for ch in folded)
     return re.sub(r"-+", "-", joined).strip("-")
 
@@ -137,6 +148,26 @@ def _extension(content_type: str | None, kind: str) -> str:
     return _KIND_EXTENSIONS.get(kind, _UNKNOWN_EXTENSION)
 
 
+def media_stem(
+    prompt: str | None,
+    *,
+    suggested: str | None = None,
+    kind: str = "media",
+    index: int = 1,
+) -> str:
+    """``red-fox-in-snow`` — the name without a suffix, for labels.
+
+    Preference order: the agent-supplied ``suggested`` stem, else the prompt,
+    else the kind word (``image``/``audio``/``video``/``media``). Split out of
+    :func:`media_filename` so a surface that has no bytes yet (batch progress
+    for a clip the provider has not returned) labels the item without guessing
+    an extension, and so the extension can never disagree with the bytes.
+    """
+    stem = _from_suggestion(suggested) or _slug(prompt or "", strip_article=True) or kind
+    stem = _cap(stem)
+    return f"{stem}-{index}" if index >= 2 else stem
+
+
 def media_filename(
     prompt: str | None,
     content_type: str | None,
@@ -147,12 +178,10 @@ def media_filename(
 ) -> str:
     """``red-fox-in-snow.png`` — the display name for one generated asset.
 
-    Preference order: the agent-supplied ``suggested`` stem, else the prompt,
-    else the kind word (``image``/``audio``/``video``/``media``). The extension
-    always comes from ``content_type``, and ``index >= 2`` numbers assets that
-    one call returned together.
+    The stem follows :func:`media_stem`; the extension always comes from
+    ``content_type``. ``index >= 2`` numbers assets that one call returned
+    together.
     """
-    stem = _from_suggestion(suggested) or _slug(prompt or "") or kind
-    stem = _cap(stem)
-    suffix = f"-{index}" if index >= 2 else ""
-    return f"{stem}{suffix}{_extension(content_type, kind)}"
+    return media_stem(prompt, suggested=suggested, kind=kind, index=index) + _extension(
+        content_type, kind
+    )

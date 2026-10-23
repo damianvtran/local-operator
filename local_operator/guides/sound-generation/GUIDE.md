@@ -147,7 +147,7 @@ display name — the Library row, the caption label and the session-file entry �
 from a short lowercase hyphenated stem, no extension:
 
 ```json
-{"text":"Welcome back — the build finished.","filename":"welcome-message"}
+{"text":"Welcome back — the build finished.","filename":"build-finished-announcement"}
 ```
 
 Omitted, the stem derives from the request (the spoken text for a voiceover,
@@ -155,9 +155,8 @@ the prompt for a sound effect): `A kettle whistling` → `kettle-whistling`. The
 extension always follows the returned bytes (`audio/wav` → `.wav`), never the
 stem. A stem is a label, not a path: separators and `..` are sanitised away,
 and the file materialises under the session's `scratchpad/generated/`; two
-different clips with one name never overwrite — the second gets a short digest
-suffix. A clip that arrives after a best-effort cancel is named from its prompt
-too, so it lands in the Library beside its siblings.
+different clips with one name never overwrite — the second FILE gets a short
+digest suffix, while its Library row and caption keep the requested label.
 
 ## The result
 

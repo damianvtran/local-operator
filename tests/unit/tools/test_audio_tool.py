@@ -1111,6 +1111,7 @@ async def test_accepted_cancel_revises_the_same_charge(
         {"sounds": []},
         {"sounds": [{"prompt": "click", "duration_s": 1}], "prompt": "other"},
         {"sounds": [{"prompt": "click", "duration_s": 1}], "duration_s": None},
+        {"sounds": [{"prompt": "click", "duration_s": 1}], "filename": "inert-stem"},
         {"sounds": [{"prompt": "click", "duration_s": 1}] * 51},
     ],
 )

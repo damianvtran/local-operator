@@ -103,9 +103,9 @@ session-file entry — from a short lowercase hyphenated stem, no extension:
 Omitted, the stem derives from the prompt. The extension always follows the
 returned bytes (`video/webm` → `.webm`), never the stem. A stem is a label, not
 a path: separators and `..` are sanitised away, and the file materialises under
-the session's `scratchpad/generated/`; two different videos with one name never
-overwrite — the second gets a short digest suffix. A job record written before
-`filename` existed still names its asset from its prompt.
+the session's `scratchpad/generated/`; two different videos with one name
+never overwrite — the second FILE gets a short digest suffix, while its Library
+row and caption keep the requested label.
 
 ## Collecting the result — `video_status`
 

@@ -716,6 +716,30 @@ def test_sanitise_name_unit() -> None:
     assert f(None, "abcdef0123456789" * 2, "image/webp") == "artifact-abcdef01.webp"
     assert f("", "d" * 32, "application/x-unknown") == "artifact-dddddddd.bin"
     assert f("a b!c.png", "d" * 32, "image/png") == "a b_c.png"
+    # Unicode stems survive the stem sanitiser (D1): the Library shows a
+    # request-derived name, so a CJK/accented stem must not become "artifact".
+    assert f("café-über-日本.png", "d" * 32, "image/png") == "café-über-日本.png"
+    assert f("Ünïcode Name.png", "d" * 32, "image/png") == "Ünïcode Name.png"
+    # Hostile shapes stay refused/neutralised.
+    assert f("../../etc/passwd", "d" * 32, "image/png") == "passwd.png"
+    assert f("..", "d" * 32, "image/png") == "artifact-dddddddd.png"
+    assert f("na\x00me.png", "d" * 32, "image/png") == "na_me.png"
+    assert f(".hidden.png", "d" * 32, "image/png") == "hidden.png"
+
+
+def test_materialise_keeps_the_unicode_library_name(world: World) -> None:
+    """The Library row's name and the materialised file's name are the same."""
+    name = "café-über-日本.png"
+    digest = world.artifact(seed=3, name=name)
+    write_journal(
+        world.session_dir,
+        generate_image_rows(1, 5.0, digest, name=name, with_artifacts=True),
+    )
+    (row,) = [r for r in world.list()["rows"] if r["ref"].get("digest") == digest]
+    receipt = service.materialise(world.config, world.family(), row["id"], home=str(world.tmp))
+    target = Path(receipt["path"])
+    assert target.name == name == row["name"]
+    assert target.read_bytes() == png(seed=3)
 
 
 def test_grandchild_family_member_materialises_to_the_url_sessions_scratchpad(world: World) -> None:

@@ -60,7 +60,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from local_operator.artifacts.naming import media_filename
+from local_operator.artifacts.naming import media_filename, media_stem
 from local_operator.artifacts.progress import ProgressFn
 from local_operator.audiogen import AudioRoute
 from local_operator.audiogen import availability as audio_availability
@@ -928,13 +928,11 @@ async def _execute_sound_batch(
     from local_operator.harness.types import AttachmentContent
 
     sounds = params.sounds or []
-    # Provisional handles for progress BEFORE any bytes exist (the extension is
-    # unknown until the provider answers; ``.mp3`` is this lane's default).
-    # The registered artifact's own name replaces it in the final row/caption.
-    names = [
-        media_filename(item.prompt, None, suggested=item.name, kind="audio") for item in sounds
-    ]
-    hints = [item.name for item in sounds]
+    # STEMS, not filenames: the provider's bytes decide the extension, and a
+    # provisional ".mp3" is a guess the final row would then contradict. The
+    # registered artifact's own name supplies the real extension.
+    names = [media_stem(item.prompt, suggested=item.name, kind="audio") for item in sounds]
+    hints = list(names)
     results: list[ToolResult | None] = [None] * len(sounds)
     started: set[int] = set()
     queue = iter(enumerate(sounds))

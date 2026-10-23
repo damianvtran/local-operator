@@ -331,7 +331,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # 494 -> 568 (media artifact naming): the new ``filename`` field for the
     # single form and the ``name`` field re-described as that item's filename
     # stem. Load-bearing naming discovery; the guide holds the rules.
-    "generate_sound_effect": 568,
+    # 568 -> 570 (round-1 m1/Q-1): the ``sounds`` description now names
+    # ``filename`` in the exclusivity clause, so the inert combination is
+    # refused rather than silently ignored.
+    "generate_sound_effect": 570,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
