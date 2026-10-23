@@ -669,6 +669,66 @@ def test_the_cache_is_reused_and_revalidated_against_the_archive(
     assert third is not None and third.exists()
 
 
+def test_a_damaged_archive_is_reported_as_damage_not_as_a_full_disk(tmp_path: Path) -> None:
+    """m-1: a truncated archive must not read as "not enough space".
+
+    The read-only resolver opened the archive's HEADER, then said "not enough space
+    to make a temporary plain copy" whenever the cache copy failed — including when
+    the failure was a MID-STREAM decode error. A support triage that follows that
+    sentence frees a disk that was never full and never touches the damaged file.
+    The two causes are typed now: ``ArchiveCorrupt`` names the decode, and
+    ``ArchiveCacheUnavailable`` is reserved for the host.
+    """
+    config = _store(tmp_path)
+    directory = _session(config, "corrupt1")
+    assert compression.compress_session(directory).status == "compressed"
+    archive = compression.archive_path(directory)
+    assert archive is not None
+    payload = archive.read_bytes()
+    # Cut the LAST DECILE rather than half: the header and the first block still
+    # read, so the failure lands mid-stream — exactly the shape the reviewer
+    # reproduced, where the header-open succeeded and the old code then blamed the
+    # disk.
+    archive.write_bytes(payload[: len(payload) - max(1, len(payload) // 10)])
+
+    with pytest.raises(compression.ArchiveCorrupt) as caught:
+        compression.transcript_for_read(directory, read_only=True)
+    message = str(caught.value)
+    assert not isinstance(caught.value, compression.ArchiveCacheUnavailable)
+    assert "not enough space" not in message, message
+    assert archive.name in message, message
+    assert "ended" in message or "decoded" in message, message
+    # The archive is untouched and no plain file was published over it.
+    assert archive.is_file()
+    assert not (directory / compression.PLAIN_FILENAME).exists()
+
+
+def test_a_full_cache_volume_is_reported_as_cache_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-1, the other direction: a host with no room says so, and says exactly that.
+
+    Read-only callers may not restore in place (that is the point of the flag), so the
+    cache is their only route to a path. When it cannot be written the answer is the
+    HOST fact, typed, and the archive is left exactly as it was.
+    """
+    config = _store(tmp_path)
+    directory = _session(config, "fullcache1")
+    assert compression.compress_session(directory).status == "compressed"
+    archive = compression.archive_path(directory)
+    assert archive is not None
+    monkeypatch.setattr(compression, "_free_bytes", lambda path: 0)
+
+    with pytest.raises(compression.ArchiveCacheUnavailable) as caught:
+        compression.transcript_for_read(directory, read_only=True)
+    message = str(caught.value)
+    assert "not enough space" in message and archive.name in message, message
+    # Typed apart from damage, so a caller can retry after freeing room.
+    assert not isinstance(caught.value, compression.ArchiveCorrupt)
+    assert archive.is_file()
+    assert not (directory / compression.PLAIN_FILENAME).exists()
+
+
 def test_the_cache_evicts_down_to_its_bounds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1238,7 +1298,9 @@ def test_the_cache_gate_budgets_the_decompressed_write(tmp_path: Path) -> None:
     ``_materialise`` writes plain bytes, so budgeting the archive's compressed
     size left a cache volume that had just over ``archive + reserve`` free to be
     filled to roughly ``4x archive`` — below the documented reserve. 5x is the
-    explicit estimate; below it the documented restore-in-place fallback applies.
+    explicit estimate; below it the typed host error says so, which a WRITING
+    caller turns into the restore-in-place fallback (review m-1 split that error
+    from ``ArchiveCorrupt``).
     """
     config = _store(tmp_path)
     directory = _session(config, "cachemem")
@@ -1252,9 +1314,8 @@ def test_the_cache_gate_budgets_the_decompressed_write(tmp_path: Path) -> None:
         # Just over the OLD budget (archive + reserve) but under the real one.
         tight = archive_size + compression.CACHE_FREE_RESERVE_BYTES + 1024
         compression._free_bytes = lambda path: tight  # type: ignore[assignment]
-        assert (
-            compression._materialise(directory, archive, "gzip") is None
-        ), "a cache volume sized for the COMPRESSED bytes was accepted"
+        with pytest.raises(compression.ArchiveCacheUnavailable):
+            compression._materialise(directory, archive, "gzip")
 
         roomy = archive_size * compression.CACHE_EXPANSION_ESTIMATE + 1024
         compression._free_bytes = lambda path: roomy + compression.CACHE_FREE_RESERVE_BYTES

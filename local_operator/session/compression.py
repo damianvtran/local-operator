@@ -245,6 +245,7 @@ __all__ = [
     "transcript_source",
     "unreadable_archive_error",
     "write_last_compression",
+    "write_listing_preview",
 ]
 
 
@@ -270,6 +271,18 @@ class ArchiveUnavailable(ArchiveError):
 
 class ArchiveCorrupt(ArchiveError):
     """The archive exists but did not decode."""
+
+
+class ArchiveCacheUnavailable(ArchiveError):
+    """The archive is readable; THIS HOST could not make the temporary plain copy.
+
+    Distinct from :class:`ArchiveCorrupt` because nothing is wrong with the archive:
+    the cache volume has no room, or its directory cannot be created, and the same
+    call succeeds once the host has room or permission. The two used to collapse into
+    one sentence ("not enough space") whenever the cache failed after a successful
+    header-open, which reported a truncated archive as a full disk and sent triage
+    after the wrong fact (review round 3, m-1).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +700,39 @@ def read_listing_preview(directory: Path) -> dict[str, Any] | None:
     return payload
 
 
+def write_listing_preview(directory: Path, window: bytes, *, truncated: bool) -> bool:
+    """Record ``preview.json`` for a tail window a caller has ALREADY read.
+
+    THE ONCE-PER-PROCESS HALF OF THE CONTRACT. ``preview.json`` exists so a listing
+    row is one small read instead of a decompression, and the compression pass is
+    the writer that keeps that true for archives IT made. An archive that predates
+    the sidecar (or that was copied in by hand) had no such writer: every listing
+    row, in every process, streamed the whole archive again — measured at 19.5 ms
+    a row on a 4.8 MB archive against 0.1 ms with the sidecar (review round 3,
+    m-2). ``resume._tail_entries`` has just paid for that window, so this is the
+    place the cost can be retired for the next process too.
+
+    REFUSES THE PLAIN STATE ON PURPOSE: a sidecar beside ``transcript.jsonl``
+    describes an archive that is no longer there, and ``read_listing_preview``
+    would refuse it anyway — the same answer the restore already gives, made
+    before a byte is written. Advisory like every sidecar writer here: a failure
+    costs a slow row, never the preview.
+    """
+    directory = Path(directory)
+    try:
+        if plain_path(directory).exists() or archive_path(directory) is None:
+            return False
+    except OSError:
+        return False
+    try:
+        from local_operator.resume import listing_preview_from_tail
+    except Exception:  # noqa: BLE001 - a missing helper costs a slow row, not a preview
+        logger.warning("transcript compression: preview rules unavailable", exc_info=True)
+        return False
+    _write_preview_sidecar(directory, listing_preview_from_tail(window, truncated=truncated))
+    return True
+
+
 def iter_lines(directory: Path) -> Iterator[str]:
     """Yield the transcript's lines as text, decompressing on the fly.
 
@@ -842,11 +888,15 @@ def _evict_cache(root: Path) -> None:
         remaining -= 1
 
 
-def _materialise(directory: Path, archive: Path, codec: str) -> Path | None:
-    """Decompress ``archive`` into the cache; ``None`` on any failure.
+def _materialise(directory: Path, archive: Path, codec: str) -> Path:
+    """Decompress ``archive`` into the cache and return the copy's path.
 
-    Callers fall back to :func:`restore_for_write` when this returns ``None``,
-    so a full or unwritable cache volume costs a restore, never a read.
+    Raises one of TWO TYPED REASONS, because the caller's report differs:
+    :class:`ArchiveCacheUnavailable` when this host could not make the copy (the
+    cache directory, the space, the write) and :class:`ArchiveCorrupt` when the
+    archive itself did not decode. Callers fall back to :func:`restore_for_write`
+    for either, so a full or unwritable cache volume still costs a restore, never a
+    read.
     """
     entry = _cache_entry_dir(directory)
     plain = entry / PLAIN_FILENAME
@@ -854,18 +904,24 @@ def _materialise(directory: Path, archive: Path, codec: str) -> Path | None:
         entry.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         logger.info("transcript compression: cache unavailable for %s: %s", directory.name, exc)
-        return None
+        raise ArchiveCacheUnavailable(
+            f"{archive.name}: the transcript cache could not be created ({exc.strerror or exc})"
+        ) from exc
     try:
         archive_stat = archive.stat()
-    except OSError:
-        return None
+    except OSError as exc:
+        raise ArchiveCorrupt(f"{archive.name}: the archive could not be read ({exc})") from exc
     needed = archive_stat.st_size * CACHE_EXPANSION_ESTIMATE
-    if _free_bytes(entry) < needed + CACHE_FREE_RESERVE_BYTES:
+    free = _free_bytes(entry)
+    if free < needed + CACHE_FREE_RESERVE_BYTES:
         logger.info(
             "transcript compression: low disk space, restoring %s in place instead of caching",
             directory.name,
         )
-        return None
+        raise ArchiveCacheUnavailable(
+            f"{archive.name}: not enough space to make a temporary plain copy "
+            f"({free} bytes free, about {needed} needed)"
+        )
     tmp = entry / f".{PLAIN_FILENAME}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     try:
         _reserve(tmp)
@@ -877,7 +933,16 @@ def _materialise(directory: Path, archive: Path, codec: str) -> Path | None:
         logger.warning("transcript compression: cannot cache %s: %s", directory.name, exc)
         _unlink_file(tmp)
         _unlink_file(plain)
-        return None
+        if isinstance(exc, ArchiveError):
+            raise ArchiveCorrupt(
+                f"{archive.name}: could not be decoded into a readable copy ({codec}: {exc})"
+            ) from exc
+        # A HOST failure, not damage: the volume filled between the free-space
+        # precheck and the write, went read-only, or the name collided. Classified
+        # here rather than by errno so every write failure gets the honest answer.
+        raise ArchiveCacheUnavailable(
+            f"{archive.name}: the temporary plain copy could not be written ({exc})"
+        ) from exc
     _write_json_atomic(
         entry / ".meta.json",
         {
@@ -912,8 +977,12 @@ def transcript_for_read(directory: Path, *, read_only: bool = False) -> Path | N
     error.
 
     Raises :class:`ArchiveError` when an archive exists but cannot be decoded
-    (including the cross-version zstd case). A caller that only needs "does this
-    session have a body" wants :func:`has_transcript`, which never raises.
+    (including the cross-version zstd case), and its :class:`ArchiveCacheUnavailable`
+    subclass when the archive IS readable but this host could not make the temporary
+    copy — a cache volume with no room, an unwritable cache directory. The two are
+    separate types because the remedies differ: free space versus repair the file. A
+    caller that only needs "does this session have a body" wants :func:`has_transcript`,
+    which never raises.
     """
     directory = Path(directory)
     plain = plain_path(directory)
@@ -935,17 +1004,25 @@ def transcript_for_read(directory: Path, *, read_only: bool = False) -> Path | N
     cached = _cached_plain(directory, archive, codec)
     if cached is not None:
         return cached
-    materialised = _materialise(directory, archive, codec)
-    if materialised is not None:
-        return materialised
-    if read_only:
-        # Decoding works (the reader above opened it); the COPY could not be
-        # made. Naming space rather than damage keeps a full disk from
-        # masquerading as a broken archive in a support triage.
-        raise ArchiveCorrupt(f"{archive.name}: not enough space to make a temporary plain copy")
-    if restore_for_write(directory):
-        return plain
-    raise ArchiveCorrupt(f"{archive.name}: could not be decoded into a readable copy")
+    try:
+        return _materialise(directory, archive, codec)
+    except (ArchiveCorrupt, ArchiveCacheUnavailable) as failure:
+        # TWO REASONS, TWO REPORTS, and the read-only caller gets the real one. The
+        # cache copy failed either because the archive did not decode or because
+        # this host could not write the copy; naming the second as the first (or
+        # the first as "not enough space", which is what this did) is what review
+        # round 3's m-1 measured on a truncated archive.
+        if read_only:
+            raise
+        if restore_for_write(directory):
+            return plain
+        if isinstance(failure, ArchiveCacheUnavailable):
+            raise ArchiveCacheUnavailable(
+                f"{failure}; restoring in place failed too, so no plain copy could be made"
+            ) from failure
+        raise ArchiveCorrupt(
+            f"{archive.name}: could not be decoded into a readable copy"
+        ) from failure
 
 
 # ---------------------------------------------------------------------------
