@@ -344,7 +344,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # on Radient, per generation on a BYOK key), the negative-prompt rule and
     # the BYOK vendor-logging limit. Measured by this test's own printed table
     # under the canonical hermetic arm; only the two audio entries moved.
-    "generate_sound_effect": 739,
+    # 739 -> 725 (review round 1, M1): the "per generation ~200 credits" claim
+    # was wrong for the request shape this tool always sends; the corrected
+    # sentence (40 credits per second of requested duration) is shorter.
+    "generate_sound_effect": 725,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -366,7 +369,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # 668 -> 788 (sfx-quality, 2026-10-23): the MP3 sentence now carries the
     # 192/128 preference and fallback, and the doc states the BYOK
     # vendor-logging limit. Same measured table, same canonical arm.
-    "generate_voiceover": 788,
+    # 788 -> 812 (review round 1, M1): one sentence names the BYOK voiceover
+    # meter (per character; the estimate is per 1,000 characters).
+    "generate_voiceover": 812,
     "glob": 87,
     "grep": 333,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six

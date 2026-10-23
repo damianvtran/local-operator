@@ -85,12 +85,12 @@ login picks them up at the NEXT session start.
   can price the call, the estimated amount BEFORE the spend.
 - Spend lands in the `audio` channel of the session's cost ledger (and the
   analytics store) as "Generated audio", with the estimate flag preserved.
-- **Length is a spend knob on Radient, and not on a BYOK key.** Radient
-  prices generated audio per second, so `duration_s` is what a longer clip
-  costs. A stored ElevenLabs key is billed by the vendor per generation
-  (~200 credits) however long the clip is; the harness's per-second figure
-  for that route is a comparable estimate from its rate table, not what the
-  provider account will show. Do not read the two as the same meter.
+- **Length is a spend lever on both sound-effect meters.** Radient bills
+  $0.002 per started second of generated audio (the server quotes and
+  settles it). A stored ElevenLabs key is billed by the vendor at 40 credits
+  per second of requested duration — this tool always supplies `duration_s`,
+  so a 30 s clip is about 1,200 credits. The rates differ; the meter does not.
+  A BYOK voiceover is priced per character instead.
 
 ## Writing a sound-effect prompt
 
@@ -104,9 +104,9 @@ likely to appear when the prompt describes the wanted one precisely and
 never names it.
 
 `duration_s` is required (0.5–30 s) and the clip is generated to fit it.
-Length is the spend lever on Radient; on a BYOK key the vendor's own price
-is per generation, so a longer clip is not a bigger vendor charge (see
-[Cost, honestly](#cost-honestly)).
+Length costs on both meters — Radient per started second, a BYOK key at the
+vendor's 40 credits per second of requested duration — so budget the length
+you actually need (see [Cost, honestly](#cost-honestly)).
 
 ## What reaches the vendor
 
@@ -126,8 +126,8 @@ a privacy guarantee for the BYOK route.
 
 - Voiceover text: 1–10,000 characters. Sound-effect prompt: 1–600 characters.
 - `duration_s` on a sound effect is REQUIRED (0.5–30 s): there is no
-  auto-duration, and the length is the main cost knob on Radient (per-second
-  pricing); see [Cost, honestly](#cost-honestly) for the BYOK difference.
+  auto-duration, and length is the main cost lever on both sound-effect
+  meters (see [Cost, honestly](#cost-honestly)).
 - `language` is honoured only by the flash models
   (`radient/voiceover-flash`, `eleven_flash_v2_5`); the multilingual default
   (`radient/voiceover`, `eleven_multilingual_v2`) pronounces whatever it is

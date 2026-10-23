@@ -713,6 +713,8 @@ async def test_elevenlabs_voiceover_sends_the_map_resolved_body():
     assert outcome.cost_usd == pytest.approx(0.08 * len(spec.text) / 1000.0)
     asset = outcome.assets[0]
     assert isinstance(asset, AudioAsset)
+    # The receipt states the bitrate of the format that went on the wire.
+    assert asset.bitrate_kbps == 192
     notes = asset.voicing_notes
     assert notes is not None and "pace:clamped" in " ".join(notes["degraded"])
 
@@ -898,6 +900,9 @@ async def test_elevenlabs_drops_to_128_once_when_the_plan_refuses_192(direction)
 
     assert _formats(seen) == ["mp3_44100_192", "mp3_44100_128"]
     assert outcome.assets[0].data == AUDIO_BYTES
+    # M2: the fact follows the fallback rather than a constant. Only the
+    # voiceover leg states a bitrate; a sound effect legitimately reports none.
+    assert outcome.assets[0].bitrate_kbps == (128 if direction == "voiceover" else None)
 
 
 @pytest.mark.asyncio
@@ -916,6 +921,36 @@ async def test_elevenlabs_skips_the_doomed_attempt_for_the_same_key():
     await _run_byok(_spec("voiceover"), api_key="capped-key", handler=handler)
 
     assert _formats(seen) == ["mp3_44100_128"]
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_retries_a_parameter_refusal_but_does_not_remember_it():
+    """A 400 naming the format is retried; it is not a statement about the tier."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.params["output_format"] == "mp3_44100_192":
+            return httpx.Response(
+                400,
+                json={
+                    "detail": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_parameter",
+                        "param": "output_format",
+                        "message": "This format is not available for this model.",
+                    }
+                },
+            )
+        return httpx.Response(200, content=AUDIO_BYTES, headers={"content-type": "audio/mpeg"})
+
+    await _run_byok(_spec("voiceover"), api_key="format-key", handler=handler)
+    seen.clear()
+    await _run_byok(_spec("voiceover"), api_key="format-key", handler=handler)
+
+    # Retried once on BOTH calls: the second call still attempts 192, because a
+    # parameter refusal must not suppress the preference for six hours.
+    assert _formats(seen) == ["mp3_44100_192", "mp3_44100_128"]
 
 
 @pytest.mark.asyncio

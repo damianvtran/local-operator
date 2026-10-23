@@ -87,7 +87,7 @@ from local_operator.audiogen.pricing import sound_effect_estimate, voiceover_est
 from local_operator.clients._http import APIError
 from local_operator.imagegen.media import download_asset
 from local_operator.stt.errors import api_error_from_httpx_response
-from local_operator.tts.output_format import PREFERRED_OUTPUT_FORMAT
+from local_operator.tts.output_format import PREFERRED_OUTPUT_FORMAT, bitrate_kbps_for
 from local_operator.tts.output_format import (
     post_with_format_fallback as _post_at_best_format,
 )
@@ -1189,7 +1189,7 @@ async def run_elevenlabs(
                 model=model,
             ),
         )
-        data, content_type = await _post_at_best_format(
+        answer = await _post_at_best_format(
             lambda wire: _post_audio(
                 http,
                 url,
@@ -1206,6 +1206,8 @@ async def run_elevenlabs(
             model=model,
             params=request_params,
         )
+        data, content_type = answer.value
+        used_format = answer.output_format
 
     estimate = (
         voiceover_estimate("elevenlabs", model, len(spec.text))
@@ -1230,7 +1232,15 @@ async def run_elevenlabs(
                 duration_s=compute_duration(data),
                 format="mp3" if content_type == BYOK_MEDIA_TYPE else None,
                 sample_rate_hz=44100 if spec.direction == "voiceover" else None,
-                bitrate_kbps=128 if spec.direction == "voiceover" else None,
+                # The receipt states the bitrate of the format that ACTUALLY
+                # went on the wire, not a constant: this rung now asks for 192
+                # and may have dropped to 128, and a receipt that says 128 over
+                # 192 kbps bytes contradicts the artifact. The vendor serves
+                # the requested token verbatim; a token naming no bitrate (PCM)
+                # answers None rather than a guess.
+                bitrate_kbps=(
+                    bitrate_kbps_for(used_format) if spec.direction == "voiceover" else None
+                ),
                 voicing_notes=voicing,
             )
         ],
