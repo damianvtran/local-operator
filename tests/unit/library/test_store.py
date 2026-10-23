@@ -117,6 +117,17 @@ def tear_root_page(store, table: str = "idx_occurrences") -> None:
         handle.write(b"\xff" * page_size)
 
 
+def stored_state(path: Path) -> dict[str, str]:
+    """``idx_state`` straight from the file, bypassing the refusal guards."""
+    raw = sqlite3.connect(path)
+    try:
+        return {
+            str(key): str(value) for key, value in raw.execute("SELECT key, value FROM idx_state")
+        }
+    finally:
+        raw.close()
+
+
 def test_search_matches_prefixes_across_names_descriptions_tags_and_titles(
     tmp_path, monkeypatch
 ) -> None:
@@ -983,12 +994,26 @@ def test_an_unreadable_authoritative_table_refuses_after_a_restart(tmp_path, mon
     for suffix in ("-wal", "-shm"):
         (root / "library" / f"library.sqlite3{suffix}").unlink(missing_ok=True)
     shutil.copyfile(backup, store.path)
+    # The bytes predate the refusal, so the flag would be ABSENT — which never
+    # exercises the clear branch (R6-2). Put it back: a repaired file carrying a
+    # stale refusal is exactly the state the next launch must heal.
+    with sqlite3.connect(store.path) as raw:
+        raw.execute(
+            "CREATE TABLE IF NOT EXISTS idx_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        raw.execute(
+            "INSERT INTO idx_state(key, value) VALUES('recovery_failed', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+        )
+        raw.commit()
     LibraryStore._ready_paths.clear()
     LibraryStore._failed_paths.clear()
     MetadataStore._ready_paths.clear()
 
     healed = LibraryStore(root)
-    assert "recovery_failed" not in {key for key, value in healed.state().items() if value == "1"}
+    # Cleared by a REAL recovery, which recreates the derived half.
+    assert healed.state().get("recovery_failed") == "0"
+    indexer.rebuild_now(root)
     frame = service.list_assets(root, service.Query())
     assert frame["state"] == "ready" and frame["total"] == 4
     kept = next(r for r in frame["rows"] if r["id"] == row["id"])
@@ -1000,3 +1025,123 @@ def test_a_healthy_empty_store_starts_ready(tmp_path, monkeypatch) -> None:
     indexer.reset_for_tests()
     frame = service.list_assets(root, service.Query())
     assert frame["state"] == "ready" and frame["rows"] == [] and frame["total"] == 0
+
+
+def test_a_deep_leaf_tear_keeps_refusing_across_a_restart(tmp_path, monkeypatch) -> None:
+    """R6-1: a ``LIMIT 1`` probe cannot see a tear in a later leaf.
+
+    The flag was cleared on that shallow evidence, and the next process served
+    ``building`` with zero rows on a file the previous one had refused.
+    """
+    import shutil
+
+    from local_operator.library.store import IndexUnavailable
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    row = next(r for r in query(root)["rows"] if r["name"] == "notes.md")
+    service.update_asset(root, row["id"], {"name": "Kept"}, actor="user", source="user")
+    indexer.reset_for_tests()
+    store = LibraryStore(root)
+
+    # Enough authoritative rows for the assets b-tree to have many leaves.
+    with store.write() as connection:
+        connection.executemany(
+            "INSERT OR REPLACE INTO assets(asset_id, key, name, name_source, "
+            "description, description_source, favorite, locked, archived, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, '', NULL, 0, 0, 0, 1.0, 1.0)",
+            [(f"la_{index:016x}", f"key-{index}", f"n{index}", None) for index in range(3000)],
+        )
+    with store.read() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    backup = tmp_path / "before.db"
+    shutil.copyfile(store.path, backup)
+
+    raw = sqlite3.connect(store.path)
+    try:
+        page_size = int(raw.execute("PRAGMA page_size").fetchone()[0])
+        root_page = int(
+            raw.execute("SELECT rootpage FROM sqlite_master WHERE name = 'assets'").fetchone()[0]
+        )
+        leaves = [
+            int(item[0])
+            for item in raw.execute(
+                "SELECT pageno FROM dbstat WHERE name = 'assets' AND pagetype = 'leaf' "
+                "ORDER BY pageno DESC"
+            )
+        ]
+    finally:
+        raw.close()
+    victim = next(page for page in leaves if page != root_page)
+    with open(store.path, "r+b") as handle:
+        handle.seek((victim - 1) * page_size)
+        handle.write(b"\xff" * page_size)
+
+    # The shallow probe still passes; only the integrity check sees the tear.
+    assert store._probe_authoritative() is True
+    assert store.recover_derived() is False
+    assert stored_state(store.path).get("recovery_failed") == "1"
+
+    # Restart: the flag must keep every read refused, not serve building/0.
+    LibraryStore._ready_paths.clear()
+    LibraryStore._failed_paths.clear()
+    MetadataStore._ready_paths.clear()
+    with pytest.raises(IndexUnavailable):
+        with LibraryStore(root).read():
+            pass
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, row["id"])
+
+    # Repair the whole file from the pre-tear copy, carrying the stale flag.
+    for suffix in ("-wal", "-shm"):
+        (root / "library" / f"library.sqlite3{suffix}").unlink(missing_ok=True)
+    shutil.copyfile(backup, store.path)
+    with sqlite3.connect(store.path) as raw:
+        raw.execute(
+            "INSERT INTO idx_state(key, value) VALUES('recovery_failed', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+        )
+        raw.commit()
+    LibraryStore._ready_paths.clear()
+    LibraryStore._failed_paths.clear()
+    MetadataStore._ready_paths.clear()
+
+    healed = LibraryStore(root)
+    assert healed.state().get("recovery_failed") == "0"
+    indexer.rebuild_now(root)
+    frame = service.list_assets(root, service.Query())
+    assert frame["state"] == "ready"
+    kept = next(r for r in frame["rows"] if r["id"] == row["id"])
+    assert kept["name"] == "Kept"
+
+
+def test_a_derived_tear_with_a_failed_rebuild_keeps_refusing(tmp_path, monkeypatch) -> None:
+    """A transient rebuild failure must not clear the flag and serve the tear."""
+    from local_operator.library.store import IndexUnavailable
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    indexer.reset_for_tests()
+    store = LibraryStore(root)
+    tear_root_page(store)
+
+    original = LibraryStore._rebuild_database
+    monkeypatch.setattr(LibraryStore, "_rebuild_database", lambda self: False)
+    assert store.recover_derived() is False
+    assert stored_state(store.path).get("recovery_failed") == "1"
+
+    LibraryStore._ready_paths.clear()
+    LibraryStore._failed_paths.clear()
+    MetadataStore._ready_paths.clear()
+    with pytest.raises(IndexUnavailable):
+        with LibraryStore(root).read():
+            pass
+
+    # The disk frees; the next launch must succeed rather than trust the flag.
+    monkeypatch.setattr(LibraryStore, "_rebuild_database", original)
+    LibraryStore._ready_paths.clear()
+    LibraryStore._failed_paths.clear()
+    MetadataStore._ready_paths.clear()
+    assert LibraryStore(root).state().get("recovery_failed") == "0"
+    indexer.rebuild_now(root)
+    assert query(root)["total"] == 4
