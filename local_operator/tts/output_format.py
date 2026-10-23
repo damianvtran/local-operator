@@ -39,9 +39,11 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar
+from dataclasses import dataclass
+from typing import Any, Generic, TypeVar
 
 from local_operator.clients._http import APIError
 
@@ -81,7 +83,27 @@ _ENTITLEMENT_WORD = re.compile(r"\b(plan|tier|subscription|upgrade|entitlement)s
 #: the TTS daemon are separate call sites inside one long-lived process.
 _caps: dict[str, float] = {}
 
+#: The memo is a plain dict touched from async code, which is one thread today,
+#: but the call sits AFTER the fallback returned audio: a second thread's
+#: mutation during remember_cap's iteration would raise and turn a successful
+#: paid generation into a reported failure. The lock costs nothing measurable
+#: and removes the class of bug rather than arguing about today's call graph.
+_caps_lock = threading.Lock()
+
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class FormatResult(Generic[T]):
+    """One answered call and the format its bytes were generated at.
+
+    ``output_format`` is what actually went on the wire, so a caller can state
+    a fact (the receipt's bitrate) that agrees with the bytes rather than
+    re-deriving it from the preference it asked for.
+    """
+
+    value: T
+    output_format: str
 
 
 def _error_detail(exc: APIError) -> dict[str, Any]:
@@ -171,33 +193,56 @@ def cap_key(api_key: str, *, endpoint: str, model: str) -> str:
     return f"{digest}|{endpoint}|{model}"
 
 
+def bitrate_kbps_for(output_format: str) -> int | None:
+    """The kbps a vendor format token names, or ``None`` when it names none.
+
+    ``mp3_44100_192`` -> 192 and ``mp3_44100_128`` -> 128. The vendor's tokens
+    are ``codec_sample_rate_bitrate``, so the bitrate is the THIRD component;
+    ``pcm_44100`` names a sample rate and no bitrate and answers ``None``
+    rather than reading the rate as one. A receipt that says "unknown" is
+    honest; one that says 128 over 192 kbps bytes is not.
+    """
+    parts = output_format.split("_")
+    if len(parts) < 3 or not parts[2].isdigit():
+        return None
+    return int(parts[2])
+
+
 def is_capped(key: str) -> bool:
     """Whether ``key`` was measured capped and the measurement is still fresh."""
-    expires = _caps.get(key)
-    if expires is None:
-        return False
-    if expires <= time.monotonic():
-        _caps.pop(key, None)
-        return False
-    return True
+    now = time.monotonic()
+    with _caps_lock:
+        expires = _caps.get(key)
+        if expires is None:
+            return False
+        if expires <= now:
+            del _caps[key]
+            return False
+        return True
 
 
 def remember_cap(key: str) -> None:
     """Record a measured cap, pruning expired entries and bounding the memo."""
     now = time.monotonic()
-    expired = [stale for stale, expires in _caps.items() if expires <= now]
-    for stale in expired:
-        del _caps[stale]
-    while len(_caps) >= CAP_MAX_KEYS:
-        # The TTL is uniform, so insertion order is expiry order; dropping the
-        # first entry evicts the oldest measurement.
-        del _caps[next(iter(_caps))]
-    _caps[key] = now + CAP_TTL_S
+    with _caps_lock:
+        # Re-insert rather than update in place: dict order is insertion order,
+        # so a re-measured key must move to the NEWEST position or the
+        # at-capacity eviction would drop the freshest measurement instead of
+        # the oldest. Popping first also keeps a re-measurement from growing
+        # the dict and evicting an unrelated entry.
+        _caps.pop(key, None)
+        expired = [stale for stale, expires in _caps.items() if expires <= now]
+        for stale in expired:
+            del _caps[stale]
+        while len(_caps) >= CAP_MAX_KEYS:
+            del _caps[next(iter(_caps))]
+        _caps[key] = now + CAP_TTL_S
 
 
 def reset_caps() -> None:
     """Clear the memo — for tests, and for a caller that has replaced a key."""
-    _caps.clear()
+    with _caps_lock:
+        _caps.clear()
 
 
 async def post_with_format_fallback(
@@ -207,17 +252,28 @@ async def post_with_format_fallback(
     endpoint: str,
     model: str,
     params: dict[str, str],
-) -> T:
+) -> FormatResult[T]:
     """Call ``send(params)`` at the preferred format, dropping to 128 once.
 
     ``send`` performs ONE vendor call with the query parameters it is given and
     raises :class:`APIError` on a refusal, so the retry here is the same
     request at a different format rather than a second request shape.
 
+    The format this module owns is ALWAYS named on the wire: a caller that
+    omits ``output_format`` gets the preferred one, because the failure this
+    module exists to prevent is precisely a request that silently inherits the
+    vendor's 128 default. An explicit NON-preferred value is sent as-is and is
+    never retried — the tier fallback is a statement about this module's own
+    preference, not about a format the caller asked for on purpose.
+
     If the fallback also fails the ORIGINAL failure is raised (with the
     fallback's error attached as its cause): the first refusal is the one that
     describes what the caller asked for, and a "did the retry help?" question is
     answered by the cause rather than by replacing the diagnosis.
+
+    The return value carries the format that actually went on the wire, so a
+    caller can report a fact that agrees with the bytes instead of re-deriving
+    it from the preference it requested.
 
     Concurrency note, accepted rather than fixed: the memo is written after the
     vendor answers, so two concurrent first-time calls on a capped key can each
@@ -225,15 +281,16 @@ async def post_with_format_fallback(
     extra call per in-flight job, not per later job.
     """
     key = cap_key(api_key, endpoint=endpoint, model=model)
-    requested = params.get(OUTPUT_FORMAT_PARAM)
     effective = dict(params)
+    effective.setdefault(OUTPUT_FORMAT_PARAM, PREFERRED_OUTPUT_FORMAT)
+    requested = effective[OUTPUT_FORMAT_PARAM]
     if requested == PREFERRED_OUTPUT_FORMAT and is_capped(key):
         # This key already refused 192 on this endpoint+model; relearning it on
         # every call would add a doomed vendor round trip to every generation.
         effective[OUTPUT_FORMAT_PARAM] = FALLBACK_OUTPUT_FORMAT
 
     try:
-        return await send(effective)
+        return FormatResult(await send(effective), effective[OUTPUT_FORMAT_PARAM])
     except APIError as exc:
         if effective.get(OUTPUT_FORMAT_PARAM) != PREFERRED_OUTPUT_FORMAT:
             raise
@@ -265,7 +322,7 @@ async def post_with_format_fallback(
             exc.status_code,
             ",".join(sorted(_classes(_error_detail(exc)))),
         )
-        return result
+        return FormatResult(result, FALLBACK_OUTPUT_FORMAT)
 
 
 __all__ = [
@@ -274,6 +331,8 @@ __all__ = [
     "FALLBACK_OUTPUT_FORMAT",
     "OUTPUT_FORMAT_PARAM",
     "PREFERRED_OUTPUT_FORMAT",
+    "FormatResult",
+    "bitrate_kbps_for",
     "cap_key",
     "is_capped",
     "is_plan_cap_learned",

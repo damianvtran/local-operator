@@ -133,9 +133,17 @@ class ElevenLabsTtsClient:
         ``params`` comes from the vendored map's ElevenLabs executor, so this
         client owns transport and nothing else — it does not decide stability,
         clamp speed, or choose a voice. The platform constants it does need
-        (``similarity_boost``, ``use_speaker_boost``, the output format) come
-        from the map's ``fixed`` block, which is the one place the hub's own
-        client reads them from too.
+        (``similarity_boost``, ``use_speaker_boost``) come from the map's
+        ``fixed`` block, which is the one place the hub's own client reads them
+        from too; the output format is a code preference instead (see
+        :mod:`local_operator.tts.output_format`), not the map's.
+
+        ``output_format`` overrides that preference for a caller that needs one
+        specific token. It is a deliberate, narrow seam: a value other than the
+        preferred format is sent as-is and gets NO tier fallback, because the
+        fallback is a statement about this client's own preference, not about
+        a format a caller asked for on purpose. No production caller passes it
+        today.
         """
         model_id = model or ELEVENLABS_TTS_MODEL
         voice_settings: dict[str, Any] = {
@@ -157,7 +165,7 @@ class ElevenLabsTtsClient:
         # dot-segment must not address another endpoint on the vendor's API
         # under our key (the hub validates the same shape from the map's
         # `fixed.elevenlabs.voice_id_pattern`).
-        audio = await _post_at_best_format(
+        answer = await _post_at_best_format(
             lambda wire: _post_audio(
                 self._client,
                 f"{self._base_url}/v1/text-to-speech/{params.voice_id}",
@@ -180,7 +188,7 @@ class ElevenLabsTtsClient:
             model=model_id,
             params={"output_format": output_format or OUTPUT_FORMAT},
         )
-        return TtsClientResult(audio=audio, model=model_id, provider="elevenlabs")
+        return TtsClientResult(audio=answer.value, model=model_id, provider="elevenlabs")
 
 
 class OpenAiTtsClient:
