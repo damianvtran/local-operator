@@ -19913,6 +19913,13 @@ BROWSER_ACTIONS = (
     "styles",
     "hit_test",
     "ancestors",
+    # The read-only DOM query: CSS in, element descriptors out (tag, id, name,
+    # role, aria-label, rendered text, visibility, checked/disabled, rect). It
+    # exists because the one question that unblocked nothing in the measured
+    # incident — "what is the id of this checkbox?" — had no answer: `read`
+    # returns no attributes, `snapshot` returns an AX tree, and `eval` is not a
+    # surface to expose. It never mutates, so it is safe where eval is not.
+    "query",
     # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
@@ -19981,6 +19988,7 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "styles",
         "hit_test",
         "ancestors",
+        "query",
     }
 )
 
@@ -20027,6 +20035,11 @@ _MAX_STYLE_PROPERTIES = 20
 #: tree omits `limit` and gets it, unchanged from before; this bounds a NUMBER,
 #: so `limit=10**9` cannot make a host build a payload nobody will read.
 SNAPSHOT_MAX_LINES = 5000
+
+#: The most element descriptors one `query` may return. The page function caps
+#: at 50 too; this is the caller-facing bound so an absurd number is REFUSED
+#: with copy rather than silently clipped into a result that looks complete.
+QUERY_MAX_ELEMENTS = 50
 
 #: A search term names a control, not a page. The cap keeps a pasted document
 #: from becoming a scan over every rendered line on every call.
@@ -20151,7 +20164,8 @@ class BrowserParams(BaseModel):
         'locator for the click/type target: role=checkbox[name="Active"], '
         'label="Homepage URL", text="Create GitHub App" — resolved '
         "against the page's a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, the scroll element, or the download/upload control.",
+        "read/snapshot scope, the query CSS, the scroll element, or the "
+        "download/upload control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -20657,24 +20671,50 @@ def _validate_window_fields(action: str, params: BrowserParams) -> str:
     `backend` and `secret_ref` all do it): a model that passed `search` to
     `click` would otherwise believe it had filtered what the click targeted.
     """
-    if action != "snapshot":
-        unused = [
-            name
-            for name, value in (
-                ("start", params.start),
-                ("limit", params.limit),
-                ("search", params.search),
-            )
-            if value not in (None, "")
-        ]
-        if unused:
-            names = ", ".join(repr(name) for name in unused)
+    # `limit` is shared with `query` (how many descriptors to return); `start`
+    # and `search` are the snapshot window's own coordinates. An action outside
+    # this table takes NONE of the three — and an action inside it takes only
+    # the ones its row names, which is what stops `start` riding a `query`.
+    allowed = {"snapshot": {"start", "limit", "search"}, "query": {"limit"}}.get(action, set())
+    unused = [
+        name
+        for name, value in (
+            ("start", params.start),
+            ("limit", params.limit),
+            ("search", params.search),
+        )
+        if name not in allowed and value not in (None, "")
+    ]
+    if unused:
+        # Name the actions that ACCEPT each field, not the row they came from:
+        # `search` is snapshot-only while `limit` is shared with `query`, and a
+        # refusal that blurs the two sends the caller to a parameter that will
+        # be refused again.
+        actions_for = {"start": "snapshot", "search": "snapshot", "limit": "snapshot or query"}
+        if len(unused) == 1:
+            name = unused[0]
             return (
-                f"{names} only valid for 'snapshot' (got it on '{action}'): "
-                "they page or filter the accessibility tree"
+                f"{name!r} only valid for {actions_for[name]!r} (got it on '{action}'): "
+                "it pages or filters the accessibility tree"
             )
-        return ""
+        parts = "; ".join(f"{name!r} only valid for {actions_for[name]!r}" for name in unused)
+        return f"{parts} (got them on '{action}')"
+    if action == "query":
+        return _validate_query_limit(params)
     return _validate_snapshot_window(params)
+
+
+def _validate_query_limit(params: BrowserParams) -> str:
+    if params.limit is None:
+        return ""
+    if params.limit < 1:
+        return f"'limit' must be at least 1 element (got {params.limit})"
+    if params.limit > QUERY_MAX_ELEMENTS:
+        return (
+            f"'limit' takes at most {QUERY_MAX_ELEMENTS} elements (got {params.limit}); "
+            "narrow the selector instead of asking for more"
+        )
+    return ""
 
 
 def _validate_snapshot_window(params: BrowserParams) -> str:
@@ -20991,6 +21031,12 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"(expected one of {', '.join(sorted(_LOG_LEVELS))})"
             )
         return ""
+    if action == "query":
+        # CSS only, mandatory: a query with no selector is a whole-page dump,
+        # which is what `snapshot` is for. `_validate_locator_target` above
+        # already refused a locator here, because a locator resolves a TARGET
+        # while a query asks the DOM a question.
+        return _validate_selector(params.selector, "query")
     if action in ("styles", "ancestors"):
         # Both name one element, so the selector is mandatory and the same
         # refusal click/type use keeps the copy consistent. The flag-shaped
@@ -23347,6 +23393,59 @@ def _geometry_entry_list(result: dict[str, Any], key: str) -> list[dict[str, Any
     return [entry for entry in raw if isinstance(entry, dict)]
 
 
+def _query_entry_list(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """The descriptor list, tolerant of a host that answered something else.
+
+    Malformed entries are dropped rather than rendered as `None`: this is model
+    input, and one bad row must not make the whole answer unreadable.
+    """
+    raw = result.get("matches")
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def _query_entries_text(matches: list[dict[str, Any]]) -> str:
+    """One block per element: the identity an agent asked for, then its state.
+
+    The layout is deliberately grep-able and stable: `tag#id[name="…"]` on the
+    first line answers the measured question ("what is the id of this
+    checkbox?"), and the state line carries the three facts that decide whether
+    a click will do anything — visibility, checked, disabled.
+    """
+    lines: list[str] = []
+    for index, entry in enumerate(matches, 1):
+        ident = str(entry.get("tag") or "")
+        if entry.get("id"):
+            ident += f"#{entry['id']}"
+        if entry.get("name"):
+            ident += f"[name={json.dumps(entry['name'], ensure_ascii=False)}]"
+        bits = [ident]
+        for key, label in (("type", "type"), ("role", "role")):
+            if entry.get(key):
+                bits.append(f"{label}={entry[key]}")
+        if entry.get("ariaLabel"):
+            bits.append(f"aria-label={json.dumps(entry['ariaLabel'], ensure_ascii=False)}")
+        lines.append(f"{index}. {' '.join(bits)}")
+        state = ["visible" if entry.get("visible") else "NOT visible"]
+        if entry.get("inView"):
+            state.append("in view")
+        if entry.get("checked") is True:
+            state.append("checked")
+        elif entry.get("checked") is False:
+            state.append("unchecked")
+        if entry.get("disabled"):
+            state.append("disabled")
+        if entry.get("value"):
+            state.append(f"value={json.dumps(entry['value'], ensure_ascii=False)}")
+        detail = "   " + ", ".join(state)
+        text = str(entry.get("text") or "")
+        if text:
+            detail += f" — text: {json.dumps(text, ensure_ascii=False)}"
+        lines.append(detail)
+    return "\n".join(lines)
+
+
 def _bridge_geometry_result(
     tool_call_id: str,
     action: str,
@@ -23403,6 +23502,35 @@ def _bridge_geometry_result(
             tool_call_id,
             "browser",
             f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+            details=details,
+        )
+    if action == "query":
+        # A read-only answer describes ELEMENTS, so the header names the count
+        # the page really had (a selector can match hundreds); `truncated` is
+        # the page function's statement that the caller asked for fewer than
+        # exist, and the remedy is a narrower selector, not a bigger limit.
+        matches = _query_entry_list(result)
+        # `count` is model input: a host that answers `{}` or "abc" must not turn
+        # a readable answer into a tool-level error (agent review round 1, R1-1).
+        raw_count = result.get("count")
+        page_count = raw_count if isinstance(raw_count, int) else len(matches)
+        details.update(
+            selector=selector,
+            count=page_count,
+            returned=len(matches),
+            truncated=bool(result.get("truncated")),
+            matches=matches,
+        )
+        head = f"{len(matches)} match{'' if len(matches) == 1 else 'es'} for {selector!r}"
+        if page_count > len(matches):
+            head += f" (the page has {page_count}); narrow the selector to see the rest"
+        elif not matches:
+            head += " — nothing in the document matches this selector"
+        body = _query_entries_text(matches)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}" if body else head,
             details=details,
         )
     chain = _geometry_entry_list(result, "chain")
@@ -24490,6 +24618,10 @@ async def _bridge_action(
                 wire["limit"] = params.limit
             if params.search.strip():
                 wire["search"] = params.search.strip()
+    elif action == "query":
+        wire["selector"] = params.selector.strip()
+        if params.limit is not None:
+            wire["limit"] = params.limit
     elif action in ("click", "type"):
         wire["selector"] = params.selector.strip()
         if action == "type":
@@ -24639,7 +24771,7 @@ async def _bridge_action(
         )
     if action == "logs":
         return _bridge_logs_result(tool_call_id, params, result, details, title, href)
-    if action in ("styles", "hit_test", "ancestors"):
+    if action in ("styles", "hit_test", "ancestors", "query"):
         return _bridge_geometry_result(tool_call_id, action, params, result, details)
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
