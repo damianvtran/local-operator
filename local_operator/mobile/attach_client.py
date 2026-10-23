@@ -90,9 +90,13 @@ try:
     # absent and this client fails CLOSED — it never sends the annotation —
     # which is the same rule the relay's strip-gate (``MobileDaemon.request``)
     # follows.
-    from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+    from local_operator.session.runtime.types import (
+        DOCUMENT_ATTACHMENTS_CAPABILITY,
+        INPUT_MODE_CAPABILITY,
+    )
 except ImportError:  # pragma: no cover — only on a pre-carriage tree
     INPUT_MODE_CAPABILITY = ""
+    DOCUMENT_ATTACHMENTS_CAPABILITY = ""
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
@@ -1174,6 +1178,14 @@ class AttachClient:
         self._input_mode_supported = bool(INPUT_MODE_CAPABILITY) and (
             INPUT_MODE_CAPABILITY in record.capabilities
         )
+        # MAY THIS OWNER RESOLVE ``Prompt.files`` REFERENCES. Gated like the
+        # carriage above, and it gates a REFUSAL rather than a strip
+        # (``attached.admit_prompt``): a document send to an owner that cannot
+        # carry it must fail in words, because forwarding the text alone
+        # answers a question the user believes was about the attached file.
+        self._document_attachments_supported = bool(DOCUMENT_ATTACHMENTS_CAPABILITY) and (
+            DOCUMENT_ATTACHMENTS_CAPABILITY in record.capabilities
+        )
         # The supplements twin: this build renders the family, and only an
         # owner that advertises ``supplements-v1`` (a handle that honours
         # ``supplements_for``) is told so — the viewer's half of the two-half
@@ -1593,6 +1605,10 @@ class AttachClient:
             # is untrusted input here, and a reason outside the enumerated set
             # degrades to the generic sentence instead of rendering.
             reason=reply.get("error_reason"),
+            # The missing-attachment refusal's file NAME, the same bounded
+            # field carriage as ``error_model``: the sentence is rebuilt here
+            # around the sanitised value.
+            filename=reply.get("error_name"),
         )
         if known is not None:
             raise known

@@ -364,22 +364,33 @@ class ImageContent(BaseModel):
     #: never emit this bookkeeping object, exactly as they never emit
     #: ``marker``.
     captured_frame: CapturedFrame | None = None
+    #: The file's ABSOLUTE ORIGIN PATH, when the client had one (a drag from
+    #: Finder, a picked file). Provenance and display only: no provider
+    #: serializer reads it, and it is persisted so history can show where the
+    #: picture came from. Omitted from every dump while unset, the same rule
+    #: ``captured_frame`` follows, so a pre-existing image row stays
+    #: byte-identical (a new null key would change every stored row and every
+    #: context hash).
+    path: str | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_capture(self, handler: Any, info: Any) -> Any:
-        """Omit ``captured_frame`` from every dump while it is unset.
+        """Omit ``captured_frame`` and an unset ``path`` from every dump.
 
         Mirrors the ``_omit_absent_core_source``/``_omit_disabled_drag``
         pattern rather than a field-level ``exclude_if`` so the guarantee
         holds at EVERY dump site (plain dumps included, not only the
         ``exclude_defaults`` ones), which is what the byte-identical
-        absent-metadata contract needs. Only THIS key's unset is dropped;
-        ``marker`` keeps its own ``exclude=True`` rule.
+        absent-metadata contract needs. ``marker`` keeps its own
+        ``exclude=True`` rule.
         """
 
         data = handler(self)
-        if isinstance(data, dict) and data.get("captured_frame") is None:
-            data.pop("captured_frame", None)
+        if isinstance(data, dict):
+            if data.get("captured_frame") is None:
+                data.pop("captured_frame", None)
+            if data.get("path") is None:
+                data.pop("path", None)
         return data
 
 
@@ -413,6 +424,60 @@ class AudioContent(BaseModel):
     mime_type: str = "audio/wav"
     duration_ms: int | None = None
     marker: int | None = Field(default=None, exclude=True)
+
+
+class DocumentContent(BaseModel):
+    """A user-attached DOCUMENT block. ``data`` is base64 bytes of ``mime_type``.
+
+    The INPUT half of the attachment contract, and the reason it is a
+    first-class block rather than a filename in the prompt text: a provider
+    that can read a PDF natively must receive the bytes, and a provider that
+    cannot must receive an extraction the harness produced — not a path a
+    model would have to shell out to read, which it cannot do in every
+    deployment (a confined session has no filesystem tools at all).
+
+    WHERE THE BYTES LIVE. Live rows carry them inline in ``data``; durable
+    rows are externalised into the attachment store exactly like images
+    (``transcript._externalize_attachments`` writes ``attachment: <digest>``
+    and ``_resolve_attachments`` restores ``data`` AND ``digest``). The
+    store is the retention copy: moving or deleting the original at
+    ``path`` never loses the document, which is what the history surface
+    promises when it says the file moved but is still retained.
+
+    ``injection`` records HOW this turn was actually delivered to the model
+    (``native`` bytes, ``extracted`` text, or a ``reference``-only block),
+    stamped at admission from the session's model. It is HISTORICAL
+    metadata for the transcript and the path hint — never the serialization
+    authority: a later request re-decides from the model it will actually
+    call (a ``/model`` switch must not send a PDF natively to a provider
+    that has no document input).
+
+    ``marker`` is the composer chip number, the same presentation fact and
+    ``exclude=True`` rule :class:`ImageContent` documents.
+    """
+
+    type: Literal["document"] = "document"
+    data: str = ""
+    mime_type: str
+    filename: str
+    #: Origin absolute path, display/provenance only (never used to read).
+    path: str | None = None
+    #: Absolute path of THIS device's RETAINED copy in the attachment store,
+    #: set at admission for a document whose bytes were stored. The history
+    #: card needs it for its moved/deleted state: offering to copy the origin
+    #: path when that file no longer exists is a control whose copy is dead,
+    #: while the retained copy is the human next step. Serializers ignore it
+    #: (the wire reads ``data``; provenance reads ``path``), and
+    #: ``exclude_defaults`` omits it from dumps when unset so every row
+    #: written before this field stays byte-identical.
+    stored_path: str | None = None
+    bytes: int = 0
+    #: Store digest, set when the bytes were cached (admission or transcript
+    #: resolution). Kept on the live block so a path hint can name the
+    #: retained copy without a second content hash.
+    digest: str | None = None
+    marker: int | None = Field(default=None, exclude=True)
+    injection: Literal["native", "extracted", "reference"] | None = None
 
 
 class AttachmentContent(BaseModel):
@@ -505,6 +570,13 @@ class AttachmentContent(BaseModel):
 #: and stated here rather than papered over (agent review round 1, F6).
 ATTACHMENT_KINDS = frozenset({"image", "video", "audio"})
 
+#: The reference key a durable document row carries in place of inline bytes.
+#: Spelled here as well as in ``session/transcript.py`` because the coercion
+#: below must recognise the legacy row shape without importing the encoder
+#: (that module imports this one). Deliberately the same string: it is the
+#: stored format, not a private convention.
+ATTACHMENT_KEY_FOR_DOCUMENTS = "attachment"
+
 
 def coerce_content_blocks(value: Any) -> Any:
     """Route raw content-block dicts to their concrete models before parsing.
@@ -542,11 +614,27 @@ def coerce_content_blocks(value: Any) -> Any:
                 and any(key in block for key in ("content_type", "attachment", "source_url"))
             ):
                 block = AttachmentContent.model_validate(block)
+            elif block.get("type") == "document" or (
+                "type" not in block
+                and "filename" in block
+                and "mime_type" in block
+                and ATTACHMENT_KEY_FOR_DOCUMENTS in block
+            ):
+                # DOCUMENTS ROUTE EXPLICITLY, on the same reasoning as the
+                # attachment branch above: the durable encoder drops ``type``
+                # (it is the model default) and a smart union resolves a
+                # typeless dict with ``data`` toward ``ImageContent`` — a PDF
+                # replayed as an image on every later turn. The legacy arm is
+                # for rows an earlier build wrote with the reference key but
+                # no discriminant (the shape contract §2 names): a document's
+                # durable identity is ``filename`` + ``mime_type`` +
+                # ``attachment``, facts an image row never carries together.
+                block = DocumentContent.model_validate(block)
         out.append(block)
     return out
 
 
-Content = TextContent | ImageContent | AudioContent | AttachmentContent
+Content = TextContent | ImageContent | AudioContent | AttachmentContent | DocumentContent
 
 
 def drop_blank_text_blocks(content: Sequence[Content]) -> list[Content]:
@@ -706,6 +794,7 @@ class Message(BaseModel):
         text: str,
         images: "Sequence[ImageContent] | None" = None,
         audio: "Sequence[AudioContent] | None" = None,
+        documents: "Sequence[DocumentContent] | None" = None,
         **extra: Any,
     ) -> "Message":
         """A user turn, optionally carrying attachments.
@@ -742,7 +831,12 @@ class Message(BaseModel):
         ``_is_empty_assistant``, ``EMPTY_TOOL_RESULT_TEXT`` and
         ``EMPTY_USER_TEXT``.
         """
-        content: list[Content] = [TextContent(text=text), *(images or ()), *(audio or ())]
+        content: list[Content] = [
+            TextContent(text=text),
+            *(images or ()),
+            *(audio or ()),
+            *(documents or ()),
+        ]
         return Message(role="user", content=drop_blank_text_blocks(content), **extra)
 
     @staticmethod

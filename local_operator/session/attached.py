@@ -3273,6 +3273,7 @@ class AttachedSession:
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | None = None,
+        files: list[dict[str, Any]] | None = None,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
@@ -3290,11 +3291,38 @@ class AttachedSession:
         nobody reads) — and it is the one attachment the inbox spool cannot
         carry (see ``ServingSessionHandle.steer``'s update-window arm), so it
         travels the ordinary frame or not at all.
+
+        ``files`` are ``Prompt.files``' references. A send that names them on a
+        conversation whose OWNER IS A PEER is refused HERE, before a frame is
+        dialled: the bytes are in THIS device's store while the owner reads
+        its own, so forwarding the digest would promise a file the far side
+        cannot resolve (contract amendment 2). Images keep their peer staging
+        (``prepare_peer_images``); documents travel the local owner's frame
+        and nothing else in v1.
         """
+        if files and self.runtime_locality == "another-machine":
+            # The owner is a PEER: its attachment store is a different one, so a
+            # digest resolved from THIS device's upload names bytes the far
+            # side does not hold. v1 refuses rather than send a doomed
+            # reference (contract amendment 2); images keep their peer staging
+            # (``prepare_peer_images``) because their bytes ride the frame.
+            from local_operator.session.errors import RemoteDocumentUnsupported
+
+            raise RemoteDocumentUnsupported()
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
+        if files and not getattr(client, "_document_attachments_supported", False):
+            # An owner from before the carriage would DROP the key (its
+            # dispatch only passes literal parameters), so this side refuses
+            # the send instead. The capability string is the owner's own
+            # statement that it resolves the references (contract
+            # amendment 1); the dispatch's parameter probe is the second,
+            # owner-side guard.
+            from local_operator.session.errors import DocumentCarriageUnsupported
+
+            raise DocumentCarriageUnsupported()
         fields: dict[str, Any] = {"text": text, "images": images, "command_id": command_id}
         if input_mode is not None:
             fields["input_mode"] = input_mode
@@ -3302,6 +3330,14 @@ class AttachedSession:
             fields["input_path"] = input_path
         if audio:
             fields["audio"] = audio
+        if files:
+            # Omitted when absent, exactly like ``audio``: a sender that always
+            # passes its list must leave a legacy frame byte-identical, and an
+            # owner from before the carriage must never see a key it does not
+            # read. An owner that cannot carry them REFUSES the frame
+            # (``DocumentCarriageUnsupported`` in the dispatch's parameter
+            # probe) rather than forwarding the text without its files.
+            fields["files"] = files
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
     async def bind_runtime(self) -> None:

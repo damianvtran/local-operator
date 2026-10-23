@@ -391,7 +391,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "directories a session lives UNDER, the same values ``paths.py`` declares",
     ),
     "local_operator/config_watch.py": (1, "the same file, watched"),
-    "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
+    "local_operator/config_migrations.py": (
+        2,
+        "``LEGACY_STAMP_NAME`` ('.migrations') is the marker recording which migrations "
+        "ran, and ``_KEY_INVENTORY_NAME`` ('.config-keys.json') is the per-launch "
+        "inventory of setting paths: both are machine-local config-root machinery "
+        "beside ``config.yml``, written by this device for this device, and neither is "
+        "an entry of a session directory or ever travels with one",
+    ),
     "local_operator/logger.py": (1, "the process log at the store root"),
     "local_operator/tools/harness_import_tool.py": (
         1,
@@ -689,6 +696,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``RESERVED_NAME`` ('Untagged'): the reserved tag DISPLAY NAME for the "
         "untagged pseudo-category — a label in the registry's vocabulary, never "
         "a path or an entry of a session directory",
+    ),
+    # The ``artifact_data`` tool's own name (``TOOL_NAME``): a candidate only
+    # through the NAME-suffix heuristic. The tool keeps no state on disk — its
+    # data lives in the remote claude.ai store — so a move carries nothing.
+    "local_operator/tools/artifact_data_tool.py": (
+        1,
+        "``TOOL_NAME`` ('artifact_data'): the tool's registered name, never a path "
+        "or an entry of a session directory",
     ),
     "local_operator/asks/store.py": (
         5,

@@ -246,6 +246,20 @@ _WALK_DEPTH_CAP = 2
 # doc gains the same scope rule and its delete semantics. Both were measured
 # through this test's own printed table on the rebased tree, whose upstream
 # baseline is the #2520 ask raise above (ask 1063, unmoved here).
+# RE-MEASURED 2026-10-23 (stale asks, ``feat/ask-stale-guidance``; design
+# ask-nonblocking §16/SA-D1): ``ask`` 1063 -> 1079 and ``ask_withdraw``
+# 314 -> 452 are the ONLY entries that moved, and both moves ARE the change:
+# the ``ask`` queued tail gains one clause (settle it the moment it stops
+# mattering — the tool the clause names is NOT in this doc's schema, so the
+# property list is unchanged), and ``ask_withdraw``'s doc renders the rewritten
+# description plus the widened ``answers`` field copy (the empty-list recipe,
+# the ids rule, the all-empty refusal, and "latest or earlier" beside VERBATIM —
+# the last two taken in review round 1, which is the 418 -> 452 part). Measured
+# through this test's own printed table on the branch; every other entry is
+# byte-identical. BOTH ledgers move together: the same two descriptions are the
+# +663 chars of ``tool_schemas`` in ``scripts/bench_context_budget.py``'s
+# top-arm raise (32,872 -> 33,364), whose child arm carries neither tool and
+# moves only by the shared ``system.md`` paragraph.
 MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S3): 1044 -> 1056. The delta is the one-clause
     # fork exception on the ephemeral bullet ("a fork starts with a copy of
@@ -259,8 +273,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # its wording is the safety-critical part). Trimmed once already; the same
     # printed table measured it.
     "agent": 1119,
-    "ask": 1063,
-    "ask_withdraw": 314,
+    "ask": 1079,
+    "ask_withdraw": 452,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
@@ -288,7 +302,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # the field's own description to the doc — the deliberate cost of the value
     # never appearing in the transcript (incident: a literal password in `type`
     # reached a subagent's transcript, where no shape pass could see it).
-    "browser": 1424,
+    "browser": 1380,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -448,6 +462,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # 528 -> 531 in review round 2: the receipt claim is qualified to
     # ``assign``, because ``create``/``list``/``rename`` name categories only.
     "tags": 531,
+    # NEW (claude.ai artifact data store, 2026-10-21): the ``artifact_data``
+    # doc — the per-action field table, the path/`me` rules and the
+    # ``if_version`` contract. The tool is DEFERRED, so this doc is what the
+    # first ``tool://`` read or call teaches; its schema adds nothing to the
+    # start context (``scripts/bench_context_budget.py`` unchanged).
+    "artifact_data": 818,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than

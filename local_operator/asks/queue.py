@@ -1283,22 +1283,27 @@ class AskQueue:
         """The whole-ask map contract, shared by :meth:`respond` and :meth:`revise`.
 
         Returns ``(cleaned cells, refusal sentence)``, the refusal empty when the
-        map is usable. Both rules are the design's (§2.4, review round 1 QA Q1 and
-        MINOR 6) and every entry point must agree on them — ``respond``,
-        ``revise`` and :meth:`withdraw`'s chat path: the row that lands is
-        terminal, so a surface that forgot a key would lose that question for
-        good, and a SECRET cell may only ever be a KEY NAME: the ``[<key>]`` shape
-        is what makes this hop load-bearing, because a cold CLI or relay route
-        reaches the queue directly and the value must not reach the log through
-        it. Kept in ONE function for the same reason ``refusal_copy`` is one
-        sentence per state: two copies of a contract drift.
+        map is usable. Three rules are the design's (§2.4, §16/SA-D1, review
+        round 1 QA Q1 and MINOR 6) and every entry point must agree on them —
+        ``respond``, ``revise`` and :meth:`withdraw`'s chat path: the row that
+        lands is terminal, so a surface that forgot a key would lose that
+        question for good, a key that is not a question id is refused by name
+        rather than written where no reader can attribute it, and a SECRET cell
+        may only ever be a KEY NAME: the ``[<key>]`` shape is what makes this hop
+        load-bearing, because a cold CLI or relay route reaches the queue
+        directly and the value must not reach the log through it. Kept in ONE
+        function for the same reason ``refusal_copy`` is one sentence per state:
+        two copies of a contract drift.
         """
         cleaned = {str(k): [str(v) for v in (vals or [])] for k, vals in answers.items()}
-        unanswered = [
-            str(q.get("id"))
-            for q in (record.get("questions") or ())
-            if str(q.get("id")) not in cleaned
-        ]
+        ids = [str(q.get("id")) for q in (record.get("questions") or ())]
+        # UNKNOWN KEYS BEFORE MISSING ONES: a typo is both, and the partial
+        # sentence would answer it by telling the model to send an empty list for
+        # a question it just answered under another spelling (field case, #2803).
+        unknown = [key for key in cleaned if key not in ids]
+        if unknown:
+            return None, _unknown_answer_error(unknown, ids)
+        unanswered = [qid for qid in ids if qid not in cleaned]
         if unanswered:
             return None, _partial_answer_error(unanswered)
         return _guard_secret_cells(record, cleaned), ""
@@ -1408,14 +1413,23 @@ class AskQueue:
 
         A TIMED-OUT ask is view-only, as before: what it can still OWE is the
         deadline notice it had not delivered (fork A, §14). An OPEN ask is
-        accepted only while this session is STOPPED (D6, design §15), and then
-        owes the agent an ``ask-response-<id>`` row that the reconcile
-        :meth:`_settled` schedules delivers like a decline's — without a turn,
-        because the stopped-work residue rule keeps it from clearing the stop.
-        The refusal comes from :func:`asks.render.dismiss_refusal`, shared with the
-        cold door (``asks/dismiss.py``), so a surface cannot tell which one
-        answered it. ``reason`` is the operator's word for why (``moot`` when
-        missing); an unknown one is refused before anything is written.
+        accepted on EVERY live session (SA-D4, 2026-10-23, replacing §15's D6),
+        and owes the agent an ``ask-response-<id>`` row that the reconcile
+        :meth:`_settled` schedules delivers like a decline's: mid-turn it rides
+        the steering queue to the next tool boundary of the SAME turn, and an
+        idle session holds it durably with no turn (``Session
+        .deliver_ask_messages``). The refusal comes from
+        :func:`asks.render.dismiss_refusal`, shared with the cold door
+        (``asks/dismiss.py``), so a surface cannot tell which one answered it.
+        ``reason`` is the operator's word for why (``moot`` when missing); an
+        unknown one is refused before anything is written.
+
+        NO RUNTIME PROBE, deliberately: the queue used to fail CLOSED on a
+        session that could not report whether work was running, which refused
+        the dismissal exactly while the operator was chatting — the case the
+        feature exists for. Nothing about the write depends on it: the log is
+        appended the same way in every state, and the DELIVERY is the session's
+        decision (see ``Session.deliver_ask_messages``).
 
         A RELAY'S DISMISSAL IS LOCAL (#2673, R1-2): the dismissal is a view act on
         this session's card, so the row written here is the whole fact — the
@@ -1429,7 +1443,7 @@ class AskQueue:
             return {"ok": False, "error": render.DISMISS_BAD_REASON}
         now = self._now()
         record = self._find(ask_id, now)
-        refusal = render.dismiss_refusal(record, agent_running=self._agent_running())
+        refusal = render.dismiss_refusal(record)
         if refusal:
             return {"ok": False, "error": refusal}
         payload = {
@@ -1444,22 +1458,6 @@ class AskQueue:
             return {"ok": False, "error": "the dismissal could not be recorded."}
         self._settled(ask_id)
         return {"ok": True}
-
-    def _agent_running(self) -> bool:
-        """Whether agent work may be running on this queue's session (D6).
-
-        FAILS CLOSED: a session that cannot say (no ``ask_agent_running``) counts as
-        running, so an open ask is never dismissed behind a turn this queue cannot
-        see. ``Session.ask_agent_running`` holds the predicate and its sources.
-        """
-        probe = getattr(self._session, "ask_agent_running", None)
-        if not callable(probe):
-            return True
-        try:
-            return bool(probe())
-        except Exception:  # noqa: BLE001 — an unreadable runtime is "running"
-            logger.debug("ask: could not read the runtime state", exc_info=True)
-            return True
 
     def withdraw(
         self,
@@ -1567,6 +1565,23 @@ class AskQueue:
         if map_refusal:
             return {"ok": False, "error": map_refusal}
         assert cells is not None  # ``_whole_ask_cells`` returns one with no refusal
+        # A CHAT ANSWER WITH NO WORDS IS NOT AN ANSWER (review round 1 m2): every
+        # cell empty or blank is a model asking to record words nobody said, and
+        # the empty-list recipe this release teaches every session makes it
+        # reachable. Refused rather than rerouted to ``moot`` — a moot writes a
+        # ``withdrawn`` row, a different fact about who acted — and nothing is
+        # appended either way.
+        if not any(any(text.strip() for text in values) for values in cells.values()):
+            return {"ok": False, "error": render.WITHDRAW_NO_ANSWER_WORDS}
+        # The questions the message did not answer close with the ask (design
+        # §16/SA-D1), and the receipt says how many: the model is the only party
+        # that can re-ask them. The ROW's own rule decides what "not answered"
+        # means — ``_ask_report`` drops blank text — so a cell of ``[" "]``
+        # counts as closed here too; counting only ``[]`` would tell the model
+        # nothing was left behind while the row renders ``(not answered)``.
+        closed_unanswered = sum(
+            1 for values in cells.values() if not any(text.strip() for text in values)
+        )
         by_map: dict[str, Any] = {"surface": "chat"}
         if message_id:
             by_map["message_id"] = str(message_id)
@@ -1587,7 +1602,7 @@ class AskQueue:
         self._settled(ask_id)
         return {
             "ok": True,
-            "text": render.withdraw_receipt(ask_id, reason),
+            "text": render.withdraw_receipt(ask_id, reason, unanswered=closed_unanswered),
             "details": {"ask_id": ask_id, "reason": reason},
         }
 
@@ -2361,7 +2376,21 @@ class AskQueue:
                 if drafts and status == store.STATUS_OPEN
                 else None
             )
-            rows.append(store.pending_row(record, draft))
+            # SA-D7 (2026-10-23): the card's context line — "3 messages from you
+            # since this was asked (last 19:36)" — rides the row as two INTs so
+            # no surface has to re-derive them from a session it may not hold
+            # (the desktop and the phone read rows, not sessions). Absent when
+            # this runtime cannot count them exactly (see ``_card_context``),
+            # which is also the shape every older runtime sends.
+            since, last_user_at = self._card_context(record)
+            rows.append(
+                store.pending_row(
+                    record,
+                    draft,
+                    user_messages_since=since,
+                    last_user_message_at=last_user_at,
+                )
+            )
         rows.sort(
             key=lambda row: (
                 row.get("status") != store.STATUS_OPEN,
@@ -2369,6 +2398,37 @@ class AskQueue:
             )
         )
         return rows[: policy.PROJECTION_CAP]
+
+    def _card_context(self, record: Mapping[str, Any]) -> tuple[int | None, int | None]:
+        """The ask card's context pair, from the session's user-message stamp.
+
+        ``(user_messages_since, last_user_message_at)``, or ``(None, None)`` when
+        the session cannot answer — a queue over a double or a reduced host with
+        no stamp, a session that has admitted no operator message yet, or an ask
+        older than the runtime's retained window. ABSENCE IS THE CONTRACT: every
+        surface renders the line only when the count is there, so "cannot count"
+        must never be sent as ``0`` (SA-D7; the same rule the ``attachments`` key
+        follows).
+
+        Probed, not assumed: ``AskQueue`` is constructed by the session but also
+        by tests and embedders over small doubles, and a duck-typed absence is
+        the difference between "no line" and an AttributeError on a per-frame
+        path.
+        """
+        probe = getattr(self._session, "ask_context_line", None)
+        if not callable(probe):
+            return None, None
+        try:
+            # ``probe`` came from a getattr, so its return is not statically known;
+            # the contract is the session's ``tuple[int, int] | None``.
+            pair: Any = probe(int(record.get("created_at") or 0))
+        except Exception:  # noqa: BLE001 — a repaint is never worth a failure
+            logger.debug("ask: could not read the user-message stamp", exc_info=True)
+            return None, None
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            return None, None
+        since, last_user_at = pair
+        return int(since), int(last_user_at)
 
     def _refresh(self, now_ms: int | None = None) -> None:
         """Rewrite the derived index. Best-effort by contract, like ``wakes/``."""
@@ -2700,6 +2760,44 @@ def _partial_answer_error(missing: Sequence[str]) -> str:
         f"every question must be answered at once: {listed} has no entry. "
         "Send an empty list for a question the user skipped — a partial answer "
         "would settle the ask and lose the rest."
+    )
+
+
+#: How much of an unknown answer key the refusal echoes (review round 1 NIT 3).
+#: The refusal quotes the key so a typo is obvious, but the map comes from a
+#: caller the queue does not trust — a hostile relay client can put a
+#: megabyte-long key in it, and this sentence is model-facing text that rides a
+#: turn. The ids the ask HOLDS are echoed whole: the model chose them.
+UNKNOWN_KEY_ECHO_MAX = 5
+UNKNOWN_KEY_ECHO_CHARS = 40
+
+
+def _unknown_answer_error(unknown: Sequence[str], valid: Sequence[str]) -> str:
+    """The refusal for an answer map naming a question that is not on the ask.
+
+    NAMES the key it did not recognise and the ids the ask actually has, because
+    the model is the one who mistyped: the field case behind this rule sent
+    ``bill-merge-permission`` for an ask whose only question was
+    ``merge-permission`` and was told it had left a question out. Before it, a map
+    that carried every real id plus one unknown key settled the ask and wrote the
+    stray cell into the log, where nothing can attribute it to a question. Shares
+    :func:`_partial_answer_error`'s contract — the answer is atomic, so the whole
+    map is refused and no cell is dropped. The echo is BOUNDED
+    (:data:`UNKNOWN_KEY_ECHO_MAX`, :data:`UNKNOWN_KEY_ECHO_CHARS`) because the
+    keys come from the caller.
+    """
+    shown = [
+        key if len(key) <= UNKNOWN_KEY_ECHO_CHARS else key[:UNKNOWN_KEY_ECHO_CHARS] + "…"
+        for key in unknown[:UNKNOWN_KEY_ECHO_MAX]
+    ]
+    listed = ", ".join(f"{key!r}" for key in shown)
+    if len(unknown) > len(shown):
+        listed += f" (and {len(unknown) - len(shown)} more)"
+    known = ", ".join(f"{qid!r}" for qid in valid) or "(none)"
+    verb = "is" if len(unknown) == 1 else "are"
+    return (
+        f"{listed} {verb} not a question on this ask — its questions are {known}. "
+        "Use the ids exactly as they were asked."
     )
 
 

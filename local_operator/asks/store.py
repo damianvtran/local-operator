@@ -929,13 +929,28 @@ def ask_ids(events: Sequence[Mapping[str, Any]]) -> list[str]:
     return _asks_in_order(events)
 
 
-def pending_row(record: Mapping[str, Any], draft: Iterable[str] | None = None) -> dict[str, Any]:
+def pending_row(
+    record: Mapping[str, Any],
+    draft: Iterable[str] | None = None,
+    *,
+    user_messages_since: int | None = None,
+    last_user_message_at: int | None = None,
+) -> dict[str, Any]:
     """One folded record as the wire's ``PendingAsk`` (design §4, frozen).
 
     Secret answers hold the KEY ONLY (``[<key>]``) because they are stored that
     way in the log — this function copies, it never resolves. ``delivered`` is
     carried rather than derived so a surface reads one field instead of
     re-implementing the sticky rule.
+
+    ``user_messages_since``/``last_user_message_at`` are the ask CARD'S CONTEXT
+    pair (SA-D7): how many operator messages were admitted after this ask was
+    asked, and when the latest one was. Both are ADDED KEYS, never defaults: a
+    row for an ask this runtime cannot count keeps exactly the shape every older
+    writer produces, and a surface shows no line rather than a zero it would have
+    to disbelieve. `asks/queue.py` is the one caller that supplies them (it holds
+    the session's stamp), and the aggregate index and every wire reader take the
+    row from there.
     """
     row: dict[str, Any] = {
         "ask_id": str(record.get("ask_id") or ""),
@@ -980,6 +995,10 @@ def pending_row(record: Mapping[str, Any], draft: Iterable[str] | None = None) -
     if answered_at:
         row["answered_at"] = int(answered_at)
     drafted = sorted(str(qid) for qid in (draft or ()))
+    if user_messages_since is not None:
+        row["user_messages_since"] = int(user_messages_since)
+    if last_user_message_at is not None:
+        row["last_user_message_at"] = int(last_user_message_at)
     if drafted:
         # THE LEGACY DRAFT (design §4, A2 addendum). The old single-slot client
         # answers a queued ask ONE QUESTION AT A TIME, so between its taps the
