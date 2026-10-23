@@ -1940,6 +1940,7 @@ class ProjectRegistry:
                 refused += 1
         hidden = len(row_files) - len(page)
         self._projects = loaded
+        self._warn_duplicate_names(loaded)
         # Replacing (not updating) the cache prunes every row this load did not
         # parse: a deleted row's parsed copy, and any row the page dropped.
         self._row_cache = cache
@@ -1969,6 +1970,35 @@ class ProjectRegistry:
                 len(page),
                 hidden,
                 "" if hidden == 1 else "s",
+            )
+
+    def _warn_duplicate_names(self, loaded: Mapping[str, Project]) -> None:
+        """Announce rows that ALREADY share a casefolded name. Warning only.
+
+        Two rows may each hold history the other does not (and now, attachments
+        the other does not), so no auto-rename and no refusal: which survivor
+        keeps the name is the operator's call. What a reader must not have to
+        discover by hand is that the store holds a pair at all — the pre-fix
+        create path could mint one, and the warning names the name and every id
+        so both rows can be found and one renamed.
+
+        One line per colliding name per load (the load itself is the throttle:
+        it runs on construction and on every refresh), not one per save.
+        """
+        by_name: dict[str, list[str]] = {}
+        for project in loaded.values():
+            by_name.setdefault(project.name.casefold(), []).append(project.id)
+        for name, ids in sorted(by_name.items()):
+            if len(ids) < 2:
+                continue
+            logger.warning(
+                "project store at %s holds %d rows named %r (ids: %s); uniqueness "
+                "applies when a name is ASSIGNED, so these rows stay readable and "
+                "writable — rename one when convenient.",
+                self.projects_dir,
+                len(ids),
+                name,
+                ", ".join(sorted(ids)),
             )
 
     @property
@@ -2196,21 +2226,43 @@ class ProjectRegistry:
         if self._find_on_disk_by_name(name) is not None:
             raise ProjectNameConflictError(f"project {name!r} already exists")
 
-    def _name_conflict(self, project: Project) -> Project | None:
-        """Another row using ``project.name``, from the page or from disk.
+    def _stored_name(self, project_id: str) -> str | None:
+        """The row's name AS STORED, or ``None`` when the store has no such row.
 
-        The disk half is skipped when this row's own name is UNCHANGED (its
-        cached copy says so, or the row itself is in the page): a save that does
-        not move a name cannot make a duplicate, and the common progress update
-        must not pay a store scan under the lock.
+        Page first (one dict walk), then the row's own file — the same two arms
+        every addressed read uses. Read-only: this answers "would this save MOVE
+        the name", and a row that is not on disk (a create) has no stored name.
+        """
+        current = self._projects.get(project_id)
+        if current is not None:
+            return current.name
+        row = self._read_row_from_disk(project_id)
+        return None if row is None else row.name
+
+    def _name_conflict(self, project: Project) -> Project | None:
+        """Another row using ``project.name``, when this save MOVES the name.
+
+        Uniqueness is enforced on ASSIGNMENT, never on EXISTENCE. A store can
+        already hold two rows with one casefolded name — the pre-fix create path
+        checked only the loaded page, so it minted duplicate pairs on a store
+        larger than the page — and if merely HOLDING a duplicated name blocked
+        writes, every update and refresh on either row would raise forever: a
+        pre-existing duplicate would freeze two projects permanently.
+
+        So the rule is: resolve this row's STORED name by id; an unchanged name
+        returns ``None`` (this save cannot create a duplicate, whatever else is
+        on disk); only a CHANGED name scans the page and the store, excluding
+        this row, and still refuses a name another row owns. ``create_project``
+        keeps its own refusal through ``_raise_if_name_taken`` — a new row has
+        no stored name, so it always takes the scanning arm.
         """
         name_key = project.name.casefold()
+        stored_name = self._stored_name(project.id)
+        if stored_name is not None and stored_name.casefold() == name_key:
+            return None
         for stored in self._projects.values():
             if stored.id != project.id and stored.name.casefold() == name_key:
                 return stored
-        current = self._projects.get(project.id)
-        if current is not None and current.name.casefold() == name_key:
-            return None
         return self._find_on_disk_by_name(project.name, exclude_id=project.id)
 
     def projects_for_session(self, session_id: str) -> list[Project]:
