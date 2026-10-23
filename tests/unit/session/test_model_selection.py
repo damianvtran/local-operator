@@ -254,9 +254,9 @@ def test_a_v2_row_below_the_settled_one_is_never_read(tmp_path, monkeypatch):
     real = module._selection
     seen: list[Any] = []
 
-    def watching(selector, effort, *, authoritative=False, boot=None):
+    def watching(selector, effort, *, authoritative=False, boot=None, fast=None):
         seen.append(selector)
-        return real(selector, effort, authoritative=authoritative, boot=boot)
+        return real(selector, effort, authoritative=authoritative, boot=boot, fast=fast)
 
     monkeypatch.setattr(module, "_selection", watching)
     saved = read_model_selection(directory)
