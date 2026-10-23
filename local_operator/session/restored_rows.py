@@ -49,7 +49,6 @@ from typing import Any
 from local_operator.incidents import CUT_OFF_CAUSES
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
-    TRANSCRIPT_FILENAME,
     TranscriptEntry,
 )
 
@@ -101,9 +100,16 @@ def child_tail_state(session_dir: Any) -> str:
     if not session_dir:
         return "unknown"
     try:
-        path = Path(session_dir) / TRANSCRIPT_FILENAME
-        if not path.exists():
+        # The resolver: the child's journal may be an archive, and "unknown"
+        # from a stat of the plain name would leave every compressed child
+        # reading as interrupted. ``transcript_for_read`` hands back the plain
+        # file or its bounded decompressed copy, so the read below is unchanged.
+        from local_operator.session import compression
+
+        resolved = compression.transcript_for_read(Path(session_dir))
+        if resolved is None:
             return "unknown"
+        path = resolved
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()

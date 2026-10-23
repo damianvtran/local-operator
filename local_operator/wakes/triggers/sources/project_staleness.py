@@ -77,7 +77,6 @@ _MAX_ROWS = 500
 _MAX_SESSIONS = 64
 
 #: The two per-session files whose newest mtime is the activity floor.
-_TRANSCRIPT_NAME = "transcript.jsonl"
 _INBOX_NAME = "inbox.jsonl"
 
 
@@ -253,11 +252,20 @@ def _last_activity_age_s(directory: Path) -> int | None:
     A FLOOR on idleness, not a verdict: files can be touched by non-turn
     traffic, and a session with neither file reads ``None`` (unknown) rather
     than a fabricated age.
+
+    The transcript is stat-ed at its PHYSICAL path (``transcript_source``), so a
+    compressed session keeps the exact age it had before the pass: compression
+    stamps the archive with the source's mtime precisely so this clock does not
+    move. Statting the plain name here would turn a compressed session into
+    "unknown idleness", which the engine reads as "ask again", forever.
     """
+    from local_operator.session import compression
+
+    transcript, _codec = compression.transcript_source(directory)
     newest: float | None = None
-    for name in (_TRANSCRIPT_NAME, _INBOX_NAME):
+    for path in (transcript, directory / _INBOX_NAME):
         try:
-            stamp = (directory / name).stat().st_mtime
+            stamp = path.stat().st_mtime
         except OSError:
             continue
         newest = stamp if newest is None else max(newest, stamp)
