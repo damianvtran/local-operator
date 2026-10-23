@@ -1593,16 +1593,23 @@ def _seed_paged_store(tmp_path: Path, total: int) -> tuple[ProjectRegistry, Proj
     Direct file writes, never ``create_project``: each create re-loads the whole
     store, so seeding 2001 rows through the API is O(n²), and mtimes must be
     EXPLICIT or the recency ranking would depend on how fast the writes land.
-    ``index`` 0 is the OLDEST stamp — the row a recency page sheds first.
+    ``index`` 0 is the OLDEST stamp — the row a recency page sheds first — and
+    its id sorts FIRST alphabetically, so a filename-ordered loader would keep
+    it and shed a ``row…`` instead: the ranking is what this fixture can tell
+    apart (m4).
+
+    ``refresh_interval=3600``: several assertions here read the snapshot straight
+    after a write, and the default 5 s interval would reload under a slow run,
+    making ``rows_loaded`` depend on WALL time rather than on the product (B1).
     """
-    store = ProjectRegistry(tmp_path)
+    store = ProjectRegistry(tmp_path, refresh_interval=3600.0)
     rows_dir = tmp_path / "projects"
-    rows_dir.mkdir()
+    rows_dir.mkdir(parents=True)
     base_ns = 1_700_000_000_000_000_000
     oldest: Project | None = None
     newest: Project | None = None
     for index in range(total):
-        project_id = "target" if index == 0 else f"row{index:05d}"
+        project_id = "aaa-target" if index == 0 else f"row{index:05d}"
         name = "dormant-target" if index == 0 else f"row-{index:05d}"
         project = Project(id=project_id, name=name)
         path = rows_dir / f"{project_id}.json"
@@ -1652,12 +1659,18 @@ def test_a_write_promotes_its_row_onto_the_page(tmp_path: Path) -> None:
     assert target.id not in {project.id for project in store.list_projects()}
 
     created = store.create_project(ProjectEdit(name="brand-new"))
+    # The just-written row is in the SNAPSHOT beside the page (the page plus
+    # rows this process wrote, every one of which belongs on the next load).
+    assert store.rows_loaded == _MAX_ROWS + 1
+    assert store.page_counts.beyond_page == 1
+
+    # An explicit reload re-cuts the page: the new row is the most recently
+    # written, so it stays and the oldest row is the one that leaves.
+    store.refresh()
     ids = {project.id for project in store.list_projects()}
     assert created.id in ids
     assert target.id not in ids
-    # The just-written row is in the snapshot beside the page (the page plus
-    # rows THIS process wrote, every one of which belongs on the next load).
-    assert store.rows_loaded == _MAX_ROWS + 1
+    assert store.rows_loaded == _MAX_ROWS
     assert store.truncated
 
 
@@ -1701,3 +1714,93 @@ def test_the_disk_name_scan_refuses_a_dormant_duplicate(tmp_path: Path) -> None:
     on_page = next(iter(store.list_projects()))
     with pytest.raises(ProjectNameConflictError):
         store.update_project(on_page.id, ProjectEdit(name=target.name))
+
+
+def test_an_unreadable_row_is_not_counted_as_a_hidden_one(tmp_path: Path) -> None:
+    """The page's cut and a load refusal are different facts (M4 / QA Q1).
+
+    ``truncated`` and every note read the PAGE CUT only: a note that promises
+    "the row is still addressable" would be false for a torn file. The refused
+    row keeps its own per-row warning and stays out of ``total_rows`` too.
+    """
+    store = ProjectRegistry(tmp_path)
+    for name in ("alpha", "beta", "gamma"):
+        store.create_project(ProjectEdit(name=name))
+    (tmp_path / "projects" / "torn.json").write_text("{not json", encoding="utf-8")
+    store.refresh()
+
+    counts = store.page_counts
+    assert (counts.on_disk, counts.page, counts.loaded, counts.refused) == (4, 4, 3, 1)
+    assert counts.beyond_page == 0
+    assert counts.total_rows == 3
+    assert store.truncated is False
+    assert len(store.list_projects()) == 3
+
+
+def test_an_in_place_rewrite_that_restores_mtime_is_not_served_from_cache(
+    tmp_path: Path,
+) -> None:
+    """ctime is in the cache key because mtime alone can be put back (m1).
+
+    A hand edit or a test can rewrite a row IN PLACE with the same size and then
+    restore its mtime; the kernel still moves ctime, so the cache must miss. With
+    (mtime, size, inode) alone this returned the superseded bytes — the inode
+    does not change on an in-place write.
+    """
+    store = ProjectRegistry(tmp_path)
+    created = store.create_project(ProjectEdit(name="cache-me", description="aaaa"))
+    store.refresh()
+    before = store.get_project(created.id)
+
+    path = tmp_path / "projects" / f"{created.id}.json"
+    stat = path.stat()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["description"] = "bbbb"
+    text = json.dumps(payload, indent=2) + "\n"
+    assert len(text) == stat.st_size, "the edit must keep the SIZE to isolate ctime"
+    path.write_text(text, encoding="utf-8")
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert path.stat().st_ino == stat.st_ino and path.stat().st_size == stat.st_size
+
+    store.refresh()
+    after = store.get_project(created.id)
+    assert after is not before
+    assert after.description == "bbbb"
+
+
+def test_a_create_scans_the_store_for_the_name_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m5: create's pre-check and the save guard share ONE scan.
+
+    The save cannot see the not-yet-stored row, so a second by-name scan would
+    find nothing the first did not — pure cost under the store lock.
+    """
+    store = ProjectRegistry(tmp_path)
+    store.create_project(ProjectEdit(name="first"))
+    calls: list[str] = []
+    original = ProjectRegistry._find_on_disk_by_name
+
+    def counting(self: ProjectRegistry, name: str, *, exclude_id: str = "") -> Project | None:
+        calls.append(name)
+        return original(self, name, exclude_id=exclude_id)
+
+    monkeypatch.setattr(ProjectRegistry, "_find_on_disk_by_name", counting)
+    store.create_project(ProjectEdit(name="second"))
+    assert calls == ["second"]
+
+
+def test_a_padded_name_resolves_the_same_way_on_both_lookups(tmp_path: Path) -> None:
+    """n3: the page walk and the disk scan must strip alike.
+
+    The page lookup casefolds and the disk lookup strips both sides, so a padded
+    name could resolve through one arm and not the other. Both arms are
+    exercised: a row on the page, and a row past it.
+    """
+    store = ProjectRegistry(tmp_path)
+    store.create_project(ProjectEdit(name="alpha"))
+    assert store.get_project_by_name("  alpha  ") is not None
+
+    paged, target, _newest = _seed_paged_store(tmp_path / "paged", _MAX_ROWS + 1)
+    found = paged.get_project_by_name(f"  {target.name}  ")
+    assert found is not None and found.id == target.id

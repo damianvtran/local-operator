@@ -56,7 +56,13 @@ async def test_empty_listing_and_the_capability_gate(api) -> None:
     client, _root = api
     listed = await client.get("/v1/desktop/projects")
     assert listed.status_code == 200
-    assert listed.json()["result"] == {"projects": []}
+    # The page declaration is additive: a whole-looking page says 0/0/false.
+    assert listed.json()["result"] == {
+        "projects": [],
+        "total_rows": 0,
+        "loaded_rows": 0,
+        "truncated": False,
+    }
 
     caps = await client.get("/v1/capabilities")
     assert caps.status_code == 200
@@ -810,3 +816,52 @@ async def test_forced_done_is_true_only_for_the_call_that_made_the_transition(ap
     )
     reclosed = await client.patch(url, json={"status": "done", "force_done": True})
     assert reclosed.json()["result"]["forced_done"] is True
+
+
+def _write_paged_row(root: Path, project_id: str, name: str, *, stamp_ns: int) -> None:
+    """Write one valid row straight into the route's store with a stated mtime."""
+    from local_operator.projects import Project
+
+    projects_dir = root / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    row = Project(id=project_id, name=name)
+    path = projects_dir / f"{project_id}.json"
+    path.write_text(json.dumps(row.model_dump(mode="json", by_alias=True)))
+    os.utime(path, ns=(stamp_ns, stamp_ns))
+
+
+async def test_a_paged_store_is_declared_and_every_row_stays_addressable(
+    api, monkeypatch
+) -> None:
+    """M1: listing/search/timeline declare the page; ``show`` resolves past it.
+
+    The desktop client is told the set is partial (``total_rows`` / ``loaded_rows``
+    / ``truncated``) AND that a row it cannot see is still reachable: the detail
+    route resolves through the disk-backed by-id/by-name lookups.
+    """
+    from local_operator import projects as projects_module
+
+    client, root = api
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_paged_row(root, "aaa-dormant", "dormant-row", stamp_ns=1_700_000_000_000_000_000)
+    _write_paged_row(root, "zzz-live", "live-row", stamp_ns=1_700_000_001_000_000_000)
+
+    listed = (await client.get("/v1/desktop/projects")).json()["result"]
+    assert [row["id"] for row in listed["projects"]] == ["zzz-live"]
+    assert (listed["total_rows"], listed["loaded_rows"], listed["truncated"]) == (2, 1, True)
+
+    by_name = await client.get("/v1/desktop/projects/dormant-row")
+    assert by_name.status_code == 200
+    assert by_name.json()["result"]["project"]["id"] == "aaa-dormant"
+    by_id = await client.get("/v1/desktop/projects/aaa-dormant")
+    assert by_id.status_code == 200
+
+    searched = (
+        await client.get("/v1/desktop/projects/search", params={"q": "dormant-row"})
+    ).json()["result"]
+    assert searched["count"] == 0
+    assert (searched["total_rows"], searched["loaded_rows"], searched["truncated"]) == (2, 1, True)
+
+    timeline = (await client.get("/v1/desktop/projects/timeline")).json()["result"]
+    assert [row["id"] for row in timeline["projects"]] == ["zzz-live"]
+    assert (timeline["total_rows"], timeline["loaded_rows"], timeline["truncated"]) == (2, 1, True)
