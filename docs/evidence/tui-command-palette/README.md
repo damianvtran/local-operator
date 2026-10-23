@@ -16,6 +16,7 @@ size, resolved font face and per-widget boxes that back the image.
 | `after/no-match` | `ctrl+p`, then `zzzzzzzz`, held past the framework's 0.5 s no-match countdown |
 | `after/empty` | `ctrl+p` with **both** catalogues stubbed empty (no app rows, no system actions) — the framework's empty discovery state |
 | `before/discover` | same keystroke on `origin/main` (`8426d1cac1`): placeholder `Search for commands…`, only the five framework system actions |
+| `after/*-fr-60x24` | the same three states with `LOP_LANG=fr`, to check the translated copy at the tight width |
 
 `before` is the "empty catalogue" the slice started from. There is no useful
 `before` frame for the other two states — on `origin/main` a query of `sett` and
@@ -80,4 +81,12 @@ rsvg-convert out/populated-100x30.svg -o out/populated-100x30.png
   spinner is left behind.
 - The placeholder at 60x24 (`Search commands, settings, sessions, agents…`, 44
   cells) fits the field without truncation, which is the `maxCells: 48` budget
-  the context sidecar records.
+  the context sidecar records. The French frame is the width check for the
+  auditor's one non-gating finding: `Trouver commandes, paramètres, sessions,
+  agents…` renders complete at 60 columns, and `Aucun résultat` is the no-match
+  line. **Two English strings remain on the French frame by design, not by
+  omission:** the slash descriptions (`SLASH_COMMANDS` resolves its copy to
+  `en` at import — the extraction's documented current state) and the five
+  system-action names/help (Textual's own catalogue). Neither is copy this
+  slice adds; the keys it does add (`placeholder`, `no_matches`, the five kind
+  tags) are localized.
