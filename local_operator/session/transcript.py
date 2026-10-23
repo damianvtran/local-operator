@@ -1970,7 +1970,31 @@ class Transcript:
         # when an archive is. Reading before restoring is the one ordering that
         # can turn a compressed session into an empty one.
         if self.directory.is_dir():
-            self._writer_lock_held = compression.acquire_writer(self.directory)
+            # BOUNDED WAIT, not a single try: the lock's other holder can be the
+            # COMPRESSOR, and the loser of that race silently loses the
+            # conversation. The compressor publishes its archive and unlinks the
+            # plain file after the restore below looked and found the plain file
+            # present; this runtime would then append to a fresh empty file that
+            # every reader prefers over the archive holding the real history. A
+            # single-session compress takes well under a second, so a few
+            # seconds of waiting closes the realistic window.
+            #
+            # Still bounded, and still proceed-with-a-warning when it expires:
+            # the remaining holder then is a second real runtime, which is the
+            # harness's documented two-writer hazard (``resume.live_runtime_pid``
+            # exists so a second front end attaches instead of opening another
+            # writer) — not something a longer wait resolves, and refusing here
+            # would turn a transient contention into a session that cannot open.
+            self._writer_lock_held = compression.acquire_writer(
+                self.directory, wait_s=compression.WRITER_LOCK_WAIT_S
+            )
+            if not self._writer_lock_held:
+                logger.warning(
+                    "transcript: %s stayed locked for %.1fs; opening WITHOUT the "
+                    "writer lock (a second runtime holds it)",
+                    self.directory,
+                    compression.WRITER_LOCK_WAIT_S,
+                )
             compression.restore_for_write(self.directory)
         self.path = self.directory / TRANSCRIPT_FILENAME
         # Claims can precreate the directory; the journal distinguishes a legacy
@@ -2642,6 +2666,21 @@ class Transcript:
         opening a second writer.
         """
         written: os.stat_result | None = None
+        # A VANISHED PLAIN FILE WITH AN ARCHIVE BESIDE IT IS NOT A MISSING
+        # JOURNAL. The rebuild below writes this object's in-memory rows over the
+        # plain name; when the file went away because a compression pass replaced
+        # it, that rebuild would publish a journal starting at whatever this
+        # runtime happened to replay while the archive — the actual conversation
+        # — sat beside it, and every reader prefers the plain name. So the
+        # archive is restored first, and an archive this build cannot decode
+        # REFUSES the append: a failed turn is recoverable, a shadowed
+        # conversation is not.
+        if not self.path.exists() and compression.archive_path(self.directory) is not None:
+            if not compression.restore_for_write(self.directory):
+                raise OSError(
+                    f"{self.directory} holds an archived transcript this build cannot "
+                    "restore; refusing to rebuild the journal from memory over it"
+                )
         rebuild = not self.path.exists()
         if self._created_at is None and not rebuild:
             # Another runtime may have materialized a speculative transcript
