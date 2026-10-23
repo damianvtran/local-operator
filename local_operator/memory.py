@@ -1012,9 +1012,9 @@ class MemoryStore:
             # the host disk can be full too. Translate it only when the cap is
             # implicated (see _page_cap_refusal); every other failure keeps the
             # caller's generic store-unavailable path.
-            cap_bytes = self._page_cap_refusal(db, exc)
-            if cap_bytes is not None:
-                raise MemoryError(self._store_full_message(cap_bytes)) from exc
+            budget = self._page_cap_refusal(db, exc)
+            if budget is not None:
+                raise MemoryError(self._store_full_message(*budget)) from exc
             raise
         finally:
             db.close()
@@ -1050,19 +1050,25 @@ class MemoryStore:
         ``batch=False``: that transient state still accepts smaller writes and
         is reported by the near-cap warning instead of a false FULL.
 
-        Cost of the ``free == 0`` rule on the refusal path: a transaction that
-        exhausts a small freelist mid-flight at the cap reports the generic
-        refusal instead of the cap message. That is accepted — translating any
-        SQLITE_FULL while free pages exist would recreate the false-FULL
-        diagnosis on the recovery state, which is worse than a generic sentence.
+        Cost of the ``free == 0`` rule on the refusal path: a SQLITE_FULL while
+        free pages remain reports the generic refusal, even at the cap where a
+        transaction may have exhausted a small freelist mid-flight. That is
+        accepted: translating it would put a cap diagnosis on a state that can
+        still accept writes. The ``free == 0, pages < cap`` case IS translated,
+        with the near-cap arm of the refusal message that states the remaining
+        headroom; only ``free > 0`` stays generic.
         """
         slack = MAX_BATCH_BYTES // page_size if batch else 0
         return free == 0 and cap - pages <= slack
 
     def _page_cap_refusal(
         self, db: sqlite3.Connection, exc: sqlite3.OperationalError
-    ) -> int | None:
-        """The enforced cap in bytes when this SQLITE_FULL is the page cap, else None.
+    ) -> tuple[int, int, int] | None:
+        """``(page_count, page_size, max_page_count)`` when this FULL is the cap.
+
+        The tuple (rather than a bare cap figure) is what lets the message say
+        which of the two states it fired in: at the cap, or below it with the
+        batch too large for the remaining headroom.
 
         When the host filesystem reports less free space than this store's own
         cap, the disk itself may be the cause; that case deliberately keeps the
@@ -1084,23 +1090,45 @@ class MemoryStore:
             return None
         if not self._at_page_cap(pages, page_size, cap, free, batch=True):
             return None
-        return cap_bytes
+        return pages, page_size, cap
 
-    def _store_full_message(self, cap_bytes: int) -> str:
-        """The one refusal that names the byte cap and every way out of it.
+    def _store_full_message(self, pages: int, page_size: int, cap: int) -> str:
+        """The refusal for a proven cap failure, worded for the state it fired in.
+
+        TWO arms, because one sentence is false in one of them (round-3 review):
+
+        * ``pages >= cap``: the store has reached the cap. Writes that need a new
+          page are refused until space is freed; small writes that fit the last
+          page can still succeed (round 2 proved this).
+        * ``pages < cap``: the batch needed more pages than remain. Saying "has
+          reached its cap" here would be false — writes needing new pages were
+          measured succeeding immediately afterwards — so this arm states the
+          remaining headroom and that a smaller write may still succeed.
 
         Generic on purpose for everything else: an unavailable store can be a
         permissions, disk or FTS problem, and telling that operator to forget
-        facts would be wrong. This message is only reached once the cap is
-        proven, so it can be prescriptive.
+        facts would be wrong. These messages are only reached once the cap is
+        proven, so they can be prescriptive.
         """
+        cap_bytes = cap * page_size
+        remedies = (
+            "Inspect usage with `lop memory status`, reclaim space with "
+            "`lop memory forget SCOPE/ID --revision REV --yes`, and compact the file "
+            f"with `sqlite3 {shlex.quote(str(self.path))} 'VACUUM'`. Run that VACUUM "
+            "first if the forget is also refused. See guide://memory."
+        )
+        if pages >= cap:
+            return (
+                f"Memory store is full: {self.path} has reached its "
+                f"{format_bytes(cap_bytes)} cap, so writes that need a new page are "
+                f"refused until space is freed. {remedies}"
+            )
+        headroom = (cap - pages) * page_size
         return (
-            f"Memory store is full: {self.path} has reached its "
-            f"{format_bytes(cap_bytes)} cap, so writes that need a new page are refused "
-            "until space is freed. Inspect usage with `lop memory status`, reclaim "
-            "space with `lop memory forget SCOPE/ID --revision REV --yes`, and compact "
-            f"the file with `sqlite3 {shlex.quote(str(self.path))} 'VACUUM'`. Run that "
-            "VACUUM first if the forget is also refused. See guide://memory."
+            f"Memory store is near its cap: this request needs more pages than the "
+            f"{format_bytes(headroom)} remaining under the {format_bytes(cap_bytes)} "
+            "cap, so it was refused and nothing was saved; a smaller write may still "
+            f"succeed. {remedies}"
         )
 
     def _storage_view(self, db: sqlite3.Connection) -> dict[str, Any]:
