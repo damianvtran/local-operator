@@ -5,8 +5,8 @@ document.
 
 Refs read:
 
-- desktop UI: `local-operator-ui` `origin/main` `76dda0304` (2026-10-18)
-- TUI: `local-operator` `origin/main` `8d91a9b9e2` (2026-10-18)
+- desktop UI: `local-operator-ui` `origin/main` `f0df7b8994` (2026-10-22; feature paths were audited at `72f94df269`)
+- TUI: `local-operator` `origin/main` `6bfac3fccb` (2026-10-22; 61 slash commands)
 
 The two trees are read at those refs. A capability is only marked present where
 the surface exists in the code, not merely where the backend supports it.
@@ -31,7 +31,7 @@ evidence for both.
 |---|---|---|---|---|
 | 1.1 | Conversation list with pinned/active/previous sections, pin/unpin, archive/unarchive/delete | ✅ | ✅ | UI `features/chat/components/chat-sidebar.tsx`, `chat-sections.ts`; TUI `widgets/session_sidebar.py`, `/archive`, `/unarchive`, `/delete` |
 | 1.2 | Conversation search over titles **and message bodies** | ✅ | ✅ | UI `shared/api/local-operator/session-search.ts`, `palette-search.ts`; TUI `widgets/session_picker.py` + `session/search_index.py` |
-| 1.4 | Global command palette / action search (`Cmd+K`, `Ctrl+K`, `Ctrl+P`) | ✅ | ◐ | UI `features/command-palette/*`; TUI inherits Textual's `ctrl+p` CommandPalette (`app.py:4578-4583`, `docs/design/keymap.md` §E.4) but registers no app-specific providers, so only framework system actions appear |
+| 1.4 | Global command palette / action search (`Cmd+K`, `Ctrl+K`, `Ctrl+P`) | ✅ | ◐ | UI `features/command-palette/*`; TUI inherits Textual's `ctrl+p` CommandPalette (`app.py:4578-4583`, `docs/design/keymap.md` §E.4) but registers no app-specific providers, so only framework system actions appear — **next slice P5** |
 | 1.5 | Agents and teams visible in the navigation column | ✅ | ◐ | UI `chat-sidebar.tsx` (Agents + Teams sections); TUI `/agent` and `/team` listings, no tree |
 | 1.6 | Notification / attention routing back to a conversation | ✅ | ◐ | UI attention store and sidebar badges; TUI `/notifications`, notifier app and status marks |
 
@@ -53,8 +53,8 @@ evidence for both.
 | 2.11 | Plan / todo list | ✅ | ✅ | UI run panel + plan chip; TUI `widgets/todo_panel.py` |
 | 2.12 | Running subagents and background jobs roster | ✅ | ✅ | UI run panel; TUI `widgets/subagent_panel.py`, `widgets/subagent_view.py`, status counters |
 | 2.13 | Armed wakes and monitors, with next-due/health | ✅ | ✅ | UI composer chips + run panel; TUI `widgets/wake_panel.py` |
-| 2.14 | Create, edit and cancel wakes/schedules | ✅ | ◐ | UI `features/schedules/*` (page + form + cancel confirm); TUI has no direct surface — the agent's `wake` tool can create/list/cancel, and the panel only displays |
-| 2.15 | Code-request ledger: PR/MR state, CI, agent/design/QA/UX review rounds, freshness | ✅ | ◐ | UI `features/code-review/*` right pane; TUI has no surface — the agent-facing `code_requests` tool can list/show rows, but there is no page |
+| 2.14 | Create, edit and cancel wakes/schedules | ✅ | ✅ | UI `features/schedules/*`; TUI `/schedule` + `widgets/schedule_view.py` (delivered 2026-10-22; replaces the agent-tool workaround) |
+| 2.15 | Code-request ledger: PR/MR state, CI, agent/design/QA/UX review rounds, freshness | ✅ | ✅ | UI `features/code-review/*` right pane; TUI `/review` + `widgets/review_view.py` (delivered 2026-10-22; read-only, opens the forge page) |
 
 ## 3. Skills, memory and harness import
 
@@ -121,8 +121,8 @@ evidence for both.
 |---|---|---|---|---|
 | 8.1 | Completion notifications and unread marks | ✅ | ✅ | UI native notifications + attention; TUI notifier app, `/notifications`, terminal marks |
 | 8.2 | Armed wake/monitor list with due time and delivery health | ✅ | ✅ | UI composer chips/run panel; TUI `wake_panel.py` |
-| 8.3 | Create/edit/cancel a wake from the app | ✅ | ◐ | UI schedules page/form; TUI direct surface absent, but the agent's `wake` tool can create/list/cancel |
-| 8.4 | Schedules page grouped by conversation, including legacy agent schedules | ✅ | ✗ | UI `features/schedules/components/schedules-page.tsx`; TUI has no page |
+| 8.3 | Create/edit/cancel a wake from the app | ✅ | ✅ | UI schedules page/form; TUI `/schedule` create/edit/cancel (`widgets/schedule_view.py`) |
+| 8.4 | Schedules page grouped by conversation, including legacy agent schedules | ✅ | ✅ | UI `features/schedules/components/schedules-page.tsx`; TUI `/schedule` grouped view (delivered 2026-10-22) |
 
 ## 9. Ask flows
 
@@ -160,11 +160,11 @@ evidence for both.
 
 ## 13. Summary
 
-Counting the 71 rows above:
+Counting the 71 rows above (statuses updated 2026-10-22):
 
-- Full parity: 38
-- TUI partial: 17
-- TUI missing: 12
+- Full parity: 42
+- TUI partial: 14
+- TUI missing: 11
 - TUI-only: 1
 - Not applicable to a terminal: 3
 
@@ -172,9 +172,9 @@ The missing set is smaller than it first looks because a capability reachable
 only through an agent tool is **partial**, not missing. The remaining missing
 set clusters into three kinds:
 
-1. **Bounded direct surfaces** — the schedules page grouped by conversation
-   (8.4) and the user profile (5.11). The underlying wake and profile data
-   exists; only the page is absent.
+1. **Bounded direct surfaces** — the user profile (5.11). The underlying
+   profile data exists; only the page is absent. The schedules page (8.4) and
+   the code-request ledger (2.15) were delivered in the 2026-10-22 slice.
 2. **Large desktop surfaces that need a terminal design and a client for a
    backend API** — the agent hub marketplace, skills library and public teams
    (4.5–4.9).
@@ -182,7 +182,7 @@ set clusters into three kinds:
    consent/approval chrome (7.1–7.3); voice dictation (2.4); the mesh graph
    (11.2, deliberately not planned for a terminal).
 
-The larger, more actionable group is the 17 **partial** rows: the capability
+The larger, more actionable group is the 14 **partial** rows: the capability
 exists only by asking the agent to use a tool, or as a read-only/stripped-down
 surface. The first six slices below target that group.
 
@@ -192,14 +192,20 @@ Order is by user value per unit of delivery risk. The first six are proposed as
 serial TUI slices; P6–P9 are proposals, not implementation work, until their
 design is accepted.
 
+Delivery status at `6bfac3fccb` (2026-10-22): **P0 `/review`, P1 `/schedule`,
+P2 project edit/milestones, P3 agent/team authoring forms and P4a `/view` are
+delivered.** The next slice is **P5 command palette providers**. The matrix rows
+that said “no direct surface” for 2.14/2.15 and 8.3/8.4 were corrected above;
+P3's per-member model/effort override editing remains desktop-only.
+
 | Order | Slice | Gap closed | Why this rank | Risk |
 |---|---|---|---|---|
-| P0 | `/review` — code-request ledger page | 2.15 | No direct TUI surface; backend ledger and `service.view_rows` already exist; read-only; high value to a developer operator | Low: read-only, no protocol change |
-| P1 | `/schedule` — wake list/create/edit/cancel | 2.14, 8.3 | No direct TUI surface; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround | Medium: mutation, form validation, date/duration parsing |
-| P2 | Project parity completion: edit project, add/remove milestone | 10.3, 10.5 | Closes the last project gaps; store APIs already exist; TUI already has the page and form patterns | Low–medium |
-| P3 | Agent and team authoring forms | 4.2, 4.4 | Removes the agent-mediated workaround; desktop has the full field set to mirror; TUI already has `/agent` and `/team` surfaces | Medium: forms and validation |
-| P4a | Read-only text/code/markdown file preview — delivered | 2.3a, 6.2a | `/view` and supported callouts share a bounded local read-only viewer; richer rendering and editing are not included | Medium: file-type routing, bounded rendering |
-| P5 | Command palette providers | 1.4 | One keyboard surface over destinations, settings rows, conversations and agents; the inherited Textual palette already opens, but has nothing app-specific to show | Medium: new interaction, not a new subsystem |
+| P0 | `/review` — code-request ledger page — **delivered** | 2.15 | No direct TUI surface; backend ledger and `service.view_rows` already exist; read-only; high value to a developer operator | Low: read-only, no protocol change |
+| P1 | `/schedule` — wake list/create/edit/cancel — **delivered** | 2.14, 8.3 | No direct TUI surface; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround | Medium: mutation, form validation, date/duration parsing |
+| P2 | Project parity completion: edit project, add/remove milestone — **delivered** | 10.3, 10.5 | Closes the last project gaps; store APIs already exist; TUI already has the page and form patterns | Low–medium |
+| P3 | Agent and team authoring forms — **delivered; per-member overrides remain desktop-only** | 4.2, 4.4 | Removes the agent-mediated workaround; desktop has the full field set to mirror; TUI already has `/agent` and `/team` surfaces | Medium: forms and validation |
+| P4a | Read-only text/code/markdown file preview — **delivered** | 2.3a, 6.2a | `/view` and supported callouts share a bounded local read-only viewer; richer rendering and editing are not included | Medium: file-type routing, bounded rendering |
+| P5 | Command palette providers — **NEXT** | 1.4 | One keyboard surface over destinations, settings rows, conversations and agents; the inherited Textual palette already opens, but has nothing app-specific to show | Medium: new interaction, not a new subsystem |
 
 ### Proposals (do not build without acceptance)
 
@@ -228,7 +234,7 @@ checked and removed from the matrix and the proposal list.
 Mesh graph (11.2) is a visual tool a terminal cannot improve on; console, mini
 view and installer are desktop/terminal-form factors, not parity gaps.
 
-## 15. First slice: `/review`
+## 15. First delivered slice (record): `/review`
 
 ### Goal
 
@@ -269,7 +275,39 @@ for the current session, read-only.
 - Independent code review and QA; design/UX round because it is a new visible
   surface.
 
-## 16. Delivery notes
+## 16. Next slice: P5 command palette
+
+### Goal
+
+Make the inherited Textual `ctrl+p` palette useful: one app-specific action
+surface over destinations, settings rows, conversations, agents and the existing
+slash-command registry, without creating a second registry.
+
+### Scope
+
+- Register command-palette providers that reuse `SLASH_COMMANDS`, settings
+  sections, session-catalog rows and agent/team names; no duplicate command
+  table.
+- Keep `ctrl+p` as the entry point; do not remap the composer or `ctrl+k`.
+- Actions must be keyboard-only, with empty/loading/no-match states, and must
+  route through the same handlers as the slash commands and full-page modes.
+- Complete i18n catalogue for every new string in all six shipped locales.
+
+### Non-goals
+
+- A new command registry or a second settings search implementation.
+- Hub marketplace, browser, media or voice (P6–P9).
+
+### Tests and evidence
+
+- Unit tests for provider ranking/filtering and handler dispatch, including an
+  empty catalogue, duplicate labels and a no-match query.
+- Widget tests for open/close, keyboard selection, focus return and empty state.
+- Rendered evidence from the real `OperatorApp` at 100x30 and 60x24, before and
+  after the palette, SVG exported and viewed; independent code review and QA;
+  design/UX round because it is a new visible interaction.
+
+## 17. Delivery notes
 
 - No version bump; no release cut. The merged PRs are handed to the current
   release-window owner.
