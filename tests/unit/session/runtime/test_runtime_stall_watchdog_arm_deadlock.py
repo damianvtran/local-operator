@@ -1132,8 +1132,7 @@ def test_the_postmortem_context_keeps_the_fatal_frame_not_arbitrary_payload() ->
     data = (
         b"private payload must not be copied\nFatal Python error: Segmentation fault\n"
         b"Current thread 0x123 (most recent call first):\n"
-        b'  File "synthetic.py", line 8 in probe\n'
-        + b"irrelevant tail\n" * 1000
+        b'  File "synthetic.py", line 8 in probe\n' + b"irrelevant tail\n" * 1000
     )
     context = _sanitized_fault_context(data)
     assert any("synthetic.py" in line for line in context)
