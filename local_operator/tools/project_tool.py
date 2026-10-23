@@ -737,6 +737,16 @@ async def _op_update(
     stored = len(params.attach or ())
     if stored:
         detail += f", {stored} attachment{'s' if stored != 1 else ''} stored"
+    if outcome.dropped:
+        # Only when the cap actually removed something: an ordinary update's
+        # receipt must not mention trimming. The second clause is the point —
+        # the cap never drops an entry that carries evidence, so a reader who
+        # sees this knows the attached files are still there.
+        noun = "entry" if outcome.dropped == 1 else "entries"
+        detail += (
+            f"; history trimmed, {outcome.dropped} oldest text {noun} dropped "
+            "— attached evidence is kept"
+        )
     return _text(
         tool_call_id,
         "project",

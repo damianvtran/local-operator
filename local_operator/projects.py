@@ -121,9 +121,13 @@ ATTRIBUTION_MAX = 80
 #: the other one-line labels (80). Longer is refused rather than truncated.
 TITLE_MAX = 80
 
-#: The append-only history is BOUNDED: the newest 500 entries are kept, oldest
-#: dropped first — deep enough for weeks of real reporting, bounded so one row
-#: cannot grow without limit.
+#: Soft bound on the append-only history: a write keeps the newest
+#: ``UPDATES_MAX`` entries and drops the OLDEST TEXT-ONLY ones beyond it. An
+#: entry that carries attachments is never dropped, so a stored list may exceed
+#: this by the number of attachment-bearing entries — deliberately: the cap
+#: trims prose, it never deletes evidence whose files are on disk. Deep enough
+#: for weeks of real reporting and bounded for prose; a read never shortens the
+#: list at all (see :func:`_coerce_updates`).
 UPDATES_MAX = 500
 
 #: Attachments are COPIED into the store, so both the count per update and
@@ -572,10 +576,15 @@ def _coerce_attachment(raw: dict[str, Any]) -> ProjectAttachment:
 def _coerce_updates(value: object) -> list[ProjectUpdateEntry]:
     """The stored history, tolerantly: malformed or missing reads as ``[]``.
 
-    No migration and no refusal: an entry that is not an object is dropped,
-    fields that lost their shape degrade to their empty values, and the log
-    stays bounded (the newest :data:`UPDATES_MAX` entries) exactly as a write
-    keeps it — so a hand-edited row reads, and the next write re-saves it clean.
+    No migration and no refusal: an entry that is not an object is dropped and
+    fields that lost their shape degrade to their empty values, so a hand-edited
+    row reads and the next write re-saves it clean.
+
+    A READ NEVER SHORTENS HISTORY. The bound is a WRITE-side policy now
+    (:data:`UPDATES_MAX`, and even there only text-only entries are dropped):
+    slicing the oldest entries off here silently destroyed them on the next
+    write, because the shortened list is what that write then persisted — and
+    with them the attachments those entries described.
     """
     if not isinstance(value, list):
         return []
@@ -603,7 +612,7 @@ def _coerce_updates(value: object) -> list[ProjectUpdateEntry]:
                 attachments=attachments,
             )
         )
-    return entries[-UPDATES_MAX:]
+    return entries
 
 
 def _refuse_done_if_incomplete(milestones: Sequence[ProjectMilestone]) -> None:
@@ -1015,14 +1024,22 @@ class ProjectUpdate:
     ``refreshed`` is True when the call recorded an assertion that a stored
     line still describes reality (an identical-normalized re-send of stale
     text, or ``refresh_project``) — no append, content clock unmoved.
+
+    ``dropped`` counts TEXT-ONLY history entries the soft cap removed on this
+    write (oldest first). It is never nonzero merely for holding a long list:
+    an entry carrying attachments is never dropped, so a receipt that says
+    "history trimmed" must be able to say what survived — the evidence did.
     """
 
-    __slots__ = ("project", "changed", "refreshed")
+    __slots__ = ("project", "changed", "refreshed", "dropped")
 
-    def __init__(self, project: Project, *, changed: bool, refreshed: bool) -> None:
+    def __init__(
+        self, project: Project, *, changed: bool, refreshed: bool, dropped: int = 0
+    ) -> None:
         self.project = project
         self.changed = changed
         self.refreshed = refreshed
+        self.dropped = dropped
 
 
 def stale_after_s(config_dir: Path | str | None = None) -> float:
@@ -2685,7 +2702,7 @@ class ProjectRegistry:
                     "re-send or a clear appends no entry to carry them)"
                 )
             stored_attachments: list[ProjectAttachment] = []
-            evicted_entries: list[ProjectUpdateEntry] = []
+            dropped = 0
             if "progress" in supplied:
                 if appends:
                     candidate.progress = new_text
@@ -2705,12 +2722,19 @@ class ProjectRegistry:
                             attachments=stored_attachments,
                         ),
                     ]
-                    # The cap evicts oldest-first, and the evicted entries'
-                    # files are reclaimed only AFTER the save lands, so a
-                    # failed save can never leave the live row pointing at
-                    # files this call removed (agent review round 1, F1).
-                    evicted_entries = appended[:-UPDATES_MAX]
-                    candidate.updates = appended[-UPDATES_MAX:]
+                    # THE CAP TRIMS TEXT, NEVER EVIDENCE. An entry that carries
+                    # attachments is kept even when it is older than the newest
+                    # UPDATES_MAX entries: the files it describes are real and
+                    # unrecoverable, and dropping the entry would leak them (a
+                    # delete of the row cannot find them either). Only text-only
+                    # entries are dropped, oldest first, and their count rides
+                    # the receipt. Order is preserved: protected parents stay
+                    # ahead of the kept tail.
+                    keep = appended[-UPDATES_MAX:]
+                    overflow = appended[:-UPDATES_MAX]
+                    protected = [entry for entry in overflow if entry.attachments]
+                    candidate.updates = [*protected, *keep]
+                    dropped = len(overflow) - len(protected)
                     changed = True
                 elif not new_normalized:
                     # An empty (or whitespace-only) snippet IS "no progress
@@ -2772,9 +2796,12 @@ class ProjectRegistry:
                         attachment.path for attachment in stored_attachments
                     )
                 raise
-            for evicted in evicted_entries:
-                self._reclaim_attachment_files(a.path for a in evicted.attachments)
-            return ProjectUpdate(saved, changed=changed, refreshed=refreshed)
+            # What the cap drops is TEXT-ONLY by construction, so there is
+            # nothing to reclaim: eviction no longer touches attachment files.
+            # ``_reclaim_attachment_files`` stays for the pre-save take-back
+            # guard above and for ``delete_project``, where the row itself is
+            # going away (agent review round 1, F1).
+            return ProjectUpdate(saved, changed=changed, refreshed=refreshed, dropped=dropped)
 
     def refresh_project(self, project_id: str, *, reporter: str = "") -> ProjectUpdate:
         """Record a CHECK that the stored progress line still describes reality.
