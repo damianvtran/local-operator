@@ -339,7 +339,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # 568 -> 570 (round-1 m1/Q-1): the ``sounds`` description now names
     # ``filename`` in the exclusivity clause, so the inert combination is
     # refused rather than silently ignored.
-    "generate_sound_effect": 570,
+    # 570 -> 739 (sfx-quality, 2026-10-23): the doc now carries the 192/128
+    # MP3 preference and its plan fallback, the duration/price split (per second
+    # on Radient, per generation on a BYOK key), the negative-prompt rule and
+    # the BYOK vendor-logging limit. Measured by this test's own printed table
+    # under the canonical hermetic arm; only the two audio entries moved.
+    "generate_sound_effect": 739,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -358,7 +363,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # the honest cancel paragraphs.
     # 628 -> 668 (media artifact naming): the ``filename`` stem field's
     # teaching description renders in the parameter table.
-    "generate_voiceover": 668,
+    # 668 -> 788 (sfx-quality, 2026-10-23): the MP3 sentence now carries the
+    # 192/128 preference and fallback, and the doc states the BYOK
+    # vendor-logging limit. Same measured table, same canonical arm.
+    "generate_voiceover": 788,
     "glob": 87,
     "grep": 333,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
