@@ -221,6 +221,25 @@ def _live_counts(registry: ProjectRegistry, projects: list[Project]) -> dict[str
     }
 
 
+def _page_fields(registry: ProjectRegistry) -> dict[str, Any]:
+    """The page declaration every listing-shaped answer carries (M1).
+
+    ONE reading of the registry's counts, so the listing, its search sibling and
+    the timeline cannot describe one store three ways. The numbers come from the
+    SAME snapshot the rows did (``page_counts`` is replaced whole by every load):
+    ``total_rows`` is the addressable set, ``loaded_rows`` what this answer
+    could see, and ``truncated`` says rows are beyond the page. A row past the
+    page is still addressable — ``GET /v1/desktop/projects/{key}`` resolves
+    through the disk-backed by-id/by-name lookups.
+    """
+    counts = registry.page_counts
+    return {
+        "total_rows": counts.total_rows,
+        "loaded_rows": counts.loaded,
+        "truncated": counts.truncated,
+    }
+
+
 def _listing_order(rows: list[Project]) -> list[Project]:
     """The listing's own order — status rank, then newest first.
 
@@ -248,7 +267,7 @@ async def projects(request: Request) -> CRUDResponse[Any]:
                 )
                 for project in listed
             ]
-            return ProjectList(projects=rows)
+            return ProjectList(projects=rows, **_page_fields(registry))
 
         return reply(await asyncio.to_thread(read))
 
@@ -302,7 +321,9 @@ async def search(
                     )
                     for match in search_projects(rows, q, limit=limit)
                 ]
-            return ProjectSearchResults(projects=hits, query=q, count=len(hits))
+            return ProjectSearchResults(
+                projects=hits, query=q, count=len(hits), **_page_fields(registry)
+            )
 
         return reply(await asyncio.to_thread(read))
 
@@ -322,7 +343,10 @@ async def timeline(request: Request) -> CRUDResponse[Any]:
         def read() -> ProjectTimeline:
             registry = _registry(request)
             listed = _listing_order(registry.list_projects())
-            return ProjectTimeline(projects=[project_timeline_entry(project) for project in listed])
+            return ProjectTimeline(
+                projects=[project_timeline_entry(project) for project in listed],
+                **_page_fields(registry),
+            )
 
         return reply(await asyncio.to_thread(read))
 

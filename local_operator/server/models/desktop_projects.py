@@ -230,9 +230,23 @@ class LinkedSessionView(BaseModel):
 
 
 class ProjectList(BaseModel):
-    """``GET /v1/desktop/projects``."""
+    """``GET /v1/desktop/projects`` — the page, plus what the page left out.
+
+    The registry loads its most recently active rows only (a recency PAGE, not
+    a visibility boundary), so a listing is a SET that can be PARTIAL. The
+    three counts are additive: they default to a whole-looking page so a client
+    built before them keeps parsing, and ``truncated`` is the flag a client must
+    honour — when it is true a missing project means "not on the loaded page",
+    never "not in the store", because the key and the name still resolve it.
+    """
 
     projects: list[ProjectSummary] = Field(default_factory=list)
+    #: Addressable rows the store holds: this page's rows plus the rows beyond it.
+    total_rows: int = 0
+    #: Rows this answer's page holds — the listing's own set size.
+    loaded_rows: int = 0
+    #: True when the recency page left rows out of this answer.
+    truncated: bool = False
 
 
 class ProjectDetail(BaseModel):
@@ -279,6 +293,13 @@ class ProjectSearchResults(BaseModel):
     projects: list[ProjectSearchHit] = Field(default_factory=list)
     query: str = ""
     count: int = 0
+    #: Addressable rows the store holds, and how many of them the ranking saw.
+    #: When ``truncated`` is true the search covered ``loaded_rows`` rows only:
+    #: an empty answer means "not on the loaded page", never "not in the store",
+    #: and a project past the page is still reachable by key or name.
+    total_rows: int = 0
+    loaded_rows: int = 0
+    truncated: bool = False
 
 
 class ProjectTimelineEntry(BaseModel):
@@ -302,6 +323,11 @@ class ProjectTimeline(BaseModel):
     """
 
     projects: list[ProjectTimelineEntry] = Field(default_factory=list)
+    #: The same page declaration every listing carries: this document is the
+    #: recency page's timeline, and ``truncated`` says rows are beyond it.
+    total_rows: int = 0
+    loaded_rows: int = 0
+    truncated: bool = False
 
 
 #: The fixed board order, and therefore both listings' sort: ``archived`` last,

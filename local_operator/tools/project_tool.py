@@ -459,17 +459,19 @@ def _page_note(registry: ProjectRegistry) -> str:
     so, or "not in this list" reads as "does not exist" for a project
     ``op='show'`` still resolves — the ordinal-502 incident, where the model was
     told a valid row did not exist. ONE copy here, so the receipt cannot drift
-    from the registry's own counts.
+    from the registry's own counts. The hidden number is the PAGE CUT
+    (``PageCounts.beyond_page``), never ``on_disk - loaded``: a row the load
+    could not read is not hidden-by-page, and promising ``op='show'`` will
+    find it would be a lie (QA Q1).
     """
-    on_disk = registry.rows_on_disk
-    loaded = registry.rows_loaded
-    hidden = on_disk - loaded
+    counts = registry.page_counts
+    hidden = counts.beyond_page
     if hidden <= 0:
         return ""
     noun = "row is" if hidden == 1 else "rows are"
     return (
-        f"showing the {loaded} most recently active of {on_disk} stored projects "
-        f"— {hidden} dormant {noun} not listed here; op='show' name='<name>' "
+        f"showing the {counts.loaded} most recently active of {counts.total_rows} stored "
+        f"projects — {hidden} {noun} not listed here; op='show' name='<name>' "
         "still finds any project."
     )
 

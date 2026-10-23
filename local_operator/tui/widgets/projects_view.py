@@ -941,6 +941,7 @@ class ProjectsView(Vertical):
                 cursor=self._cursor if self._views else None,
                 associated=self._associated,
                 style_for=resolver,
+                hidden=self._hidden_rows,
             )
         if self._view == "timeline":
             return render_project_timeline(
@@ -949,6 +950,7 @@ class ProjectsView(Vertical):
                 cursor=self._cursor if self._views else None,
                 associated=self._associated,
                 style_for=resolver,
+                hidden=self._hidden_rows,
             )
         return render_project_list(
             self._views,

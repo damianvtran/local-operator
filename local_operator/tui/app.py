@@ -20920,28 +20920,36 @@ class OperatorApp(App[None]):
         """
         return _is_viewer(self._session)
 
-    def _projects_payload(self) -> list[Any]:
-        """Compose every project's view ONCE — the page's whole data input.
+    def _projects_payload(self) -> tuple[list[Any], int]:
+        """Compose the page's views and its hidden-row count from ONE registry read.
 
         One runtime scan serves every project (``records=``), so a listing of N
         projects does not walk the runtime registry N times, and the TUI-only
         live overlay is merged for THIS process's own session. Never raises: a
         store that cannot be read degrades to an empty page rather than a crash
         on a keystroke path, and one unreadable row does not hide the rest.
+
+        Returns ``(views, hidden_rows)``. Both come from the SAME registry
+        snapshot — the count is that snapshot's ``PageCounts.beyond_page`` — so a
+        page can never paint one load's rows beside another load's numbers, and
+        the caller never has to know which value to read first. A session with
+        NO registry reads as ``([], 0)``: ``_project_registry()`` would build an
+        uncached registry whose counters describe nothing (M2).
         """
         registry = self._project_registry()
         if registry is None:
-            return []
+            return [], 0
         from local_operator.paths import config_dir
         from local_operator.projects import build_project_view, scan_runtime_states
 
         root = config_dir()
         try:
             projects = list(registry.list_projects())
+            hidden = registry.page_counts.beyond_page
             states = scan_runtime_states(root)
         except Exception:  # noqa: BLE001 — the page degrades, it does not crash
             logger.debug("projects: composition failed", exc_info=True)
-            return []
+            return [], 0
         overlay = self._projects_live_overlay()
         views: list[Any] = []
         for project in projects:
@@ -20952,25 +20960,27 @@ class OperatorApp(App[None]):
             except Exception:  # noqa: BLE001 — one row must not hide the rest
                 logger.debug("projects: view composition failed", exc_info=True)
         self._mark_missing_attachments(views)
-        return views
+        return views, hidden
 
-    def _projects_page_hidden_rows(self) -> int:
-        """Stored rows the registry PAGE left out of the composed views.
+    def _reload_projects_page(self, page: Any, **extra: Any) -> None:
+        """Recompose and point the projects page at ONE read's views and counts.
 
-        The store loads its most recently active rows only (``projects._MAX_ROWS``);
-        the page cannot paint what the registry never loaded, and it must not
-        stay silent about it — a dormant project would read as deleted. The
-        list's existing overflow row states the total not shown.
-
-        MUST be read AFTER :meth:`_projects_payload` in the same call: the
-        payload's ``list_projects()`` is the read that refreshes the snapshot,
-        and these counters describe THAT load. Python evaluates keyword
-        arguments left to right, and every load site lists ``views=`` first.
+        ONE place resolves the registry, composes the views and reads the page
+        count, so no call site can pair a page of rows with another read's
+        numbers — the ordering contract an earlier revision left implicit in
+        keyword-argument order (M2).
         """
-        registry = self._project_registry()
-        if registry is None:
-            return 0
-        return max(0, registry.rows_on_disk - registry.rows_loaded)
+        import time as _time
+
+        views, hidden = self._projects_payload()
+        page.load(
+            views=views,
+            hidden_rows=hidden,
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
+            **extra,
+        )
 
     @staticmethod
     def _mark_missing_attachments(views: list[Any]) -> None:
@@ -38738,26 +38748,19 @@ class OperatorApp(App[None]):
         self._close_team_form()
         if self._projects_view is not None:
             if view is not None or associated is not None:
-                import time as _time
-
                 # Every open SPECIFIES its own marker set: an entry that names
                 # none clears the previous one instead of leaving the old `◆`
                 # rows and the `this session (N)` title under an all-projects
                 # entry (agent review r1 MINOR 2 / QA r1 Q3).
-                self._projects_view.load(
-                    views=self._projects_payload(),
-                    hidden_rows=self._projects_page_hidden_rows(),
+                self._reload_projects_page(
+                    self._projects_view,
                     highlight=highlight,
                     view=view,
                     associated=associated if associated is not None else frozenset(),
-                    updated_at=_time.time(),
-                    own_session=self._own_session_id(),
-                    read_only=self._projects_read_only(),
                 )
             elif highlight:
                 self._projects_view.focus_project(highlight)
             return
-        payload = self._projects_payload()
         # Captured before anything is blurred: this is where Esc puts the user
         # back, almost always the composer.
         self._projects_focus_restore = self.focused
@@ -38779,17 +38782,11 @@ class OperatorApp(App[None]):
         # Deliberate ordering: the data is seeded before the deferred
         # ``on_mount`` repaint lands, so the FIRST painted frame is the page
         # (the same seed-before-mount rule ``_open_org_chart_view`` records).
-        import time as _time
-
-        page.load(
-            views=payload,
-            hidden_rows=self._projects_page_hidden_rows(),
+        self._reload_projects_page(
+            page,
             highlight=highlight,
             view=view,
             associated=associated if associated is not None else frozenset(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
         )
         # The start picker's rows ride the same seed (P5b): the page never reads
         # a registry, so the host hands them over while it is still building the
@@ -38888,15 +38885,7 @@ class OperatorApp(App[None]):
         view = self._projects_view
         if view is None:
             return
-        import time as _time
-
-        view.load(
-            views=self._projects_payload(),
-            hidden_rows=self._projects_page_hidden_rows(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.set_start_rows(self._start_picker_rows())
 
     def _start_picker_rows(self) -> list[StartTarget]:
@@ -39140,15 +39129,7 @@ class OperatorApp(App[None]):
             else:
                 view.show_notice(f"could not update the milestone: {store_error_text(exc)}")
             return
-        import time as _time
-
-        view.load(
-            views=self._projects_payload(),
-            hidden_rows=self._projects_page_hidden_rows(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
 
     def _projects_manager_target(self) -> SendTarget | None:
         """This session's MANAGER, when it has one (P5a, spec §7.5.1).
@@ -39724,8 +39705,6 @@ class OperatorApp(App[None]):
             return
         if view.refuse_read_only():
             return
-        import time as _time
-
         from local_operator.projects import store_error_text
 
         session_id = self._own_session_id()
@@ -39743,13 +39722,7 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_form_refusal(store_error_text(exc))
             return
-        view.load(
-            views=self._projects_payload(),
-            hidden_rows=self._projects_page_hidden_rows(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.form_created(project.id, project.title or project.name)
 
     def on_projects_view_edit_submitted(self, message: ProjectsViewEditSubmitted) -> None:
@@ -39768,8 +39741,6 @@ class OperatorApp(App[None]):
             return
         if view.refuse_read_only():
             return
-        import time as _time
-
         from local_operator.projects import ProjectDoneGateError, store_error_text
         from local_operator.tui.projects_edit import refusal_field
 
@@ -39794,13 +39765,7 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_form_refusal(store_error_text(exc), field=refusal_field(exc))
             return
-        view.load(
-            views=self._projects_payload(),
-            hidden_rows=self._projects_page_hidden_rows(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.form_edited(changed=result.changed)
 
     def on_projects_view_milestone_added_requested(
@@ -39821,8 +39786,6 @@ class OperatorApp(App[None]):
             return
         if view.refuse_read_only():
             return
-        import time as _time
-
         from local_operator.projects import MilestoneEdit, store_error_text
 
         # The same tri-state rule as the prompt's: a blank optional date is
@@ -39846,13 +39809,7 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_notice(store_error_text(exc))
             return
-        view.load(
-            views=self._projects_payload(),
-            hidden_rows=self._projects_page_hidden_rows(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.milestone_added(message.name, action)
 
     def on_projects_view_milestone_removed(self, message: ProjectsViewMilestoneRemoved) -> None:
@@ -39869,8 +39826,6 @@ class OperatorApp(App[None]):
             return
         if view.refuse_read_only():
             return
-        import time as _time
-
         from local_operator.projects import MilestoneEdit, store_error_text
 
         try:
@@ -39885,13 +39840,7 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_notice(store_error_text(exc))
             return
-        view.load(
-            views=self._projects_payload(),
-            hidden_rows=self._projects_page_hidden_rows(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.milestone_removed(message.name)
 
     def _own_session_id(self) -> str | None:
