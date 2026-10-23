@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -36,6 +37,7 @@ from local_operator.projects import (
     ProjectRegistry,
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
+    ProjectUpdateEntry,
     build_project_view,
     display_name,
     milestone_status,
@@ -1015,7 +1017,14 @@ def test_delete_reclaims_the_projects_attachment_files(store, tmp_path) -> None:
     assert not attached.exists()
 
 
-def test_history_eviction_reclaims_the_evicted_entrys_files(store) -> None:
+def test_history_eviction_keeps_every_attached_entry(store) -> None:
+    """The cap never evicts an entry that owns files — not even the oldest.
+
+    The previous policy reclaimed the evicted entry's files, which deleted
+    evidence an ordinary append had pushed past the cap. The cap now drops
+    TEXT only: an attached entry stays, the stored list grows past
+    ``UPDATES_MAX`` by exactly those entries, and every file survives.
+    """
     project = create(store)
     folder = store.projects_dir / "attachments" / project.id
     folder.mkdir(parents=True)
@@ -1045,16 +1054,17 @@ def test_history_eviction_reclaims_the_evicted_entrys_files(store) -> None:
 
     reader = ProjectRegistry(store.config_dir)
     outcome = reader.update_project(project.id, ProjectEdit(progress="newest"), reporter=SESSION_A)
-    assert len(outcome.project.updates) == UPDATES_MAX
+    assert outcome.dropped == 0
+    assert len(outcome.project.updates) == UPDATES_MAX + 1
     assert outcome.project.updates[-1].text == "newest"
-    assert not seeds[0].exists()  # evicted oldest-first -> its file reclaimed
-    assert seeds[-1].exists()  # every entry still in the log keeps its file
+    assert all(path.exists() for path in seeds)
 
 
-def test_eviction_never_deletes_files_outside_the_store(store, tmp_path) -> None:
-    # A hand-edited row must not be able to turn the reclaim into an
+def test_delete_never_unlinks_files_outside_the_store(store, tmp_path) -> None:
+    # A hand-edited row must not be able to turn a reclaim into an
     # arbitrary-file delete: only paths under the store's attachments root
-    # are ever unlinked (agent review round 1, F1's safety rule).
+    # are ever unlinked (agent review round 1, F1's safety rule). Eviction no
+    # longer reclaims at all, so the surviving call site is the delete path.
     project = create(store)
     outside = tmp_path / "keep.txt"
     outside.write_text("keep me")
@@ -1074,9 +1084,8 @@ def test_eviction_never_deletes_files_outside_the_store(store, tmp_path) -> None
     (store.projects_dir / f"{project.id}.json").write_text(json.dumps(row))
 
     reader = ProjectRegistry(store.config_dir)
-    outcome = reader.update_project(project.id, ProjectEdit(progress="newest"), reporter=SESSION_A)
-    assert outcome.project.updates[-1].text == "newest"  # the eviction ran
-    assert not outcome.project.updates[0].attachments  # ... past the outside path
+    reader.delete_project(project.id)
+    assert not (store.projects_dir / f"{project.id}.json").exists()
     assert outside.exists()
 
 
@@ -1828,3 +1837,310 @@ def test_an_addressed_update_of_a_row_past_the_page_moves_the_counts_with_it(
     assert counts.loaded == _MAX_ROWS + 1
     assert counts.beyond_page == 0
     assert len(store.list_projects()) == _MAX_ROWS + 1
+
+
+# -- uniqueness on assignment, and evidence-preserving history -------------------
+
+
+def _seed_row(store: ProjectRegistry, project_id: str, **fields: Any) -> Project:
+    """Write one valid row straight to the store, so a test can seed edges.
+
+    Direct writes, never ``create_project``: a fixture needs duplicate names and
+    a history already at the cap, neither of which the write path can produce.
+    """
+    store.projects_dir.mkdir(parents=True, exist_ok=True)
+    row = Project(id=project_id, **fields)
+    path = store.projects_dir / f"{project_id}.json"
+    path.write_text(json.dumps(row.model_dump(mode="json", by_alias=True)))
+    return row
+
+
+def _seed_history(
+    store: ProjectRegistry,
+    *,
+    entries: int,
+    name: str = "history-row",
+    attachments_on_oldest: int = 0,
+) -> tuple[Project, list[Path]]:
+    """A row whose history already holds ``entries`` entries.
+
+    The OLDEST entry owns ``attachments_on_oldest`` real files under the store's
+    attachment root, so a test can prove eviction never touches them.
+    """
+    project_id = "historyrow0000000000000000000000"
+    files: list[Path] = []
+    attached: list[ProjectAttachment] = []
+    if attachments_on_oldest:
+        directory = store.projects_dir / "attachments" / project_id
+        directory.mkdir(parents=True, exist_ok=True)
+        for index in range(attachments_on_oldest):
+            path = directory / f"evidence-{index}.md"
+            path.write_text("evidence", encoding="utf-8")
+            files.append(path)
+            attached.append(
+                ProjectAttachment(
+                    name=path.name, kind="data", path=str(path), bytes=path.stat().st_size
+                )
+            )
+    updates = [
+        ProjectUpdateEntry(
+            at=f"2026-10-01T00:00:{index % 60:02d}Z",
+            text=f"line {index}",
+            by=SESSION_A,
+            attachments=attached if index == 0 else [],
+        )
+        for index in range(entries)
+    ]
+    row = _seed_row(
+        store,
+        project_id,
+        name=name,
+        status="active",
+        progress="current line",
+        progress_updated_at=1_700_000_000.0,
+        updates=updates,
+    )
+    return row, files
+
+
+def test_a_pre_existing_duplicate_name_does_not_block_updates_or_refreshes(
+    tmp_path: Path,
+) -> None:
+    """A duplicate the old create path minted must not freeze both rows.
+
+    Uniqueness is enforced on ASSIGNMENT: a save whose name is unchanged cannot
+    create a duplicate, so it must not be refused for one that already exists.
+    """
+    store = ProjectRegistry(tmp_path)
+    first = _seed_row(
+        store,
+        "dup00000000000000000000000000001",
+        name="skill-bundle-carrier",
+        status="active",
+        progress="old line",
+        progress_updated_at=1_700_000_000.0,
+    )
+    second = _seed_row(
+        store,
+        "dup00000000000000000000000000002",
+        name="Skill-Bundle-Carrier",
+        status="active",
+        progress="old line",
+        progress_updated_at=1_700_000_000.0,
+    )
+    # A SETTLED duplicate is the other real shape (the live store has a
+    # validation/done pair and a paused/active one): refresh is a documented
+    # no-op there, and must be a no-op rather than a name conflict.
+    settled = _seed_row(
+        store,
+        "dup00000000000000000000000000004",
+        name="skill-bundle-carrier",
+        status="done",
+        progress="old line",
+        progress_updated_at=1_700_000_000.0,
+    )
+    _seed_row(store, "thirdrow00000000000000000000003", name="third-row")
+    ids = (first.id, second.id)
+
+    registry = ProjectRegistry(tmp_path)
+    for project_id in ids:
+        assert registry.refresh_project(project_id, reporter=SESSION_A).refreshed is True
+    settled_outcome = registry.refresh_project(settled.id, reporter=SESSION_A)
+    assert settled_outcome.refreshed is False and settled_outcome.changed is False
+    for project_id in ids:
+        assert (
+            registry.update_project(
+                project_id, ProjectEdit(progress=f"updated {project_id}")
+            ).changed
+            is True
+        )
+
+    fresh = ProjectRegistry(tmp_path)
+    assert fresh.get_project(first.id).progress == f"updated {first.id}"
+    assert fresh.get_project(second.id).progress == f"updated {second.id}"
+    assert fresh.get_project_by_name("skill-bundle-carrier") is not None
+
+    # Assigning the name is still refused — create, and a rename INTO it.
+    with pytest.raises(ProjectNameConflictError):
+        fresh.create_project(ProjectEdit(name="skill-bundle-carrier"))
+    with pytest.raises(ProjectNameConflictError):
+        fresh.update_project(
+            "thirdrow00000000000000000000003", ProjectEdit(name="skill-bundle-carrier")
+        )
+
+    # Moving a duplicate OFF the name is an assignment too, and a free one lands.
+    renamed = fresh.update_project(second.id, ProjectEdit(name="skill-bundle-carrier-renamed"))
+    assert renamed.project.name == "skill-bundle-carrier-renamed"
+
+
+def test_an_attachment_bearing_entry_is_never_evicted(store, tmp_path: Path) -> None:
+    """The cap trims text, never evidence: the oldest entry's files survive."""
+    project, files = _seed_history(
+        store, entries=UPDATES_MAX, attachments_on_oldest=3, name="evidence-row"
+    )
+    assert all(path.exists() for path in files)
+
+    outcome = store.update_project(project.id, ProjectEdit(progress="after the cap"))
+
+    assert outcome.dropped == 0
+    stored = store.get_project(project.id)
+    assert len(stored.updates) == UPDATES_MAX + 1
+    assert stored.updates[0].text == "line 0"
+    assert len(stored.updates[0].attachments) == 3
+    assert all(path.exists() for path in files)
+    # And the row still points at them after a fresh read.
+    fresh = ProjectRegistry(store.config_dir)
+    assert all(Path(a.path).exists() for a in fresh.get_project(project.id).updates[0].attachments)
+
+
+def test_text_only_eviction_drops_the_oldest_and_reports_it(store, monkeypatch) -> None:
+    """A TEXT-ONLY tail is what the cap may drop, and the caller is told.
+
+    The spy records EVERY invocation (even one with an empty path list): an
+    ``extend`` over the generator would record nothing for a call that deleted
+    nothing, so the test could not tell "never called" from "called empty" —
+    and the old code's call, which is the bug, would pass it (M4).
+    """
+    project, _files = _seed_history(store, entries=UPDATES_MAX, name="text-row")
+    calls: list[list[str]] = []
+
+    def spy(self: ProjectRegistry, paths: Any) -> None:
+        calls.append(list(paths))
+
+    monkeypatch.setattr(ProjectRegistry, "_reclaim_attachment_files", spy)
+
+    outcome = store.update_project(project.id, ProjectEdit(progress="one past the cap"))
+
+    assert outcome.dropped == 1
+    stored = store.get_project(project.id)
+    assert len(stored.updates) == UPDATES_MAX
+    assert stored.updates[0].text == "line 1"
+    assert stored.updates[-1].text == "one past the cap"
+    # Not merely "nothing recorded": the helper was NOT INVOKED AT ALL.
+    assert calls == []
+
+
+def test_the_reclaim_spy_sees_a_real_file_bearing_call(store, tmp_path: Path, monkeypatch) -> None:
+    """Positive control for the eviction test's spy (M4).
+
+    A refused update takes its just-copied files back through the same helper
+    with REAL paths; if the spy recorded nothing here, ``calls == []`` in the
+    test above would prove nothing about eviction.
+    """
+    alpha = create(store)
+    create(store, name="beta")
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"z")
+    calls: list[list[str]] = []
+
+    def spy(self: ProjectRegistry, paths: Any) -> None:
+        calls.append(list(paths))
+
+    monkeypatch.setattr(ProjectRegistry, "_reclaim_attachment_files", spy)
+
+    with pytest.raises(ProjectNameConflictError):
+        store.update_project(
+            alpha.id, ProjectEdit(name="beta", progress="renamed onto beta"), attachments=[shot]
+        )
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 1 and calls[0][0].endswith(".png")
+
+
+def test_a_read_never_shortens_the_history(store) -> None:
+    """A read used to slice the oldest entries off, and the next write kept it."""
+    project, _files = _seed_history(store, entries=UPDATES_MAX + 5, name="long-row")
+    store.refresh()
+    assert len(store.get_project(project.id).updates) == UPDATES_MAX + 5
+
+    store.link_session(project.id, SESSION_B)
+
+    fresh = ProjectRegistry(store.config_dir)
+    assert len(fresh.get_project(project.id).updates) == UPDATES_MAX + 5
+
+
+def test_the_load_warns_once_for_a_duplicate_name(tmp_path: Path, caplog) -> None:
+    """The store announces a duplicate pair — names it, names both ids, once."""
+    store = ProjectRegistry(tmp_path)
+    first = _seed_row(store, "dup00000000000000000000000000001", name="skill-bundle-carrier")
+    second = _seed_row(store, "dup00000000000000000000000000002", name="Skill-Bundle-Carrier")
+    _seed_row(store, "clean0000000000000000000000000003", name="clean-row")
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        ProjectRegistry(tmp_path)
+    warnings = [
+        record.getMessage() for record in caplog.records if "rows named" in record.getMessage()
+    ]
+
+    assert len(warnings) == 1
+    assert "skill-bundle-carrier" in warnings[0]
+    assert first.id in warnings[0] and second.id in warnings[0]
+
+    # Deduped IN PROCESS: on THIS registry, a reload and a mutation's in-lock
+    # load are the same fact, so the line is not repeated (M2).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        watcher = ProjectRegistry(tmp_path)
+        watcher.refresh()
+        watcher.link_session(first.id, SESSION_B)
+    assert len([r for r in caplog.records if "rows named" in r.getMessage()]) == 1
+
+    # A MEMBERSHIP change is a new fact and warns again.
+    caplog.clear()
+    _seed_row(store, "dup00000000000000000000000000005", name="SKILL-BUNDLE-CARRIER")
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        watcher.refresh()
+    changed = [r.getMessage() for r in caplog.records if "rows named" in r.getMessage()]
+    assert len(changed) == 1 and "3 rows named" in changed[0]
+
+    # A store without a collision says nothing about names.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        ProjectRegistry(tmp_path / "clean")
+    assert [r for r in caplog.records if "rows named" in r.getMessage()] == []
+
+
+def test_the_duplicate_warning_walks_the_page_and_says_so(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """M3: the check sees the LOADED rows, and the line says which set it saw.
+
+    A pair whose two rows are both beyond the recency page is invisible to this
+    check — measuring the whole store would cost an all-row parse on every load
+    — so the line states the scope instead of implying the store.
+    """
+    from local_operator import projects as projects_module
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 2)
+    store = ProjectRegistry(tmp_path)
+    oldest = _seed_row(store, "dup00000000000000000000000000001", name="dup-name")
+    second = _seed_row(store, "dup00000000000000000000000000002", name="DUP-NAME")
+    _seed_row(store, "live0000000000000000000000000003", name="live-one")
+    _seed_row(store, "live0000000000000000000000000004", name="live-two")
+    for index, project in enumerate((oldest, second)):
+        path = store.projects_dir / f"{project.id}.json"
+        stamp = 1_700_000_000_000_000_000 + index
+        os.utime(path, ns=(stamp, stamp))
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        ProjectRegistry(tmp_path)
+    assert [r for r in caplog.records if "rows named" in r.getMessage()] == []
+
+    # Bring the PAIR onto the page — newer than every live row — and the line
+    # says which set it saw.
+    live_newest = max(
+        (store.projects_dir / f"{name}.json").stat().st_mtime_ns
+        for name in ("live0000000000000000000000000003", "live0000000000000000000000000004")
+    )
+    for offset, project in enumerate((oldest, second), start=1):
+        path = store.projects_dir / f"{project.id}.json"
+        stamp = live_newest + offset * 1_000_000
+        os.utime(path, ns=(stamp, stamp))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        ProjectRegistry(tmp_path)
+    visible = [r.getMessage() for r in caplog.records if "rows named" in r.getMessage()]
+    assert len(visible) == 1
+    assert "LOADED page" in visible[0] and "beyond the page is not reported" in visible[0]
