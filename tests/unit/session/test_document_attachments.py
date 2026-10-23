@@ -1035,3 +1035,90 @@ def test_a_document_is_charged_by_its_page_count(store) -> None:
     assert charge >= 120 * PDF_PAGE_TOKEN_ESTIMATE
     # The cheap bound must never fall below the estimate it stands for.
     assert messages_tokens_upper_bound([message]) >= charge
+
+
+# ---------------------------------------------------------------------------
+# L. the retained copy's path (UI moved/deleted state)
+# ---------------------------------------------------------------------------
+
+
+def test_stored_path_round_trips_and_is_omitted_when_unset() -> None:
+    absent = DocumentContent(mime_type="application/pdf", filename="a.pdf")
+    assert "stored_path" not in absent.model_dump(exclude_defaults=True)
+
+    block = DocumentContent(
+        mime_type="application/pdf",
+        filename="a.pdf",
+        stored_path="/home/u/.local-operator/attachments/abc.bin",
+    )
+    dumped = block.model_dump(exclude_defaults=True)
+    assert dumped["stored_path"] == "/home/u/.local-operator/attachments/abc.bin"
+    assert DocumentContent.model_validate(dumped).stored_path == block.stored_path
+
+
+def test_admission_populates_stored_path_and_the_transcript_keeps_it(store) -> None:
+    raw = _pdf_raw()
+    ref = store.put_bytes(raw, "application/pdf")
+    assert ref is not None
+    (block,) = document_blocks(
+        [{"digest": ref.digest, "name": "report.pdf", "path": "/tmp/report.pdf"}]
+    )
+    assert block.stored_path == str(store.path_for(ref.digest))
+
+    payload = encode_message_payload(Message.user("read", documents=[block]), store)
+    row = payload["content"][1]
+    assert row["type"] == "document"
+    assert row["attachment"] == ref.digest
+    assert row["stored_path"] == block.stored_path
+    assert "data" not in row
+
+    resolved = {"role": "user", "content": [dict(row)]}
+    _resolve_attachments(resolved, store)
+    parsed = coerce_content_blocks(resolved["content"])[0]
+    assert isinstance(parsed, DocumentContent)
+    assert parsed.stored_path == block.stored_path
+    assert parsed.digest == ref.digest
+    assert base64.b64decode(parsed.data) == raw
+
+
+def test_a_row_without_stored_path_keeps_the_old_shape(store) -> None:
+    raw = _pdf_raw()
+    payload = encode_message_payload(Message.user("read", documents=[_pdf_block(raw)]), store)
+    assert "stored_path" not in payload["content"][1]
+
+
+def test_serializers_ignore_stored_path() -> None:
+    marker = "/unique/marker/retained-copy.bin"
+    block = _pdf_block(_pdf_raw())
+    block.digest = "b" * 32
+    block.stored_path = marker
+    message = Message.user("read", documents=[block])
+
+    chat = _message_to_openai(
+        message, document_form("mistral", "openai-chat", supports_images=True)
+    )
+    responses = _messages_to_openai_responses(
+        [message], ModelSpec(provider="openai", model_id="gpt-4o")
+    )
+    anthropic = AnthropicClient._message_blocks(
+        message, document_form("anthropic", "anthropic-messages")
+    )
+    google = GoogleClient()._build_body(
+        ChatRequest(
+            model=ModelSpec(provider="google", model_id="gemini-2.5-pro"),
+            messages=[message],
+        )
+    )
+    assert marker not in json.dumps([chat, responses, anthropic, google])
+
+
+def test_the_legacy_chat_path_also_records_the_retained_copy(tmp_path: Path, store) -> None:
+    """The second admission door builds the same block, so it owes the same field."""
+    from local_operator.server.utils.operator import _legacy_document_blocks
+
+    path = tmp_path / "legacy.pdf"
+    path.write_bytes(_pdf_raw())
+    (block,) = _legacy_document_blocks([str(path)])
+    assert block.digest is not None
+    assert block.path == str(path)
+    assert block.stored_path == str(store.path_for(block.digest))

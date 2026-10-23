@@ -365,6 +365,9 @@ def document_blocks(
             mime_type=mime_type,
             filename=filename,
             path=str(item.get("path") or "") or None,
+            # The retained copy's absolute path, for the history card's
+            # moved/deleted state (the UI must offer a path that exists).
+            stored_path=str(store.path_for(digest)),
             bytes=len(raw),
             digest=digest,
         )

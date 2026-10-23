@@ -462,6 +462,15 @@ class DocumentContent(BaseModel):
     filename: str
     #: Origin absolute path, display/provenance only (never used to read).
     path: str | None = None
+    #: Absolute path of THIS device's RETAINED copy in the attachment store,
+    #: set at admission for a document whose bytes were stored. The history
+    #: card needs it for its moved/deleted state: offering to copy the origin
+    #: path when that file no longer exists is a control whose copy is dead,
+    #: while the retained copy is the human next step. Serializers ignore it
+    #: (the wire reads ``data``; provenance reads ``path``), and
+    #: ``exclude_defaults`` omits it from dumps when unset so every row
+    #: written before this field stays byte-identical.
+    stored_path: str | None = None
     bytes: int = 0
     #: Store digest, set when the bytes were cached (admission or transcript
     #: resolution). Kept on the live block so a path hint can name the

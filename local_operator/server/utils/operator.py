@@ -714,6 +714,7 @@ def _legacy_document_blocks(paths: list[str]) -> list["DocumentContent"]:
             mime_type=mime_type,
             filename=path.name or str(path),
             path=str(path),
+            stored_path=str(store.path_for(ref.digest)) if ref is not None else None,
             bytes=len(raw),
             digest=ref.digest if ref is not None else None,
         )
