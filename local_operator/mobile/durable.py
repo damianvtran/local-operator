@@ -63,7 +63,6 @@ from local_operator.session.transcript import (
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
     ENTRY_PRUNE,
-    TRANSCRIPT_FILENAME,
     TranscriptEntry,
     _compaction_marker,
     _entry_to_message,
@@ -296,7 +295,17 @@ class DurableFoldCache:
         :attr:`DurableFoldState.scan_from_bof`."""
         state = self.get(directory)
         with state.lock:
-            path = directory / TRANSCRIPT_FILENAME
+            # A compressed transcript folds from its materialised copy: the
+            # bytes are the same journal, so the offsets and the inode-keyed
+            # incremental path keep their meaning, and a cache copy that is
+            # re-made simply reads as a new inode (a rebuild, never a wrong
+            # fold).
+            from local_operator.session import compression
+
+            path = compression.transcript_for_read(directory)
+            if path is None:
+                self.invalidate(directory)
+                raise FileNotFoundError(compression.plain_path(directory))
             try:
                 stat = os.stat(path)
             except OSError:
@@ -905,7 +914,11 @@ def _journal_prunes(directory: Path, *, fallback: Mapping[str, str]) -> dict[str
     file answers with: the walk's own read is about to fail on the same file, so
     refusing to page would trade a real answer for no answer.
     """
-    path = directory / TRANSCRIPT_FILENAME
+    from local_operator.session import compression
+
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        return dict(fallback)
     try:
         stat = os.stat(path)
     except OSError:
@@ -1227,7 +1240,13 @@ class CustomSnapshotCache:
         grew or was replaced — a dead child's transcript never changes, so the
         scan runs once per daemon lifetime per child.
         """
-        path = directory / TRANSCRIPT_FILENAME
+        from local_operator.session import compression
+
+        path = compression.transcript_for_read(directory)
+        if path is None:
+            with self._lock:
+                self._entries.pop(str(directory), None)
+            return None
         try:
             stat = os.stat(path)
         except OSError:

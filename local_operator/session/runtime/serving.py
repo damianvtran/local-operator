@@ -108,7 +108,6 @@ from local_operator.session.runtime.types import (
     runtime_must_complete,
 )
 from local_operator.session.transcript import (
-    TRANSCRIPT_FILENAME,
     Transcript,
     is_bookkeeping_entry,
     is_bookkeeping_message,
@@ -451,14 +450,15 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
     is the one-row backward scan over the tail, so this costs the distance from
     EOF to the newest snapshot rather than a decode of the child's whole history.
     """
+    from local_operator.session import compression
     from local_operator.session.frontend_state import TodoItemState, TodoPhaseState
-    from local_operator.session.transcript import (
-        TRANSCRIPT_FILENAME,
-        read_latest_custom,
-    )
+    from local_operator.session.transcript import read_latest_custom
 
     try:
-        if not (Path(directory) / TRANSCRIPT_FILENAME).is_file():
+        # ``has_transcript`` answers for both forms. A plain-name probe here
+        # answered "no journal" for a compressed child, which this function's
+        # own contract reserves for a session that was never engaged.
+        if not compression.has_transcript(Path(directory)):
             return None
         payload = read_latest_custom(directory, "todo_snapshot") or {}
         raw = payload.get("items", [])
@@ -1860,8 +1860,13 @@ class ServingSessionHandle(SessionHandle):
             # helper cannot vouch for — absent, empty, unparseable, or holding
             # even one real row — keeps the old "a write happened" verdict.
             directory = Path(getattr(transcript, "directory", "") or "")
-            transcript_path = directory / TRANSCRIPT_FILENAME
-            if transcript_path.exists() and not transcript_is_bookkeeping_only(transcript_path):
+            # Resolve THROUGH the codec, not by the plain name: a compressed
+            # transcript's rows live in an archive and a plain-name probe would
+            # answer "no file" for a session that does have one.
+            from local_operator.session import compression
+
+            transcript_path = compression.transcript_for_read(directory)
+            if transcript_path is not None and not transcript_is_bookkeeping_only(transcript_path):
                 return False
             # The attachment sidecar is durable state the user asked for with
             # no transcript row to show for it: a routed `/team <name>` or
