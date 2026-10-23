@@ -1628,7 +1628,21 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # tokens to this arm, measured by THIS script on the branch with an isolated
 # HOME. The tool is a security control (the sanctioned route for public copy),
 # not incidental prose; ceiling = measured head 32,341 + the 55 band.
-BUDGET_BILLED_TOKENS = 32_396
+#
+# COMPOSED WITH #2796 ON THE MOVED BASE (media artifact naming, PR #2792),
+# measured by THIS script on both trees with an isolated HOME, one run each —
+# NOT by adding this branch's old-base number to main's:
+#   base (origin/main 8426d1cac1, #2796)  89,908 chars = ~32,341 billed
+#   head (this branch)                    90,905 chars = ~32,700 billed
+#   delta                                     +997 chars = ~+359
+# The delta is the four ``filename`` properties (each carries its ~150-char
+# teaching description plus the JSON anyOf/maxLength around it), the
+# ``SoundEffectRequest.name`` description (now that item's filename stem) and
+# the ``sounds`` description's ``filename`` exclusivity clause. Those
+# descriptions are the discovery surface for a capability whose point is that
+# the agent names the asset; the sanitising and collision rules ride the three
+# generation guides, read on demand. Ceiling = measured head + the 55 band.
+BUDGET_BILLED_TOKENS = 32_755
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1752,7 +1766,13 @@ BUDGET_BILLED_TOKENS = 32_396
 # RAISED 29,149 -> 29,371 with the top arm's public-copy reader (same PR, same
 # delta): the child surface carries the tool too, measured 29,316 billed on this
 # head; ceiling = 29,316 + the 55 band.
-BUDGET_CHILD_BILLED_TOKENS = 29_371
+#
+# COMPOSED WITH #2796 ON THE MOVED BASE (media artifact naming, same pass as
+# the top arm): the child surface carries all four media tools, so it grows by
+# the SAME +997 chars:
+#   base  81,498 chars = ~29,316 billed
+#   head  82,495 chars = ~29,674 billed  -> ceiling = head + 55.
+BUDGET_CHILD_BILLED_TOKENS = 29_729
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

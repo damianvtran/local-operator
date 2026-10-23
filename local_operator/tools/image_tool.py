@@ -52,13 +52,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import mimetypes
 import re
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from local_operator.artifacts.naming import media_filename
 from local_operator.artifacts.rung import SourceSupport
 from local_operator.harness.types import (
     AbortSignal,
@@ -163,6 +163,14 @@ class GenerateImageParams(BaseModel):
     seed: int | None = Field(default=None, description="Seed for reproducibility where supported.")
     model: str | None = Field(
         default=None, description="Provider model id; its default when omitted."
+    )
+    filename: str | None = Field(
+        default=None,
+        max_length=120,
+        description=(
+            "Filename stem: a short lowercase hyphenated description of the request, "
+            "no extension (e.g. `red-fox-in-snow`); omit to derive it from the prompt."
+        ),
     )
 
 
@@ -517,14 +525,6 @@ def _source_lists(params: GenerateImageParams) -> tuple[list[str], list[str]]:
     return paths, digests
 
 
-def _artifact_name(model: str, content_type: str, index: int) -> str:
-    """A short human handle ("flux-dev-01.png"); NEVER a filesystem path."""
-    slug = "".join(ch if ch.isalnum() else "-" for ch in (model or "image"))
-    slug = "-".join(part for part in slug.split("-") if part)[:40] or "image"
-    ext = mimetypes.guess_extension((content_type or "").split(";")[0].strip()) or ".png"
-    return f"{slug}-{index:02d}{ext}"
-
-
 def _dimensions_text(assets: tuple[Any, ...], fallback: str) -> str:
     """Distinct ``WxH`` pairs from the assets, else the requested size token."""
     seen: list[str] = []
@@ -848,7 +848,15 @@ def _generated_result(
             asset.data,
             asset.content_type or "application/octet-stream",
             kind="image",
-            name=_artifact_name(outcome.model, asset.content_type, index),
+            # The REQUEST names the artifact, not the model template: two
+            # generations of different prompts must not land on one name.
+            name=media_filename(
+                params.prompt,
+                asset.content_type,
+                suggested=params.filename,
+                kind="image",
+                index=index,
+            ),
             source_url=asset.source_url or None,
             width=asset.width,
             height=asset.height,
