@@ -110,10 +110,10 @@ _CORRUPT_CODES: Final = frozenset({11, 26})
 
 def _is_corruption(error: sqlite3.DatabaseError) -> bool:
     code = getattr(error, "sqlite_errorcode", None)
-    if code in _CORRUPT_CODES:
-        return True
     if code is not None:
-        return False
+        # CPython exposes EXTENDED codes (a constraint failure is 2067, not
+        # 19), so compare the low byte: the primary code is what names damage.
+        return (code & 0xFF) in _CORRUPT_CODES
     # Older SQLite builds do not expose ``sqlite_errorcode``; the message is the
     # only signal left, and only these two phrases mean damage.
     text = str(error).lower()
@@ -551,6 +551,11 @@ class LibraryStore:
     #: the same reason as ``MetadataStore._ready_paths``: one store per list
     #: request must not re-run DDL on the read path.
     _ready_paths: set[str] = set()
+    #: Paths whose recovery FAILED. A torn authoritative table leaves the derived
+    #: tables empty and readable, so a request would otherwise answer an endless
+    #: "building" with zero rows instead of the typed 503 (R4-1). Every read and
+    #: write refuses until a later recovery attempt succeeds.
+    _failed_paths: set[str] = set()
 
     def __init__(self, config_dir: str | Path) -> None:
         self.config_dir = Path(config_dir)
@@ -561,6 +566,8 @@ class LibraryStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
+        if self._key in self._failed_paths:
+            raise IndexUnavailable("library index is unreadable", corrupt=True)
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self.path, timeout=5.0)
@@ -634,6 +641,7 @@ class LibraryStore:
                 # transaction, and a dead connection must surface as the typed
                 # refusal, not as a bare ``ProgrammingError``.
                 connection.execute("PRAGMA journal_mode=WAL")
+                self._clean_stale_rebuilds()
                 # The metadata tables are AUTHORITATIVE and owned by
                 # ``MetadataStore``; three triggers below attach to them, so they
                 # must exist before this script runs. A derived table may never
@@ -722,7 +730,9 @@ class LibraryStore:
             if not MetadataStore(self.config_dir).ensure_schema():
                 return False
             self._recreate_derived()
+            self._probe_authoritative()
             self._ready_paths.add(self._key)
+            self._failed_paths.discard(self._key)
             logger.info("library: derived index rebuilt after an unreadable file")
             return True
         except sqlite3.DatabaseError as error:
@@ -735,7 +745,59 @@ class LibraryStore:
         except Exception:  # noqa: BLE001 - a failed recovery is a 503, not a crash
             logger.warning("library: derived index recovery failed", exc_info=True)
             return False
-        return self._rebuild_database()
+        rebuilt = self._rebuild_database()
+        if not rebuilt:
+            # Nothing can answer from this file: refuse instead of serving an
+            # empty catalog forever. The next recovery attempt clears it.
+            self._failed_paths.add(self._key)
+        return rebuilt
+
+    def _clean_stale_rebuilds(self) -> None:
+        """Remove rebuild temp files a crash left beside the database.
+
+        A rebuild writes ``library.sqlite3.rebuild-<pid>-<tid>`` and only removes
+        it on failure; a process killed mid-copy leaves a full-size file that
+        nothing would ever collect. Bounded to this one directory and this one
+        filename prefix, once per process at schema bootstrap.
+        """
+        mine = f"-{os.getpid()}-"
+        for path in self.path.parent.glob(f"{self.path.name}.rebuild-*"):
+            if mine in path.name:
+                # A rebuild in THIS process may be alive on another thread; its
+                # own failure path removes it. Only other processes' flakes are
+                # safe to collect here.
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+
+    def _probe_authoritative(self) -> None:
+        """Read one row from EVERY authoritative table. Raises ``DatabaseError``.
+
+        DDL never reads rows, so a torn ``assets`` b-tree survives DROP+CREATE
+        and the fast path would report a successful recovery while serving an
+        empty library forever (R4-1). One bounded read per table is what tells
+        "the schema exists" apart from "the data is readable".
+        """
+        connection = sqlite3.connect(self.path, timeout=5.0)
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            for table in AUTHORITATIVE_TABLES:
+                # ``SELECT *``, not ``SELECT 1``: a covering index would answer
+                # the latter without ever reading the table's own b-tree, which
+                # is exactly where the damage is.
+                connection.execute(f"SELECT * FROM {table} LIMIT 1").fetchone()
+            # Then one bounded integrity pass. DDL and a leftmost-leaf read both
+            # miss damage deeper in a tree, and this is the only check that
+            # walks every authoritative page. It runs ONCE per recovery.
+            rows = connection.execute("PRAGMA quick_check(1)").fetchall()
+            if not rows or str(rows[0][0]) != "ok":
+                raise sqlite3.DatabaseError(
+                    "; ".join(str(row[0]) for row in rows[:3]) or "integrity check failed"
+                )
+        finally:
+            connection.close()
 
     def _recreate_derived(self) -> None:
         """DROP + CREATE + reset in one transaction. Raises on failure."""
@@ -789,12 +851,17 @@ class LibraryStore:
         copies row-for-row through ``ATTACH``, and ``os.replace``s it — the
         original is never edited, so a failure leaves it exactly as it was.
 
-        Transactions and locking: one process-wide lock means two requests
-        cannot swap at once, and the caller's cooldown keeps a persistently
-        unreadable file from paying this repeatedly. The replacement is built in
-        rollback-journal mode so the single file is complete when it is moved;
-        the old ``-wal``/``-shm`` are removed after the swap because they belong
-        to the file that no longer exists at that path.
+        Transactions and locking: one process-wide lock means two requests in
+        THIS process cannot swap at once, and the caller's cooldown keeps a
+        persistently unreadable file from paying this repeatedly.
+
+        KNOWN LOSS WINDOW (review R4-3): the copy is a snapshot. A metadata
+        commit that lands between the copy and the swap is written to the file
+        being replaced and is lost with it, and the process-wide lock does not
+        cover other processes at all. Making this lossless needs a shared lock
+        every ``MetadataStore`` write takes, which is a change of its own; the
+        window is milliseconds and is only reachable while the file is already
+        damaged, but it is not lossless and this docstring must not claim it is.
         """
         with _REBUILD_LOCK:
             try:
@@ -802,7 +869,9 @@ class LibraryStore:
                 # rebuilt the file. If the DDL now runs, the repair is done and
                 # a second copy would only churn the disk.
                 self._recreate_derived()
+                self._probe_authoritative()
                 self._ready_paths.add(self._key)
+                self._failed_paths.discard(self._key)
                 return True
             except sqlite3.DatabaseError:
                 pass
@@ -854,9 +923,11 @@ class LibraryStore:
     def _swap_in_database(self, temp: Path) -> None:
         """Replace the database with ``temp`` and drop the old file's WAL.
 
-        The ``-wal``/``-shm`` belong to the file that is being replaced: leaving
-        them would attach another database's pages to this path. A method of its
-        own so the tests can prove two concurrent recoveries swap exactly once.
+        The ``-wal``/``-shm`` are removed BEFORE ``os.replace``: after it they
+        would belong to the NEW file by name, and a stale WAL replayed over it
+        is exactly the corruption this avoids. That order is load-bearing.
+        A method of its own so the tests can prove two concurrent recoveries
+        swap exactly once.
         """
         for suffix in ("-wal", "-shm"):
             Path(f"{self.path}{suffix}").unlink(missing_ok=True)
@@ -940,6 +1011,16 @@ class LibraryStore:
             str(row["key"]): str(row["value"])
             for row in connection.execute("SELECT key, value FROM idx_state")
         }
+
+    def complete_session_count(self) -> int:
+        """Sessions with a complete checkpoint — the build's numerator.
+
+        Public because the indexer must compare it against the denominator
+        before it may call the build finished; rows on disk are not proof that
+        every session was scanned (QA Q-R4-1).
+        """
+        with self.read() as connection:
+            return self._count_sessions(connection, complete=True)
 
     def _count_sessions(self, connection: sqlite3.Connection, *, complete: bool) -> int:
         clause = " WHERE complete = 1" if complete else ""

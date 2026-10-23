@@ -507,3 +507,32 @@ def test_a_rename_reaches_the_next_pass_without_a_journal_change(tmp_path, monke
     polled = service.list_assets(root, service.Query(), budget_s=library_index.DEFAULT_BUDGET_S)
     assert polled["rows"][0]["occurrences"][0]["session_title"] == "Victor support triage"
     assert polled["revision"] > revision_before
+
+
+def test_detail_paths_only_rebuild_for_damage(tmp_path, monkeypatch) -> None:
+    """R4-5: a BUSY/IO failure is a 503, not a licence to discard the index."""
+    from local_operator.library.store import IndexUnavailable
+
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, root.parent / "keep.txt"))
+    indexer.rebuild_now(root)
+    asset_id = listing(root, service.Query())["rows"][0]["id"]
+
+    calls: list[int] = []
+    monkeypatch.setattr(service, "_recover_index", lambda config: calls.append(1))
+
+    def busy(self, *args, **kwargs):
+        raise IndexUnavailable("database is locked", corrupt=False)
+
+    monkeypatch.setattr(LibraryStore, "asset", busy)
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, asset_id)
+    assert calls == [], "a transient failure must not trigger a rebuild"
+
+    def torn(self, *args, **kwargs):
+        raise IndexUnavailable("database disk image is malformed", corrupt=True)
+
+    monkeypatch.setattr(LibraryStore, "asset", torn)
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, asset_id)
+    assert calls == [1], "damage does try to recover"

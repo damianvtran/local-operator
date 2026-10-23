@@ -2958,7 +2958,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/library/store.py::LibraryStore._swap_in_database",
         "<path>.unlink",
-        "removes the old file's stale -wal/-shm siblings after the swap; never sessions/",
+        "removes the old file's stale -wal/-shm siblings BEFORE the replace "
+        "(after it they would attach to the new file); never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._clean_stale_rebuilds",
+        "<path>.unlink",
+        "removes another process's crashed database-rebuild temp file beside "
+        "<config>/library/library.sqlite3; never sessions/",
     ),
     (
         "local_operator/library/store.py::LibraryStore._rebuild_database",

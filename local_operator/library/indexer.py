@@ -371,6 +371,11 @@ class LibraryIndexer:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._thumb_thread: threading.Thread | None = None
+        #: True for the duration of one ``process_dirty`` batch. A finish check
+        #: reads the checkpoint table, which has no row yet for a session the
+        #: batch has not reached, so without this it could mark a half-built
+        #: catalog done between two scans.
+        self._batch_active = False
         self._observer: Any = None
         self._cwd_cache: dict[str, str] = {}
         self._deny: Any = None
@@ -486,10 +491,20 @@ class LibraryIndexer:
                 if self._stop.is_set() or not first:
                     continue
                 batch, wake = self.coalesce(first)
+                self._batch_active = True
                 try:
                     self.process_dirty(batch)
                 except Exception:  # noqa: BLE001 - one bad session must not stop the index
                     logger.warning("library: session batch failed", exc_info=True)
+                finally:
+                    self._batch_active = False
+                if not wake:
+                    # The batch may have been the last work owed; finish here so
+                    # the UI leaves "building" without waiting for a timer.
+                    try:
+                        self._maybe_finish_backfill()
+                    except Exception:  # noqa: BLE001 - keep the worker alive
+                        logger.warning("library: finish check failed", exc_info=True)
                 if wake:
                     # A recovery or an explicit kick wants the backfill to start
                     # now rather than on the next 6 h tick. Reconcile AFTER the
@@ -760,16 +775,35 @@ class LibraryIndexer:
     # -- backfill and reconcile ---------------------------------------------
 
     def _maybe_finish_backfill(self) -> None:
+        """Mark the build done ONLY when every scannable session has a checkpoint.
+
+        Three separate ways this used to lie, all of them observed in QA:
+        a recovery-reset denominator (0) read as "nothing owed"; a batch that
+        was already queued made rows appear before their sessions were scanned;
+        and a non-session file under ``sessions/`` kept ``sessions_dir_empty``
+        false forever. So: an expected count derived the SAME way ``reconcile``
+        writes it, a complete-checkpoint count against it, and no pending work.
+        """
         state = self.store.state()
         if state.get(STATE_BACKFILL_DONE) == "1":
             return
         if self.store.incomplete_sessions():
             return
-        if int(state.get(STATE_SESSIONS_TOTAL) or 0) == 0 and not self.store.sessions_dir_empty():
-            # Recovery resets the denominator to 0, and "0 owed" would otherwise
-            # read as "nothing to do": with rows on disk and journals present
-            # that marks a PARTIAL catalog finished and parks the worker for 6 h
-            # (QA Q-2). Only an empty sessions directory may finish on 0.
+        total = int(state.get(STATE_SESSIONS_TOTAL) or 0)
+        if total == 0:
+            # Recovery resets the denominator. Measurement, not "is the dir
+            # empty": ``sessions/last_cleanup.json`` alone is a finished empty
+            # index; forty journals with a 0 denominator are not (R4-2).
+            total = _scannable(self.config_dir, library_index._visible_sessions(self.config_dir))
+            if total:
+                # ``reconcile`` writes the real count; until then this is unknown
+                # and finishing would freeze a partial catalog as ready.
+                return
+        if self.store.complete_session_count() < total:
+            # Work is queued or in flight: rows from a previous life are not a
+            # finished build (QA Q-R4-1).
+            return
+        if self._batch_active or not self._queue.empty():
             return
         with self.store.write() as connection:
             self.store.set_state(
@@ -833,10 +867,11 @@ class LibraryIndexer:
                     STATE_LAST_RECONCILE: time.time(),
                 },
             )
-        if not visible:
-            # An empty config is a finished (empty) index, not a build in
-            # progress: the UI must not show "scanning" forever.
-            self._maybe_finish_backfill()
+        # ALWAYS, not only for an empty config: a reconcile is what writes the
+        # denominator, and a recovery that swapped the database while a batch was
+        # scanning leaves ``backfill_done`` at 0 with every row already served
+        # (QA Q-R4-1). The finish check needs the denominator this call just set.
+        self._maybe_finish_backfill()
         logger.debug(
             "library: reconciled %d visible sessions (%d dirty, %d removed)",
             len(visible),

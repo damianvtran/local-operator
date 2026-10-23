@@ -581,10 +581,12 @@ def get_asset(
     # now kept fresh by a watcher, so a miss is a genuinely unknown id.
     try:
         asset = LibraryStore(config).asset(asset_id)
-    except library_store.IndexUnavailable:
+    except library_store.IndexUnavailable as error:
         # Recover if we can, but do not pretend the row is missing: it is the
-        # index that cannot answer yet.
-        _recover_index(config)
+        # index that cannot answer yet. Only DAMAGE licenses a rebuild — a busy
+        # lock or an I/O hiccup must not discard a healthy index (R4-5).
+        if error.corrupt:
+            _recover_index(config)
         raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
@@ -621,8 +623,9 @@ def _known_asset(config_dir: Path, asset_id: str) -> library_index.Asset:
         raise AssetNotFound(asset_id)
     try:
         asset = LibraryStore(config_dir).asset(asset_id)
-    except library_store.IndexUnavailable:
-        _recover_index(config_dir)
+    except library_store.IndexUnavailable as error:
+        if error.corrupt:
+            _recover_index(config_dir)
         raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
@@ -778,8 +781,9 @@ def _catalog_asset(config: Path, asset_id: str) -> library_index.Asset:
         raise AssetNotFound(asset_id)
     try:
         asset = LibraryStore(config).asset(asset_id)
-    except library_store.IndexUnavailable:
-        _recover_index(config)
+    except library_store.IndexUnavailable as error:
+        if error.corrupt:
+            _recover_index(config)
         raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
@@ -848,8 +852,9 @@ def thumbnail(config_dir: str | Path, asset_id: str, width: int = THUMB_MAX_WIDT
     try:
         asset = store.asset(asset_id)
         live = store.thumb_is_live(asset_id, width)
-    except library_store.IndexUnavailable:
-        _recover_index(config)
+    except library_store.IndexUnavailable as error:
+        if error.corrupt:
+            _recover_index(config)
         raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
