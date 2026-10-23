@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: driver/ax-compact.ts (host-free shared policy (chrome.*-free by construction)).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (11 modules: access-flow.ts, access-queue.ts, ax-compact.ts, deadline.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 43ac10fee942645e53fb02306fe1f4bd58799ee32683e1bfe31161313a6cdd12
+// Inputs sha256: 0d9b879ca60b02b932b0310815b189730e5a12bb91b146252c9cd2e3677ab6cf
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -32,10 +32,72 @@ export interface SnapshotRef {
   epoch: number;
 }
 
+/* WHERE A SNAPSHOT STARTS, and what it may be narrowed to afterwards.
+ *
+ * Both browser hosts render a page's whole accessibility tree, and a real
+ * settings form (a GitHub App's create page is the measured case — see
+ * `~/workspace/browser-tool-diagnosis-2026-10-23.md`) spends that tree on
+ * hundreds of unrelated fields before it reaches the one section the agent
+ * needs. The old contract had no way to ask for a section, so the answer
+ * arrived truncated mid-tree with every ref below the cut unobtainable.
+ *
+ * `rootBackendNodeId` is the fix at the walk: the caller has already resolved a
+ * CSS selector against the DOM (`DOM.querySelector` → `DOM.describeNode`) and
+ * hands over the element's backend node id, so the render starts at that AX
+ * node and emits nothing above it. Depth is re-based to zero for the same
+ * reason: the printed tree should read like a small page, not like a fragment
+ * indented 17 levels deep.
+ *
+ * WINDOWING IS A SEPARATE, TEXT-LEVEL OPERATION (`windowSnapshot` below) and
+ * that split is deliberate. Filtering the tree walk would renumber refs and
+ * make `start`/`limit` paging inconsistent between calls; filtering the
+ * rendered text keeps every ref the page's own name, so `e57` names the same
+ * element whether it arrived in page 1 or page 3. Refs are still minted for
+ * the whole rendered tree, which is what lets an agent page through a snapshot
+ * and then click a ref it saw three calls ago.
+ */
+export interface CompactOptions {
+  /** Render only the subtree rooted at this AX node's backend DOM node. */
+  rootBackendNodeId?: number;
+}
+
+export interface CompactResult {
+  snapshot: string;
+  refs: Record<string, SnapshotRef>;
+  /** Rendered lines before any `windowSnapshot` filter or page. */
+  totalLines: number;
+  /** True only when a scope was requested AND found in the tree. */
+  scoped: boolean;
+}
+
 const LANDMARKS = new Set(["banner", "main", "navigation", "complementary", "contentinfo", "form", "region"]);
 const INTERACTIVE = new Set(["button", "link", "textbox", "checkbox", "radio", "combobox", "menuitem", "tab", "switch", "slider", "spinbutton"]);
 
-export function compactAX(nodes: AXNode[], epoch: number): { snapshot: string; refs: Record<string, SnapshotRef> } {
+/** The AX properties that change what a control will DO when it is clicked.
+ *
+ * `expanded: false` is the one that made collapsed sections unreachable in the
+ * measured incident: a `<details>` with its panel closed contributes its
+ * `<summary>` (role `DisclosureTriangle`) and NOTHING inside it, so an agent
+ * reading the tree saw “Webhook”, not the checkbox that opens it, and every
+ * guess at the checkbox's id failed. Printing the state turns “this section
+ * exists but is closed” into a fact on the line, and the summary already
+ * carries a ref, so the next call is a click rather than a guess. */
+function stateSuffix(node: AXNode): string {
+  // Chromium is inconsistent about the TYPE of these AX values, measured on a
+  // real page: `expanded` arrives as a boolean false, while `checked` arrives
+  // as the STRING "true". Comparing against `true` alone printed [collapsed]
+  // correctly and silently dropped every [checked] — the marker that matters
+  // most on a form whose dangerous default is a ticked box.
+  const truthy = (value: unknown): boolean => value === true || value === "true";
+  const falsy = (value: unknown): boolean => value === false || value === "false";
+  const property = (name: string) => node.properties?.find((entry) => entry.name === name)?.value.value;
+  if (falsy(property("expanded"))) return " [collapsed]";
+  if (truthy(property("checked"))) return " [checked]";
+  if (truthy(property("disabled"))) return " [disabled]";
+  return "";
+}
+
+export function compactAX(nodes: AXNode[], epoch: number, options: CompactOptions = {}): CompactResult {
   const byId = new Map(nodes.map((node) => [node.nodeId, node]));
   const refs: Record<string, SnapshotRef> = {};
   const lines: string[] = [];
@@ -77,14 +139,86 @@ export function compactAX(nodes: AXNode[], epoch: number): { snapshot: string; r
         ref = `e${++sequence}`;
         refs[ref] = { backendNodeId: node.backendDOMNodeId, epoch };
       }
-      lines.push(`${"  ".repeat(depth)}- ${role || "node"}${name ? ` ${JSON.stringify(name)}` : ""}${ref ? ` [${ref}]` : ""}`);
+      lines.push(`${"  ".repeat(depth)}- ${role || "node"}${name ? ` ${JSON.stringify(name)}` : ""}${ref ? ` [${ref}]` : ""}${stateSuffix(node)}`);
     }
     for (const child of node.childIds ?? []) {
       const found = byId.get(child);
       if (found) visit(found, interesting ? depth + 1 : depth);
     }
   }
+  // The scope's already-resolved backend id, matched against the tree the host
+  // just read. Absent means the element exists in the DOM but contributes no
+  // accessible node (hidden, aria-hidden, display:none): the host answers a
+  // typed element_not_found rather than pretending the empty result is the tree.
+  const scopedRoot =
+    options.rootBackendNodeId === undefined
+      ? undefined
+      : nodes.find((node) => node.backendDOMNodeId === options.rootBackendNodeId);
+  if (options.rootBackendNodeId !== undefined) {
+    if (scopedRoot) visit(scopedRoot, 0);
+    return { snapshot: lines.join("\n"), refs, totalLines: lines.length, scoped: Boolean(scopedRoot) };
+  }
   const childIds = new Set(nodes.flatMap((node) => node.childIds ?? []));
   for (const root of nodes.filter((node) => !childIds.has(node.nodeId))) visit(root, 0);
-  return { snapshot: lines.join("\n"), refs };
+  return { snapshot: lines.join("\n"), refs, totalLines: lines.length, scoped: false };
+}
+
+/** The result of one page of a snapshot, and the numbers a footer needs. */
+export interface SnapshotWindow {
+  text: string;
+  /** Lines in the tree before `search` (or the page) narrowed anything. */
+  totalLines: number;
+  /** Lines that matched `search`; equals `totalLines` when there is no search. */
+  matchedLines: number;
+  /** Lines actually returned. */
+  returnedLines: number;
+  /** 1-based line this page starts at, in matched coordinates. */
+  start: number;
+  /** Requested page size; 0 means "to the end". */
+  limit: number;
+  search: string;
+}
+
+export interface WindowOptions {
+  /** Case-insensitive substring; matched against the rendered line (role+name). */
+  search?: string;
+  /** 1-based first line to return (default 1). */
+  start?: number;
+  /** Maximum lines to return; 0 or absent means everything from `start`. */
+  limit?: number;
+}
+
+/* Why the search matches the RENDERED line rather than the AX name: the line
+ * is what the agent has in front of it, and an agent hunting a control knows
+ * either its role ("checkbox") or its name ("Active"). Matching both means one
+ * term finds `- checkbox "Active" [e12]` either way, and it cannot drift from
+ * what the printed snapshot says because it is the same string.
+ *
+ * An empty/blank search is "no filter", not "match nothing": an agent that
+ * passes search="" means the whole tree, and silently returning zero lines
+ * would read as "this section is empty".
+ */
+export function windowSnapshot(text: string, options: WindowOptions = {}): SnapshotWindow {
+  const lines = text ? text.split("\n").filter((line) => line.length > 0) : [];
+  const totalLines = lines.length;
+  const search = String(options.search ?? "").trim();
+  const matched = search
+    ? lines.filter((line) => line.toLowerCase().includes(search.toLowerCase()))
+    : lines;
+  const matchedLines = matched.length;
+  const requested = Number(options.start ?? 1);
+  const start = Number.isFinite(requested) && requested >= 1 ? Math.floor(requested) : 1;
+  const rawLimit = Number(options.limit ?? 0);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 0;
+  const end = limit ? start - 1 + limit : matchedLines;
+  const page = matched.slice(start - 1, end);
+  return {
+    text: page.join("\n"),
+    totalLines,
+    matchedLines,
+    returnedLines: page.length,
+    start,
+    limit,
+    search,
+  };
 }

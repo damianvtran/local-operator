@@ -20014,6 +20014,15 @@ _STYLE_PROPERTY_RE = re.compile(r"^[-_A-Za-z0-9]+$")
 #: looks complete.
 _MAX_STYLE_PROPERTIES = 20
 
+#: The most lines one `snapshot` page may ask for. A caller that wants the whole
+#: tree omits `limit` and gets it, unchanged from before; this bounds a NUMBER,
+#: so `limit=10**9` cannot make a host build a payload nobody will read.
+SNAPSHOT_MAX_LINES = 5000
+
+#: A search term names a control, not a page. The cap keeps a pasted document
+#: from becoming a scan over every rendered line on every call.
+SNAPSHOT_MAX_SEARCH_CHARS = 120
+
 #: The hosts an explicit ``backend`` hint on `open` may name, beside "" (the
 #: default availability order). Spellings are the COPY spellings: the paired
 #: host is named by what the user sees ("extension"), not by the handle prefix
@@ -20132,6 +20141,30 @@ class BrowserParams(BaseModel):
         description="CSS selector or a snapshot ref (e5): the click/type "
         "target, the read scope (default: body), the scroll element, or the "
         "download/upload control.",
+    )
+    # The snapshot window. Three fields rather than a page token, because the
+    # three questions an agent asks a cut tree are different: "give me the next
+    # page" (start), "do not spend my context on all of it" (limit), and "where
+    # is the checkbox called Active" (search). All three act on the rendered
+    # lines, so a ref keeps its name across pages — see `windowSnapshot` in
+    # extension/src/driver/ax-compact.ts.
+    start: int | None = Field(
+        default=None,
+        description=(
+            "'snapshot': 1-based line to start the page at (the footer names the "
+            "next line when a tree was cut)."
+        ),
+    )
+    limit: int | None = Field(
+        default=None,
+        description="'snapshot': the most lines to return in one page.",
+    )
+    search: str = Field(
+        default="",
+        description=(
+            "'snapshot': keep only lines whose role or accessible name contains "
+            "this text (case-insensitive), e.g. search='Active'."
+        ),
     )
     text: str = Field(
         default="",
@@ -20616,6 +20649,153 @@ def _validate_browser_backend(action: str, params: BrowserParams) -> str:
     return ""
 
 
+def _validate_window_fields(action: str, params: BrowserParams) -> str:
+    """The snapshot window's refusals, and the actions that may not use it.
+
+    Refusing a field an action ignores is this tool's house rule (`tab`,
+    `backend` and `secret_ref` all do it): a model that passed `search` to
+    `click` would otherwise believe it had filtered what the click targeted.
+    """
+    if action != "snapshot":
+        unused = [
+            name
+            for name, value in (
+                ("start", params.start),
+                ("limit", params.limit),
+                ("search", params.search),
+            )
+            if value not in (None, "")
+        ]
+        if unused:
+            names = ", ".join(repr(name) for name in unused)
+            return (
+                f"{names} only valid for 'snapshot' (got it on '{action}'): "
+                "they page or filter the accessibility tree"
+            )
+        return ""
+    return _validate_snapshot_window(params)
+
+
+def _validate_snapshot_window(params: BrowserParams) -> str:
+    if params.start is not None and params.start < 1:
+        return f"'start' is 1-based (got {params.start})"
+    if params.limit is not None and params.limit < 1:
+        return f"'limit' must be at least 1 line (got {params.limit})"
+    if params.limit is not None and params.limit > SNAPSHOT_MAX_LINES:
+        return (
+            f"'limit' takes at most {SNAPSHOT_MAX_LINES} lines (got {params.limit}); "
+            "omit it for the whole tree"
+        )
+    if len(params.search) > SNAPSHOT_MAX_SEARCH_CHARS:
+        return (
+            f"'search' takes at most {SNAPSHOT_MAX_SEARCH_CHARS} characters "
+            f"(got {len(params.search)}); name the control, not the page"
+        )
+    return ""
+
+
+def _window_snapshot_lines(
+    text: str, *, search: str, start: int, limit: int
+) -> tuple[str, int, int, int]:
+    """Narrow a snapshot the TOOL already holds: ``(text, total, matched, returned)``.
+
+    Both browser hosts window at the source (`windowSnapshot` in
+    extension/src/driver/ax-compact.ts) and report the numbers back, because a
+    host that can avoid building the payload should. This is the path for the
+    hosts that cannot say anything about the window: cmux, which has no such
+    flags, and an older desktop app or extension, which ignores the params. It
+    is deliberately the SAME semantics — 1-based lines, case-insensitive
+    substring over the rendered line, refs keep their names because only whole
+    text lines are dropped — so an agent cannot tell which host served the page
+    from the footer's arithmetic.
+
+    A blank search is "no filter", never "match nothing": `search=""` is what a
+    caller sends when it means the whole tree, and zero lines would read as an
+    empty section.
+    """
+    lines = [line for line in text.split("\n") if line] if text else []
+    total = len(lines)
+    term = search.strip().lower()
+    matched_lines = [line for line in lines if term in line.lower()] if term else lines
+    matched = len(matched_lines)
+    first = max(start, 1)
+    end = first - 1 + limit if limit > 0 else matched
+    page = matched_lines[first - 1 : end]
+    return "\n".join(page), total, matched, len(page)
+
+
+def _snapshot_footer(
+    *,
+    total: int,
+    matched: int,
+    returned: int,
+    start: int,
+    search: str,
+    scope: str,
+    scoped: bool,
+    host_ignored_scope: bool,
+    truncated: bool = False,
+) -> str:
+    """The one line that makes a narrowed tree recoverable.
+
+    The measured failure this exists for: a snapshot was cut mid-tree by the
+    model-facing character ceiling and said nothing usable about how to get the
+    rest, so every ref below the cut was unobtainable and the agent guessed CSS
+    instead. A footer that names the next `start`, the match count, or the fact
+    that the host ignored the scope turns that into one follow-up call.
+
+    Silent when there is nothing to say (a complete, unscoped tree): a footer on
+    every call would be noise an agent learns to skip.
+    """
+    notes: list[str] = []
+    if scope and host_ignored_scope:
+        # Honest about WHO is behind: the params are additive on the wire, so a
+        # host that predates them accepts and ignores them, and an agent that
+        # believed the tree was scoped would read the whole page as the section.
+        notes.append(
+            f"this host ignored selector={scope!r}: update the desktop app (or the "
+            "browser extension) to scope a snapshot to a subtree"
+        )
+    elif scope and scoped:
+        notes.append(f"scoped to {scope!r}")
+    if matched == 0:
+        # Zero matches is a RESULT, not a cut: there is no next page to name,
+        # and saying "lines 1-0 of 0" would read as paging trouble rather than
+        # as "this term is not in the tree".
+        notes.append(
+            f"0 of {total} lines matched {search.strip()!r}"
+            if search.strip()
+            else "the accessibility tree is empty"
+        )
+    elif matched < total or returned < matched:
+        shown_end = start + returned - 1 if returned else start - 1
+        where = f"lines {start}-{shown_end} of {matched}"
+        if search.strip():
+            where += f" matching {search.strip()!r}"
+        elif matched < total:
+            where += f" ({total} in the tree)"
+        if returned and start + returned <= matched:
+            where += (
+                f"; pass start={start + returned} for the next page, or narrow with "
+                "selector= or search="
+            )
+        elif returned == 0:
+            where += "; start is past the end — re-run with a smaller start"
+        notes.append(where)
+    elif search.strip():
+        notes.append(f"{matched} of {total} lines matched {search.strip()!r}")
+    if truncated and matched:
+        # The page was cut by the model-facing character ceiling AFTER the line
+        # window was applied, so the line numbers above describe a page whose
+        # tail is missing. Name the remedy rather than letting the cut look like
+        # the end of the tree.
+        notes.append(
+            "this page was also cut to fit the context; pass a smaller limit= "
+            "to get whole lines"
+        )
+    return f"[snapshot: {'; '.join(notes)}]" if notes else ""
+
+
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
     """Refuse an unusable argument, or "" when the call may proceed.
 
@@ -20633,6 +20813,9 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     backend = _validate_browser_backend(action, params)
     if backend:
         return backend
+    window = _validate_window_fields(action, params)
+    if window:
+        return window
     if action != "type" and params.secret_ref.strip():
         # Refused rather than silently ignored, the same house rule `tab` and
         # `backend` follow: a caller that passed a ref to an action which never
@@ -20665,10 +20848,10 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             # read-back comparison in the lane still catches a failed fill.
             return ""
         return _validate_typed_text(params.text)
-    if action == "snapshot" and params.selector.strip():
+    if action == "snapshot":
         # Optional here — an absent selector snapshots the whole document —
         # which is why this is not the same shape as click/type.
-        return _validate_selector(params.selector, "snapshot")
+        return _validate_selector(params.selector, "snapshot") if params.selector.strip() else ""
     if action == "scroll":
         # Every scroll param is optional (no params = one viewport down), so the
         # only refusals are a malformed value: a flag-shaped selector (same argv
@@ -24158,6 +24341,16 @@ async def _bridge_action(
     elif action in ("read", "snapshot"):
         if params.selector.strip():
             wire["selector"] = params.selector.strip()
+        if action == "snapshot":
+            # Only what the caller asked for: an absent param must stay absent,
+            # because the host's own default is the pre-existing whole tree and
+            # sending start=1/limit=0 would be this tool inventing a window.
+            if params.start is not None:
+                wire["start"] = params.start
+            if params.limit is not None:
+                wire["limit"] = params.limit
+            if params.search.strip():
+                wire["search"] = params.search.strip()
     elif action in ("click", "type"):
         wire["selector"] = params.selector.strip()
         if action == "type":
@@ -24230,13 +24423,61 @@ async def _bridge_action(
             details=details,
         )
     if action == "snapshot":
-        return _text(
-            tool_call_id,
-            "browser",
-            truncate_output(str(result.get("snapshot", "")), BROWSER_TEXT_LIMIT_CHARS)
-            or "(empty snapshot)",
-            details=details,
+        raw = str(result.get("snapshot", ""))
+        reported = result.get("total_lines")
+        if isinstance(reported, int):
+            # A host that windows at the source reports what it narrowed; its
+            # text is already the requested page and must not be windowed twice.
+            total = reported
+            # Explicit None checks, not `or`: a host reporting matched_lines=0
+            # means "the term is not in the tree", and `0 or total` would
+            # silently turn that into "every line matched" — the exact
+            # confidently-wrong footer this helper exists to prevent.
+            raw_matched = result.get("matched_lines")
+            matched = total if raw_matched is None else int(raw_matched)
+            raw_returned = result.get("returned_lines")
+            returned = 0 if raw_returned is None else int(raw_returned)
+            raw_start = result.get("start")
+            start = int(raw_start) if raw_start is not None else (params.start or 1)
+            scoped = bool(result.get("scoped"))
+            body = raw
+        else:
+            # cmux, or a host older than the window params: narrow locally so
+            # paging works everywhere the tool runs.
+            body, total, matched, returned = _window_snapshot_lines(
+                raw,
+                search=params.search,
+                start=params.start or 1,
+                limit=params.limit or 0,
+            )
+            scoped = False
+            start = params.start or 1
+        scope = params.selector.strip()
+        # A scope was asked for and this host cannot say it honoured it. The
+        # params are additive, so an old host accepts and ignores them; the
+        # footer names that rather than letting the agent read a whole page as
+        # "the section".
+        host_ignored_scope = bool(scope) and not scoped
+        page_text = body
+        body = truncate_output(page_text, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)"
+        footer = _snapshot_footer(
+            total=total,
+            matched=matched,
+            returned=returned,
+            start=start,
+            search=params.search,
+            scope=scope,
+            scoped=scoped,
+            host_ignored_scope=host_ignored_scope,
+            truncated=len(page_text) > BROWSER_TEXT_LIMIT_CHARS,
         )
+        if footer:
+            body = f"{body}\n\n{footer}"
+            details["total_lines"] = total
+            details["returned_lines"] = returned
+        if scoped:
+            details["scoped"] = True
+        return _text(tool_call_id, "browser", body, details=details)
     if action == "scroll":
         x = int(result.get("scrollX", 0) or 0)
         y = int(result.get("scrollY", 0) or 0)

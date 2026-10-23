@@ -260,7 +260,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="open", blurb="Start a surface at a URL."),
             ToolDocOp(op="goto", blurb="Navigate the session's existing surface."),
             ToolDocOp(op="read", blurb="The page's text."),
-            ToolDocOp(op="snapshot", blurb="Accessibility tree with click refs."),
+            ToolDocOp(op="snapshot", blurb="Accessibility tree with click refs; selector= scopes it, start=/limit=/search= page or filter it."),
             ToolDocOp(op="screenshot", blurb="Capture the page to a file."),
             ToolDocOp(op="click", blurb="Click a selector or snapshot ref."),
             ToolDocOp(
