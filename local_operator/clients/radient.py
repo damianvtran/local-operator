@@ -17,6 +17,7 @@ from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
 from local_operator.agents import MAX_AGENT_NAME_CHARS
 from local_operator.clients._http import (
     APIError,
+    NotModified,
     api_error_from_exception,
     api_error_from_response,
     redact_secrets,
@@ -506,6 +507,13 @@ def team_target_params(visibility: Optional[str], tenant_id: Optional[str]) -> D
 PREVIEW_ENVELOPE_VERSION = 1
 PREVIEW_TOKEN_HEADER = "X-Radient-Preview-Token"
 PREVIEW_ACCEPT_HEADER = "X-Radient-Accept-Unresolved"
+#: The conditional-read validator a hub GET carries (RFC 9110 §13.1.2). The value is an opaque
+#: ETag the client already holds -- quotes included, verbatim -- and a match makes the hub answer
+#: ``304`` with no body. Sent only by callers that HAVE a validator; a first pull has nothing to
+#: revalidate against and must stay an unconditional read.
+IF_NONE_MATCH_HEADER = "If-None-Match"
+#: The status behind :class:`NotModified`; named so the branch does not read as a magic number.
+HTTP_NOT_MODIFIED = 304
 #: The query parameter the internal-operations consent rides on (P1). It travels next to the
 #: target it is only meaningful for -- never in the document -- and only on a COMMIT: a preview
 #: route refuses it, because consent is confirmed after the diff is seen.
@@ -1586,6 +1594,7 @@ class RadientClient:
         *,
         timeout: Optional[float] = None,
         with_credential: bool = True,
+        if_none_match: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Pull one skill manifest by id (``GET /v1/skills/:skillid``).
 
@@ -1597,12 +1606,25 @@ class RadientClient:
         existence is not disclosed. ``with_credential=False`` is the anonymous
         public arm.
 
+        ``if_none_match`` makes the read CONDITIONAL: the value is the opaque
+        revision (an ETag, quotes verbatim) the caller already holds for this
+        row, and it travels as ``If-None-Match``. When it still matches, the hub
+        answers ``304`` with no body and this method raises
+        :class:`~local_operator.clients._http.NotModified` -- the row is
+        unchanged, so there is no document to parse and nothing was transferred.
+        A caller with no revision to revalidate against omits it and gets the
+        plain unconditional read it has always had. The choice is the CALLER's
+        on purpose: "what revision do I hold" is link state (the baseline
+        record), which a transport client must not be asked to know.
+
         Returns:
             The skill document: ``id``, ``tenant_id``, ``name``,
             ``description``, ``files`` (path/content pairs), ``version`` and the
             moderation record.
 
         Raises:
+            NotModified: When the conditional read matched (HTTP 304). Not a
+                failure: the caller's held representation is still current.
             APIError: When the hub refuses (404 for a missing skill or a caller
                 who may not read it).
         """
@@ -1611,10 +1633,21 @@ class RadientClient:
         headers = self._get_headers(
             content_type="application/json", require_api_key=with_credential
         )
+        if if_none_match:
+            headers[IF_NONE_MATCH_HEADER] = if_none_match
         try:
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
             response = requests.get(url, headers=headers, allow_redirects=False, **extra)
             response.raise_for_status()
+            if response.status_code == HTTP_NOT_MODIFIED and if_none_match:
+                # BEFORE ``_refuse_redirect``: that guard refuses every 3xx so a
+                # redirect can never re-send the bearer, and a 304 is not a
+                # redirect -- it is the success case of THIS conditional read.
+                # Gated on ``if_none_match``: a 304 to a request that carried no
+                # validator is a protocol violation, not "unchanged", and it must
+                # keep the existing unexpected-redirect refusal rather than be
+                # read as a row that did not move.
+                raise NotModified(etag=response.headers.get("ETag"))
             self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
