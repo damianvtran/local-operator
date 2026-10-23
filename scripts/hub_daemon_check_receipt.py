@@ -7,7 +7,9 @@ Run it with the repository's interpreter, from anywhere:
 
 No arguments, no flags, no environment to set: every value this needs is derived
 below or built into a fresh temporary HOME. It exits 0 only when the delta it
-measures is exactly the one request the trigger is supposed to cause.
+measures is exactly the one request the trigger is supposed to cause AND that
+request is ordered strictly before the earliest tick the runner could fire on
+its own.
 
 WHAT THE Q-1 FINDING WAS, AND WHY THE FIRST ATTEMPT WAS REJECTED. #2822 attached
 the session-start trigger to the desktop create route (``server/routes/
@@ -29,13 +31,32 @@ stub's request log, the daemon's ``/health``, and the daemon's status store. If 
 future edit needs to import ``HubSyncRunner`` here, the edit has re-created the
 rejected harness -- stop, and find a way to observe instead.
 
-THE EVIDENCE IS A DELTA OF ONE, AND WHY A COUNT RATHER THAN A TIMESTAMP. The
-runner fires a tick on its own at startup (``STARTUP_DELAY_S`` + jitter), so
-``last_checked_at`` moving after a create proves nothing by itself: the startup
-tick already wrote it, and both writes can land in the same second. The
-unambiguous evidence is the stub's request count taken after the startup pass has
-gone quiet and again after the create. The delta must be exactly 1, and that one
-request must be the skill read the check makes.
+CREATE FIRST, THEN PROVE THE ORDERING. The runner's first automatic tick is its
+startup pass, ``STARTUP_DELAY_S`` (45 s) + ``random.uniform(0, STARTUP_JITTER_S)``
+after ``run_forever`` starts; the next is one jittered interval after that.
+Waiting for the startup pass and then creating (the previous attempt) spent the
+session-start throttle and still could not finish inside its budget. So this
+script creates ONE session as soon as ``/health`` answers -- seconds after the
+daemon exists, tens of seconds before the earliest automatic tick -- and
+attributes the check BY ORDERING:
+
+* immediately before the create it asserts the stub has seen ZERO requests and
+the status store has NO ``last_checked_at``. Either one non-empty means a check
+already ran and the create cannot be shown to be the cause: the run is VOID
+(exit 5), printed with its numbers, and nothing is claimed;
+* the create's own request timestamp and the one hub request it causes must both
+be STRICTLY before ``spawn + STARTUP_DELAY_S`` -- the earliest instant any
+automatic tick could fire, derived from the runner's constants below. A create
+that is not strictly earlier is ``INCONCLUSIVE`` (exit 6), never a pass: the tick
+could have raced it, and a near-miss is not a pass.
+
+THE EVIDENCE IS A DELTA OF ONE FROM ZERO. ``last_checked_at`` alone cannot carry
+the claim: an automatic tick writes it too. The baseline assertion above proves
+nothing had checked before the create, so the stub's count is 0; after the create
+the delta must be exactly 1, and that one request must be the skill read,
+carrying this run's dummy bearer. A zero or two fails with the whole log printed,
+so a miss is diagnosable rather than ambiguous. The ordering check is what turns
+"a request appeared" into "the create caused it".
 
 WHAT MAKES THE ONE REQUEST REACHABLE (the fixture, and why it is shaped this
 way). A check is per LINKED item, and a fresh isolated config has no links -- so
@@ -80,29 +101,35 @@ a request to any real HTTPS host fails TLS verification before bytes leave -- th
 hub client is ``requests``. A stub that sees an unexpected request logs it and
 the assertion below fails on it.
 
-TIMING. The whole run is bounded by ``BUDGET_S`` (240 s) and a watchdog kills and
-reaps at that mark rather than hanging. The budget is spent like this:
+TIMING. The whole run is bounded by ``BUDGET_S`` (90 s), and a watchdog SIGKILLs
+the daemon's process group and exits 3 at that mark rather than hanging. The
+budget is spent like this:
 
-    daemon boot to /health           ~5-25 s (measured, printed)
-    runner's first tick              45-60 s (STARTUP_DELAY_S + STARTUP_JITTER_S)
-    quiet confirmation               +10 s
-    session-start throttle           120 s (SESSION_START_CHECK_THROTTLE_S) + 3 s
-    create + delta + reap            ~10-15 s
+    daemon boot to /health          ~5-25 s (measured, printed)
+    baseline assert + create        < 1 s
+    the create's one hub request    < 2 s
+    status-store settle             <= 5 s
+    reap                            ~2-5 s
 
-The two runner constants are READ FROM THE MODULE, not restated, and preflight
-refuses to start if their arithmetic no longer fits the budget -- a code change
-that moves either one fails here with numbers rather than as a timeout.
+The binding constraint is the derivation, not the budget: the create must land
+before ``STARTUP_DELAY_S`` (45 s) after spawn, so a daemon that took that long to
+boot is INCONCLUSIVE rather than passed. The constants are READ FROM THE
+MODULES and printed with their arithmetic -- a code change that moves them fails
+here with numbers rather than as a timeout.
 
 EXIT CODES. 0 = the receipt passed; 2 = a preflight refused (nothing was
-started); 3 = the 240 s budget was exhausted; 4 = the receipt did not hold
-(delta wrong, create failed, or the wrong request). Every non-zero path prints
-the full request log and, for daemon trouble, the tail of the daemon's own log.
+started); 3 = the 90 s budget was exhausted; 4 = the receipt did not hold (delta
+wrong, create failed, or the wrong request); 5 = VOID (the baseline was not empty
+before the create, so attribution is impossible); 6 = INCONCLUSIVE (the create
+was not strictly before the derived earliest automatic tick). Every non-zero
+path prints the full request log and, for daemon trouble, the tail of the
+daemon's own log.
 
 WHAT THIS IS NOT. It is not a test (no CI, no pytest); it is a receipt for a
-person on a machine whose resource gate allows one daemon boot and ~150 s of
-idle waiting. It asserts nothing about whether an available item should be
-APPLIED -- ``check_now`` applies nothing by contract, and the startup tick is
-inside its first-run grace.
+person on a machine whose resource gate allows one daemon boot and ~25 s of its
+life. It asserts nothing about whether an available item should be APPLIED --
+``check_now`` applies nothing by contract, and the startup tick is inside its
+first-run grace.
 """
 
 from __future__ import annotations
@@ -159,9 +186,13 @@ from local_operator.config import ConfigManager  # noqa: E402
 from local_operator.hub_sync import provenance as prov  # noqa: E402
 from local_operator.hub_sync import store as status_store  # noqa: E402
 from local_operator.hub_sync.runner import (  # noqa: E402
-    SESSION_START_CHECK_THROTTLE_S,
+    INTERVAL_JITTER,
     STARTUP_DELAY_S,
     STARTUP_JITTER_S,
+)
+from local_operator.hub_sync.settings import (  # noqa: E402
+    DEFAULT_CHECK_INTERVAL_MIN,
+    HubSyncSettings,
 )
 from local_operator.hub_sync.skill_document import SkillDocument, SkillFile  # noqa: E402
 from local_operator.providers.auth_store import AuthStore  # noqa: E402
@@ -170,23 +201,28 @@ from local_operator.providers.radient_credentials import (  # noqa: E402
     resolve_radient_oauth_access,
 )
 
-#: The receipt's own budget. A hard wall, enforced by a watchdog: a hung daemon
-#: must be reaped and reported, never waited on.
-BUDGET_S = 240.0
-#: "The startup pass has settled": no request for this long.
-QUIET_S = 10.0
-#: The task's cap on waiting for the startup tick before giving up on it.
-STARTUP_CAP_S = 120.0
-#: How long the trigger's own request may take to appear after the create.
-POST_CREATE_WAIT_S = 20.0
-#: Extra wait on top of the throttle, so scheduling jitter cannot land us a
-#: millisecond on the wrong side of the runner's monotonic comparison.
-THROTTLE_MARGIN_S = 3.0
-#: Room the rest of the script needs after the throttle has elapsed: the
-#: create, the wait for its request, the assertions and the teardown. Sized from
-#: the measured shape of those steps, not padded -- every second here is a second
-#: the startup window cannot have.
-POST_THROTTLE_RESERVE_S = 20.0
+#: The receipt's own budget: the lease bound is 90 s. A hard wall, enforced by
+#: a watchdog that SIGKILLs the daemon's process group and exits 3.
+BUDGET_S = 90.0
+#: Cap on the daemon boot to /health. The measured shape is 5-25 s; a boot
+#: slower than ~45 s cannot pass attribution anyway (the derived deadline).
+HEALTH_CAP_S = 40.0
+#: Absolute ceiling for /health, measured from ``_T0``, so a slow preflight
+#: cannot eat the create's window silently.
+HEALTH_LATEST_S = 50.0
+#: How long the create's own check may take to reach the stub. Measured <2 s;
+#: this is slack for a loaded machine, not a schedule.
+POST_CREATE_WAIT_S = 15.0
+#: The status store is written by the check's worker after the request, so the
+#: supporting ``last_checked_at`` read gets this long -- never a gate on the count.
+STORE_SETTLE_S = 5.0
+#: Room after the wait for the request: the assertions and the reaper's own
+#: worst case (12 s SIGTERM + 5 s SIGKILL + 5 s port settle), with slack.
+POST_CREATE_RESERVE_S = 25.0
+#: Exit 5: the baseline was not empty, so no attribution is possible.
+EXIT_VOID = 5
+#: Exit 6: the create was not strictly before the earliest automatic tick.
+EXIT_INCONCLUSIVE = 6
 
 _SANDBOX = Path(os.environ["HOME"])
 _CONFIG_DIR = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
@@ -243,6 +279,10 @@ class _Seen:
 
     seq: int
     epoch: float
+    #: Read at the same moment as ``epoch`` but on the monotonic clock: the
+    #: attribution comparison uses this one, so a wall-clock step cannot turn a
+    #: late request into a pass (or an early one into a false INCONCLUSIVE).
+    mono: float
     method: str
     path: str
     status: int
@@ -336,7 +376,17 @@ class _HubStub:
         else:
             auth = "other"
         with self._lock:
-            self._seen.append(_Seen(len(self._seen) + 1, time.time(), method, path, status, auth))
+            self._seen.append(
+                _Seen(
+                    len(self._seen) + 1,
+                    time.time(),
+                    time.monotonic(),
+                    method,
+                    path,
+                    status,
+                    auth,
+                )
+            )
 
     def snapshot(self) -> list[_Seen]:
         with self._lock:
@@ -345,10 +395,6 @@ class _HubStub:
     def count(self) -> int:
         with self._lock:
             return len(self._seen)
-
-    def last_epoch(self) -> float | None:
-        with self._lock:
-            return self._seen[-1].epoch if self._seen else None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -411,14 +457,6 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-def _wait_until(moment: float) -> None:
-    while True:
-        left = moment - time.monotonic()
-        if left <= 0:
-            return
-        time.sleep(min(left, 0.5))
 
 
 # -- the daemon ----------------------------------------------------------------
@@ -745,6 +783,16 @@ class _Plan:
     module_path: Path
     head: str
     dirty: bool
+    #: The interval the runner will read FRESH on every tick, from the isolated
+    #: config (unset there, so ``DEFAULT_CHECK_INTERVAL_MIN``).
+    interval_min: int
+    #: A printed description of where that number came from.
+    interval_source: str
+    #: ``STARTUP_DELAY_S + min jitter``: the earliest automatic tick, seconds
+    #: after the runner's loop starts (never before the daemon's spawn).
+    earliest_tick_s: float
+    #: Earliest SECOND automatic tick: the first plus a jittered interval.
+    periodic_tick_s: float
 
 
 def _probe_daemon_interpreter() -> tuple[Path, str]:
@@ -865,7 +913,8 @@ def _preflight() -> _Plan:
         f"(tenant {_TENANT}, content_state {seeded[0].content_state})"
     )
 
-    resolved_base = configured_radient_base_url(ConfigManager(_CONFIG_DIR))
+    config = ConfigManager(_CONFIG_DIR)
+    resolved_base = configured_radient_base_url(config)
     if resolved_base != _HUB_BASE:
         raise _Fail(
             f"config resolved the hub base to {resolved_base!r}, not {_HUB_BASE!r}", code=2
@@ -889,19 +938,94 @@ def _preflight() -> _Plan:
         )
     _say(f"preflight  credential resolves    kind=oauth sha256={_short_digest(_DUMMY_BEARER)}")
 
-    startup_max = STARTUP_DELAY_S + STARTUP_JITTER_S
-    floor = startup_max + SESSION_START_CHECK_THROTTLE_S + THROTTLE_MARGIN_S
-    floor += POST_THROTTLE_RESERVE_S + 25.0
-    _say(f"preflight  startup delay          {STARTUP_DELAY_S} s + 0-{STARTUP_JITTER_S} s (runner)")
-    _say(f"preflight  session throttle       {SESSION_START_CHECK_THROTTLE_S} s (runner)")
-    _say(f"preflight  budget                {BUDGET_S} s; floor {floor:.0f} s")
-    if floor > BUDGET_S:
+    # -- the deadline, DERIVED from production code, never from a measurement --
+    #
+    # ``run_forever`` sleeps ``STARTUP_DELAY_S + uniform(0, STARTUP_JITTER_S)``
+    # before its first (startup) tick, then one jittered interval before the
+    # next. Jitter is ADDITIVE, so the earliest instant either can fire is the
+    # floor of each range -- there is nothing to subtract from STARTUP_DELAY_S.
+    # The create is raced against the FIRST of those two instants, because it is
+    # the earlier one; the periodic tick is printed to show how much room the
+    # run leaves after it. Both numbers are computed from the modules imported
+    # above, so a code change moves the receipt's deadline with it.
+    raw_interval = config.get_nested_value(("hub", "check_interval_min"), None)
+    hub_settings = HubSyncSettings.from_config(config)
+    interval_min = hub_settings.interval_min
+    interval_source = (
+        f"hub.check_interval_min={raw_interval!r} (clamped)"
+        if raw_interval is not None
+        else (
+            "hub.check_interval_min unset -> DEFAULT_CHECK_INTERVAL_MIN="
+            f"{DEFAULT_CHECK_INTERVAL_MIN}"
+        )
+    )
+    interval_s = float(interval_min * 60)
+    startup_floor = STARTUP_DELAY_S
+    startup_ceiling = STARTUP_DELAY_S + STARTUP_JITTER_S
+    interval_floor = interval_s * (1.0 - INTERVAL_JITTER)
+    interval_ceiling = interval_s * (1.0 + INTERVAL_JITTER)
+    periodic_floor = startup_floor + interval_floor
+    _say("preflight  derivation            earliest automatic tick, from runner/settings:")
+    _say(
+        f"derive     STARTUP_DELAY_S       {STARTUP_DELAY_S:.1f} s "
+        "(local_operator.hub_sync.runner)"
+    )
+    _say(
+        f"derive     STARTUP_JITTER_S      {STARTUP_JITTER_S:.1f} s -> first tick = "
+        f"{STARTUP_DELAY_S:.1f} + U(0, {STARTUP_JITTER_S:.1f}) = "
+        f"[{startup_floor:.1f}, {startup_ceiling:.1f}] s after run_forever starts"
+    )
+    _say(
+        f"derive     interval              {interval_min} min = {interval_s:.0f} s "
+        f"({interval_source}; local_operator.hub_sync.settings)"
+    )
+    _say(
+        f"derive     INTERVAL_JITTER       {INTERVAL_JITTER:.2f} -> periodic delay = "
+        f"{interval_s:.0f} * U({1 - INTERVAL_JITTER:.2f}, {1 + INTERVAL_JITTER:.2f}) = "
+        f"[{interval_floor:.0f}, {interval_ceiling:.0f}] s"
+    )
+    _say(
+        f"derive     earliest tick        spawn + {startup_floor:.1f} s "
+        "(STARTUP_DELAY_S + min jitter 0; jitter only ADDS)"
+    )
+    _say(
+        f"derive     earliest periodic    spawn + {startup_floor:.1f} + {interval_floor:.0f} = "
+        f"spawn + {periodic_floor:.0f} s (zero-length first tick, both jitters at their floor)"
+    )
+    _say(
+        f"derive     attribution deadline spawn + {startup_floor:.1f} s -- the create AND "
+        "its hub request must both be strictly earlier"
+    )
+    if startup_floor <= 0.0 or not 0.0 <= INTERVAL_JITTER < 1.0 or interval_s <= 0.0:
         raise _Fail(
-            f"the runner's own constants no longer fit the {BUDGET_S} s budget "
-            f"(they need at least {floor:.0f} s). Nothing was started.",
+            "the derived deadline is not meaningful (STARTUP_DELAY_S="
+            f"{STARTUP_DELAY_S!r}, INTERVAL_JITTER={INTERVAL_JITTER!r}, "
+            f"interval={interval_min} min). Nothing was started.",
             code=2,
         )
-    return _Plan(daemon_port=daemon_port, module_path=module_path, head=head, dirty=dirty)
+
+    reserve = HEALTH_CAP_S + POST_CREATE_WAIT_S + STORE_SETTLE_S + POST_CREATE_RESERVE_S
+    _say(
+        f"preflight  budget                {BUDGET_S:.0f} s; health cap {HEALTH_CAP_S:.0f} s + "
+        f"create wait {POST_CREATE_WAIT_S:.0f} s + settle {STORE_SETTLE_S:.0f} s + teardown "
+        f"reserve {POST_CREATE_RESERVE_S:.0f} s = {reserve:.0f} s"
+    )
+    if reserve > BUDGET_S:
+        raise _Fail(
+            f"the run's own windows no longer fit the {BUDGET_S:.0f} s budget "
+            f"(they need {reserve:.0f} s). Nothing was started.",
+            code=2,
+        )
+    return _Plan(
+        daemon_port=daemon_port,
+        module_path=module_path,
+        head=head,
+        dirty=dirty,
+        interval_min=interval_min,
+        interval_source=interval_source,
+        earliest_tick_s=startup_floor,
+        periodic_tick_s=periodic_floor,
+    )
 
 
 # -- the run -------------------------------------------------------------------
@@ -945,29 +1069,27 @@ class _Handles:
     proc: "subprocess.Popen[bytes] | None" = None
 
 
-def _run(plan: _Plan) -> int:
-    started = time.monotonic()
-    _WORK_DIR.mkdir(parents=True, exist_ok=True)
-    (_SANDBOX / "tmp").mkdir(parents=True, exist_ok=True)
-    log_path = _SANDBOX / "daemon.log"
-    handles = _Handles()
-    reaper = _Reaper()
+def _arm_watchdog(handles: _Handles, log_path: Path) -> None:
+    """Arm the whole-run hard stop: at ``BUDGET_S``, SIGKILL the group and exit 3.
+
+    Armed in ``main`` BEFORE the preflight, because the 90 s figure is the run's
+    wall clock, not just the measured section: an interpreter probe that hangs
+    must not escape it. It kills the daemon's whole process GROUP rather than
+    going through ``reaper`` -- the case this exists for is the one where the
+    main thread is stuck (inside ``proc.wait``, a socket read, a lock), and a
+    cooperative teardown that waits for that thread would be the hang this
+    replaces. The group is safe to signal because the daemon is started with
+    ``start_new_session=True``: its pid is its pgid, and nothing else is in it.
+    The stub is a thread of THIS process, so ``os._exit`` closes it.
+    """
 
     def watchdog() -> None:
-        """The hard stop at the budget: report, KILL the daemon tree, exit.
-
-        It kills the daemon's whole process GROUP rather than going through
-        ``reaper``: the case this exists for is the one where the main thread is
-        stuck (inside ``proc.wait``, a socket read, a lock), and a cooperative
-        teardown that waits for that thread would be the hang this replaces. The
-        group is safe to signal because the daemon was started with
-        ``start_new_session=True`` -- its pid is its pgid, and nothing else is in
-        it. The stub is a thread of THIS process, so ``os._exit`` closes it.
-        """
-
         time.sleep(max(0.0, BUDGET_S - (time.monotonic() - _T0)))
         _say("")
-        _say(f"FAIL       {BUDGET_S:.0f} s budget exhausted; killing the daemon tree")
+        _say(
+            f"FAIL       the {BUDGET_S:.0f} s lease bound is exhausted; "
+            "SIGKILLing the daemon process group"
+        )
         _print_log(handles.stub.snapshot() if handles.stub is not None else [], "request log")
         _say(f"daemon log tail ({log_path}):")
         _say(_tail(log_path))
@@ -983,6 +1105,13 @@ def _run(plan: _Plan) -> int:
 
     threading.Thread(target=watchdog, name="budget-watchdog", daemon=True).start()
 
+
+def _run(plan: _Plan, handles: _Handles, log_path: Path) -> int:
+    started = time.monotonic()
+    _WORK_DIR.mkdir(parents=True, exist_ok=True)
+    (_SANDBOX / "tmp").mkdir(parents=True, exist_ok=True)
+    reaper = _Reaper()
+
     outcome = 0
     try:
         _run_steps(plan, log_path, started, handles)
@@ -993,8 +1122,12 @@ def _run(plan: _Plan) -> int:
     finally:
         clean = reaper.reap(handles.proc, handles.stub, [plan.daemon_port, _HUB_PORT])
     # A port still held after a PASS is not a pass: the next run cannot bind,
-    # and something this invocation started is still running.
-    return outcome if clean else 4
+    # and something this invocation started is still running. A non-zero
+    # attribution code (VOID 5 / INCONCLUSIVE 6 / receipt 4) is preserved --
+    # the leak is reported, but it must not disguise why the run failed.
+    if not clean:
+        _say("FAIL       a port this run started is still held after teardown")
+    return outcome if outcome or clean else 4
 
 
 def _run_steps(plan: _Plan, log_path: Path, started: float, handles: _Handles) -> None:
@@ -1005,124 +1138,109 @@ def _run_steps(plan: _Plan, log_path: Path, started: float, handles: _Handles) -
     _say(f"stub       listening on 127.0.0.1:{_HUB_PORT}")
     _say(f"stub       answers GET /v1/skills/{_HUB_ID} with the fixture manifest")
 
+    # The clocks BEFORE the spawn. The child cannot exist a millisecond earlier,
+    # so ``spawn_mono`` is a sound (slightly early) lower bound on the instant
+    # ``run_forever`` starts -- and therefore on its earliest automatic tick.
+    # Anchoring on the SPAWN rather than on /health is what makes the deadline
+    # conservative: the runner starts inside the lifespan, BEFORE uvicorn answers
+    # /health, so a health-anchored deadline would be too late by the boot time.
+    # The monotonic pair is what the comparisons use; the wall pair is only for
+    # the human-readable stamps, so a clock step cannot decide the verdict.
+    spawn_epoch = time.time()
+    spawn_mono = time.monotonic()
     proc = _open_daemon(plan.daemon_port, log_path)
     handles.proc = proc
     _say(f"daemon     pid {proc.pid}, 127.0.0.1:{plan.daemon_port}, log {log_path}")
 
-    health_until = min(time.monotonic() + 45.0, _T0 + 120.0)
+    health_until = min(time.monotonic() + HEALTH_CAP_S, _T0 + HEALTH_LATEST_S)
     health_s = _wait_healthy(proc, plan.daemon_port, log_path, health_until)
-    _say(f"daemon     /health 200 after {health_s:.1f} s")
-    _say("daemon     the lifespan has attached the runner; waiting for its own first tick")
-
-    # -- step 4: the startup tick settles -----------------------------
-    #
-    # The tick is at STARTUP_DELAY_S + jitter AFTER the runner was built, so
-    # this window is sized from the module's own constants rather than a guess.
-    # The cap is also bounded by what the rest of the run needs: a cap that ate
-    # the throttle would only move the failure to the watchdog.
-    startup_max = STARTUP_DELAY_S + STARTUP_JITTER_S
-    poll_started = time.monotonic()
-    startup_cap = min(
-        STARTUP_CAP_S,
-        (_T0 + BUDGET_S)
-        - poll_started
-        - (SESSION_START_CHECK_THROTTLE_S + THROTTLE_MARGIN_S + POST_THROTTLE_RESERVE_S),
-    )
-    if startup_cap < startup_max + 2.0:
-        raise _Fail(
-            f"only {startup_cap:.0f} s of the {BUDGET_S:.0f} s budget is left to catch the "
-            f"startup tick, which the runner fires {startup_max:.0f} s after boot; the "
-            "daemon booted too slowly to finish this receipt inside its budget.",
-            code=3,
-        )
-    _say(f"startup    waiting up to {startup_cap:.0f} s for a request, then {QUIET_S:.0f} s quiet")
-    quiet_since: float | None = None
-    last_count = 0
-    while True:
-        now = time.monotonic()
-        count = stub.count()
-        if count != last_count:
-            last_count = count
-            quiet_since = now
-        if count and quiet_since is not None and now - quiet_since >= QUIET_S:
-            break
-        if now - poll_started >= startup_cap:
-            break
-        time.sleep(0.2)
-
-    _print_log(stub.snapshot(), "startup    request log so far")
-    before = stub.count()
-    if before == 0:
-        raise _Fail(
-            "the daemon's startup tick produced NO hub request, so there is no "
-            "baseline to measure a delta against. The log above is the whole "
-            "evidence; the daemon log tail says why the check did not reach the "
-            f"stub.\ndaemon log tail ({log_path}):\n{_tail(log_path)}",
-            code=4,
-        )
-    startup_calls = [item for item in stub.snapshot() if item.path == f"/v1/skills/{_HUB_ID}"]
-    if not startup_calls:
-        raise _Fail(
-            "the startup window's request(s) did not include the skill read; "
-            "the seeded link was not what the runner checked.",
-            code=4,
-        )
-    if not any(item.status == 200 for item in startup_calls):
-        raise _Fail(
-            "the startup skill read was answered "
-            f"{startup_calls[0].status}, not 200: the stub and the client disagree "
-            "about the endpoint, so nothing below would be measuring the trigger.",
-            code=4,
-        )
-    checked_before = _last_checked_at()
     _say(
-        f"startup    settled with {before} request(s); the skill check is among them "
-        f"(last_checked_at={checked_before or '<unset>'})"
+        f"daemon     /health 200 after {health_s:.1f} s "
+        f"(spawn + {time.monotonic() - spawn_mono:.2f} s)"
     )
-
-    # -- step 5: wait out the throttle, measured from the last request --
-    #
-    # The runner claims the window at tick START, which is a moment BEFORE the
-    # request the stub logged -- so measuring from the stub's timestamp is the
-    # conservative side of the comparison.
-    last_epoch = stub.last_epoch()
-    if last_epoch is None:  # `before >= 1` should make this unreachable
-        raise _Fail("the stub logged no request although its count was non-zero.", code=4)
-    ready_at = last_epoch + SESSION_START_CHECK_THROTTLE_S + THROTTLE_MARGIN_S
-    wait_s = max(0.0, ready_at - time.time())
-    ceiling = (_T0 + BUDGET_S) - POST_THROTTLE_RESERVE_S
-    if time.time() + wait_s > ceiling:
-        raise _Fail(
-            f"the {SESSION_START_CHECK_THROTTLE_S:.0f} s throttle cannot be waited out "
-            f"inside the {BUDGET_S:.0f} s budget (needs {wait_s:.0f} s more).",
-            code=3,
-        )
     _say(
-        f"throttle   last hub request {_stamp(last_epoch)}; waiting {wait_s:.1f} s "
-        f"({SESSION_START_CHECK_THROTTLE_S:.0f} s throttle + {THROTTLE_MARGIN_S:.0f} s margin)"
+        "daemon     the lifespan has attached the runner; creating NOW, before its "
+        f"earliest automatic tick at spawn + {plan.earliest_tick_s:.1f} s"
     )
-    _wait_until(ready_at)
 
-    # -- step 6: ONE real session over HTTP ---------------------------
+    # -- create-first: the empty baseline is asserted IMMEDIATELY before it -----
+    #
+    # Anything the stub has already seen, or a status write already on disk, could
+    # have come from the runner's own startup tick. Then the create cannot be
+    # shown to be its cause, and no later arithmetic repairs that: VOID, with its
+    # numbers printed, so the run is diagnosable and never mistaken for a pass.
+    baseline_count = stub.count()
+    baseline_checked = _last_checked_at()
+    _say(
+        f"baseline   requests={baseline_count} "
+        f"last_checked_at={baseline_checked or '<absent>'} (asserted empty before the create)"
+    )
+    if baseline_count != 0 or baseline_checked is not None:
+        _print_log(stub.snapshot(), "baseline   request log")
+        raise _Fail(
+            "VOID: the baseline was not empty before the create "
+            f"(requests={baseline_count}, last_checked_at={baseline_checked or '<absent>'}). "
+            "A check already ran, so the create cannot be shown to be the cause; "
+            "the full log is above.",
+            code=EXIT_VOID,
+        )
+
+    # -- ONE real session over HTTP, as early as the daemon allows --------------
+    #
+    # ``create_mono`` is taken BEFORE the POST so it is early rather than late:
+    # if even that instant is past the deadline the run cannot be attributed.
+    # The wire send (and the check it triggers) is covered by the request's own
+    # monotonic stamp below, against the same deadline.
+    deadline_mono = spawn_mono + plan.earliest_tick_s
+    deadline_wall = spawn_epoch + plan.earliest_tick_s
+    create_mono = time.monotonic()
+    create_epoch = time.time()
+    _say(
+        f"create     sending at spawn + {create_mono - spawn_mono:.2f} s; "
+        f"attribution deadline spawn + {plan.earliest_tick_s:.1f} s"
+    )
     created_at = time.monotonic()
     _create_session(plan.daemon_port)
     _say(f"create     one session created in {time.monotonic() - created_at:.1f} s")
 
-    after_deadline = min(time.monotonic() + POST_CREATE_WAIT_S, (_T0 + BUDGET_S) - 8.0)
-    while stub.count() <= before and time.monotonic() < after_deadline:
+    create_margin = deadline_mono - create_mono
+    _say(
+        f"order      create {_stamp(create_epoch)} = spawn + "
+        f"{create_mono - spawn_mono:.2f} s ({create_margin:.2f} s before the deadline)"
+    )
+    if not create_mono < deadline_mono:
+        _say("INCONCLUSIVE — the periodic tick could have raced the create")
+        raise _Fail(
+            "the create was sent after the derived earliest automatic tick "
+            f"(create spawn + {create_mono - spawn_mono:.2f} s, deadline spawn + "
+            f"{plan.earliest_tick_s:.1f} s). A near-miss is not a pass.",
+            code=EXIT_INCONCLUSIVE,
+        )
+
+    after_deadline = min(
+        time.monotonic() + POST_CREATE_WAIT_S,
+        _T0 + BUDGET_S - POST_CREATE_RESERVE_S,
+    )
+    if after_deadline <= time.monotonic():
+        raise _Fail(
+            f"no budget is left to wait for the create's request inside the "
+            f"{BUDGET_S:.0f} s wall (health took {health_s:.1f} s).",
+            code=3,
+        )
+    while stub.count() <= baseline_count and time.monotonic() < after_deadline:
         time.sleep(0.2)
     after = stub.count()
     _print_log(stub.snapshot(), "session    request log")
 
-    delta = after - before
-    _say(f"delta      before={before} after={after} delta={delta}")
+    delta = after - baseline_count
+    _say(f"delta      before={baseline_count} after={after} delta={delta}")
     if delta != 1:
         raise _Fail(
             f"expected exactly 1 request from the session start, measured {delta}. "
-            f"before={before} after={after}; the full log is above.",
+            f"before={baseline_count} after={after}; the full log is above.",
             code=4,
         )
-    trigger = stub.snapshot()[before]
+    trigger = stub.snapshot()[baseline_count]
     if (trigger.method, trigger.path) != ("GET", f"/v1/skills/{_HUB_ID}"):
         raise _Fail(
             f"the one new request was {trigger.method} {trigger.path}, not the "
@@ -1135,6 +1253,27 @@ def _run_steps(plan: _Plan, log_path: Path, started: float, handles: _Handles) -
             f"(auth={trigger.auth}); the check did not use the isolated store.",
             code=4,
         )
+
+    # -- attribution BY ORDERING, against the same derived deadline ------------
+    request_margin = deadline_mono - trigger.mono
+    _say(
+        f"order      request #{trigger.seq} {_stamp(trigger.epoch)} = spawn + "
+        f"{trigger.mono - spawn_mono:.2f} s ({request_margin:.2f} s before the deadline)"
+    )
+    _say(
+        f"order      deadline {_stamp(deadline_wall)} = spawn + {plan.earliest_tick_s:.1f} s "
+        "(STARTUP_DELAY_S + 0 jitter); next automatic tick no earlier than spawn + "
+        f"{plan.periodic_tick_s:.0f} s"
+    )
+    if not trigger.mono < deadline_mono:
+        _say("INCONCLUSIVE — the periodic tick could have raced the create")
+        raise _Fail(
+            "the create's hub request was logged after the derived earliest automatic "
+            f"tick (request spawn + {trigger.mono - spawn_mono:.2f} s, deadline "
+            f"spawn + {plan.earliest_tick_s:.1f} s). A near-miss is not a pass.",
+            code=EXIT_INCONCLUSIVE,
+        )
+
     _say(
         f"check      #{trigger.seq} {_stamp(trigger.epoch)} {trigger.method} "
         f"{trigger.path} -> {trigger.status} auth=dummy"
@@ -1142,11 +1281,11 @@ def _run_steps(plan: _Plan, log_path: Path, started: float, handles: _Handles) -
 
     # The store write happens in the check's worker; give it a moment to land
     # before reading, without making the count depend on it.
-    settle = time.monotonic() + 5.0
-    while time.monotonic() < settle and _last_checked_at() == checked_before:
+    settle = time.monotonic() + STORE_SETTLE_S
+    while time.monotonic() < settle and _last_checked_at() == baseline_checked:
         time.sleep(0.1)
     checked_after = _last_checked_at()
-    _say(f"store      last_checked_at before={checked_before or '<unset>'}")
+    _say(f"store      last_checked_at before={baseline_checked or '<unset>'}")
     _say(f"store      last_checked_at after ={checked_after or '<unset>'}")
     if checked_after is None:
         raise _Fail(
@@ -1158,23 +1297,44 @@ def _run_steps(plan: _Plan, log_path: Path, started: float, handles: _Handles) -
     _say("")
     _say(
         "PASS       the daemon's own lifespan attached the runner, and ONE session "
-        "start asked the hub exactly once"
+        "start asked the hub exactly once, strictly before any automatic tick"
+    )
+    _say(
+        f"PASS       ordering: create spawn + {create_mono - spawn_mono:.2f} s, request "
+        f"spawn + {trigger.mono - spawn_mono:.2f} s, deadline spawn + "
+        f"{plan.earliest_tick_s:.1f} s (next automatic tick >= spawn + "
+        f"{plan.periodic_tick_s:.0f} s)"
+    )
+    _say(
+        "PASS       derivation: STARTUP_DELAY_S="
+        f"{STARTUP_DELAY_S:.1f} + U(0, STARTUP_JITTER_S={STARTUP_JITTER_S:.1f}) s; "
+        f"interval {plan.interval_min} min ({plan.interval_source}); "
+        f"INTERVAL_JITTER={INTERVAL_JITTER:.2f}"
     )
     _say(f"PASS       provenance: HEAD {plan.head}, module {plan.module_path}")
-    _say(f"PASS       total {time.monotonic() - started:.1f} s of the {BUDGET_S:.0f} s budget")
+    _say(
+        f"PASS       total {time.monotonic() - _T0:.1f} s of the {BUDGET_S:.0f} s budget "
+        f"(measured section {time.monotonic() - started:.1f} s)"
+    )
 
 
 def main() -> int:
     if sys.argv[1:]:
         _say("usage: hub_daemon_check_receipt.py   (this script takes no arguments)")
         return 2
+    log_path = _SANDBOX / "daemon.log"
+    handles = _Handles()
+    # BEFORE the preflight: the 90 s bound is the whole run's wall clock, and a
+    # hanging interpreter probe must not escape it. Nothing is spawned yet, so
+    # the watchdog's kill branch simply finds no process to signal.
+    _arm_watchdog(handles, log_path)
     try:
         plan = _preflight()
     except _Fail as failure:
         _say(f"FAIL       {failure}")
         return failure.code
     try:
-        return _run(plan)
+        return _run(plan, handles, log_path)
     except _Fail as failure:
         _say("")
         _say(f"FAIL       {failure}")
