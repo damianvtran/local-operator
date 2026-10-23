@@ -6382,8 +6382,32 @@ def _store(
 ) -> None:
     _reload_before_write(manager)
     top = path[0]
+    # ``drop`` reaches ``ConfigManager._write_config``, which preserves every disk
+    # value this payload does not model. A caller that rebuilt the subtree to
+    # REMOVE something inside it must declare that removal here, or the value is
+    # copied straight back and the delete is undone.
+    merged_drop: dict[tuple[str, ...], str] = dict(drop or {})
+    if isinstance(value, Mapping):
+        # A mapping VALUE is the writer's whole model of that setting, so sub-keys
+        # it leaves out are REMOVED by the new value rather than unmodelled. The
+        # case that forces this: a tier's ``auto`` effort is stored as the
+        # ABSENCE of ``effort`` (``subagents.models.hi`` = ``{"model": ...}``), so
+        # preserving the old ``effort`` back would turn an explicit "auto" into
+        # whatever was there before — the user's choice silently reversed.
+        #
+        # Computed for a top-level path too: no setting has a mapping value there
+        # today, and the next one that does must get the same rule rather than a
+        # silent exception to it.
+        from local_operator.config import _leaf_values
+
+        previous = manager.get_nested_value(tuple(path), None)
+        if isinstance(previous, Mapping):
+            stored = _leaf_values(value)
+            for leaf in _leaf_values(previous):
+                if leaf not in stored:
+                    merged_drop[(*path, *leaf)] = "replaced by /settings"
     if len(path) == 1:
-        manager.set_config_value(top, value, drop=drop)
+        manager.set_config_value(top, value, drop=merged_drop)
         return
     existing = manager.get_config_value(top, None)
     # A shallow copy per level, so the write never mutates the manager's live
@@ -6397,26 +6421,6 @@ def _store(
         cursor[part] = dict(child) if isinstance(child, Mapping) else {}
         cursor = cursor[part]
     cursor[path[-1]] = value
-    # ``drop`` reaches ``ConfigManager._write_config``, which preserves every disk
-    # value this payload does not model. A caller that rebuilt the subtree to
-    # REMOVE something inside it must declare that removal here, or the value is
-    # copied straight back and the delete is undone.
-    merged_drop: dict[tuple[str, ...], str] = dict(drop or {})
-    if isinstance(value, Mapping):
-        # A mapping VALUE is the writer's whole model of that setting, so sub-keys
-        # it leaves out are REMOVED by the new value rather than unmodelled. The
-        # case that forces this: a tier's ``auto`` effort is stored as the
-        # ABSENCE of ``effort`` (``subagents.models.hi`` = ``{"model": ...}``), so
-        # preserving the old ``effort`` back would turn an explicit "auto" into
-        # whatever was there before — the user's choice silently reversed.
-        from local_operator.config import _leaf_values
-
-        previous = manager.get_nested_value(tuple(path), None)
-        if isinstance(previous, Mapping):
-            stored = _leaf_values(value)
-            for leaf in _leaf_values(previous):
-                if leaf not in stored:
-                    merged_drop[(*path, *leaf)] = "replaced by /settings"
     manager.set_config_value(top, root, drop=merged_drop)
 
 
