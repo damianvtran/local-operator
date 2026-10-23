@@ -951,7 +951,7 @@ Module-level defaults live NEXT TO THE READER, in `local_operator/hub_sync/setti
 ```python
 DEFAULT_AUTO_UPDATE_AGENTS = True
 DEFAULT_AUTO_UPDATE_TEAMS = True
-DEFAULT_CHECK_INTERVAL_MIN = 60
+DEFAULT_CHECK_INTERVAL_MIN = 15
 MIN_CHECK_INTERVAL_MIN, MAX_CHECK_INTERVAL_MIN = 5, 1440
 
 @dataclass(frozen=True)
@@ -1232,7 +1232,7 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 {
   "generated_at": "2026-09-29T12:00:00Z",
   "credential": "ok | none",
-  "settings": {"auto_agents": true, "auto_teams": true, "interval_min": 60},
+  "settings": {"auto_agents": true, "auto_teams": true, "interval_min": 15},
   "counts": {"available": 2, "failed": 1, "updating": 0, "up-to-date": 9},
   "items": [
     {"kind":"agent","name":"coder","local_id":"…","hub_id":"…","tenant_id":null,
