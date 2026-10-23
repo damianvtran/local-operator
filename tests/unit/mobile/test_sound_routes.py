@@ -31,8 +31,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from local_operator.library import identity
-from local_operator.library import index as library_index
-from local_operator.library.index import Asset, Catalog
+from local_operator.library.index import Asset
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
@@ -40,6 +39,7 @@ from local_operator.session.transcript import Transcript
 
 SESSION_ID = "soundsession"
 OTHER_SESSION = "othersound"
+LIB_SESSION = "4e92693767fa"
 #: Enough real bytes to exercise the Range arithmetic; no decoder ever sees them
 #: (the bytes route serves the store verbatim).
 AUDIO = b"ID3\x04\x00\x00\x00\x00\x00\x00" + bytes(range(64))
@@ -339,10 +339,16 @@ def test_waveform_requires_the_same_reference(session: dict[str, Any]) -> None:
 def audio_assets(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Two digest-backed audio assets: one with a peaks sidecar, one without.
 
-    The catalog is injected at BOTH read entry points ``_catalog_asset`` uses
-    (``catalog_for_read``, then the refresh), so the route's own resolution path is
-    exercised rather than bypassed.
+    Seeded through the DERIVED INDEX the service reads (``library/store.py``),
+    exactly as ``tests/unit/mobile/test_library_routes.py`` does after the SQLite
+    index landed (#2793): the scanner normally writes these rows, and a fixture
+    that only monkeypatched the old JSON catalog is invisible to
+    ``_catalog_asset`` now. A digest-backed asset's key is ``a:<digest>``, so the
+    aggregate carries ``digest`` with no path.
     """
+    from local_operator.library.metadata import MetadataStore
+    from local_operator.library.store import LibraryStore
+
     store = AttachmentStore()
     with_peaks = store.put_bytes(AUDIO, "audio/mpeg")
     without_peaks = store.put_bytes(AUDIO + b"2", "audio/mpeg")
@@ -351,7 +357,7 @@ def audio_assets(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     assert store.put_peaks(with_peaks.digest, [0.5] * 240)
 
     def asset(ref: Any, name: str) -> Asset:
-        key = f"artifact:{ref.digest}"
+        key = identity.digest_key(ref.digest)
         return Asset(
             key=key,
             id=identity.asset_id(key),
@@ -365,16 +371,48 @@ def audio_assets(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     ready = asset(with_peaks, "chime.mp3")
     silent = asset(without_peaks, "mute.mp3")
-    catalog = Catalog(
-        assets=[ready, silent],
-        revision=1,
-        state="ready",
-        sessions_total=1,
-        sessions_scanned=1,
-        built_at=1_700_000_200.0,
+    metadata = MetadataStore(config_dir())
+    db = LibraryStore(config_dir())
+    db.ensure_schema()
+    rows: list[dict[str, Any]] = []
+    for item in (ready, silent):
+        metadata.ensure_asset(item.id, item.key, derived_name=item.derived_name)
+        rows.append(
+            {
+                "asset_id": item.id,
+                "key": item.key,
+                "session_id": LIB_SESSION,
+                "title": "library fixture",
+                "origin": "generated",
+                "tool": "generate_sound_effect",
+                "first_ts": 1_700_000_000.0,
+                "last_ts": 1_700_000_100.0,
+                "first_seq": 1,
+                "last_seq": 2,
+                "touches": 1,
+                "name": item.derived_name,
+                "path": None,
+                "kind": item.kind,
+                "content_type": item.content_type,
+                "size_bytes": item.size_bytes,
+                "duration_s": 3.5,
+            }
+        )
+
+    # A fixed-row HTTP contract: the background worker would reconcile this
+    # synthetic session against a config with no journal for it and prune the
+    # rows. Its own suite covers indexing.
+    class _NoWorker:
+        @staticmethod
+        def enqueue_thumbnail(_asset_id: str, _width: int = 480) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "local_operator.library.service.ensure_started", lambda *a, **k: _NoWorker()
     )
-    monkeypatch.setattr(library_index, "catalog_for_read", lambda *args, **kwargs: catalog)
-    monkeypatch.setattr(library_index, "build_catalog", lambda *args, **kwargs: catalog)
+    with db.write() as connection:
+        db.replace_session_occurrences(connection, LIB_SESSION, rows)
+        db.recompute_assets(connection, [item.id for item in (ready, silent)])
     return {"ready": ready, "silent": silent}
 
 
