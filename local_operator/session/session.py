@@ -6886,7 +6886,7 @@ class Session:
             # change. The SELECTION row is a different matter and is re-written
             # below: a level the user chose is a durable property of the
             # conversation, not an in-memory knob (see
-            # `_journal_effort_if_selection_in_force`).
+            # `_journal_knobs_if_selection_changed`).
             if self._active_route is not None:
                 refreshed = self._spec_for_route(*self._active_route)
                 if refreshed is not None:
