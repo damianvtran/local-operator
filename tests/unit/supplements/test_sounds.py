@@ -300,17 +300,23 @@ async def test_fourteen_sounds_survive_the_live_beat_and_the_mobile_fold(tmp_pat
     handle.subscribe(lambda: None)
     try:
         await handle._supplements._progress(row, "done")
+        # The bound's disclosure travels with the list it describes: a live viewer
+        # must not paint 200 as a complete list and wait for a cold open to learn.
+        await handle._supplements._progress({**row, "sounds_more": 3}, "done")
     finally:
         await handle.dispose()
         await session.dispose()
     beats = [event for event in events if event.type == "supplement_progress"]
-    assert len(beats) == 1
+    assert len(beats) == 2
     live = beats[0]
     # The live wire carries all 14 -- the emit site must not re-slice either.
     assert [sound["title"] for sound in live.sounds] == [
         f"Storm swell {n}" for n in range(BATCH_SOUNDS)
     ]
     assert len(live.model_dump()["sounds"]) == BATCH_SOUNDS
+    # Zero is absence on the wire (the event serializer's rule).
+    assert "sounds_more" not in live.model_dump()
+    assert beats[1].sounds_more == 3 and beats[1].model_dump()["sounds_more"] == 3
 
     # The phone's live fold keeps them (the relay projection dropped the key before).
     fold = ProjectionFold(SessionProjection(session_id="s1", pid=1))
@@ -324,6 +330,10 @@ async def test_fourteen_sounds_survive_the_live_beat_and_the_mobile_fold(tmp_pat
     quiet = ProjectionFold(SessionProjection(session_id="s1", pid=1))
     quiet.fold_event(silent)
     assert "sounds" not in quiet.projection.supplements["a" * 32]
+    # The disclosure folds with the beat, so the phone can say what was held back.
+    fold.fold_event(beats[1])
+    assert fold.projection.supplements["a" * 32]["sounds_more"] == 3
+    assert "sounds_more" not in quiet.projection.supplements["a" * 32]
 
 
 def test_a_fourteen_sound_row_survives_the_durable_cold_open(tmp_path, monkeypatch) -> None:
@@ -350,3 +360,63 @@ def test_a_fourteen_sound_row_survives_the_durable_cold_open(tmp_path, monkeypat
     assert [sound["title"] for sound in projection.supplements["a" * 32]["sounds"]] == [
         f"Storm swell {n}" for n in range(BATCH_SOUNDS)
     ]
+
+
+def test_a_sound_row_at_the_bound_survives_the_wire_strip_with_a_disclosure():
+    """The strip trims SOUNDS, never the row: 200 long titles + files is > 32 KB.
+
+    Measured at the producer's own cap: 200 sounds with 100-character names and four
+    file rows serialise to ~33 KB, and the old unconditional gate returned ``None``
+    there -- no block, no disclosure, the whole row gone from the attach/history
+    frame. The strip now keeps the earliest sounds, adds the removed count to
+    ``sounds_more`` and refuses only when the row is still over budget without them.
+    """
+    import json
+
+    from local_operator.supplements.contract import SOUNDS_MAX
+
+    sounds = [
+        {
+            "attachment": f"{n:032x}",
+            "mime": "audio/wav",
+            "title": "x" * 100,
+            "duration_s": 2.0,
+        }
+        for n in range(SOUNDS_MAX)
+    ]
+    files = [
+        {
+            "path": f"reports/file-{n}.md",
+            "name": f"file-{n}.md",
+            "kind": "document",
+            "size_bytes": 4120,
+            "mtime": 1.0,
+            "why": "written by write",
+        }
+        for n in range(4)
+    ]
+    row = {
+        "anchor": "answer",
+        "job": "audio-job",
+        "version": 1,
+        "state": "done",
+        "files": files,
+        "components": [],
+        "sounds": sounds,
+        "at": 1.0,
+    }
+    kept = strip_entry(
+        {
+            "id": "row",
+            "type": "custom",
+            "payload": {"custom_type": "supplement_v1", "details": row},
+        },
+        supplements=True,
+    )
+    assert kept is not None, "a row carrying sounds must never be dropped by the strip"
+    details = kept["payload"]["details"]
+    assert 0 < len(details["sounds"]) < SOUNDS_MAX
+    assert details["sounds_more"] == SOUNDS_MAX - len(details["sounds"])
+    # Generation order is kept: the survivors are the prefix, not a re-pick.
+    assert details["sounds"] == sounds[: len(details["sounds"])]
+    assert len(json.dumps(details, separators=(",", ":"))) <= 32768

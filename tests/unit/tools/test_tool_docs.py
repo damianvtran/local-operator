@@ -253,7 +253,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``show`` messages now carry it. Measured through this test's own
     # printed table; the ``team`` entry below moves by the same 12 for its
     # twin sentence, and no other entry moved.
-    "agent": 1056,
+    # RE-MEASURED (LOH-9 S4): 1056 -> 1119. The delta is promotion: the ``op``
+    # enum gains one word and the payload gains ``as_name`` and
+    # ``confirm_replace`` (the second is the overwrite AND the user's answer, so
+    # its wording is the safety-critical part). Trimmed once already; the same
+    # printed table measured it.
+    "agent": 1119,
     "ask": 1063,
     "ask_withdraw": 314,
     "bash": 295,
@@ -313,7 +318,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # 918 -> 935 (2026-10-11, round-1 remediation F2): the cost sentence no
     # longer lumps OpenAI with the never-reporting rungs — an OpenAI edit
     # shows an estimated figure when the response carries usage.
-    "generate_image": 931,
+    # 931 -> 975 (media artifact naming): the new ``filename`` stem field's
+    # teaching description renders in the parameter table. The sanitising and
+    # collision rules live in the image guide, so the wire keeps one sentence.
+    "generate_image": 975,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
     # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
     # what it costs, the estimate rules and the honest cancel paragraphs.
@@ -325,7 +333,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # fields and caps names at 100 chars: final render is 494 (+7 from 487).
     # Both measurements use render_tool_doc + count_text_tokens in this test's
     # canonical isolated arm, not a copied or guessed token allowance.
-    "generate_sound_effect": 494,
+    # 494 -> 568 (media artifact naming): the new ``filename`` field for the
+    # single form and the ``name`` field re-described as that item's filename
+    # stem. Load-bearing naming discovery; the guide holds the rules.
+    # 568 -> 570 (round-1 m1/Q-1): the ``sounds`` description now names
+    # ``filename`` in the exclusivity clause, so the inert combination is
+    # refused rather than silently ignored.
+    "generate_sound_effect": 570,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -335,12 +349,16 @@ MEASURED_TOKENS: dict[str, int] = {
     # now the contract §2.3 string verbatim (the shipped wording stated the
     # same fact twice); re-measured deliberately, and it is the ONLY entry
     # this remediation moved.
-    "generate_video": 790,
+    # 790 -> 833 (media artifact naming): the ``filename`` stem field's
+    # teaching description; the destination/collision rules live in the guide.
+    "generate_video": 833,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_voiceover`` doc
     # — the three rungs and the failover rule, cost and estimates, the
     # language-on-flash limit (no pronunciation dictionaries), MP3-only and
     # the honest cancel paragraphs.
-    "generate_voiceover": 628,
+    # 628 -> 668 (media artifact naming): the ``filename`` stem field's
+    # teaching description renders in the parameter table.
+    "generate_voiceover": 668,
     "glob": 87,
     "grep": 333,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
@@ -397,7 +415,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
     "send": 779,
     # Spawn's tags field/description deliberately adds 21 reference tokens.
-    "sessions": 819,
+    # RE-MEASURED 2026-10-23 (session self-identity): the description gains one
+    # sentence pointing at the listing's `(this session)` marker, so the doc
+    # moves 819 -> 840. That sentence is the ONLY thing that moved; every other
+    # count above is byte-identical, re-measured through this test's own
+    # printed table rather than pasted.
+    "sessions": 840,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
@@ -425,7 +448,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # table, and the tier arm below still does not read config.
     # RE-MEASURED (LOH-9 S3): 1018 -> 1030, the fork-copy clause; only this
     # and the ``agent`` entry moved.
-    "team": 1030,
+    # RE-MEASURED (LOH-9 S4): 1030 -> 1109, the same promotion delta; the team
+    # doc also states that a replace may cover a member, which the agent twin
+    # does not need.
+    "team": 1109,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -457,7 +483,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: tier arm renders it identically, so `task` stays 764.
 #: 1073 -> 1085 (LOH-9 S3): the one-clause fork exception, the same +12 as
 #: the canonical arm; `task` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1085, "task": 764}
+#: RE-MEASURED (LOH-9 S4): agent 1085 -> 1148; ``task`` is unmoved because the
+#: promotion fields are on ``agent``/``team``, not on the launch tool.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1148, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

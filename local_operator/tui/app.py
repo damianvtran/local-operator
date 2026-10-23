@@ -20488,8 +20488,11 @@ class OperatorApp(App[None]):
             return []
         if first.lower() == "new" and space:
             return []
-        if first.lower() in {"chart", "edit"} and space:
-            # Second slot: names feed either the chart or installed-team editor.
+        if first.lower() in {"chart", "edit", "promote"} and space:
+            # Second slot: names feed the chart, the installed-team editor, or the
+            # promote rehearsal. The rehearsal takes its `replace`/`yes` flags as
+            # typed words: it offers team names here, and no flag rows (review
+            # round 1, NIT-2 — the old comment claimed rows that never existed).
             return [
                 ArgumentChoice(
                     f"{first.lower()} {team.name}",
@@ -20535,6 +20538,11 @@ class OperatorApp(App[None]):
                 ),
                 ArgumentChoice(
                     "edit", translate(keys.edit_hint()), detail=translate(keys.subcommand())
+                ),
+                ArgumentChoice(
+                    "promote",
+                    translate(keys.promote_hint()),
+                    detail=translate(keys.subcommand()),
                 ),
             ]
         )
@@ -20920,28 +20928,41 @@ class OperatorApp(App[None]):
         """
         return _is_viewer(self._session)
 
-    def _projects_payload(self) -> list[Any]:
-        """Compose every project's view ONCE — the page's whole data input.
+    def _projects_payload(self) -> tuple[list[Any], int]:
+        """Compose the page's views and its hidden-row count from ONE registry read.
 
         One runtime scan serves every project (``records=``), so a listing of N
         projects does not walk the runtime registry N times, and the TUI-only
         live overlay is merged for THIS process's own session. Never raises: a
         store that cannot be read degrades to an empty page rather than a crash
         on a keystroke path, and one unreadable row does not hide the rest.
+
+        Returns ``(views, hidden_rows)``. Both come from the SAME registry
+        snapshot — the count is that snapshot's ``PageCounts.beyond_page`` — so a
+        page can never paint one load's rows beside another load's numbers, and
+        the caller never has to know which value to read first.
+
+        A resolver that answers ``None`` (no facade and no usable config root)
+        reads as ``([], 0)``: an empty page, never a fabricated count. When the
+        resolver builds a FALLBACK registry instead — the bare-terminal path —
+        that one instance serves both values, which is the M2 fix: the old split
+        called the resolver twice and the second, freshly constructed registry
+        reported zero rows on disk.
         """
         registry = self._project_registry()
         if registry is None:
-            return []
+            return [], 0
         from local_operator.paths import config_dir
         from local_operator.projects import build_project_view, scan_runtime_states
 
         root = config_dir()
         try:
             projects = list(registry.list_projects())
+            hidden = registry.page_counts.beyond_page
             states = scan_runtime_states(root)
         except Exception:  # noqa: BLE001 — the page degrades, it does not crash
             logger.debug("projects: composition failed", exc_info=True)
-            return []
+            return [], 0
         overlay = self._projects_live_overlay()
         views: list[Any] = []
         for project in projects:
@@ -20952,7 +20973,27 @@ class OperatorApp(App[None]):
             except Exception:  # noqa: BLE001 — one row must not hide the rest
                 logger.debug("projects: view composition failed", exc_info=True)
         self._mark_missing_attachments(views)
-        return views
+        return views, hidden
+
+    def _reload_projects_page(self, page: Any, **extra: Any) -> None:
+        """Recompose and point the projects page at ONE read's views and counts.
+
+        ONE place resolves the registry, composes the views and reads the page
+        count, so no call site can pair a page of rows with another read's
+        numbers — the ordering contract an earlier revision left implicit in
+        keyword-argument order (M2).
+        """
+        import time as _time
+
+        views, hidden = self._projects_payload()
+        page.load(
+            views=views,
+            hidden_rows=hidden,
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
+            **extra,
+        )
 
     @staticmethod
     def _mark_missing_attachments(views: list[Any]) -> None:
@@ -21165,6 +21206,9 @@ class OperatorApp(App[None]):
         # implies charting — routing it to the talk path (attaching a team
         # literally named ``Chart``) would contradict what the UI just showed.
         # Consistent with ``get_team_by_name``'s own casefold.
+        if first.casefold() == "promote":
+            self._cmd_promote("team", rest.strip(), notice)
+            return
         if first.casefold() == "chart":
             self._cmd_team_chart(rest.strip(), registry, notice)
             return
@@ -21455,7 +21499,7 @@ class OperatorApp(App[None]):
                 for word, help_text in agent_subcommand_rows()
             )
             return rows
-        if first.casefold() not in {"class", "edit"}:
+        if first.casefold() not in {"class", "edit", "promote"}:
             return []
         return [
             ArgumentChoice(
@@ -21694,6 +21738,61 @@ class OperatorApp(App[None]):
         severity: NoticeKind = "warning" if getattr(result, "style", "") == "warning" else "info"
         notice(str(getattr(result, "text", "") or ""), severity)
 
+    def _cmd_promote(self, kind: str, rest: str, notice: NoticeFn) -> None:
+        """``/agent promote <name>`` / ``/team promote <name>`` — copy, rehearsed.
+
+        The grammar and the receipts live in :mod:`local_operator.promote_slash`,
+        SHARED with the runtime owner's dispatchers: ``/agent`` and ``/team`` are
+        authoritative-session commands, so a live terminal's line never reaches
+        this method (QA round 1, Q1). This branch still runs where nothing routes,
+        and it must word the confirmation exactly as the owner does — which is why
+        it delegates instead of composing its own notice.
+
+        Runs in a worker: the promotion reads and writes both registries on disk
+        and takes the composite write lock, none of which may park the event loop.
+        ``authorized_by="surface:tui"`` is the audit origin: the user typed the
+        command on this surface, which is what the account-write rule requires.
+        """
+
+        from local_operator.session.frontend_state import SlashResult
+
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        self.run_worker(
+            self._promote_worker(kind, rest, SlashResult),
+            thread=False,
+            group="session",
+        )
+
+    async def _promote_worker(self, kind: str, rest: str, SlashResult: Any) -> None:
+        """Run the SHARED promote grammar off the loop and paint its notice."""
+
+        import asyncio
+
+        from local_operator.promote_slash import notice_kind, promote_receipt
+
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        result = await asyncio.to_thread(
+            promote_receipt,
+            session,
+            kind,
+            rest,
+            SlashResult,
+            agents=getattr(session, "agent_registry", None),
+        )
+        self._system_notice(
+            str(getattr(result, "text", "") or ""),
+            # ``notice_kind`` answers a tier NAME from the shared module, which
+            # cannot import this app's ``NoticeKind`` alias (it is below both
+            # hosts), so the narrowing cast lives at the one call site.
+            cast(NoticeKind, notice_kind(str(getattr(result, "style", "") or "info"))),
+        )
+
     def _cmd_agent(
         self,
         arg: str,
@@ -21751,6 +21850,9 @@ class OperatorApp(App[None]):
         verb = first.strip().casefold()
         if verb == "class":
             self._cmd_agent_class(rest.strip(), notice)
+            return
+        if verb == "promote":
+            self._cmd_promote("agent", rest.strip(), notice)
             return
         if verb in ("new", "edit"):
             from local_operator.i18n.keys import tui_authoring as author_keys
@@ -38387,7 +38489,7 @@ class OperatorApp(App[None]):
         """One leading escape protects both reserved verbs and literal '=' names."""
         return (
             "=" + name
-            if name.casefold() in {"chart", "new", "edit"} or name.startswith("=")
+            if name.casefold() in {"chart", "new", "edit", "promote"} or name.startswith("=")
             else name
         )
 
@@ -38720,25 +38822,19 @@ class OperatorApp(App[None]):
         self._close_team_form()
         if self._projects_view is not None:
             if view is not None or associated is not None:
-                import time as _time
-
                 # Every open SPECIFIES its own marker set: an entry that names
                 # none clears the previous one instead of leaving the old `◆`
                 # rows and the `this session (N)` title under an all-projects
                 # entry (agent review r1 MINOR 2 / QA r1 Q3).
-                self._projects_view.load(
-                    views=self._projects_payload(),
+                self._reload_projects_page(
+                    self._projects_view,
                     highlight=highlight,
                     view=view,
                     associated=associated if associated is not None else frozenset(),
-                    updated_at=_time.time(),
-                    own_session=self._own_session_id(),
-                    read_only=self._projects_read_only(),
                 )
             elif highlight:
                 self._projects_view.focus_project(highlight)
             return
-        payload = self._projects_payload()
         # Captured before anything is blurred: this is where Esc puts the user
         # back, almost always the composer.
         self._projects_focus_restore = self.focused
@@ -38760,16 +38856,11 @@ class OperatorApp(App[None]):
         # Deliberate ordering: the data is seeded before the deferred
         # ``on_mount`` repaint lands, so the FIRST painted frame is the page
         # (the same seed-before-mount rule ``_open_org_chart_view`` records).
-        import time as _time
-
-        page.load(
-            views=payload,
+        self._reload_projects_page(
+            page,
             highlight=highlight,
             view=view,
             associated=associated if associated is not None else frozenset(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
         )
         # The start picker's rows ride the same seed (P5b): the page never reads
         # a registry, so the host hands them over while it is still building the
@@ -38868,14 +38959,7 @@ class OperatorApp(App[None]):
         view = self._projects_view
         if view is None:
             return
-        import time as _time
-
-        view.load(
-            views=self._projects_payload(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.set_start_rows(self._start_picker_rows())
 
     def _start_picker_rows(self) -> list[StartTarget]:
@@ -39119,14 +39203,7 @@ class OperatorApp(App[None]):
             else:
                 view.show_notice(f"could not update the milestone: {store_error_text(exc)}")
             return
-        import time as _time
-
-        view.load(
-            views=self._projects_payload(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
 
     def _projects_manager_target(self) -> SendTarget | None:
         """This session's MANAGER, when it has one (P5a, spec §7.5.1).
@@ -39702,8 +39779,6 @@ class OperatorApp(App[None]):
             return
         if view.refuse_read_only():
             return
-        import time as _time
-
         from local_operator.projects import store_error_text
 
         session_id = self._own_session_id()
@@ -39721,12 +39796,7 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_form_refusal(store_error_text(exc))
             return
-        view.load(
-            views=self._projects_payload(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.form_created(project.id, project.title or project.name)
 
     def on_projects_view_edit_submitted(self, message: ProjectsViewEditSubmitted) -> None:
@@ -39745,8 +39815,6 @@ class OperatorApp(App[None]):
             return
         if view.refuse_read_only():
             return
-        import time as _time
-
         from local_operator.projects import ProjectDoneGateError, store_error_text
         from local_operator.tui.projects_edit import refusal_field
 
@@ -39771,12 +39839,7 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_form_refusal(store_error_text(exc), field=refusal_field(exc))
             return
-        view.load(
-            views=self._projects_payload(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.form_edited(changed=result.changed)
 
     def on_projects_view_milestone_added_requested(
@@ -39797,8 +39860,6 @@ class OperatorApp(App[None]):
             return
         if view.refuse_read_only():
             return
-        import time as _time
-
         from local_operator.projects import MilestoneEdit, store_error_text
 
         # The same tri-state rule as the prompt's: a blank optional date is
@@ -39822,12 +39883,7 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_notice(store_error_text(exc))
             return
-        view.load(
-            views=self._projects_payload(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.milestone_added(message.name, action)
 
     def on_projects_view_milestone_removed(self, message: ProjectsViewMilestoneRemoved) -> None:
@@ -39844,8 +39900,6 @@ class OperatorApp(App[None]):
             return
         if view.refuse_read_only():
             return
-        import time as _time
-
         from local_operator.projects import MilestoneEdit, store_error_text
 
         try:
@@ -39860,12 +39914,7 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_notice(store_error_text(exc))
             return
-        view.load(
-            views=self._projects_payload(),
-            updated_at=_time.time(),
-            own_session=self._own_session_id(),
-            read_only=self._projects_read_only(),
-        )
+        self._reload_projects_page(view)
         view.milestone_removed(message.name)
 
     def _own_session_id(self) -> str | None:
@@ -41759,10 +41808,13 @@ class OperatorApp(App[None]):
                 self._notice(_loop_status_line(data), "info")
                 return
         if text:
-            notice_kind: NoticeKind = "warning" if style == "warning" else "info"
-            if style == "error":
-                notice_kind = "error"
-            self._notice(text, notice_kind)
+            # ``notice_kind`` rather than an inline warning/else: a promotion
+            # rehearsal is ``note`` and its receipt is ``success`` (LOH-9 S4),
+            # and the two branches that render one must agree on those tiers or
+            # the same sentence changes weight depending on which host ran it.
+            from local_operator.promote_slash import notice_kind as _notice_kind
+
+            self._notice(text, _notice_kind(style))  # type: ignore[arg-type]
         # The goal/attach mutation happened on the OWNER (that is where session
         # context lives); the request is sent from HERE so it carries this
         # terminal's own images and paste expansion, and so the transcript row
@@ -60480,7 +60532,15 @@ class OperatorApp(App[None]):
         except (TypeError, ValueError):
             same_version = False
         if same_version:
-            for key in ("files", "files_more", "more", "components", "images", "sounds"):
+            for key in (
+                "files",
+                "files_more",
+                "more",
+                "components",
+                "images",
+                "sounds",
+                "sounds_more",
+            ):
                 if not merged.get(key) and prev.get(key):
                     merged[key] = prev[key]
         return merged

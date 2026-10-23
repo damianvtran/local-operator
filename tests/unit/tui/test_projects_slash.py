@@ -11,12 +11,14 @@ a later edit gave either surface its own sentence.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from local_operator.projects import ProjectEdit, ProjectRegistry
+from local_operator.projects import Project, ProjectEdit, ProjectRegistry
 from local_operator.slash_commands import (
     PROJECT_SUBCOMMAND_HELP,
     PROJECT_SUBCOMMANDS,
@@ -1052,3 +1054,71 @@ async def test_new_files_the_chief_of_staff_session_instead_of_joining_it(
         assert project is not None
         assert project.sessions == []
         assert project.coordination_sessions == [SESSION_ID]
+
+
+# -- the store's recency page, declared on both listing receipts -----------------
+
+
+def _write_row(config: Path, project_id: str, name: str, *, stamp_ns: int) -> None:
+    """Write one valid row straight to the scratch store with a stated mtime.
+
+    The mtime IS the page's ranking, so it is set explicitly rather than
+    inherited from write order.
+    """
+    (config / "projects").mkdir(parents=True, exist_ok=True)
+    row = Project(id=project_id, name=name)
+    path = config / "projects" / f"{project_id}.json"
+    path.write_text(json.dumps(row.model_dump(mode="json", by_alias=True)))
+    os.utime(path, ns=(stamp_ns, stamp_ns))
+
+
+@pytest.mark.asyncio
+async def test_a_paged_listing_states_the_dormant_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/project list` returns a SET, so a partial one must say what it left out.
+
+    The cap is pinned to 1 rather than seeding 2001 files: the assertion is
+    about the receipt a reader gets, and the store's own page is covered in
+    ``test_projects_store.py``.
+    """
+    from local_operator import projects as projects_module
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_row(tmp_path, "aaa-dormant", "dormant-row", stamp_ns=1_700_000_000_000_000_000)
+    _write_row(tmp_path, "zzz-live", "live-row", stamp_ns=1_700_000_001_000_000_000)
+    session = _ProjectSession()
+    session.project_registry = ProjectRegistry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(160, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project list")
+        await pilot.pause()
+        receipt = _notices(app)[0]
+
+    assert "live-row" in receipt
+    assert "dormant-row" not in receipt
+    assert "showing the 1 most recently active of 2 stored projects" in receipt
+    assert "/project show <name> resolves any project the store can read" in receipt
+
+
+def test_the_nameless_show_overview_states_the_dormant_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overview is the other set-returning renderer; ONE sentence serves both."""
+    from local_operator import projects as projects_module
+    from local_operator.slash_commands import project_overview_receipt
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_row(tmp_path, "aaa-dormant", "dormant-row", stamp_ns=1_700_000_000_000_000_000)
+    _write_row(tmp_path, "zzz-live", "live-row", stamp_ns=1_700_000_001_000_000_000)
+
+    text, style = project_overview_receipt(
+        ProjectRegistry(tmp_path), config_dir=tmp_path, session_id=None
+    )
+
+    assert style == "info"
+    assert "live-row" in text
+    assert "dormant-row" not in text
+    assert "showing the 1 most recently active of 2 stored projects" in text
+    assert "/project show <name> resolves any project the store can read" in text
