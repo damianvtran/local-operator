@@ -1,0 +1,39 @@
+name: Owned EVAL injected-sleep diagnostic 6911
+on:
+  push:
+    branches: [diag/lfs-eval-sleep-6911]
+permissions:
+  contents: read
+jobs:
+  pair:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Setup closure or STOP
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -m pip install -e '.[dev]'
+      - name: Two original EVAL variants serially
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python -B scripts/run_bounded.py --timeout 220 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.lfs_eval_6911.controller "$RUNNER_TEMP/lfs-eval-6911"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lfs-eval-6911-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lfs-eval-6911/eval.json
+          if-no-files-found: warn
+          retention-days: 3
