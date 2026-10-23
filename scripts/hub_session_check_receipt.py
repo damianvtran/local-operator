@@ -298,6 +298,10 @@ def main() -> int:
             )
 
         agents = AgentRegistry(config_dir)
+        # AgentEditFields' ``Field(None, ...)`` fields are required by pyright's
+        # view of the generated constructor (the module's own convention: every
+        # construction site spells them), so the partial edit below names them
+        # all rather than relying on their runtime defaults.
         row = agents.create_agent(
             AgentEditFields(
                 name="receipt-coder",
@@ -307,6 +311,20 @@ def main() -> int:
                     f"hub:{HUB_ID}",
                     f"{HUB_SHA256_PREFIX}{hub_fingerprint(INSTRUCTIONS, DESCRIPTION)}",
                 ],
+                security_prompt=None,
+                hosting=None,
+                model=None,
+                categories=None,
+                last_message=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
+                current_working_directory=None,
             )
         )
         agents.set_agent_system_prompt(row.id, INSTRUCTIONS)
