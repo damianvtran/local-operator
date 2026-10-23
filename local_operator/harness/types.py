@@ -2991,6 +2991,11 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     components: list[dict[str, Any]] = Field(default_factory=list)
     #: Like files, stored turn audio is ready at decided; do not wait for graphics.
     sounds: list[dict[str, Any]] = Field(default_factory=list)
+    #: How many sounds the row's ``SOUNDS_MAX`` bound (and the panel strip's byte
+    #: budget) held back -- the row's own disclosure, ``files_more``'s sound twin.
+    #: Zero means "nothing held back" and is OMITTED on the wire like the fields
+    #: above, so a beat from a turn inside the bound stays byte-identical.
+    sounds_more: int = 0
     model: str = ""
     model_source: str = ""
     attempts: list[str] = Field(default_factory=list)
@@ -3004,7 +3009,7 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     ) -> dict[str, Any]:
         """Old event fixtures remain byte-identical when no new facts were observed."""
         value = handler(self)
-        for key in ("model", "model_source", "attempts", "detail", "sounds"):
+        for key in ("model", "model_source", "attempts", "detail", "sounds", "sounds_more"):
             if not value.get(key):
                 value.pop(key, None)
         return value

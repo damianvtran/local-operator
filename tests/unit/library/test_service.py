@@ -433,3 +433,73 @@ def test_a_rename_reaches_a_budgeted_poll_before_the_write_interval_ends(
     polled = service.list_assets(root, service.Query(), budget_s=library_index.DEFAULT_BUDGET_S)
 
     assert polled["rows"][0]["occurrences"][0]["session_title"] == "Victor support triage"
+
+
+# ---------------------------------------------------------------------------
+# Waveform decode: one slot, one honest answer
+# ---------------------------------------------------------------------------
+
+
+def test_path_decodes_are_serialised_on_the_one_child_decoder_slot(monkeypatch) -> None:
+    """Two concurrent first-read decodes never run their children at once.
+
+    A Library grid asks for many path-asset waveforms at a time and each decode is a
+    child interpreter (~1.7 s measured); without the recovery module's single slot the
+    grid spawns one per tile. The fake child below records how many runs overlap.
+    """
+    import json
+    import threading
+    import types
+
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def fake_run(*args: Any, **kwargs: Any) -> types.SimpleNamespace:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with guard:
+            active -= 1
+        return types.SimpleNamespace(stdout=json.dumps([0.25] * 240))
+
+    monkeypatch.setattr(service.subprocess, "run", fake_run)
+    results: list[list[float] | None] = []
+
+    def work() -> None:
+        results.append(service._decode_peaks_bounded(b"audio"))
+
+    threads = [threading.Thread(target=work) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert peak == 1, "two child decoders overlapped"
+    assert results == [[0.25] * 240, [0.25] * 240]
+
+
+def test_a_busy_decoder_slot_is_an_honest_no_waveform(monkeypatch) -> None:
+    """No slot within the deadline is a refusal, never an unbounded wait or a spawn."""
+    import local_operator.audiogen.recovery as recovery
+
+    def no_spawn(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a refused slot must not spawn a decoder")
+
+    monkeypatch.setattr(recovery, "decode_slot", lambda timeout=None: False)
+    monkeypatch.setattr(service.subprocess, "run", no_spawn)
+    assert service._decode_peaks_bounded(b"audio") is None
+
+
+def test_a_decoder_answer_outside_the_frozen_bar_contract_is_refused(monkeypatch) -> None:
+    """The child is not the place the renderer's 0..1/finite contract lives."""
+    import json
+    import types
+
+    monkeypatch.setattr(
+        service.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(stdout=json.dumps([1.5] * 240)),
+    )
+    assert service._decode_peaks_bounded(b"audio") is None

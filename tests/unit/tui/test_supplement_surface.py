@@ -483,6 +483,44 @@ async def test_a_live_beat_paints_every_sound_and_a_later_beat_keeps_them() -> N
 
 
 @pytest.mark.asyncio
+async def test_the_sound_bound_disclosure_survives_a_later_beat() -> None:
+    """`sounds_more` rides the beat and is carried across beats that omit it.
+
+    Without the carry, the terminal beat's upgrade read (which lands the disclosure)
+    was undone by the next list-less beat, and the block showed 200 rows as if that
+    were the whole batch.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 32)) as pilot:
+        await _boot(app, pilot, session)
+        _mount_answer(app, ANCHOR)
+        await pilot.pause()
+        app.post_message(
+            SupplementProgress(
+                ANCHOR,
+                JOB,
+                1,
+                "decided",
+                files=[],
+                components=[],
+                sounds=[_sound(0)],
+                sounds_more=2,
+            )
+        )
+        await pilot.pause()
+        block = _supplement_blocks(app)[0]
+        expected = ["  ♪ Storm swell 0 · 2.0 s", "  2 more sounds"]
+        lines = _painted(block).plain.splitlines()
+        assert lines[:2] == expected
+        assert lines[2].endswith("Preparing highlights…")
+        app.post_message(SupplementProgress(ANCHOR, JOB, 1, "running", stage="generating"))
+        app.post_message(SupplementProgress(ANCHOR, JOB, 1, "done", files=[], components=[]))
+        await pilot.pause()
+        assert _painted(block).plain.splitlines() == expected
+
+
+@pytest.mark.asyncio
 async def test_an_html_only_done_mounts_no_block() -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
