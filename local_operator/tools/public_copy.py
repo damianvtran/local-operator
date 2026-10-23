@@ -39,6 +39,7 @@ to bypass.  Review of changes under these roots is the control.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -220,6 +221,52 @@ def _read_key_source(text: str, key: str) -> str:
     return "\n".join(matches[:_MAX_KEY_LINES])
 
 
+def _committed_public_copy(root: Path, relative: str) -> tuple[bytes, str | None]:
+    """The committed blob for ``relative``, or a refusal sentence.
+
+    ``HEAD`` is the committed copy, and this reader serves THAT blob rather than
+    the working-tree file. Two consequences, both measured in review:
+
+    * a working-tree secret cannot be read back (the write-a-secret bypass);
+    * a clean checkout with ``core.autocrlf=true`` (Git for Windows' default)
+      still serves, because the comparison is Git's own index/worktree
+      comparison and the bytes are the blob's LF bytes. Raw byte equality
+      against the working tree failed every read on that platform.
+
+    The helper is synchronous and runs off the event loop
+    (:func:`execute_read_public_copy` awaits it in a thread).
+    """
+
+    def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+    try:
+        inside = _git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != b"true":
+            return b"", "the workspace is not a git checkout"
+        tracked = _git("ls-files", "--error-unmatch", "--", relative)
+        if tracked.returncode != 0:
+            return b"", f"{relative} is not committed at HEAD; commit the public copy first"
+        clean = _git("diff", "--quiet", "HEAD", "--", relative)
+        if clean.returncode == 1:
+            return b"", (
+                f"{relative} differs from HEAD; commit the public copy before auditing it"
+            )
+        if clean.returncode != 0:
+            return b"", f"could not compare {relative} with HEAD"
+        blob = _git("show", f"HEAD:{relative}")
+        if blob.returncode != 0:
+            return b"", f"{relative} is not committed at HEAD; commit the public copy first"
+        return blob.stdout, None
+    except (OSError, subprocess.SubprocessError) as exc:
+        return b"", f"could not read the committed copy of {relative} ({exc})"
+
+
 async def execute_read_public_copy(
     tool_call_id: str,
     arguments: dict[str, Any],
@@ -273,52 +320,14 @@ async def execute_read_public_copy(
     # THE BYTES MUST BE THE COMMITTED BYTES. The allowlisted roots are writable
     # by the same agent that calls this tool, so trusting whatever is on disk is
     # a two-call bypass: write a credential into a catalogue, read it back
-    # verbatim. HEAD is the reviewed copy, and a working-tree difference is
-    # refused rather than served. A hard link is refused for the same reason: it
-    # is another path to bytes that need not be the committed ones.
+    # verbatim. ``_committed_public_copy`` serves the HEAD blob and refuses a
+    # working-tree difference or an untracked file; it is also why a CRLF
+    # checkout works (Git's comparison, not raw byte equality).
+    blob, refusal = await asyncio.to_thread(_committed_public_copy, root, relative)
+    if refusal is not None:
+        return _text(tool_call_id, f"refused: {refusal}", is_error=True)
     try:
-        if resolved.stat().st_nlink > 1:
-            return _text(
-                tool_call_id,
-                "refused: a hard-linked public-copy file is not trusted",
-                is_error=True,
-            )
-    except OSError as exc:
-        return _text(tool_call_id, f"could not stat {relative}: {exc}", is_error=True)
-    try:
-        committed = subprocess.run(
-            ["git", "-C", str(root), "show", f"HEAD:{relative}"],
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return _text(
-            tool_call_id,
-            f"refused: could not read the committed copy of {relative} ({exc})",
-            is_error=True,
-        )
-    if committed.returncode != 0:
-        return _text(
-            tool_call_id,
-            f"refused: {relative} is not committed at HEAD; commit the public copy first",
-            is_error=True,
-        )
-    try:
-        current = resolved.read_bytes()
-    except OSError as exc:
-        return _text(tool_call_id, f"could not read {relative}: {exc}", is_error=True)
-    if current != committed.stdout:
-        return _text(
-            tool_call_id,
-            (
-                f"refused: {relative} differs from HEAD; commit the public copy "
-                "before auditing it"
-            ),
-            is_error=True,
-        )
-    try:
-        text = current.decode("utf-8")
+        text = blob.decode("utf-8")
     except UnicodeDecodeError as exc:
         return _text(tool_call_id, f"could not decode {relative} as UTF-8: {exc}", is_error=True)
 

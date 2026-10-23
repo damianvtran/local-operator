@@ -116,7 +116,54 @@ async def test_an_untracked_public_copy_file_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_a_hard_link_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_clean_crlf_checkout_is_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Git for Windows' default: CRLF on disk, LF in the blob, clean index.
+
+    Round 2 measured the raw byte-equality version refusing every read here. The
+    route now compares with ``git diff --quiet`` and serves the blob, so the
+    platform's line endings cannot kill the audit.
+    """
+    root = _public_repo(tmp_path)
+    _git(root, "config", "core.autocrlf", "true")
+    catalogue = root / "local_operator/i18n/catalogues/en/wire.slash.json"
+    body = json.dumps(
+        {"wire.slash.credential": "Type or paste a secret after a space; masked"},
+        ensure_ascii=False,
+        indent=2,
+    )
+    catalogue.write_bytes(body.replace("\n", "\r\n").encode("utf-8") + b"\r\n")
+    _git(root, "add", "local_operator/i18n/catalogues/en/wire.slash.json")
+    _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "crlf")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-crlf",
+        {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+            "key": "wire.slash.credential",
+        },
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert not result.is_error, result.text
+    assert "Type or paste a secret after a space; masked" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_hard_link_does_not_change_the_served_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hard link is another name, not different committed bytes.
+
+    Round 2 measured that the old nlink refusal was a false refuse once the
+    route serves the HEAD blob: the link cannot change what HEAD holds. The
+    test keeps the old fixture (a second link to a clean catalogue) and asserts
+    the read still succeeds.
+    """
     root = _public_repo(tmp_path)
     catalogue = root / "local_operator/i18n/catalogues/en/wire.slash.json"
     os.link(catalogue, catalogue.with_name("hard.json"))
@@ -133,8 +180,36 @@ async def test_a_hard_link_is_refused(tmp_path: Path, monkeypatch: pytest.Monkey
         _context(root, tmp_path),
     )
 
+    assert not result.is_error, result.text
+    assert "Type or paste a secret after a space; masked" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_non_git_directory_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route requires a git checkout; the refusal names that, not 'untracked'."""
+    root = tmp_path / "plain"
+    catalogue = root / "local_operator/i18n/catalogues/en"
+    catalogue.mkdir(parents=True)
+    (catalogue / "wire.slash.json").write_text(
+        json.dumps({"wire.slash.credential": "public"}), encoding="utf-8"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-3b",
+        {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+            "key": "wire.slash.credential",
+        },
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
     assert result.is_error
-    assert "hard-linked" in result.text
+    assert "not a git checkout" in result.text
 
 
 @pytest.mark.asyncio

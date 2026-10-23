@@ -126,10 +126,13 @@ is **not** a redaction toggle:
   `local_operator/mobile/web/src/i18n/keys.gen.ts`,
   `local_operator/mobile/web/src/i18n/bundled.gen.ts`. There is no directory
   rule and no extension rule; adding a root is an amendment under §5.
-* It serves **committed bytes only**: the file must be tracked and byte-identical
-  to `HEAD`. A working-tree difference, an untracked file and a hard link are
-  refused. Commit the public copy before auditing it; that keeps the route from
-  becoming a two-call bypass (write a secret into a catalogue, read it back).
+* It serves **the committed blob only**: the file must be tracked and its
+  working tree clean against `HEAD` (`git ls-files --error-unmatch` plus
+  `git diff --quiet HEAD --`). A working-tree difference or an untracked file is
+  refused, and the bytes returned are `HEAD`'s blob — so a clean CRLF checkout
+  still reads correctly. Commit the public copy before auditing it; that keeps
+  the route from becoming a two-call bypass (write a secret into a catalogue,
+  read it back). The route requires `git` on `PATH`.
 * It returns a named catalogue key, or the lines of a key module / generated
   map that name the key. A whole catalogue is returned only when it is small
   and no key was given.
@@ -181,10 +184,11 @@ comment.
 * A credential that is genuinely spelled as a DNS-1123 identifier with a
   workload/environment qualifier is released by name-driven rules. It is still
   masked by DSN, bearer, PEM and vendor rules, and by exact value once known.
-* `read_public_copy` trusts the allowlisted roots **at `HEAD`**. A secret
-  committed into a catalogue by a mistaken commit will be returned verbatim;
-  review of changes under those roots is the control. The route refuses
-  working-tree changes precisely so an agent cannot create that state silently.
+* `read_public_copy` serves the allowlisted roots **at `HEAD`**. `HEAD` is the
+  committed copy, not necessarily a reviewed one: a secret committed into a
+  catalogue by a mistaken commit will be returned verbatim, so review of
+  changes under those roots is the control. The route refuses working-tree
+  changes precisely so an agent cannot create that state silently.
 
 ## 7. Enforcement map
 
