@@ -15,7 +15,10 @@ OperatorApp via run_test.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -1358,6 +1361,108 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
             configure.invalidate_model_info_cache()
 
 
+class _HeldDiscovery:
+    """Gated discovery stand-in for the S3 off-loop proof.
+
+    A sleeping stub cannot say WHICH thread is blocked, and ``Event.wait`` on
+    the loop would block the very dispatch it awaits. This helper:
+
+    * refuses the loop thread BEFORE any wait — an inline dependency fails
+      immediately instead of freezing the loop for the gate timeout;
+    * is armed by construction, so a refresh dispatched while the app boots is
+      captured rather than sliding into a plain sleep no later gate can reach;
+    * counts only the invocations CURRENTLY parked, so a stale entry flag can
+      never qualify a worker that expired and finished;
+    * records expiry explicitly: a timed-out gate can never be a held witness.
+    """
+
+    TICK_S = 0.01
+
+    def __init__(self, *, latency_s: float = 5.0, expire_s: float = 5.0) -> None:
+        self.latency_s = latency_s
+        self._gate = threading.Event()
+        self._expire_s = expire_s
+        self._loop_thread = threading.get_ident()
+        self._lock = threading.Lock()
+        self.entered = 0
+        self.parked = 0
+        self.expired = 0
+        #: Identity of the invocation currently parked; bumps on every entry so
+        #: a witness cannot borrow ticks from an earlier invocation.
+        self._generation = 0
+        self._active_generation = 0
+        self.inline_violations = 0
+        self.worker_thread: int | None = None
+
+    def __call__(self, provider: str, **_kwargs: Any) -> tuple[list[Any], str]:
+        if threading.get_ident() == self._loop_thread:
+            with self._lock:
+                self.inline_violations += 1
+            raise AssertionError("metadata dependency ran on the loop thread")
+        with self._lock:
+            self.entered += 1
+            self._generation += 1
+            self._active_generation = self._generation
+            self.parked += 1
+            self.worker_thread = threading.get_ident()
+        try:
+            if not self._gate.wait(timeout=self._expire_s):
+                with self._lock:
+                    self.expired += 1
+        finally:
+            with self._lock:
+                self.parked -= 1
+        return [], "ok"
+
+    def release(self) -> None:
+        self._gate.set()
+
+    async def await_held(self, *, minimum_ticks: int = 3, timeout_s: float = 2.0) -> dict[str, int]:
+        """N consecutive intervals held across BOTH ends by the SAME invocation.
+
+        Each interval is sampled before and after its sleep: a tick only counts
+        when the same parked generation is present on both sides, the gate is
+        unreleased and nothing has expired. The first held tick cannot claim
+        ticks that elapsed before entry, and a released-but-waking worker
+        (parked still 1) is a failure, not a sample.
+        """
+        started = time.perf_counter()
+        consecutive = 0
+        generation = 0
+        while True:
+            with self._lock:
+                before = (self.parked, self._active_generation, self.expired, self._gate.is_set())
+            await asyncio.sleep(self.TICK_S)
+            with self._lock:
+                after = (self.parked, self._active_generation, self.expired, self._gate.is_set())
+            if after[2] or before[2]:
+                raise AssertionError("the held dependency gate expired before the witness")
+            if after[3] or before[3]:
+                raise AssertionError("the gate was released before the witness completed")
+            held = (
+                before[0] >= 1
+                and after[0] >= 1
+                and before[1] == after[1]
+                and after[1] != 0
+            )
+            if held and after[1] == generation:
+                consecutive += 1
+            elif held and generation == 0:
+                generation = after[1]
+                consecutive = 1
+            else:
+                consecutive = 0
+                generation = after[1] if held else 0
+            if consecutive >= minimum_ticks:
+                return {
+                    "ticks": consecutive,
+                    "parked": after[0],
+                    "generation": generation,
+                }
+            if time.perf_counter() - started > timeout_s:
+                raise AssertionError("no invocation stayed parked for the witness")
+
+
 @pytest.mark.asyncio
 async def test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free() -> None:
     """S3: the 1 Hz subagent harvest pricing a child on an unlisted model
@@ -1370,39 +1475,148 @@ async def test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free(
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-    slow = _SlowListing(5.0)
+    # ARMED BEFORE install and before the app boots: a refresh dispatched
+    # during startup must be captured, not slide into a plain sleep no later
+    # gate can intercept. The install itself happens INSIDE the protected try
+    # below, so a failure after it still restores discovery.
+    slow = _HeldDiscovery()
     original = discovery.available_models
-    discovery.available_models = slow  # type: ignore[assignment]
-    configure.invalidate_model_info_cache()
+    # PREEXISTING PENDING BASELINE, captured BEFORE the first global mutation:
+    # a foreign key must fail closed rather than be cleared into looking empty.
+    preexisting_refreshes = set(configure._paint_refreshing)
+    # NARROW OBSERVER over the real entry: record the args BEFORE delegating
+    # unchanged, so a refresh that completes before cleanup still leaves proof
+    # that we owned a submission. The real executor/_refresh/dependency path is
+    # untouched — no stub worker, no new product seam.
+    original_refresh_entry = configure.refresh_model_info_background
+    submitted_refreshes: list[tuple[str, str]] = []
+    target_refresh = ("kimi", "never-heard-of-it")
 
-    session = FakeSession()
-    # A child job on a model nothing knows: the harvest's worst case.
-    child = SimpleNamespace(
-        id="j1",
-        usage=Usage(input_tokens=48_000, output_tokens=9_000),
-        model_label="kimi/never-heard-of-it",
-    )
-    session.jobs = SimpleNamespace(list=lambda: [child])  # type: ignore[assignment]
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        recorder = StallRecorder()
-        await recorder.start()
-        started = time.perf_counter()
-        for _ in range(3):  # three harvest ticks' worth of work, inline
-            app._harvest_subagent_costs()
-            await pilot.pause(0.02)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        await recorder.stop()
-        slow.latency_s = 0.0
-        for _ in range(200):
-            if slow.in_flight == 0:
-                break
-            await asyncio.sleep(0.02)
-        discovery.available_models = original  # type: ignore[assignment]
+    def _observe_refresh(provider: str, model_id: str) -> None:
+        submitted_refreshes.append((provider, model_id))
+        return original_refresh_entry(provider, model_id)
+
+    installed = False
+    recorder: StallRecorder | None = None
+    harvest_cpu_ms = 0.0
+    # OWNED CLEANUP FROM THE FIRST GLOBAL REPLACEMENT: an app-start, harvest,
+    # witness or recorder failure must still restore discovery and settle the
+    # worker, or the next test in this worker inherits both.
+    try:
+        # Refuse foreign work BEFORE clearing caches or replacing either global.
+        # A joiner/app response is not ownership of an already queued resolver.
+        assert not preexisting_refreshes, (
+            f"pre-existing refresh keys before install: {preexisting_refreshes!r}"
+        )
+        installed = True
+        configure.refresh_model_info_background = _observe_refresh  # type: ignore[assignment]
+        discovery.available_models = slow  # type: ignore[assignment]
         configure.invalidate_model_info_cache()
-        assert elapsed_ms < 500.0, f"harvest blocked for {elapsed_ms:.0f} ms"
-        recorder.assert_no_stall_loaded()
+        session = FakeSession()
+        child = SimpleNamespace(
+            id="j1",
+            usage=Usage(input_tokens=48_000, output_tokens=9_000),
+            model_label="kimi/never-heard-of-it",
+        )
+        session.jobs = SimpleNamespace(list=lambda: [child])  # type: ignore[assignment]
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            recorder = StallRecorder()
+            await recorder.start()
+            # CALL-ONLY CPU: the old span wrapped the three calls AND their
+            # pilot.pause(0.02) settles, so it read the runner's wake-up as
+            # harvest work (an injected 600 ms async pause produced a 696 ms
+            # window while the calls cost 0.015 ms of loop CPU; run
+            # 39968922316, split case). The 500 ms budget is unchanged; only
+            # its subject is now the loop thread's own time inside the calls.
+            for _ in range(3):  # three harvest ticks' worth of work, inline
+                call_cpu = time.thread_time()
+                app._harvest_subagent_costs()
+                harvest_cpu_ms += (time.thread_time() - call_cpu) * 1000.0
+                await pilot.pause(0.02)
+            # CAUSAL OFF-LOOP PROOF. Low CPU alone also passes a harvest that
+            # waits on the loop, so require real loop ticks WHILE the refresh
+            # worker is parked at the dependency, unexpired and unreleased.
+            witness = await slow.await_held()
+            # The held worker must belong to THIS model's real refresh request,
+            # not unrelated discovery work that happens to park at the same stub.
+            assert target_refresh in submitted_refreshes, "target refresh was never submitted"
+            assert slow.inline_violations == 0, (
+                "the metadata dependency ran on the loop thread"
+            )
+            assert slow.worker_thread != threading.get_ident()
+            slow.release()
+            assert harvest_cpu_ms < 500.0, (
+                f"harvest consumed {harvest_cpu_ms:.1f} ms of loop CPU across 3 calls"
+            )
+            recorder.assert_no_stall_loaded()
+            assert witness["parked"] >= 1 and witness["ticks"] >= 3
+    finally:
+        # Every stage runs even when an earlier one faults; discovery is
+        # restored LAST but unconditionally, so a queued refresh cannot read it
+        # while the owned worker is still awake, and a failure inside cleanup
+        # cannot skip the other stages or silently pass.
+        cleanup_error: BaseException | None = None
+        try:
+            slow.release()  # cleanup release never authorizes the witness
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = exc
+        try:
+            if recorder is not None:
+                await recorder.stop()
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        try:
+            # SETTLEMENT = the owned refresh key disappearing from the module's
+            # pending set, observed BEFORE any invalidation: invalidation clears
+            # that set, so checking afterwards would fabricate completion.
+            # `slow.parked == 0` alone is NOT completion — it is also true
+            # before a queued job reaches the dependency and after the
+            # dependency returns but before `_refresh`'s finally runs.
+            # A KNOWN owned submission that already completed is settled: never
+            # wait for its key to reappear. EVERY observed submission after our
+            # empty baseline is test-owned, even if it is not the target model.
+            owned = set(submitted_refreshes)
+            if owned:
+                settled = not owned.intersection(configure._paint_refreshing)
+                deadline = time.perf_counter() + 4.0
+                while not settled and time.perf_counter() < deadline:
+                    await asyncio.sleep(0.02)
+                    settled = not owned.intersection(configure._paint_refreshing)
+                if not settled:
+                    raise AssertionError("an owned refresh is still pending at restore")
+            else:
+                # No owned submission was observed (e.g. the body failed before
+                # the harvest ran): do not invent expected work.
+                settled = True
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        try:
+            configure.refresh_model_info_background = original_refresh_entry  # type: ignore[assignment]
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        try:
+            discovery.available_models = original  # type: ignore[assignment]
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        try:
+            # No installed globals means no owned cache: preserve foreign pending
+            # markers when the first guard refused the test before mutation.
+            if installed:
+                configure.invalidate_model_info_cache()
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        # BODY + CLEANUP ARE BOTH PRESERVED: a red body does not waive the
+        # visibility of a leaked or unsettled producer.
+        body_error = sys.exc_info()[1]
+        if cleanup_error is not None:
+            if body_error is not None and body_error is not cleanup_error:
+                raise BaseExceptionGroup(
+                    "S3 body and cleanup both failed",
+                    [body_error, cleanup_error],
+                ) from None
+            raise cleanup_error
 
 
 @pytest.mark.asyncio
