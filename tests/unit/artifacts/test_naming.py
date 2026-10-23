@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.artifacts.naming import media_filename
+from local_operator.artifacts.naming import media_filename, media_stem
 
 
 def test_prompt_names_the_artifact_without_a_leading_article() -> None:
@@ -70,6 +70,11 @@ def test_the_extension_follows_the_bytes_not_the_suggestion() -> None:
         ("audio/x-wav", ".wav"),
         ("video/webm", ".webm"),
         ("video/quicktime", ".mov"),
+        ("audio/flac", ".flac"),
+        ("audio/x-flac", ".flac"),
+        ("audio/ogg", ".ogg"),
+        ("audio/opus", ".opus"),
+        ("audio/webm", ".weba"),
         ("video/mp4; codecs=avc1", ".mp4"),
     ],
 )
@@ -104,7 +109,31 @@ def test_a_useless_prompt_falls_back_to_the_kind(prompt: str) -> None:
     assert media_filename(prompt, "audio/wav") == "media.wav"
 
 
-def test_a_counter_numbers_a_multi_asset_call_only() -> None:
+def test_an_explicit_stem_keeps_its_leading_article() -> None:
+    # The article rule is for PROMPTS (sentences); a suggested stem is already
+    # a name the caller chose, so "the-great-wave" must survive verbatim.
+    assert media_filename("anything", "image/png", suggested="the-great-wave", kind="image") == (
+        "the-great-wave.png"
+    )
+    assert media_filename("The great wave off Kanagawa", "image/png", kind="image") == (
+        "great-wave-off-kanagawa.png"
+    )
+
+
+def test_media_stem_has_no_extension_and_follows_the_same_rules() -> None:
+    assert media_stem("A red fox in snow, painterly", kind="image") == "red-fox-in-snow-painterly"
+    assert media_stem("anything", suggested="Bird Chirping.mp3", kind="audio") == "bird-chirping"
+    assert media_stem("anything", suggested="../../etc/passwd.png", kind="image") == "passwd"
+    assert media_stem("!!!", kind="audio") == "audio"
+    # A surface without bytes cannot know the extension, so it is never invented.
+    assert "." not in media_stem("anything", suggested="The Great Wave", kind="image")
+
+
+def test_the_counter_numbers_a_stem_and_the_filename_derives_from_it() -> None:
+    assert media_stem("x") == "x"
+    assert media_stem("x", index=1) == "x"
+    assert media_stem("x", index=2) == "x-2"
+    assert media_stem("x", index=3) == "x-3"
     assert media_filename("x", "image/webp", kind="image") == "x.webp"
     assert media_filename("x", "image/webp", kind="image", index=1) == "x.webp"
     assert media_filename("x", "image/webp", kind="image", index=2) == "x-2.webp"

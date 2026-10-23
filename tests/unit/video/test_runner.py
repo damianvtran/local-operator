@@ -311,6 +311,73 @@ def _fake_wake(job_id: str) -> Any:
     )
 
 
+def test_request_naming_reads_new_and_legacy_records() -> None:
+    assert video_jobs.request_naming({"params": {"prompt": "a kite", "filename": "Kite"}}) == (
+        "a kite",
+        "Kite",
+    )
+    # A record written before ``filename`` existed: the prompt is the fallback.
+    assert video_jobs.request_naming({"params": {"prompt": "a kite"}}) == ("a kite", None)
+    assert video_jobs.request_naming({}) == (None, None)
+    assert video_jobs.request_naming({"params": "garbage"}) == (None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        (
+            {"prompt": "a kite over cliffs", "filename": "Kite Over Cliffs"},
+            ("a kite over cliffs", "Kite Over Cliffs"),
+        ),
+        ({"prompt": "a kite over cliffs"}, ("a kite over cliffs", None)),
+    ],
+)
+async def test_watcher_names_assets_from_the_durable_request(
+    monkeypatch: pytest.MonkeyPatch,
+    params: dict[str, Any],
+    expected: tuple[str | None, str | None],
+) -> None:
+    """The watcher runs after the submitting process is gone: the record's own
+    ``params`` are the naming request, and a legacy record falls back to the
+    prompt rather than losing the name."""
+    captured: list[tuple[str | None, str | None]] = []
+
+    async def fake_resume(**_kwargs: Any) -> Any:
+        return SimpleNamespace(
+            assets=[MediaAsset(data=b"x", content_type="video/mp4", source_url="https://x/v.mp4")],
+            model="m",
+            cost_usd=None,
+            cost_source=None,
+            billing_basis=None,
+        )
+
+    def fake_register(assets: Any, prompt: str | None, filename: str | None = None) -> Any:
+        captured.append((prompt, filename))
+        return ["d" * 32], [], []
+
+    monkeypatch.setattr(video_jobs, "resume_video_observation", fake_resume)
+    monkeypatch.setattr(video_jobs, "_register_video_assets", fake_register)
+
+    runner = video_jobs.make_video_watcher_runner(
+        record={
+            "job": "w-name",
+            "state": "running",
+            "provider": "radient",
+            "model": "m",
+            "mode": "t2v",
+            "params": params,
+            "provider_ref": {"request_id": "r1"},
+        },
+        config_dir=None,
+        journal=None,
+        wake=_fake_wake("w-name"),
+        append_output=None,
+    )
+    await runner("w-name", AbortSignal(), lambda d: None)
+    assert captured == [expected]
+
+
 @pytest.mark.asyncio
 async def test_watcher_settles_provider_cancelled_as_cancelled(
     monkeypatch: pytest.MonkeyPatch,

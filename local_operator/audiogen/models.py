@@ -191,14 +191,19 @@ class GenerateSoundEffectParams(BaseModel):
         default=None,
         min_length=1,
         max_length=50,
-        description="Named sound effects in one approval (1-50); exclusive with prompt/duration_s.",
+        description=(
+            "Named sound effects in one approval (1-50); exclusive with "
+            "prompt/duration_s/filename."
+        ),
     )
 
     @model_validator(mode="after")
     def exactly_one_form(self) -> GenerateSoundEffectParams:
         if self.sounds is not None:
-            if {"prompt", "duration_s"} & self.model_fields_set:
-                raise ValueError("Use either sounds or prompt + duration_s, not both")
+            if {"prompt", "duration_s", "filename"} & self.model_fields_set:
+                raise ValueError(
+                    "Use either sounds or prompt + duration_s (+ optional filename), not both"
+                )
         elif self.prompt is None or self.duration_s is None:
             raise ValueError("Supply either sounds or both prompt and duration_s")
         return self

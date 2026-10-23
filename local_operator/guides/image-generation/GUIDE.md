@@ -230,7 +230,8 @@ Omitted, the stem derives from the prompt (`A red fox in snow, painterly` →
 provider returned (`image/webp` → `.webp`), never the stem. A stem is a label,
 not a path: separators and `..` are sanitised away, and the file materialises
 under the session's `scratchpad/generated/`; two different images with one
-name never overwrite — the second gets a short digest suffix.
+name never overwrite — the second FILE gets a short digest suffix, while its
+Library row and caption keep the requested label.
 
 ## Saving to disk
 
