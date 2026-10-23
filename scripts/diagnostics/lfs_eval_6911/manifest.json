@@ -5,7 +5,8 @@
     "tests/unit/tools/lfs_eval_plugin_6911.py",
     "tests/conftest.py",
     "local_operator/tools/eval.py",
-    "local_operator/tools/builtin.py"
+    "local_operator/tools/builtin.py",
+    "scripts/diagnostics/lfs_eval_6911/controller.py"
   ],
   "sources": {
     "tests/unit/tools/test_eval_tool.py": "2fbfcd580375c92ef69fe277900e69398b98f12d967fda9b99adb5964dcaa50c",
@@ -15,8 +16,8 @@
     "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
     "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
     "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
-    "tests/unit/tools/lfs_eval_plugin_6911.py": "9d2afebd0aa03a8f074d9871d3f335712157310ede8bf33ba2f6707297f4b580",
-    "scripts/diagnostics/lfs_eval_6911/controller.py": "9030356a526886f93a4a91ffac6bc2401a51433357be75adab8111c39c579296"
+    "tests/unit/tools/lfs_eval_plugin_6911.py": "b375c877cafd9c1ea50851a1e653ea39279ac8449921428ad9b0c8ce6fbfcc25",
+    "scripts/diagnostics/lfs_eval_6911/controller.py": "06fbd78898b9086874cc6d45e4d1901db8cf899e4c4f595805aeb5ebcb22dd8c"
   },
   "qa_fragment_sha256": "6502f9a2e91aa696f83329df4dd77c4f15e84d1bfb1c3567d8bca961be37240d",
   "historical_witness": {

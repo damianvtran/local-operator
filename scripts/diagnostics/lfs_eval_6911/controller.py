@@ -1,4 +1,4 @@
-"""Two ORIGINAL selectors in one serial child, 30+5 TOTAL, offhost only.
+"""Two original EVAL variants in one serial child, 45+5 TOTAL, offhost only.
 Reuse reviewed PAIR lifecycle/owned-set/identity functions unchanged by import.
 """
 import hashlib
@@ -18,6 +18,24 @@ HERE = Path(__file__).resolve().parent
 NODE = "tests/unit/tools/test_eval_tool.py::test_render_does_not_block_the_event_loop"
 
 
+def validate_row(row, mode, token, outcome):
+    """Shared fail-closed completed-call and final-qualification policy."""
+    if row['mode'] != mode or row['token'] != token or mode not in ('baseline', 'noinject'):
+        raise ValueError('EVAL row order STOP')
+    if row['injected_calls'] != 1 or row['active'] != 0 or row['restored'] is not True:
+        raise ValueError('EVAL injection cardinality/cleanup STOP')
+    if (row['delegated'], row['skipped']) != ((1, 0) if mode == 'baseline' else (0, 1)):
+        raise ValueError('EVAL mutation STOP')
+    if len(row['spill_threads']) != 1 or row['spill_threads'][0] == row['loop_thread']:
+        raise ValueError('EVAL render ran inline STOP')
+    if type(row['call_pass']) is not bool or outcome != ('passed' if row['call_pass'] else 'failed'):
+        raise ValueError('EVAL call receipt mismatch STOP')
+    if not row['call_pass'] and not (row['assertion'] is True and row['heartbeat_assertion'] is True):
+        raise ValueError('EVAL non-heartbeat failure STOP')
+    if row['call_pass'] and (row['assertion'] or row['heartbeat_assertion']):
+        raise ValueError('EVAL contradictory result STOP')
+
+
 def qualify_rows(rows, reports):
     """Controller calls AFTER full module fixtures and owned-process settlement.
     Identity/isolation/source-binding validation is MANDATORY before this helper;
@@ -29,17 +47,8 @@ def qualify_rows(rows, reports):
         raise ValueError('EVAL phases STOP')
     if any(r['outcome'] != 'passed' for r in reports if r['phase'] != 'call'):
         raise ValueError('EVAL fixture STOP')
-    for i, r in enumerate(rows):
-        if r['injected_calls'] != 1 or r['active'] != 0 or r['restored'] is not True:
-            raise ValueError('EVAL injection cardinality/cleanup STOP')
-        if (r['delegated'], r['skipped']) != ((1, 0) if i == 0 else (0, 1)):
-            raise ValueError('EVAL mutation STOP')
-        if len(r['spill_threads']) != 1 or r['spill_threads'][0] == r['loop_thread']:
-            raise ValueError('EVAL render ran inline STOP')
-        if not r['call_pass'] and not r['heartbeat_assertion']:
-            raise ValueError('EVAL non-heartbeat failure STOP')
-        if reports[3 * i + 1]['outcome'] != ('passed' if r['call_pass'] else 'failed'):
-            raise ValueError('EVAL call receipt mismatch STOP')
+    for i, row in enumerate(rows):
+        validate_row(row, ('baseline', 'noinject')[i], i + 1, reports[3 * i + 1]['outcome'])
     if all(r['call_pass'] for r in rows):
         return 'INCONCLUSIVE_NOT_EXONERATED'
     if all(not r['call_pass'] for r in rows):

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from scripts.diagnostics.lfs_pair_6911.controller import validate_identity
+from scripts.diagnostics.lfs_eval_6911.controller import validate_row
 
 NODE = 'tests/unit/tools/test_eval_tool.py::test_render_does_not_block_the_event_loop'
 # Integrator must populate this from the frozen Git blob, not a runtime self-hash.
@@ -114,8 +115,16 @@ def pytest_runtest_call(item):
 
 def pytest_runtest_logreport(report):
     REPORTS.append(dict(phase=report.when, outcome=report.outcome))
-    if report.failed and (report.when != 'call' or not ROWS or not ROWS[-1]['heartbeat_assertion']):
-        SESSION.shouldstop = 'EVAL setup/identity/non-heartbeat STOP'
+    if report.when == 'call':
+        try:
+            if not ROWS or not 1 <= CALLS <= 2 or len(ROWS) != CALLS:
+                raise ValueError('EVAL missing completed call STOP')
+            validate_row(ROWS[-1], ('baseline', 'noinject')[CALLS - 1], CALLS, report.outcome)
+        except (ValueError, KeyError, TypeError, IndexError):
+            SESSION.shouldstop = 'EVAL invalid completed call STOP'
+    elif report.outcome != 'passed':
+        SESSION.shouldstop = 'EVAL setup/fixture STOP'
+
 
 
 
@@ -130,17 +139,8 @@ def qualify_rows(rows, reports):
         raise ValueError('EVAL phases STOP')
     if any(r['outcome'] != 'passed' for r in reports if r['phase'] != 'call'):
         raise ValueError('EVAL fixture STOP')
-    for i, r in enumerate(rows):
-        if r['injected_calls'] != 1 or r['active'] != 0 or r['restored'] is not True:
-            raise ValueError('EVAL injection cardinality/cleanup STOP')
-        if (r['delegated'], r['skipped']) != ((1, 0) if i == 0 else (0, 1)):
-            raise ValueError('EVAL mutation STOP')
-        if len(r['spill_threads']) != 1 or r['spill_threads'][0] == r['loop_thread']:
-            raise ValueError('EVAL render ran inline STOP')
-        if not r['call_pass'] and not r['heartbeat_assertion']:
-            raise ValueError('EVAL non-heartbeat failure STOP')
-        if reports[3 * i + 1]['outcome'] != ('passed' if r['call_pass'] else 'failed'):
-            raise ValueError('EVAL call receipt mismatch STOP')
+    for i, row in enumerate(rows):
+        validate_row(row, ('baseline', 'noinject')[i], i + 1, reports[3 * i + 1]['outcome'])
     if all(r['call_pass'] for r in rows):
         return 'INCONCLUSIVE_NOT_EXONERATED'
     if all(not r['call_pass'] for r in rows):
@@ -164,6 +164,7 @@ def verify_identity(module):
              'tests/conftest.py': policy.__file__,
              'local_operator/tools/eval.py': module.eval_tool.__file__,
              'local_operator/tools/builtin.py': module.builtin.__file__}
+    files['scripts/diagnostics/lfs_eval_6911/controller.py'] = sys.modules[validate_row.__module__].__file__
     hashes = {}
     for label, actual in files.items():
         path = Path(actual).resolve()
