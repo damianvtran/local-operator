@@ -1,0 +1,30 @@
+{
+  "base": "4c71e647d6a6777c68c0ea00dee8af913193dd8e",
+  "sources": {
+    "tests/unit/network/test_mobility_promotion_identity.py": "45e4030c7a19418600430ce7f6db3bef1520d465991a4f161eb11b661f6fdab8",
+    "tests/conftest.py": "18766004614a9796f7d9d92336c71316d3bf128115ce0ddfd9b5db171376ac08",
+    "tests/unit/network/conftest.py": "8b3419fd792f95ad2ec03537b9ef65464f8f648bdb67c7c34d1db40e3fd40b09",
+    "tests/unit/network/test_relay_e2e.py": "a79494f6e6259dafc09f1dcc8dfd55fa5dea22450c7c6ae6fc36c8408aa454e9",
+    "tests/unit/network/test_mobility.py": "77e06a704d802ae50140f0bc6c81f6cee9d77adab150d225745dfc59d9b4ad57",
+    "local_operator/network/relay.py": "548d2e3c3faac7c987ba7e72bc9287f30230d49abddfe5cdfb613e807016a8c1",
+    "local_operator/network/mobility.py": "1029c68ee7a4fd9a3a02f779dddd7db238b79c5ac7d8bd62c17b00bcdd96096d",
+    "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
+    "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
+    "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
+    "tests/unit/network/lfs_move_plugin_6911.py": "c6eb1df01e70730da380977d0787e8d99835eaab8803ae468fe898a0b7be132f",
+    "scripts/diagnostics/lfs_move_6911/controller.py": "265aee0c7e5284b1018901f3bd73d3192c0191e17b1da239ad634a036c2b244d"
+  },
+  "loaded_sources": [
+    "tests/unit/network/test_mobility_promotion_identity.py",
+    "tests/unit/network/lfs_move_plugin_6911.py",
+    "tests/conftest.py",
+    "tests/unit/network/conftest.py",
+    "tests/unit/network/test_relay_e2e.py",
+    "tests/unit/network/test_mobility.py",
+    "local_operator/network/relay.py",
+    "local_operator/network/mobility.py",
+    "scripts/diagnostics/lfs_move_6911/controller.py"
+  ],
+  "qa_fragment_sha256": "b2e992b204b13d0a3c487811e636597376e4deba811a052ef1e8658a0d5c4622",
+  "historical_equivalence": "UNCLAIMED; controlled source snapshot"
+}
