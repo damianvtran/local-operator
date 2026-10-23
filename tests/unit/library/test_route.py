@@ -300,14 +300,19 @@ async def test_a_corrupt_index_recovers_and_answers_a_building_page(api, monkeyp
     client, root = api
     seed(root)
     original = LibraryStore.query_page
+    recovered = {"done": False}
 
-    def once(self, *args, **kwargs):
-        if not getattr(self, "_raised", False):
-            self._raised = True
+    def broken(self, *args, **kwargs):
+        if not recovered["done"]:
             raise IndexUnavailable("file is not a database")
         return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(LibraryStore, "query_page", once)
+    def recover(self) -> bool:
+        recovered["done"] = True
+        return True
+
+    monkeypatch.setattr(LibraryStore, "query_page", broken)
+    monkeypatch.setattr(LibraryStore, "recover_derived", recover)
     response = await client.get("/v1/desktop/library/assets")
     assert response.status_code == 200, response.text
     page = response.json()["result"]
@@ -344,3 +349,57 @@ async def test_an_unknown_tag_id_is_not_a_name_grammar_error(api) -> None:
     )
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["code"] == "library_tag_unknown"
+
+
+async def test_a_torn_derived_page_is_never_a_500(api, monkeypatch) -> None:
+    """A malformed b-tree inside ``idx_occurrences`` used to escape as a 500.
+
+    The store translates ``sqlite3.DatabaseError`` into ``IndexUnavailable`` at
+    its read boundary, so the route's one-shot recovery answers a building page.
+    """
+    import sqlite3
+
+    from local_operator.library.store import LibraryStore
+
+    client, root = api
+    seed(root)
+
+    def torn(self, *args, **kwargs) -> None:
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(LibraryStore, "_occurrences", torn)
+    response = await client.get("/v1/desktop/library/assets?scope=all")
+    assert response.status_code != 500, response.text
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["state"] == "building"
+
+
+async def test_write_routes_map_an_unreadable_index_to_the_503_envelope(api, monkeypatch) -> None:
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    client, root = api
+    text_id, _image_id, _digest = seed(root)
+
+    def boom(self, *args, **kwargs):
+        raise IndexUnavailable("file is not a database")
+
+    monkeypatch.setattr(LibraryStore, "asset", boom)
+    monkeypatch.setattr(LibraryStore, "recover_derived", lambda self: False)
+
+    patched = await client.patch(f"/v1/desktop/library/assets/{text_id}", json={"name": "Renamed"})
+    tagged = await client.put(f"/v1/desktop/library/assets/{text_id}/tags", json={"tags": []})
+    chatted = await client.put(
+        f"/v1/desktop/library/assets/{text_id}/chat", json={"session_id": SESSION}
+    )
+    for response in (patched, tagged, chatted):
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["code"] == "library_metadata_unavailable"
+
+
+async def test_an_empty_library_answers_ready_not_building(api) -> None:
+    """A fresh install has no sessions: that is an empty READY library."""
+    client, _root = api
+    response = await client.get("/v1/desktop/library/assets")
+    assert response.status_code == 200, response.text
+    page = response.json()["result"]
+    assert page["state"] == "ready" and page["rows"] == [] and page["total"] == 0

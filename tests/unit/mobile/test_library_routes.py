@@ -437,3 +437,18 @@ def test_facets_without_rows(library: dict[str, Any]) -> None:
     assert facets["total"] == 4
     assert "rows" not in facets
     assert facets["counts"]["category"]["document"] == 2
+
+
+def test_an_unreadable_index_is_a_503_not_a_500(library: dict[str, Any], monkeypatch) -> None:
+    """The phone sees the same typed refusal the desktop routes give."""
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    def boom(self, *args, **kwargs):
+        raise IndexUnavailable("file is not a database")
+
+    monkeypatch.setattr(LibraryStore, "asset", boom)
+    monkeypatch.setattr(LibraryStore, "query_page", boom)
+    monkeypatch.setattr(LibraryStore, "recover_derived", lambda self: False)
+    response = _client().get("/api/library/assets")
+    assert response.status_code == 503, response.text
+    assert response.json()["code"] == "library_store_busy"

@@ -122,9 +122,10 @@ dependencies = [
     # wheels for cp39-cp313 only, so CPython 3.14 (the operator's runtime) builds
     # the sdist and its ``_watchdog_fsevents`` C extension. That build works
     # here (2.5 s with the Xcode toolchain) but a compiler-less 3.14 host cannot
-    # install it. ``indexer.py`` therefore treats the observer as optional: if
-    # the extension cannot import, it falls back to the timed reconcile, so the
-    # cost of a failed watch is a slower refresh, never a broken install path.
+    # install it — and that failure happens before any of this code runs. Only a
+    # wheel that INSTALLS but whose extension cannot load is covered by
+    # ``indexer.py``'s optional-observer fallback, which hands over to the timed
+    # reconcile: a failed watch costs a slower refresh, not a broken runtime.
     "watchdog>=6.0.0",
 ]
 requires-python = ">=3.12"

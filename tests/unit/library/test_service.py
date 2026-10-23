@@ -261,9 +261,13 @@ def test_thumbnail_reads_the_index_without_a_session_scan(tmp_path, monkeypatch)
     second = service.thumbnail(root, asset_id, 120)
 
     # The FIRST read has no cached WebP yet, so it serves the original and asks
-    # the worker for one; it must not resize inline.
+    # the worker for one; it must not resize inline. The SECOND may already be
+    # the cached file — the worker is a thread — but it is never a fresh resize
+    # on the request path, so it is either the original or a file the worker
+    # wrote under ``cache/library/thumbs``.
+    thumbs = root / "cache" / "library" / "thumbs"
     assert first.path == image
-    assert second.path == image
+    assert second.path == image or second.path.parent == thumbs
 
 
 class _NoWorker:
