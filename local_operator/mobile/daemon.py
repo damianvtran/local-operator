@@ -2934,7 +2934,11 @@ def _attachment_bytes(
     if not compression.has_transcript(directory):
         return None
     try:
-        transcript = Transcript(directory)
+        # READ-ONLY: this fetch folds history and serves one row. A writer
+        # Transcript would restore the archive into a plain file for good, so
+        # viewing one image on the phone would re-inflate the whole transcript
+        # on the serving device (review m2).
+        transcript = Transcript(directory, read_only=True)
         history = transcript.build_llm_history()
     except Exception:  # noqa: BLE001 — an odd transcript serves no image, not a 500
         logger.exception("image fetch: history fold failed for %s", record.session_id)

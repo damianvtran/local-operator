@@ -82,9 +82,12 @@ Exactly, in this order — :func:`compress_session` is the transcript of it:
    transcript changed under us) and keeps the original;
 7. ``os.replace(tmp, archive)`` — the only publish, so a half-written archive is
    never observable under the archive name;
-8. re-stat the source again; equal -> unlink it; not equal -> unlink the
-   ARCHIVE just published and leave the source intact (a writer restored or
-   appended to the plain file between the publish and the unlink);
+8. RENAME the source to ``.transcript.jsonl.quarantine`` in the same directory,
+   then stat the RENAMED file. Unchanged -> unlink the quarantine. Changed ->
+   rename it back over the plain name and unlink the archive just published. A
+   writer holding an fd opened before the rename appends into the quarantined
+   inode, which is exactly what that stat sees; the old order (re-stat, then
+   unlink) deleted a row that landed in the window between the two calls;
 9. fsync the directory, rewrite the search index's physical signature for this
    session (no re-digest), and drop the now-stale tail anchor;
 10. release the lock.
@@ -93,6 +96,26 @@ Invariants the tests pin: never unlink before a verified archive exists; a
 verification failure leaves the original byte-identical and no ``.tmp`` behind;
 a source that grows is never deleted; the archive is never observable partially
 written.
+
+A crash between the quarantine rename and its unlink leaves the plain file under
+the quarantine name. Nothing a reader looks at is missing (readers only ever ask
+for the two known transcript names), and :func:`_recover_quarantine` puts it back
+from three places: :func:`restore_for_write`, the start of a compression attempt,
+and the pass's scan. The name is FIXED rather than pid-unique for exactly that
+reason: recovery must find it with one stat, and the per-session writer lock
+already guarantees at most one compressor.
+
+THE LISTING SIDECAR
+===================
+
+A list row asks two questions of the transcript tail — the last assistant reply
+and the newest failure — and asking them of an ARCHIVE means decompressing it
+end to end, once per row per process. So compression writes ``preview.json``
+(schema 1) beside the archive, holding exactly those two condensed strings, from
+a bounded tail read of the plain file before it is retired. Readers stat it and
+read ~400 B; only an archive from a build that predates the sidecar falls back
+to the tail read, once. ``restore_for_write`` deletes it, because the plain file
+is authoritative again; the next pass recreates it.
 
 THE ACTIVITY CLOCK MUST NOT MOVE
 ================================
@@ -160,7 +183,9 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator
 
 try:  # PEP 784 — Python 3.14+. The only codec import that may be absent.
-    from compression import zstd as _zstd
+    # The 3.12/3.13 typeshed the repo type-checks against has no ``compression.zstd``
+    # symbol; the branch is real and CI's 3.14 leg executes it.
+    from compression import zstd as _zstd  # pyright: ignore[reportAttributeAccessIssue]
 except ImportError:  # 3.12/3.13: gzip is the working codec.
     _zstd = None
 
@@ -194,6 +219,9 @@ __all__ = [
     "MIN_AFTER_DAYS",
     "Outcome",
     "PLAIN_FILENAME",
+    "PREVIEW_SIDECAR_NAME",
+    "PREVIEW_TAIL_BYTES",
+    "QUARANTINE_NAME",
     "WRITER_LOCK_WAIT_S",
     "WRITER_WAIT_POLL_S",
     "acquire_writer",
@@ -206,13 +234,16 @@ __all__ = [
     "plain_path",
     "policy_from_config",
     "read_head",
+    "read_listing_preview",
     "read_tail",
+    "read_tail_window",
     "release_writer",
     "transcript_state",
     "restore_for_write",
     "run_compression",
     "transcript_for_read",
     "transcript_source",
+    "unreadable_archive_error",
     "write_last_compression",
 ]
 
@@ -267,6 +298,31 @@ ARCHIVE_FILENAMES: tuple[str, ...] = tuple(
 #: The per-session writer lock (see the module docstring's lock protocol).
 LOCK_NAME = ".transcript.lock"
 
+#: Where the plain transcript is parked while compression decides whether it may
+#: be retired. Dot-prefixed so a directory listing reads it as bookkeeping, and
+#: FIXED rather than pid-unique because crash recovery has to find it with one
+#: stat: the per-session writer lock already guarantees at most one renamer, so
+#: uniqueness would buy a glob per session directory and nothing else. Readers
+#: never look at this name — only :func:`_recover_quarantine` and the protocol
+#: do.
+QUARANTINE_NAME = f".{PLAIN_FILENAME}.quarantine"
+
+#: The listing sidecar written beside an archive at compression time, and its
+#: schema. Holding one condensed assistant line and one failure line, it is what
+#: keeps a cold listing from decompressing every archive to paint its rows.
+PREVIEW_SIDECAR_NAME = "preview.json"
+PREVIEW_SIDECAR_SCHEMA = 1
+
+#: Bytes of the plain tail read at compression time to build that sidecar.
+#: Equal to ``resume.PREVIEW_SCAN_BYTES`` by construction — a test pins the two
+#: together, because this module must import standalone (no harness import at
+#: module scope) while the reader that consumes the value lives in ``resume``.
+PREVIEW_TAIL_BYTES = 64_000
+
+#: A sidecar read is bounded: the document holds two strings capped at
+#: ``resume.PREVIEW_MAX_CHARS`` each. Anything larger is not ours.
+PREVIEW_SIDECAR_MAX_BYTES = 4096
+
 #: Append-only record of every compression that landed, inside the store it
 #: describes: ``{"at", "session", "codec", "bytes_before", "bytes_after",
 #: "actor", "pid"}``. Mirrors ``cleanup.CLEANUP_LOG_NAME``; dry runs are not
@@ -313,6 +369,14 @@ CACHE_MAX_ENTRIES = 64
 #: archive into it. Under that, the archive is restored in place instead (which
 #: is also how a read succeeds on a store whose cache volume is full).
 CACHE_FREE_RESERVE_BYTES = 512 * 1024 * 1024
+
+#: How much bigger than its archive a cache copy is budgeted to be. The gate in
+#: :func:`_materialise` must reserve room for the bytes it WRITES, which are the
+#: DECOMPRESSED ones; the archive's size would under-book by the compression
+#: ratio. The measured corpus expands ~3.7x, so 5x leaves headroom for the tail
+#: of the distribution. Over-budget answers fall back to the documented in-place
+#: restore; they never fail a read.
+CACHE_EXPANSION_ESTIMATE = 5
 
 #: A session's cold-read hint; invalidated when the transcript's physical form
 #: changes (the anchor stores byte offsets and sizes of the PLAIN file).
@@ -532,48 +596,95 @@ def read_head(directory: Path, limit: int) -> bytes:
         raise ArchiveCorrupt(f"{Path(directory).name}: {exc}") from exc
 
 
-def read_tail(directory: Path, limit: int) -> bytes:
-    """The last ``limit`` bytes of the transcript.
+def read_tail_window(directory: Path, limit: int) -> tuple[bytes, bool]:
+    """The last ``limit`` bytes, plus whether the source is LONGER than them.
 
-    Neither codec is seekable from the end, so this streams the whole file
-    through a rolling buffer of ``limit`` bytes. Memory stays bounded by the
-    caller's budget plus one chunk; time is linear in the archive, which for the
-    preview reads that use this is a fraction of a second even on the largest
-    transcripts measured here.
+    The flag is the difference between a window that starts mid-row and one
+    that starts on a whole row, and callers that parse the window depend on it:
+    a source of exactly ``limit`` bytes is not truncated, so its first line is
+    real and dropping it would lose the oldest entry of the window (review n1).
+
+    A PLAIN journal is seeked to ``size - limit``: the read is bounded by the
+    caller's budget and independent of the file's size. Only an archive streams
+    — neither codec offers a seek from the end — so its time stays linear in the
+    archive, and the listing avoids even that through
+    :func:`read_listing_preview`.
     """
     budget = max(0, int(limit))
     if budget == 0:
-        return b""
-    try:
-        reader, codec = _open_reader(Path(directory))
-    except (OSError, ValueError):
-        # A PLAIN journal that cannot be opened — absent, a directory, a
-        # permission change — reads as empty here, which is what an unreadable
-        # `read` always answered. An archive's own failures are ArchiveError
-        # (not OSError) and deliberately propagate: they are never "empty".
-        return b""
+        return b"", False
+    path, codec = transcript_source(Path(directory))
+    if codec is None:
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                if size > budget:
+                    handle.seek(size - budget)
+                return handle.read(budget), size > budget
+        except OSError:
+            # An unopenable plain journal reads as empty, which is what an
+            # unreadable `read` always answered. Archive failures are
+            # ArchiveError and deliberately propagate: they are never "empty".
+            return b"", False
+    reader = _open_archive_reader(path, codec)
     tail = bytearray()
+    total = 0
     try:
         with reader:
             while True:
                 try:
                     chunk = reader.read(CHUNK)
+                except ArchiveError:
+                    raise
                 except Exception as exc:  # noqa: BLE001 - decoder-specific types
-                    if codec is None:
-                        break
                     raise ArchiveCorrupt(f"{Path(directory).name}: {exc}") from exc
                 if not chunk:
                     break
+                total += len(chunk)
                 tail.extend(chunk)
                 if len(tail) > budget:
                     del tail[: len(tail) - budget]
     except (FileNotFoundError, IsADirectoryError):
-        return b""
+        return b"", False
     except OSError as exc:
-        if codec is None:
-            return b""
         raise ArchiveCorrupt(f"{Path(directory).name}: {exc}") from exc
-    return bytes(tail)
+    return bytes(tail), total > budget
+
+
+def read_tail(directory: Path, limit: int) -> bytes:
+    """The last ``limit`` bytes of the transcript.
+
+    Thin wrapper over :func:`read_tail_window`, which is where the seek and the
+    streaming live; callers that parse the window should ask that function so
+    they can tell a truncated window from a whole one.
+    """
+    return read_tail_window(directory, limit)[0]
+
+
+def read_listing_preview(directory: Path) -> dict[str, Any] | None:
+    """The archived session's listing sidecar, or ``None`` when there is none.
+
+    THE cheap answer for a compressed session's list row: one stat and a
+    sub-kilobyte read, instead of decompressing the archive to reach its tail.
+    ``None`` means "ask the transcript": the session is plain (the sidecar
+    never exists beside a plain file), the archive predates the sidecar, its
+    write failed, or the document is foreign or unreadable. Every caller falls
+    back to :func:`read_tail_window`, so a missing sidecar costs speed, never a
+    preview.
+    """
+    directory = Path(directory)
+    try:
+        if plain_path(directory).exists() or archive_path(directory) is None:
+            return None
+        info = (directory / PREVIEW_SIDECAR_NAME).stat()
+        if info.st_size > PREVIEW_SIDECAR_MAX_BYTES:
+            return None
+        payload = json.loads((directory / PREVIEW_SIDECAR_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != PREVIEW_SIDECAR_SCHEMA:
+        return None
+    return payload
 
 
 def iter_lines(directory: Path) -> Iterator[str]:
@@ -748,7 +859,7 @@ def _materialise(directory: Path, archive: Path, codec: str) -> Path | None:
         archive_stat = archive.stat()
     except OSError:
         return None
-    needed = archive_stat.st_size
+    needed = archive_stat.st_size * CACHE_EXPANSION_ESTIMATE
     if _free_bytes(entry) < needed + CACHE_FREE_RESERVE_BYTES:
         logger.info(
             "transcript compression: low disk space, restoring %s in place instead of caching",
@@ -863,13 +974,16 @@ def _unlink_file(path: Path) -> bool:
 
 
 def _publish(tmp: Path, destination: Path) -> None:
-    """Atomically publish a fully-written ``tmp`` at ``destination``.
+    """Atomically displace a fully-written file to ``destination``.
 
-    THE only path displacer in this module. The destination is always a regular
-    file this module named itself — a session's transcript archive, a cache
-    ``.meta.json``, a cache transcript, or ``sessions/last-compression.json``.
-    It is never a session directory: compression replaces a file, and a session
-    directory is not this module's to rename or remove.
+    THE only path displacer in this module. Destinations are always regular
+    files this module named itself — a session's transcript archive, the
+    QUARANTINE the plain journal is parked under while compression decides
+    whether it may be retired, the plain name when that journal is put back, a
+    cache ``.meta.json``, a cache transcript, or
+    ``sessions/last-compression.json``. Never a session directory: compression
+    replaces files, and a session directory is not this module's to rename or
+    remove.
     """
     os.replace(os.fspath(tmp), os.fspath(destination))
 
@@ -1326,6 +1440,149 @@ def _after_archive(directory: Path, archive: Path, codec: str) -> None:
         pass
 
 
+def _listing_payload(directory: Path) -> dict[str, str]:
+    """The two listing fields the sidecar carries, from the PLAIN tail.
+
+    Called while the session is still plain (a seek of at most
+    :data:`PREVIEW_TAIL_BYTES`), so the cost is the same bounded read a listing
+    pays today, once per compression instead of once per row per process.
+
+    ``resume`` owns the preview rules — the condensed assistant line and the
+    failure record — so they are imported HERE rather than reimplemented: this
+    module stays stdlib-only at module scope (see the module docstring), and a
+    second copy of the rules is how the sidecar and a live preview drift apart.
+    """
+    try:
+        window, truncated = read_tail_window(directory, PREVIEW_TAIL_BYTES)
+    except ArchiveError:  # pragma: no cover - the session is plain by contract here
+        return {"preview": "", "failure": ""}
+    try:
+        from local_operator.resume import listing_preview_from_tail
+    except Exception:  # noqa: BLE001 - a missing helper costs a preview, not a compression
+        logger.warning("transcript compression: preview rules unavailable", exc_info=True)
+        return {"preview": "", "failure": ""}
+    return listing_preview_from_tail(window, truncated=truncated)
+
+
+def _write_preview_sidecar(directory: Path, listing: dict[str, str]) -> None:
+    """Write ``preview.json`` atomically. Advisory: a failure costs a slow row."""
+    payload = {
+        "schema": PREVIEW_SIDECAR_SCHEMA,
+        "preview": listing.get("preview", ""),
+        "failure": listing.get("failure", ""),
+        "at": time.time(),
+    }
+    if _write_json_atomic(directory / PREVIEW_SIDECAR_NAME, payload):
+        _fsync_dir(directory)
+
+
+def _ensure_title_sidecar(directory: Path) -> None:
+    """Guarantee ``title.json`` exists before the plain file stops being read.
+
+    An archived session's stored title is read from its HEAD window only (see
+    ``resume.stored_session_title``); reaching for the tail would decompress the
+    whole archive once per listing row. That is lossless only when the newest
+    title sits in the sidecar, so compression resolves it HERE — the transcript
+    is still plain, so the existing head+tail window scan is cheap — and writes
+    it through the same API a rename uses (which preserves the directory's
+    mtime). No title resolvable ⇒ nothing written, and the opener still names
+    the row from the head window.
+    """
+    try:
+        from local_operator.resume import TITLE_SIDECAR_NAME as title_name
+        from local_operator.resume import title_seed_for_sidecar, write_session_title
+    except Exception:  # noqa: BLE001 - a missing helper costs a title, not a compression
+        logger.warning("transcript compression: title rules unavailable", exc_info=True)
+        return
+    try:
+        if (directory / title_name).is_file():
+            return
+    except OSError:  # pragma: no cover - is_file already folds OSError
+        return
+    seed = title_seed_for_sidecar(directory)
+    if seed is None:
+        return
+    text, user_set, past_names = seed
+    write_session_title(directory, text, user_set=user_set, past_names=past_names)
+
+
+def _recover_quarantine(directory: Path) -> bool:
+    """Undo a compression interrupted between the quarantine rename and its unlink.
+
+    Returns whether it restored anything. Readers only ever ask for the two
+    known transcript names, so a leftover quarantine makes a session look
+    EMPTY; putting it back is the difference between "the conversation is
+    gone" and "the pass will retry tomorrow".
+
+    Both files present is the one case this does NOT repair: a writer recreated
+    the plain journal after the crash, and merging two journals is not a
+    recovery. Both are left where they are and reported, which keeps every row
+    on disk.
+    """
+    directory = Path(directory)
+    quarantine = directory / QUARANTINE_NAME
+    try:
+        if not quarantine.is_file():
+            return False
+    except OSError:
+        return False
+    plain = plain_path(directory)
+    try:
+        if plain.exists():
+            logger.error(
+                "transcript compression: %s holds both a plain transcript and a "
+                "quarantine (%s); leaving both in place",
+                directory.name,
+                QUARANTINE_NAME,
+            )
+            return False
+        _publish(quarantine, plain)
+    except OSError as exc:
+        logger.error("transcript compression: cannot recover %s: %s", directory.name, exc)
+        return False
+    # The archive published just before the crash is a copy of these bytes and
+    # the plain file is authoritative again: drop it (and the cache copy built
+    # from it) so the next pass starts from a clean slate.
+    for name in ARCHIVE_FILENAMES:
+        _unlink_file(directory / name)
+    _unlink_file(directory / PREVIEW_SIDECAR_NAME)
+    _drop_cache(directory)
+    _fsync_dir(directory)
+    logger.warning(
+        "transcript compression: recovered %s from an interrupted compression", directory.name
+    )
+    return True
+
+
+def unreadable_archive_error(directory: Path) -> ArchiveError | None:
+    """The typed reason this build cannot read ``directory``'s archive, or ``None``.
+
+    :func:`restore_for_write` answers a bool, which is enough for a caller that
+    has a fallback and useless for one that must not open an EMPTY conversation
+    over a full one. ``Transcript.__init__`` asks this after a failed restore: an
+    archive that exists and cannot be decoded is the same class of fact as a
+    byte-corrupt plain journal, which already raises, so it names the archive
+    and the codec instead of loading zero rows (review m4).
+    """
+    directory = Path(directory)
+    archive = archive_path(directory)
+    if archive is None:
+        return None
+    codec = _codec_for(archive)
+    if codec is None:  # pragma: no cover - archive_path only names known suffixes
+        return ArchiveCorrupt(f"{archive}: not a known transcript archive form")
+    try:
+        _open_archive_reader(archive, codec).close()
+    except ArchiveError as exc:
+        # Re-typed with the same class so a caller can branch on decoder-missing
+        # vs corrupt, and prefixed with the file and codec so the message names
+        # both facts a reader needs.
+        return type(exc)(f"{archive}: {codec}: {exc}")
+    return ArchiveCorrupt(
+        f"{archive}: {codec}: the archive could not be decoded into a readable copy"
+    )
+
+
 def compress_session(
     directory: Path, *, codec: str | None = None, now: float | None = None
 ) -> Outcome:
@@ -1364,6 +1621,11 @@ def _compress_session_locked(directory: Path, codec: str, started: float) -> Out
         )
 
     source = plain_path(directory)
+    # A crash between the quarantine rename and its unlink leaves the plain file
+    # parked under the quarantine name. Put it back before anything reads it as
+    # "no plain transcript" — the archive published just before the crash is a
+    # copy of the same bytes, so recovering is a rename and a drop.
+    _recover_quarantine(directory)
     if archive_path(directory) is not None:
         # Never rewrite an existing archive, and never keep two forms of the same
         # transcript: the plain file wins for readers, and a second pass is a
@@ -1374,6 +1636,11 @@ def _compress_session_locked(directory: Path, codec: str, started: float) -> Out
         return done("skipped", "no plain transcript")
     if sig0[2] == 0:
         return done("skipped", "empty transcript")
+    # The listing sidecar and the title sidecar are computed while the plain file
+    # is still here: after this point the only readable copy is the archive, and
+    # both values exist to spare a reader a decompression.
+    listing = _listing_payload(directory)
+    _ensure_title_sidecar(directory)
     tmp = directory / f".{PLAIN_FILENAME}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     try:
         _reserve(tmp)
@@ -1431,21 +1698,77 @@ def _compress_session_locked(directory: Path, codec: str, started: float) -> Out
         logger.error("transcript compression: cannot publish %s: %s", archive.name, exc)
         _unlink_file(tmp)
         return done("failed", "cannot publish the archive")
-    sig_after = _stat_sig(source)
-    if sig_after is not None and sig_after != sig0:
-        # A writer restored or appended to the plain file between the publish and
-        # this stat. The archive is NOT the current content any more, so it must
-        # not be left as a stale second form: remove it and keep the source.
+    # THE REMOVAL IS ATOMIC WITH THE DECISION (review M2). Any re-stat followed by
+    # an unlink is check-then-act: an append that lands between the two calls is
+    # deleted with the file, and the archive — a copy of the PRE-append bytes —
+    # becomes the only copy, silently dropping the new row. So the plain file is
+    # RENAMED first and the renamed inode is what gets stat'ed. A writer holding
+    # an fd opened before the rename appends into the quarantined inode, which is
+    # exactly what the stat below sees, and the file is put back.
+    #
+    # ``Transcript._append`` opens the journal by path per append (no long-lived
+    # fd), so a writer that opens AFTER the rename creates a new plain file
+    # rather than writing into the quarantine; the check after the unlink reports
+    # that case. Nothing here merges it — merging two journals is not this
+    # pass's job, and refusing to lose the archive is.
+    quarantine = directory / QUARANTINE_NAME
+    try:
+        _publish(source, quarantine)
+    except FileNotFoundError:
+        # The source vanished between the publish and the rename: the archive is
+        # the ONLY surviving copy of the conversation, so retire nothing. Only a
+        # source that is present AND different may withdraw its archive.
+        _fsync_dir(directory)
+        _write_preview_sidecar(directory, listing)
+        _after_archive(directory, archive, codec)
+        try:
+            after = archive.stat().st_size
+        except OSError:  # pragma: no cover - just published
+            after = 0
+        return done(
+            "compressed",
+            "source vanished; the archive is the surviving copy",
+            before=sig0[2],
+            after=after,
+        )
+    except OSError as exc:
+        # Cannot park the source, so cannot prove it is safe to retire: withdraw
+        # the archive and leave the plain file exactly as it was.
+        logger.error("transcript compression: cannot quarantine %s: %s", source.name, exc)
         _unlink_file(archive)
+        return done("failed", "cannot quarantine the source")
+    quarantined = _stat_sig(quarantine)
+    if quarantined is not None and quarantined != sig0:
+        # An append landed after the publish — the documented writer that timed
+        # out on the lock. Put the plain file back (the appended rows are in
+        # this inode) and withdraw the archive: it is a copy of the pre-append
+        # bytes and must not shadow the grown source.
+        try:
+            _publish(quarantine, source)
+        except OSError as exc:  # pragma: no cover - the recovery pass reports this
+            logger.error(
+                "transcript compression: cannot restore the quarantined transcript for %s: %s",
+                directory.name,
+                exc,
+            )
+            _unlink_file(archive)
+            return done("failed", "cannot restore the quarantined transcript")
+        _unlink_file(archive)
+        _fsync_dir(directory)
         return done("skipped", "the transcript changed while it was being compressed")
-    # ``sig_after is None`` is the source having VANISHED, not changed — and the
-    # two must not share a branch. Something removed the plain file after the
-    # publish (a restore that reversed our replace, a manual cleanup, a sweep),
-    # so the archive just published is the ONLY surviving copy of the
-    # conversation. Removing it here would lose the session outright; only a
-    # source that is present AND different may retire its archive.
-    _unlink_file(source)
+    _unlink_file(quarantine)
+    if _stat_sig(source) is not None:  # pragma: no cover - microsecond window
+        # A writer reopened the plain path after the rename and wrote a row into
+        # a NEW file. Both copies hold rows the other does not, so neither is
+        # removed; the archive stays the only copy of the history before the
+        # append. Reported, never merged.
+        logger.error(
+            "transcript compression: %s reappeared during the quarantine window; "
+            "the archive and the new plain file both stand",
+            source.name,
+        )
     _fsync_dir(directory)
+    _write_preview_sidecar(directory, listing)
     _after_archive(directory, archive, codec)
     try:
         after = archive.stat().st_size
@@ -1679,6 +2002,12 @@ def run_compression(
             break
         # Which file this session keeps its history in, decided ONCE here: a
         # second look could disagree with the first if a pass ran concurrently.
+        if not dry_run:
+            # A crash between the quarantine rename and its unlink leaves the
+            # plain file parked under a dot-name. Without this the session reads
+            # as "already compressed" AND has no readable transcript, so it
+            # would never be revisited (review M2). One stat per candidate.
+            _recover_quarantine(directory)
         plain_present = plain_path(directory).exists()
         if not plain_present:
             skip(
@@ -1817,8 +2146,13 @@ def restore_for_write(directory: Path) -> bool:
     archive and drop any cache copy. ``True`` when a plain transcript exists
     afterwards; ``False`` when there is nothing to restore or it could not be
     decoded (the archive is then left exactly as it was).
+
+    A quarantine left by a crashed compression is recovered first: it IS the
+    plain file, parked under a dot-name, so decoding the archive beside it would
+    rewrite bytes that are already on disk.
     """
     directory = Path(directory)
+    _recover_quarantine(directory)
     plain = plain_path(directory)
     try:
         if plain.exists():
@@ -1848,9 +2182,12 @@ def restore_for_write(directory: Path) -> bool:
         _unlink_file(tmp)
         return False
     # Every archive form goes, not only the one read: a second form would
-    # otherwise shadow the restored plain file on the next read.
+    # otherwise shadow the restored plain file on the next read. The listing
+    # sidecar goes with it — it describes a compressed form that no longer
+    # exists, and the plain file is authoritative again.
     for name in ARCHIVE_FILENAMES:
         _unlink_file(directory / name)
+    _unlink_file(directory / PREVIEW_SIDECAR_NAME)
     _fsync_dir(directory)
     _drop_cache(directory)
     return True

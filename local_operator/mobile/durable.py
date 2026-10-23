@@ -790,7 +790,9 @@ def _fold(history: list[AgentMessage], directory: Path | None = None) -> list[An
 
     # The existing cache supplies the selected raw window. Only deterministic
     # record IDs for its bounded roots use the existing index; no journal scan.
-    transcript = Transcript(directory)
+    # READ-ONLY: this fold never writes, and the writer variant would restore a
+    # compressed session into a plain file just to replay it (review m2).
+    transcript = Transcript(directory, read_only=True)
     records = discover_records(transcript, history[-4096:], directory.name)
     return fold_messages_to_entries(
         history,

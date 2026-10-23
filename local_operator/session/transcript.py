@@ -1929,15 +1929,40 @@ def read_replay_suffix(
     )
 
 
+class ReadOnlyTranscript(RuntimeError):
+    """A write was attempted on a ``Transcript(..., read_only=True)`` view.
+
+    A read-only view exists so a pure reader (the phone's image fetch, the
+    mobile projection fold) can read a compressed session WITHOUT restoring it
+    into a plain file for good. Reads behave exactly as they do on a writer; a
+    write is a programming error at the caller, not a condition to handle, so it
+    fails loudly instead of appending to whatever copy the resolver handed back.
+    """
+
+
 class Transcript:
     """Append-only JSONL store, thread/async-safe via an asyncio lock.
 
     Message entries reuse the message's own ``id`` as the entry id so
     compaction can reference ``first_kept_entry_id`` without a second mapping.
+
+    ``read_only=True`` is the PURE READER variant: no writer lock, no restore,
+    rows served from the bounded decompressed cache, and every write API raising
+    :class:`ReadOnlyTranscript`. It is what a caller that only folds history
+    wants — constructing the writer variant turns an archive back into a plain
+    file for good, so merely browsing a 280 MB conversation re-inflated it on
+    the serving device (review m2).
     """
 
-    def __init__(self, directory: str | Path, *, defer_materialise: bool = False) -> None:
+    def __init__(
+        self,
+        directory: str | Path,
+        *,
+        defer_materialise: bool = False,
+        read_only: bool = False,
+    ) -> None:
         self.directory = Path(directory)
+        self._read_only = read_only
         # ``defer_materialise`` is what makes a speculative runtime leave
         # nothing behind: a viewer's first keystroke warms a runtime BEFORE
         # the user has committed to a message, and an abandoned draft must not
@@ -1952,8 +1977,18 @@ class Transcript:
         # directory through that same self-healing path, after which this
         # object behaves identically to an eagerly-materialised one.
         self._writer_lock_held = False
-        if not defer_materialise:
+        if not defer_materialise and not read_only:
             self.directory.mkdir(parents=True, exist_ok=True)
+        if read_only:
+            # No lock and no restore: rows come from the bounded cache
+            # (``compression.transcript_for_read``), which is what keeps a read
+            # from rewriting the store. An archive this build cannot decode
+            # raises the resolver's typed error here rather than loading an
+            # empty conversation — the same honesty the writer path gets below.
+            resolved = compression.transcript_for_read(self.directory)
+            self.path = resolved if resolved is not None else self.directory / TRANSCRIPT_FILENAME
+        else:
+            self.path = self.directory / TRANSCRIPT_FILENAME
         # THE WRITER LOCK, held for this object's whole lifetime, and taken
         # BEFORE the first read or create.
         #
@@ -1969,7 +2004,7 @@ class Transcript:
         # a no-op when the plain file is present, and a verified in-place restore
         # when an archive is. Reading before restoring is the one ordering that
         # can turn a compressed session into an empty one.
-        if self.directory.is_dir():
+        if not read_only and self.directory.is_dir():
             # BOUNDED WAIT, not a single try: the lock's other holder can be the
             # COMPRESSOR, and the loser of that race silently loses the
             # conversation. The compressor publishes its archive and unlinks the
@@ -1995,12 +2030,20 @@ class Transcript:
                     self.directory,
                     compression.WRITER_LOCK_WAIT_S,
                 )
-            compression.restore_for_write(self.directory)
-        self.path = self.directory / TRANSCRIPT_FILENAME
+            if not compression.restore_for_write(self.directory):
+                # An archive that EXISTS but cannot be made readable must fail
+                # this open, not load zero rows: a live runtime over an empty
+                # conversation reads as "this session lost its history" and only
+                # the next append would say otherwise (review m4). Same class of
+                # fact as a byte-corrupt plain journal, which already raises.
+                error = compression.unreadable_archive_error(self.directory)
+                if error is not None:
+                    self.close()
+                    raise error
         # Claims can precreate the directory; the journal distinguishes a legacy
         # conversation from new work. Keep birth in memory across directory loss.
         self._created_at = session_created_at(self.directory) if self.path.exists() else None
-        if not defer_materialise:
+        if not defer_materialise and not read_only:
             self._created_at = ensure_session_created_at(
                 self.directory, self._created_at if self._created_at is not None else time.time()
             )
@@ -2095,6 +2138,19 @@ class Transcript:
         self.close()
 
     # -- append -------------------------------------------------------------
+
+    def _require_writable(self) -> None:
+        """Refuse a write on a read-only view, naming the directory.
+
+        One guard for every write entry point: the append methods all funnel
+        through :meth:`_append`, and compaction is the other writer. Reads on a
+        read-only view are untouched.
+        """
+        if getattr(self, "_read_only", False):
+            raise ReadOnlyTranscript(
+                f"{self.directory}: this transcript was opened read-only; "
+                "writes need a writer Transcript"
+            )
 
     async def append_message(
         self,
@@ -2392,6 +2448,7 @@ class Transcript:
         preserve_mtime: bool = False,
     ) -> TranscriptEntry:
         entry = TranscriptEntry(entry_id or uuid.uuid4().hex, time.time(), type, payload)
+        self._require_writable()
         return (await self._commit(lambda: [entry], preserve_mtime=preserve_mtime))[0]
 
     async def _commit(
@@ -2409,6 +2466,7 @@ class Transcript:
         that reached disk. Callers must await this boundary before exposing a
         message to a model/fork; notably Session's aside drain does so too.
         """
+        self._require_writable()
         async with self._lock:
 
             def write() -> tuple[list[TranscriptEntry], tuple[int, int, float]]:
@@ -3232,6 +3290,7 @@ class Transcript:
         the old one and moved over it with an atomic ``os.replace``, so an
         interrupted compaction leaves the original transcript intact.
         """
+        self._require_writable()
         async with self._lock:
             prunes = self.pending_prunes()
             superseded = self._superseded_custom_indices()

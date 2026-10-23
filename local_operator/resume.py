@@ -1182,40 +1182,79 @@ def _scan_all_titles(session_dir: Path) -> list[tuple[str, bool]]:
     Tolerant like every reader here: an unreadable transcript or a half-written
     final line yields what it could parse, never an exception.
 
-    ``compression.iter_lines`` STREAMS the journal, decompressing an archive in
-    bounded chunks instead of materialising it: this is a full scan by design
-    (it lives only on the backfill path), and a compressed session must yield
-    the same titles without paying a whole-file cache copy to find them.
+    ``compression.iter_lines`` STREAMS a PLAIN journal. An ARCHIVE is read from
+    its HEAD window only: compression guarantees ``title.json`` holds the newest
+    title before the plain file goes away (``_ensure_title_sidecar``), so a
+    backfill that re-decompressed the whole archive to recover older names would
+    pay the cost M1 measured for data the sidecar already carries. The names a
+    window can still offer are the opener's; anything renamed into the middle of
+    a now-compressed journal was captured in the sidecar's ``names`` at the time
+    it was written.
     """
-    titles: list[tuple[str, bool]] = []
     try:
-        for line in compression.iter_lines(session_dir):
-            line = line.strip()
-            if not line or _TITLE_CUSTOM_TYPE not in line:
-                # Cheap reject before the JSON parse: title rows are a tiny
-                # fraction of a transcript, and the substring check skips
-                # the decode for every message and tool line.
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(entry, dict):
-                continue
-            payload = entry.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("custom_type") != _TITLE_CUSTOM_TYPE:
-                continue
-            details = payload.get("details")
-            if not isinstance(details, dict):
-                continue
-            text = details.get("text")
-            if isinstance(text, str) and text.strip():
-                titles.append((" ".join(text.split()), bool(details.get("user_set"))))
-    except OSError:
-        return titles
+        if compression.archive_path(session_dir) is not None:
+            head = compression.read_head(session_dir, TITLE_SCAN_BYTES)
+            return _titles_in_lines(head.decode("utf-8", "replace").splitlines())
+        return _titles_in_lines(compression.iter_lines(session_dir))
+    except (OSError, compression.ArchiveError):
+        return []
+
+
+def _titles_in_lines(lines: Iterable[str]) -> list[tuple[str, bool]]:
+    """Every ``(text, user_set)`` title row in ``lines``, in the order given."""
+    titles: list[tuple[str, bool]] = []
+    for line in lines:
+        line = line.strip()
+        if not line or _TITLE_CUSTOM_TYPE not in line:
+            # Cheap reject before the JSON parse: title rows are a tiny
+            # fraction of a transcript, and the substring check skips
+            # the decode for every message and tool line.
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("custom_type") != _TITLE_CUSTOM_TYPE:
+            continue
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            continue
+        text = details.get("text")
+        if isinstance(text, str) and text.strip():
+            titles.append((" ".join(text.split()), bool(details.get("user_set"))))
     return titles
+
+
+def title_seed_for_sidecar(session_dir: Path) -> tuple[str, bool, list[str]] | None:
+    """``(text, user_set, past_names)`` for a session with no ``title.json``.
+
+    Called by the compression pass while the transcript is still PLAIN: after
+    compression the title is read from the archive's head window only, so the
+    newest name must be captured while the tail is still a cheap seek. The
+    windows are read tail-first, exactly as :func:`stored_session_title` ranks
+    them, so the last ``(text, user_set)`` is the title in force and the rest
+    become ``write_session_title``'s ``past_names``.
+
+    ``None`` when neither window holds a title row; the caller then writes
+    nothing and the opener still names the row from the head window.
+    """
+    try:
+        head = compression.read_head(session_dir, TITLE_SCAN_BYTES)
+        tail = compression.read_tail(session_dir, TITLE_SCAN_BYTES)
+    except (OSError, compression.ArchiveError):
+        return None
+    found = _titles_in_lines(tail.decode("utf-8", "replace").splitlines())
+    found += _titles_in_lines(head.decode("utf-8", "replace").splitlines())
+    if not found:
+        return None
+    text, user_set = found[-1]
+    past_names = list(dict.fromkeys(name for name, _user_set in found[:-1] if name))
+    return text, user_set, past_names
 
 
 def _write_origin_scan_sentinel(session_dir: Path) -> None:
@@ -3670,13 +3709,23 @@ def stored_session_title(session_dir: Path) -> str:
             memo[name] = (sidecar_key, False, None, "")
         return ""
     try:
-        # TWO bounded windows through the codec-aware reader: an archive is
-        # decompressed only as far as each window needs — never materialised as
-        # a whole cache copy just to read a name. The "whole file once" case
-        # below degrades gracefully: both windows then hold the same bytes, and
-        # the LAST match still wins across them.
+        # TWO bounded windows through the codec-aware reader for a PLAIN
+        # journal; HEAD ONLY for an archive.
+        #
+        # An archived session's newest title is in ``title.json``: the
+        # compression pass RESOLVES AND WRITES it before it retires the plain
+        # file (``compression._ensure_title_sidecar``), so the sidecar check
+        # above has already had its chance and a miss means the title is in the
+        # transcript's HEAD (the opener) or nowhere. Reading the tail here would
+        # decompress the WHOLE archive once per listing row — 22 ms and 210 MB of
+        # decode on the 77 MB archive measured in review M1 — for a name the
+        # sidecar already answered.
         head = compression.read_head(session_dir, TITLE_SCAN_BYTES)
-        tail = compression.read_tail(session_dir, TITLE_SCAN_BYTES)
+        tail = (
+            b""
+            if compression.archive_path(session_dir) is not None
+            else compression.read_tail(session_dir, TITLE_SCAN_BYTES)
+        )
     except compression.ArchiveError:
         # The archive exists but this build cannot decode it, or it is corrupt.
         # A fact about the BUILD, not the conversation: answer, never memoise a
@@ -3923,17 +3972,17 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
     thing the model actually SAID. Returns ``""`` when the transcript is
     missing, unreadable, or contains no assistant text, and the caller renders
     its own empty state.
+
+    For an ARCHIVE the answer comes from the sidecar compression wrote beside it
+    (:func:`compression.read_listing_preview`) — one stat and a sub-kilobyte
+    read, where reading the transcript's tail would decompress the whole archive
+    once per listing row. An archive from a build that predates the sidecar
+    falls back to the tail window once, which is what this function always cost.
     """
-    for entry in _tail_entries(session_dir):
-        if entry.get("type") != "message":
-            continue
-        payload = entry.get("payload")
-        if not isinstance(payload, dict) or payload.get("role") != "assistant":
-            continue
-        text = _first_text(payload.get("content"))
-        if text.strip():
-            return _condense(text, max_chars)
-    return ""
+    sidecar = compression.read_listing_preview(session_dir)
+    if sidecar is not None:
+        return _condense(str(sidecar.get("preview") or ""), max_chars)
+    return _preview_from_entries(_tail_entries(session_dir), max_chars)
 
 
 def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) -> str:
@@ -3969,8 +4018,55 @@ def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_C
     single bounded read and is independent of transcript size. Returns ``""``
     for a missing, unreadable or incident-free transcript, and the caller falls
     back to the house sentence.
+
+    For an ARCHIVE the answer comes from the sidecar compression wrote beside it
+    (see :func:`session_preview`): one small read instead of a decompression, and
+    the same fallback for an archive that predates it.
     """
-    for entry in _tail_entries(session_dir):
+    sidecar = compression.read_listing_preview(session_dir)
+    if sidecar is not None:
+        return _condense(str(sidecar.get("failure") or ""), max_chars)
+    return _failure_from_entries(_tail_entries(session_dir), max_chars)
+
+
+def listing_preview_from_tail(window: bytes, *, truncated: bool) -> dict[str, str]:
+    """The two listing fields, computed from ONE tail window.
+
+    Called by the compression pass before it retires the plain transcript: the
+    sidecar it writes must answer exactly what :func:`session_preview` and
+    :func:`session_failure_summary` answer for that transcript, so both routes
+    run the SAME entry scan and the SAME two field readers. A second copy of
+    these rules is how a compressed row's preview would drift from its plain
+    twin's — the property the surface suite pins.
+
+    ``truncated`` says whether the window starts mid-row (see
+    :func:`compression.read_tail_window`); passing it in keeps that decision in
+    the reader that knows the source's size.
+    """
+    entries = _entries_from_window(window, truncated)
+    return {
+        "preview": _preview_from_entries(entries, PREVIEW_MAX_CHARS),
+        "failure": _failure_from_entries(entries, PREVIEW_MAX_CHARS),
+    }
+
+
+def _preview_from_entries(entries: list[dict[str, Any]], max_chars: int) -> str:
+    """The newest assistant text in ``entries`` (newest first), condensed."""
+    for entry in entries:
+        if entry.get("type") != "message":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("role") != "assistant":
+            continue
+        text = _first_text(payload.get("content"))
+        if text.strip():
+            return _condense(text, max_chars)
+    return ""
+
+
+def _failure_from_entries(entries: list[dict[str, Any]], max_chars: int) -> str:
+    """The newest ``session_incident`` raw text in ``entries`` (newest first)."""
+    for entry in entries:
         payload = entry.get("payload")
         if not isinstance(payload, dict):
             continue
@@ -3994,20 +4090,30 @@ def _tail_entries(session_dir: Path) -> list[dict[str, Any]]:
     unparseable line skipped because a live writer may be mid-append. Two
     copies of that would be two places for the window arithmetic to drift.
 
-    ``compression.read_tail`` keeps that window the same SIZE for an archive —
-    it streams through a rolling buffer of the budget instead of seeking — so a
-    compressed session's preview is byte-identical to its plain twin's and the
-    memory bound does not change.
+    ``compression.read_tail_window`` keeps that window the same SIZE for an
+    archive — it streams through a rolling buffer of the budget instead of
+    seeking — so a compressed session's preview is byte-identical to its plain
+    twin's and the memory bound does not change. For a PLAIN transcript the read
+    is a seek, bounded by the budget rather than by the file.
     """
     try:
-        window = compression.read_tail(session_dir, PREVIEW_SCAN_BYTES)
+        window, truncated = compression.read_tail_window(session_dir, PREVIEW_SCAN_BYTES)
     except compression.ArchiveError:
         # An undecodable archive costs the preview, never the listing row.
         return []
-    if len(window) >= PREVIEW_SCAN_BYTES:
-        # The budget was filled, so the window may start at an arbitrary byte:
-        # the first line is then a fragment. Unlike the name scan there is
-        # nothing to recover from it: the newest entry is at the other end.
+    return _entries_from_window(window, truncated)
+
+
+def _entries_from_window(window: bytes, truncated: bool) -> list[dict[str, Any]]:
+    """Parse one tail window, NEWEST FIRST.
+
+    ``truncated`` is the only thing that makes the first line a fragment: a
+    source LONGER than the window was seeked into, so the window starts at an
+    arbitrary byte. A source of exactly the window size starts on a whole row,
+    and dropping it would lose the oldest entry of the window (review n1) —
+    which matters to the compress-time sidecar, whose window is the source.
+    """
+    if truncated:
         _, _, window = window.partition(b"\n")
     entries: list[dict[str, Any]] = []
     for line in reversed(window.decode("utf-8", "replace").splitlines()):

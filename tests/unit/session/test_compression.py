@@ -1230,3 +1230,36 @@ def test_prewarm_and_anchor_skip_an_archived_session(tmp_path: Path) -> None:
     assert archived.name not in index_prewarm.sessions_needing_replay(config)
     assert tail_anchor.build_anchor(archived) is None
     assert not stale.exists()
+
+
+def test_the_cache_gate_budgets_the_decompressed_write(tmp_path: Path) -> None:
+    """n2: the write is the DECOMPRESSED size, so the reserve means what it says.
+
+    ``_materialise`` writes plain bytes, so budgeting the archive's compressed
+    size left a cache volume that had just over ``archive + reserve`` free to be
+    filled to roughly ``4x archive`` — below the documented reserve. 5x is the
+    explicit estimate; below it the documented restore-in-place fallback applies.
+    """
+    config = _store(tmp_path)
+    directory = _session(config, "cachemem")
+    assert compression.compress_session(directory).status == "compressed"
+    archive = compression.archive_path(directory)
+    assert archive is not None
+    archive_size = archive.stat().st_size
+
+    real_free = compression._free_bytes
+    try:
+        # Just over the OLD budget (archive + reserve) but under the real one.
+        tight = archive_size + compression.CACHE_FREE_RESERVE_BYTES + 1024
+        compression._free_bytes = lambda path: tight  # type: ignore[assignment]
+        assert (
+            compression._materialise(directory, archive, "gzip") is None
+        ), "a cache volume sized for the COMPRESSED bytes was accepted"
+
+        roomy = archive_size * compression.CACHE_EXPANSION_ESTIMATE + 1024
+        compression._free_bytes = lambda path: roomy + compression.CACHE_FREE_RESERVE_BYTES
+        cached = compression._materialise(directory, archive, "gzip")
+        assert cached is not None and cached.exists()
+        assert cached.read_bytes() == _transcript()
+    finally:
+        compression._free_bytes = real_free  # type: ignore[assignment]
