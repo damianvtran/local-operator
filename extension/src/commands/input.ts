@@ -35,6 +35,21 @@ async function callOnNode<T>(
 /* Exported because `upload` resolves its file input through it: a second copy of
  * the ref/selector resolution would be a second place for the
  * `pushNodesByBackendIdsToFrontend` document-request fixup to be forgotten. */
+/** The closest real elements for a selector that matched nothing.
+ *
+ * The measured loop: nine CSS guesses, each a whole tool call, each answering
+ * only "element not found". Reading the a11y tree on the FAILURE path (never a
+ * success) lets the miss name the elements that DO exist with the locator that
+ * targets each — one correction instead of the next guess.
+ *
+ * Best-effort by construction: a tree read that fails here must not replace the
+ * caller's own error, so an empty list is the fallback.
+ */
+async function missCandidates(surface: StoredSurface, selector: string) {
+  const nodes = await readAXTree(surface).catch(() => []);
+  return locatorSuggestions(nodes, selector);
+}
+
 /** What resolved a click/type target, and which node it resolved to. */
 export interface ResolvedTarget {
   nodeId: number;
@@ -111,7 +126,12 @@ export async function resolveTarget(surface: StoredSurface, selector: unknown): 
   }
   const document = await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
   const queried = await cdp<QueryResult>(tabId, "DOM.querySelector", { nodeId: document.root.nodeId, selector });
-  if (!queried.nodeId) throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`);
+  if (!queried.nodeId) {
+    throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`, {
+      candidates: await missCandidates(surface, selector),
+      matched: 0,
+    });
+  }
   return { nodeId: queried.nodeId, by: "css" };
 }
 
@@ -138,7 +158,15 @@ export async function backendNodeIdForSelector(surface: StoredSurface, selector:
   if (!selector) throw new BridgeCommandError("element_not_found", "selector is required");
   const document = await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
   const queried = await cdp<QueryResult>(tabId, "DOM.querySelector", { nodeId: document.root.nodeId, selector });
-  if (!queried.nodeId) throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`);
+  if (!queried.nodeId) {
+    // Same diagnostics on the snapshot-scope path: `snapshot selector="#nope"`
+    // is a miss the caller has to correct, and it is exactly where a section's
+    // real name is least obvious.
+    throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`, {
+      candidates: await missCandidates(surface, selector),
+      matched: 0,
+    });
+  }
   const described = await cdp<DescribedNode>(tabId, "DOM.describeNode", { nodeId: queried.nodeId, depth: 0 });
   const backendNodeId = described.node?.backendNodeId;
   if (backendNodeId === undefined) {

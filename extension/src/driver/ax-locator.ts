@@ -181,9 +181,23 @@ function matches(haystack: string, needle: string, substring: boolean): boolean 
   return substring ? left.includes(right) : left === right;
 }
 
+/** Roles that can never be a click target. Chromium gives inline text boxes and
+ *  static text real backend ids, so a "has an id" filter alone offered
+ *  `role=StaticText[name="Webhook"]` as a suggestion — a locator that resolves
+ *  to a node nothing can click. Measured on the fixture: the first candidate for
+ *  `#hook_active` was a StaticText.
+ */
+const NEVER_TARGETED = new Set(["StaticText", "InlineTextBox", "none", "generic"]);
+
 function candidateNodes(nodes: AXNode[]): AXNode[] {
   // Ignored nodes are excluded from the accessible tree, and a node without a
   // backend id cannot be clicked — both are non-candidates by construction.
+  //
+  // NEVER_TARGETED is deliberately NOT applied here (agent review round 1 on the
+  // diagnostics slice): `candidateNodes` also feeds RESOLUTION, and a `generic`
+  // or `none` container can legitimately be the element a `text=` locator names
+  // — excluding it there would refuse a click that worked before. The role
+  // filter is a SUGGESTION rule, applied in `locatorSuggestions` only.
   return nodes.filter((node) => !node.ignored && node.backendDOMNodeId !== undefined);
 }
 
@@ -263,13 +277,18 @@ export function locatorSuggestions(
     const role = String(node.role?.value ?? "");
     const name = normalise(node.name?.value);
     if (!name) continue;
+    // Only a SUGGESTION has to be clickable; resolution stays permissive.
+    if (NEVER_TARGETED.has(role)) continue;
     const lowerName = name.toLowerCase();
     let score = 0;
     if (term && lowerName === term) score += 100;
     else if (term && lowerName.includes(term)) score += 60;
     for (const word of words) if (lowerName.includes(word)) score += 8;
     if (wantedRole && role.toLowerCase() === wantedRole) score += 25;
-    if (CLICKABLE.has(role)) score += 4;
+    // A suggestion is only useful if it can be CLICKED: an element with the
+    // right words that is a heading or a static text costs the caller another
+    // wrong call, which is the loop this exists to end.
+    if (CLICKABLE.has(role)) score += 12;
     if (!score) continue;
     scored.push({ score, role, name });
   }

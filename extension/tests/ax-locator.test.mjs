@@ -248,3 +248,48 @@ test("a single-quoted suggestion escapes backslashes like a double-quoted one", 
     await close();
   }
 });
+
+test("a suggestion is always something that can be clicked", async () => {
+  // Measured on the fixture: the first candidate for `#hook_active` was
+  // `role=StaticText[name="Webhook"]` — Chromium gives inline text a real
+  // backend id, so "has an id" was not enough to make a candidate a TARGET.
+  const { loaded, close } = await load("src/driver/ax-locator.ts");
+  try {
+    const nodes = [
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "" }, childIds: ["2"] },
+      { nodeId: "2", backendDOMNodeId: 1, role: { value: "StaticText" }, name: { value: "Active" }, childIds: [] },
+      { nodeId: "3", backendDOMNodeId: 2, role: { value: "checkbox" }, name: { value: "Active" }, childIds: [] },
+    ];
+    const candidates = loaded.locatorSuggestions(nodes, "#hook_active");
+    assert.ok(candidates.length > 0);
+    assert.ok(!candidates.some((entry) => entry.role === "StaticText"), JSON.stringify(candidates));
+    assert.equal(candidates[0].role, "checkbox");
+    // And the suggestion really resolves.
+    assert.equal(loaded.resolveLocator(nodes, loaded.parseLocator(candidates[0].locator)).backendNodeId, 2);
+  } finally {
+    await close();
+  }
+});
+
+test("the suggestion role filter never narrows resolution", async () => {
+  // Agent review round 1 on the diagnostics slice: `generic` was excluded from
+  // `candidateNodes`, which also feeds RESOLUTION — so a `text=` locator that
+  // used to select a generic container started failing. The filter is a
+  // suggestion rule only.
+  const { loaded, close } = await load("src/driver/ax-locator.ts");
+  try {
+    const nodes = [
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "" }, childIds: ["2"] },
+      { nodeId: "2", backendDOMNodeId: 9, role: { value: "generic" }, name: { value: "Open menu" }, childIds: [] },
+    ];
+    const hit = loaded.resolveLocator(nodes, loaded.parseLocator('text="Open menu"'));
+    assert.ok(hit, "a generic container must still resolve");
+    assert.equal(hit.backendNodeId, 9);
+    assert.ok(
+      !loaded.locatorSuggestions(nodes, "menu").some((entry) => entry.role === "generic"),
+      "…but it is never offered as a suggestion",
+    );
+  } finally {
+    await close();
+  }
+});
