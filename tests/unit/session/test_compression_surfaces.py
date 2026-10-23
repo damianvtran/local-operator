@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -201,7 +201,10 @@ def test_the_tui_resume_hint_survives_compression(
         _session = type("S", (), {"session_id": directory.name})()
         _stopped_session_id = ""
 
-    assert OperatorApp._resumable_session_id(_Stub()) == directory.name
+    # The probe reads two attributes off ``self``; a stub is the point of the
+    # test, and pyright cannot see that the duck type satisfies the real class,
+    # so the cast states the intent instead of the test importing the app.
+    assert OperatorApp._resumable_session_id(cast(Any, _Stub())) == directory.name
 
 
 def test_the_cleanup_primitive_refuses_an_archived_session(
@@ -536,3 +539,58 @@ def test_a_compressed_replica_is_restored_before_an_append(
 def destination_attachments(dest: Path) -> Path:
     """The replica's own store root: a replica keeps its blobs inside itself."""
     return dest
+
+
+# ---------------------------------------------------------------------------
+# Round 2 m1 — a VIEWER never re-inflates the archive
+# ---------------------------------------------------------------------------
+
+
+def test_a_read_only_open_refuses_rather_than_restoring_in_place(
+    archived: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE REPRO (review m1): the cache cannot be materialised, read-only open.
+
+    ``Transcript(read_only=True)`` promises "no lock and no restore", and the
+    resolver's last resort broke that promise: when the cache copy is
+    impossible — a full volume, an unwritable cache, a ``statvfs`` failure —
+    ``transcript_for_read`` fell back to ``restore_for_write``, publishing the
+    plain file back into the store WITHOUT the writer lock. One image viewed on
+    a phone would undo the compression the pass exists to perform, on exactly
+    the device whose cache miss means the disk is full.
+    """
+    from local_operator.session.transcript import Transcript
+
+    config, directory = archived
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    # What a full or unwritable cache volume does: the copy cannot be made.
+    monkeypatch.setattr(compression, "_materialise", lambda *args, **kwargs: None)
+    # The lock file itself already exists (the compression pass took the lock),
+    # so the proof is that this open leaves the directory EXACTLY as it was.
+    before = sorted(entry.name for entry in directory.iterdir())
+
+    with pytest.raises(compression.ArchiveCorrupt, match="not enough space"):
+        Transcript(directory, read_only=True)
+
+    # The failure cost the reader an error, never a rewrite of the store.
+    assert compression.archive_path(directory) is not None
+    assert not (directory / compression.PLAIN_FILENAME).exists()
+    assert sorted(entry.name for entry in directory.iterdir()) == before
+
+
+def test_the_writer_open_still_restores_when_the_cache_cannot_be_used(
+    archived: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read-only refusal must not have removed the writer's fallback."""
+    from local_operator.session.transcript import Transcript
+
+    config, directory = archived
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    monkeypatch.setattr(compression, "_materialise", lambda *args, **kwargs: None)
+
+    transcript = Transcript(directory)
+    try:
+        assert transcript.entries()
+    finally:
+        transcript.close()
+    assert (directory / compression.PLAIN_FILENAME).exists()
