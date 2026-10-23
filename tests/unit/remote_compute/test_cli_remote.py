@@ -562,6 +562,13 @@ def test_a_given_name_reaches_the_body_unchanged(
         "   ",
         "x" * 120,
         "é" * 51,
+        # N1 — Python's ``strip`` removes U+001C-U+001F and Go's does not, so
+        # these used to measure 100 bytes here and arrive as 101.
+        "\x1c" + "a" * 100,
+        "\x1f" * 3 + "b" * 98,
+        "a" * 100 + "\x1e",
+        # Q3 — a run name is a single-line label.
+        "a\nb",
     ],
 )
 def test_a_name_the_server_would_refuse_is_refused_before_the_request(
@@ -582,9 +589,25 @@ def test_a_name_the_server_would_refuse_is_refused_before_the_request(
     """
     assert _run(BASE + HOSTING + ["--name", given, "do it"], monkeypatch) == 1
     err = capsys.readouterr().err
-    assert err.startswith("remote compute failed: a run name must be non-blank")
+    assert err.startswith("remote compute failed: a run name must be a single line")
     assert "at most 100 bytes of UTF-8" in err
     assert origin.requests == []
+
+
+def test_a_name_padded_with_ascii_spaces_at_the_bound_is_accepted_and_sent_verbatim(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N1's ACCEPT half: 5 spaces + 100 characters is 100 bytes once the server
+    trims, so refusing it would refuse a name the far end takes."""
+    origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
+    given = " " * 5 + "a" * 100
+    assert _run(BASE + HOSTING + ["--detach", "--name", given, "do it"], monkeypatch) == 0
+    (sent,) = origin.requests
+    assert json.loads(sent.content)["name"] == given
 
 
 def test_an_oversize_idempotency_key_is_refused_before_the_request(
@@ -1392,6 +1415,34 @@ def test_a_real_lop_process_runs_with_no_name_and_the_server_takes_it(
     assert result.stdout.strip() == RUN_ID
     (sent,) = name_origin.names
     assert sent == "Run the acceptance checks"
+
+
+def test_a_real_lop_process_derives_a_name_of_exactly_the_bound_and_the_server_takes_it(
+    enabled: None, network: NetworkRecord, signed_in: int, name_origin: _NameRadient
+) -> None:
+    """N6 — the DERIVED name is measured by the server's rule, not just ours.
+
+    A 300-character first line is shortened to 97 bytes plus the 3-byte ``…``,
+    which is exactly ``MAX_RUN_NAME_BYTES``: the bound is inclusive, and a
+    derived name that came out one byte longer would be this same 400 on every
+    long prompt. The origin here is the loopback server that applies the
+    contract's rule and nothing else.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
+    env["LOP_REMOTE_COMPUTE_API_URL"] = f"http://127.0.0.1:{name_origin.server_address[1]}"
+    prompt = "a" * 300
+    result = subprocess.run(
+        [sys.executable, "-c", _LOP_ENTRY, *BASE, *HOSTING, "--detach", prompt],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+        cwd=Path(__file__).resolve().parents[3],
+    )
+    assert result.returncode == 0, result.stderr
+    (sent,) = name_origin.names
+    assert len(sent.encode("utf-8")) == 100
+    assert sent.endswith("…")
 
 
 # ---------------------------------------------------------------------------
