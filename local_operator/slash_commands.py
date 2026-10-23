@@ -440,6 +440,30 @@ def project_show_refusal_text(name: str) -> str:
     return f"no project named {name!r} — /project list shows every tracked project."
 
 
+def project_page_truncation_text(registry: Any) -> str:
+    """The partial-listing notice, or ``""`` when the store fits one page.
+
+    The store's snapshot is a recency PAGE over the rows (``projects._MAX_ROWS``),
+    not a visibility boundary, so a SET-returning surface must state what it left
+    out — otherwise "not listed" reads as "does not exist" for a project the
+    addressing verbs still resolve (the ordinal-502 incident). ONE copy for both
+    ``/project`` listing renderers (the `list` branch and the nameless `show`
+    overview), so the two receipts cannot disagree; the TUI page states the same
+    fact through its own renderer's existing overflow row.
+    """
+    on_disk = int(getattr(registry, "rows_on_disk", 0) or 0)
+    loaded = int(getattr(registry, "rows_loaded", 0) or 0)
+    hidden = on_disk - loaded
+    if hidden <= 0:
+        return ""
+    noun = "row is" if hidden == 1 else "rows are"
+    return (
+        f"showing the {loaded} most recently active of {on_disk} stored projects "
+        f"— {hidden} dormant {noun} not listed; /project show <name> still finds "
+        "any project."
+    )
+
+
 def project_listing_hint_text() -> str:
     """The listing's FOOTER: the two page entries, named (S3b).
 
@@ -541,7 +565,9 @@ def project_overview_receipt(
         return (project_empty_text(), "info")
     states = scan_runtime_states(config_dir)
     rows = project_listing_rows(projects, states=states, now=now, window=stale_after_s(config_dir))
-    return ("\n".join([*rows, project_listing_hint_text()]), "info")
+    note = project_page_truncation_text(registry)
+    footer = [*([note] if note else []), project_listing_hint_text()]
+    return ("\n".join([*rows, *footer]), "info")
 
 
 def project_delete_rehearsal_text(name: str) -> str:
@@ -782,9 +808,12 @@ def run_project_slash_op(
         rows = project_listing_rows(
             projects, states=states, now=now, window=stale_after_s(config_dir)
         )
-        # The listing's footer (S3b): the two page entries, named. A FOOTER —
-        # after every row, absent on an empty store.
-        return ("\n".join([*rows, project_listing_hint_text()]), "info")
+        # The listing's footer (S3b): the two page entries, named — and, when
+        # the store outgrew the page, what the page left out. A FOOTER — after
+        # every row, absent on an empty store.
+        note = project_page_truncation_text(registry)
+        footer = [*([note] if note else []), project_listing_hint_text()]
+        return ("\n".join([*rows, *footer]), "info")
 
     if word in PROJECT_PAGE_VERBS:
         name = rest.strip()
