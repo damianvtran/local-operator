@@ -1,0 +1,34 @@
+{
+  "base": "1adf78ecaf4f4906e678e74eb7b519532c9f9ecd",
+  "loaded_sources": [
+    "tests/unit/tools/test_eval_tool.py",
+    "tests/unit/tools/lfs_eval_plugin_6911.py",
+    "tests/conftest.py",
+    "local_operator/tools/eval.py",
+    "local_operator/tools/builtin.py"
+  ],
+  "sources": {
+    "tests/unit/tools/test_eval_tool.py": "2fbfcd580375c92ef69fe277900e69398b98f12d967fda9b99adb5964dcaa50c",
+    "tests/conftest.py": "18766004614a9796f7d9d92336c71316d3bf128115ce0ddfd9b5db171376ac08",
+    "local_operator/tools/eval.py": "3cef8488991981a58b3e6760e84d39e6fcdd13aa3388221ef784cd8bee4fd65f",
+    "local_operator/tools/builtin.py": "d4a1e7ed3a4bd700c85c860ba84a0acd79ce2eec28387580ce7014549c813aad",
+    "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
+    "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
+    "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
+    "tests/unit/tools/lfs_eval_plugin_6911.py": "9d2afebd0aa03a8f074d9871d3f335712157310ede8bf33ba2f6707297f4b580",
+    "scripts/diagnostics/lfs_eval_6911/controller.py": "9030356a526886f93a4a91ffac6bc2401a51433357be75adab8111c39c579296"
+  },
+  "qa_fragment_sha256": "6502f9a2e91aa696f83329df4dd77c4f15e84d1bfb1c3567d8bca961be37240d",
+  "historical_witness": {
+    "head": "edd369ed",
+    "run": 39910882585,
+    "job": 120273888104,
+    "python_family": "3.13",
+    "source_byte_matches": {
+      "tests/unit/tools/test_eval_tool.py": true,
+      "local_operator/tools/eval.py": true,
+      "local_operator/tools/builtin.py": false
+    }
+  },
+  "equivalence": "NOT full historical/runtime equivalence"
+}
