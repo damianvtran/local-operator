@@ -2956,9 +2956,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "tmp FILE -> <config>/cache/library/index.json FILE; cache-derived, never sessions/",
     ),
     (
-        "local_operator/library/service.py::thumbnail",
+        "local_operator/library/indexer.py::LibraryIndexer._drop_legacy_index",
+        "<path>.unlink",
+        "removes <config>/cache/library/index.json and its .lock: the superseded "
+        "derived catalog, never a session directory",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore.ensure_thumbnail",
         "os.replace",
-        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/; never sessions/",
+        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/thumbs; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._swap_in_database",
+        "os.replace",
+        "a fresh copy of <config>/library/library.sqlite3 replaces the unreadable "
+        "database in the same directory; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._swap_in_database",
+        "<path>.unlink",
+        "removes the old file's stale -wal/-shm siblings BEFORE the replace "
+        "(after it they would attach to the new file); never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._clean_stale_rebuilds",
+        "<path>.unlink",
+        "removes another process's crashed database-rebuild temp file beside "
+        "<config>/library/library.sqlite3; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._rebuild_database",
+        "<path>.unlink",
+        "removes the rebuild temp file before writing it and again on failure; " "never sessions/",
+        2,
     ),
     (
         "local_operator/library/service.py::waveform",

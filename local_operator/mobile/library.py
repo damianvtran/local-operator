@@ -170,6 +170,8 @@ def list_payload(config_dir: str | Path, params: dict[str, str]) -> dict[str, An
         raise LibraryRouteError(422, "library_invalid_cursor", str(error)) from error
     except library_service.InvalidFilter as error:
         raise LibraryRouteError(422, "library_invalid_filter", str(error)) from error
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except MetadataUnavailable as error:
         raise _unavailable(error) from error
 
@@ -195,6 +197,8 @@ def facets_payload(config_dir: str | Path) -> dict[str, Any]:
 def detail_payload(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
     try:
         return library_service.get_asset(config_dir, asset_id, display=True)
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except MetadataUnavailable as error:
@@ -211,6 +215,8 @@ def patch_payload(config_dir: str | Path, asset_id: str, body: dict[str, Any]) -
         # crosses this plane on a WRITE either — the list/detail guarantee must
         # not end at the first mutation.
         return library_service.get_asset(config_dir, asset_id, display=True)
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except TagRefused as error:
@@ -222,6 +228,8 @@ def patch_payload(config_dir: str | Path, asset_id: str, body: dict[str, Any]) -
 def tags_payload(config_dir: str | Path) -> dict[str, Any]:
     try:
         return {"tags": MetadataStore(config_dir).list_tags()}
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except MetadataUnavailable as error:
         raise _unavailable(error) from error
 
@@ -237,6 +245,8 @@ def create_tag_payload(config_dir: str | Path, body: dict[str, Any]) -> dict[str
         return {"tag": MetadataStore(config_dir).create_tag(name, category)}
     except TagRefused as error:
         raise _refused(error) from error
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except MetadataUnavailable as error:
         raise _unavailable(error) from error
 
@@ -249,6 +259,8 @@ def rename_tag_payload(config_dir: str | Path, tag_id: str, body: dict[str, Any]
         return {"tag": MetadataStore(config_dir).rename_tag(tag_id, name)}
     except TagRefused as error:
         raise _refused(error) from error
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except MetadataUnavailable as error:
         raise _unavailable(error) from error
 
@@ -261,6 +273,8 @@ def merge_tag_payload(config_dir: str | Path, tag_id: str, body: dict[str, Any])
         return {"tag": MetadataStore(config_dir).merge_tags(tag_id, into)}
     except TagRefused as error:
         raise _refused(error) from error
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except MetadataUnavailable as error:
         raise _unavailable(error) from error
 
@@ -287,6 +301,8 @@ def set_tags_payload(config_dir: str | Path, asset_id: str, body: dict[str, Any]
         library_service.set_tags(config_dir, asset_id, raw, primary=primary, actor="user")
         # Same re-projection as PATCH: the write returns the desktop row.
         return library_service.get_asset(config_dir, asset_id, display=True)
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except TagRefused as error:
@@ -302,6 +318,8 @@ def chat_payload(config_dir: str | Path, asset_id: str, body: dict[str, Any]) ->
         raise LibraryRouteError(422, "bad_session_id")
     try:
         return {"chat": library_service.set_chat_link(config_dir, asset_id, session_id)}
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except TagRefused as error:
@@ -314,6 +332,8 @@ def clear_chat_payload(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
     try:
         cleared = library_service.clear_chat_link(config_dir, asset_id)
         return {"ok": True, "cleared": cleared}
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except MetadataUnavailable as error:
@@ -323,6 +343,8 @@ def clear_chat_payload(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
 def content_ref(config_dir: str | Path, asset_id: str) -> library_service.ContentRef:
     try:
         return library_service.resolve_content(config_dir, asset_id)
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except library_service.ContentUnavailable as error:
@@ -334,6 +356,8 @@ def content_ref(config_dir: str | Path, asset_id: str) -> library_service.Conten
 def thumb_ref(config_dir: str | Path, asset_id: str, width: int) -> library_service.ContentRef:
     try:
         return library_service.thumbnail(config_dir, asset_id, width)
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except library_service.ContentUnavailable as error:

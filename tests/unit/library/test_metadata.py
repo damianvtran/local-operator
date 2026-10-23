@@ -11,6 +11,7 @@ from local_operator.library.metadata import (
     MetadataStore,
     MetadataUnavailable,
     TagRefused,
+    reset_schema_readiness,
 )
 
 A = "la_0123456789abcdef"
@@ -101,8 +102,10 @@ def test_a_future_or_corrupt_database_answers_an_empty_catalog(tmp_path) -> None
     s.ensure_asset(A, "p:/a", derived_name="a")
     with s._write() as connection:
         connection.execute("UPDATE state SET value = '99' WHERE key = 'schema_version'")
-    # A NEW reader is the process that meets a future store, not one that has
-    # already cached the schema as readable.
+    # A NEW PROCESS is what meets a future store, not a reader that has already
+    # verified the schema; the process-wide readiness cache is cleared to model
+    # that boundary (production never re-learns inside one process).
+    reset_schema_readiness()
     future = store(tmp_path)
     assert future.asset(A) is None
     assert future.list_tags() == []
