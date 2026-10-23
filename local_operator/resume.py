@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -4125,6 +4126,37 @@ def _failure_from_entries(entries: list[dict[str, Any]], max_chars: int) -> str:
     return ""
 
 
+#: How many archives' parsed tail windows this process remembers (review round 3,
+#: m-2). Small on purpose: a listing paints rows in one pass, so a handful covers
+#: the store a person scrolls; 32 entries of one bounded window each stay far under
+#: the preview budget's own cost.
+_TAIL_MEMO_MAX = 32
+
+#: ``archive identity -> parsed tail entries`` (see :func:`_tail_memo_key`). Bounded
+#: by ``_TAIL_MEMO_MAX`` and never keyed on a PLAIN transcript, whose tail changes
+#: with every append and whose read is a seek anyway.
+_tail_memo: "OrderedDict[tuple[str, int, int, int, int], list[dict[str, Any]]]" = OrderedDict()
+
+
+def _tail_memo_key(session_dir: Path) -> tuple[str, int, int, int, int] | None:
+    """The memo key for ``session_dir``'s ARCHIVE, or ``None`` when it has none.
+
+    The key is the archive's IDENTITY — device, inode, size, mtime in nanoseconds —
+    so every way the bytes can change (a re-compress, a hand-copied replacement, a
+    restore that removes it) is a different key. Nothing has to clear this memo for
+    correctness; ``restore_for_write`` and the compression pass change the archive,
+    which is exactly what moves the key.
+    """
+    try:
+        archive = compression.archive_path(session_dir)
+        if archive is None:
+            return None
+        info = archive.stat()
+    except OSError:
+        return None
+    return (str(session_dir), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
 def _tail_entries(session_dir: Path) -> list[dict[str, Any]]:
     """Parsed entries from the transcript's tail window, NEWEST FIRST.
 
@@ -4139,13 +4171,41 @@ def _tail_entries(session_dir: Path) -> list[dict[str, Any]]:
     seeking — so a compressed session's preview is byte-identical to its plain
     twin's and the memory bound does not change. For a PLAIN transcript the read
     is a seek, bounded by the budget rather than by the file.
+
+    AN ARCHIVE'S TAIL IS PAID ONCE, NOT ONCE PER ROW (review round 3, m-2). Two
+    things make that true and both are needed: this process keeps the parsed window
+    in a small bounded memo keyed by the archive's identity (so a listing that paints
+    fifty rows of one cold archive streams it once), and after a read that had no
+    sidecar the window is recorded as ``preview.json`` so the NEXT process starts
+    from the cheap path. Neither can serve stale bytes: the memo key is
+    ``(dev, ino, size, mtime_ns)`` of the archive, so a re-compress, a restore or a
+    change under it is a miss rather than a lie, and ``write_listing_preview``
+    refuses to write beside a plain transcript.
     """
+    session_dir = Path(session_dir)
+    key = _tail_memo_key(session_dir)
+    if key is not None:
+        cached = _tail_memo.get(key)
+        if cached is not None:
+            _tail_memo.move_to_end(key)
+            return cached
     try:
         window, truncated = compression.read_tail_window(session_dir, PREVIEW_SCAN_BYTES)
     except compression.ArchiveError:
         # An undecodable archive costs the preview, never the listing row.
         return []
-    return _entries_from_window(window, truncated)
+    entries = _entries_from_window(window, truncated)
+    if key is not None:
+        _tail_memo[key] = entries
+        while len(_tail_memo) > _TAIL_MEMO_MAX:
+            _tail_memo.popitem(last=False)
+        # The read just proved what this archive's tail says; record it so the next
+        # process does not stream the archive again. Only when there is no sidecar
+        # already: one that exists is either current or is being read for a larger
+        # ``max_chars`` than it stores, and neither case needs this write.
+        if compression.read_listing_preview(session_dir) is None:
+            compression.write_listing_preview(session_dir, window, truncated=truncated)
+    return entries
 
 
 def _entries_from_window(window: bytes, truncated: bool) -> list[dict[str, Any]]:
