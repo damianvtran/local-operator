@@ -49,7 +49,7 @@ from local_operator.harness.intent import (
     sanitize_intent,
     scan_streaming_intent,
 )
-from local_operator.harness.redaction import tool_source
+from local_operator.harness.redaction import PUBLIC_COPY_TOOLS, tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.types import (
     FAULT_ABORTED,
@@ -6280,6 +6280,14 @@ class AgentLoop:
         texts = [item.text for item in content if isinstance(item, TextContent)]
         if not texts:
             return content  # decided ON THE LOOP: imagery/empty pays no hop
+        # PUBLIC COPY BY POLICY: ``read_public_copy`` is the sanctioned reader for
+        # the i18n catalogues and key maps (docs/security/redaction-policy.md).
+        # The exemption is keyed to the TOOL NAME, never to an argument, and the
+        # tool itself refuses any path outside its allowlist and records every
+        # read. Masking it here would make the route useless; masking every other
+        # tool's result is unchanged.
+        if tool_name in PUBLIC_COPY_TOOLS:
+            return content
 
         def _run() -> list[str]:
             with (
@@ -6347,6 +6355,11 @@ class AgentLoop:
         in the shape report, and a bare executor spelling would drop it.
         """
         if not details:
+            return details
+        # The sibling public-copy rule: the sanctioned reader's structured payload
+        # (path/key/hash) is part of the same public record, not a second channel
+        # to mask. See the block in ``_redact_content``.
+        if tool_name in PUBLIC_COPY_TOOLS:
             return details
         if not any(
             isinstance(details.get(key), str)

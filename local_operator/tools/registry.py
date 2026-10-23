@@ -35,6 +35,7 @@ from local_operator.tools.project_tool import (
     build_project_delete_tool,
     build_project_tool,
 )
+from local_operator.tools.public_copy import build_read_public_copy_tool
 from local_operator.tools.secret_tool import build_secret_tool
 from local_operator.tools.tags_tool import build_tags_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
@@ -53,6 +54,7 @@ from local_operator.web_search.tool import build_web_search_tool
 TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "bash": lambda _context: builtin.build_bash_tool(),
     "read": lambda _context: builtin.build_read_tool(),
+    "read_public_copy": lambda _context: build_read_public_copy_tool(),
     "write": lambda _context: builtin.build_write_tool(),
     "edit": lambda _context: builtin.build_edit_tool(),
     "memory": lambda _context: build_memory_tool(),
@@ -206,6 +208,7 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
 DEFAULT_TOOL_NAMES: list[str] = [
     "bash",
     "read",
+    "read_public_copy",
     "write",
     "edit",
     "memory",
