@@ -1085,7 +1085,9 @@ def _sample_deadline_overlap(
     The old 2000-beat loop could finish before its reader got scheduled (CI:
     42 reads, zero partials). A read now earns credit only after a NEW completed
     beat, and the writer continues until 200 such observations exist. A reader
-    cannot satisfy this by reading one frozen version 200 times. The clock
+    cannot satisfy this by sampling one frozen beat counter 200 times. These
+    counters do not identify distinct encoded file bytes or prove syscall overlap;
+    only the forced half-write control proves a read in the vulnerable window. The clock
     injection belongs only to the dead-reader control and expires after the
     minimum workload, avoiding a twenty-second busy-loop negative control.
     """
