@@ -27,17 +27,17 @@ from typing import Any, NamedTuple
 
 from local_operator.procstate import is_zombie, pid_liveness, process_sample
 
+# The transcript resolver, also stdlib-only at ITS module scope, and needed by
+# every listing reader below: a compressed transcript is still a transcript, and
+# a plain-name probe or open would report it as absent or empty.
+from local_operator.session import compression
+
 # The archive index is imported at module scope deliberately: it is stdlib-only
 # at ITS module scope (its one local import, of ``session.catalog``, is made
 # inside the function that needs it precisely because ``catalog`` imports this
 # module), so it costs this module's import budget nothing and the scan can read
 # it without a per-poll import.
 from local_operator.session.archived import archived_ids
-
-# The transcript resolver, also stdlib-only at ITS module scope, and needed by
-# every listing reader below: a compressed transcript is still a transcript, and
-# a plain-name probe or open would report it as absent or empty.
-from local_operator.session import compression
 
 #: Module level, not lazy, and deliberately so: this module sits on the CLI
 #: startup path, and ``session.errors`` is the one importable that costs

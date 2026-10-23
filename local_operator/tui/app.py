@@ -1889,6 +1889,7 @@ def _has_transcript(directory: "Path") -> bool:
 
     return compression.has_transcript(directory)
 
+
 #: How long the second Ctrl+C counts as a DOUBLE press. Short on purpose: this
 #: is a deliberate double-tap, not a mode. Long enough and a user interrupting
 #: two turns in a row would quit the app by accident, which is the one outcome a

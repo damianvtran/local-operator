@@ -194,6 +194,7 @@ ATTEMPT_REASONS = frozenset({"wedged", "failed", "raised"})
 _ENV_DISABLE = "LOCAL_OPERATOR_NO_AIDA"
 _FALSY = {"0", "false", "no", "off", ""}
 
+
 @dataclass(frozen=True)
 class TriggerInstance:
     """One live condition, as a source reports it.

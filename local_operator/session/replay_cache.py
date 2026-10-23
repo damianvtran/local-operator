@@ -73,8 +73,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from local_operator.session.attachments import store_for_transcript_dir
 from local_operator.session import compression
+from local_operator.session.attachments import store_for_transcript_dir
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE

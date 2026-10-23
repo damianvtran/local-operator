@@ -149,6 +149,7 @@ from local_operator.session.runtime.types import (
     PEER_JOURNAL_SOURCE_FLAG,
     PROTOCOL_VERSION,
 )
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

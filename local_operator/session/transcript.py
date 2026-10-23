@@ -60,6 +60,12 @@ from local_operator.harness.types import (
     Message,
     TextContent,
 )
+
+# The read-side resolver for a transcript that may be stored compressed. Imported
+# at module scope because this module's READERS all need it and ``compression`` is
+# stdlib-only by contract (whose own lazy imports keep the harness out of ITS
+# graph), so this adds no cycle and no weight to the CLI path.
+from local_operator.session import compression
 from local_operator.session.attachments import AttachmentStore
 
 # The engagement reader — and the transcript filename it looks for — live in
@@ -79,12 +85,6 @@ from local_operator.session.creation import (
     session_created_at,
 )
 from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
-
-# The read-side resolver for a transcript that may be stored compressed. Imported
-# at module scope because this module's READERS all need it and ``compression`` is
-# stdlib-only by contract (whose own lazy imports keep the harness out of ITS
-# graph), so this adds no cycle and no weight to the CLI path.
-from local_operator.session import compression
 from local_operator.session.runtime.engagement import (  # noqa: F401
     TRANSCRIPT_FILENAME,
     durable_conversation_path,

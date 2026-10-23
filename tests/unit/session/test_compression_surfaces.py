@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.session import compression, cleanup
+from local_operator.session import cleanup, compression
 
 
 def _journal(rows: int = 6) -> bytes:
@@ -371,12 +371,15 @@ def test_the_sweep_scans_a_compressed_transcript(tmp_path: Path) -> None:
 
     config = _store(tmp_path, "sweep")
     digest = "a" * 32
-    body = _journal() + (
-        json.dumps(
-            {"id": "ref1", "ts": 1.0, "type": "custom", "payload": {"attachment": digest}}
-        )
-        + "\n"
-    ).encode()
+    body = (
+        _journal()
+        + (
+            json.dumps(
+                {"id": "ref1", "ts": 1.0, "type": "custom", "payload": {"attachment": digest}}
+            )
+            + "\n"
+        ).encode()
+    )
     directory = _session(config, "sweep01", body=body)
     _compress(directory)
 
