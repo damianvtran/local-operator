@@ -34,8 +34,10 @@ the empty catalogue are unit-testable without a Screen. The app method
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Iterable, Sequence
 
+from rich.markup import escape
 from textual.command import CommandPalette, DiscoveryHit, Hit, Hits, Provider
 
 from local_operator.i18n.keys import tui_palette as _p
@@ -110,8 +112,6 @@ class PaletteEntry:
         carry bracketed tokens such as ``[Paste #N]``, which ``Content`` would
         otherwise read as a style tag.
         """
-        from rich.markup import escape
-
         tag = self.kind_label
         if not self.description:
             return escape(tag)
@@ -273,8 +273,6 @@ class OperatorCommandProvider(Provider):
             self._system = None
 
     def _hit_command(self, entry: PaletteEntry) -> Any:
-        from functools import partial
-
         return partial(self.app._run_palette_entry, entry)  # type: ignore[attr-defined]
 
     async def discover(self) -> Hits:
