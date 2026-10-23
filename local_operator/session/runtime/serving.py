@@ -3771,7 +3771,12 @@ class ServingSessionHandle(SessionHandle):
             # prompt would return a receipt for a message that arrives without
             # its attachment — losing the user's file while telling them it was
             # queued. It takes the refusal, which returns both to the composer.
-            if self._draining and not self._exit_committed and not blocks:
+            if (
+                self._draining
+                and not self._exit_committed
+                and not blocks
+                and not document_blocks_decoded
+            ):
                 try:
                     receipt = await self._spool_for_successor(
                         text,
@@ -4820,12 +4825,15 @@ class ServingSessionHandle(SessionHandle):
         # the owner's receipt: the successor runs it, at the head of the turn the
         # prompt above it opens.
         #
-        # IMAGES (AND NOW A RECORDING) ARE THE ONE THING THE VEHICLE CANNOT
-        # CARRY and take the refusal, exactly as an attachment-carrying prompt
-        # does (see that arm for why an inbox row cannot hold them). Checked on
-        # the RAW argument rather than on the decoded blocks because the
-        # decision has to happen before the attach, and a non-empty ``images``
-        # or ``audio`` is the same fact one decode earlier.
+        # ATTACHMENTS — IMAGES, A RECORDING, AND NOW DOCUMENTS — ARE THE ONE
+        # THING THE VEHICLE CANNOT CARRY and take the refusal, exactly as an
+        # attachment-carrying prompt does (see that arm for why an inbox row
+        # cannot hold them). Checked on the RAW image/audio arguments rather
+        # than on the decoded blocks because the decision has to happen before
+        # the attach, and a non-empty ``images`` or ``audio`` is the same fact
+        # one decode earlier; a resolved document block is the only form the
+        # fact takes, because resolving it is what raises the refusal a
+        # missing digest owes.
         if self._updating:
             if images or audio or document_blocks_decoded:
                 self._command_reservations.reject(command_id)
