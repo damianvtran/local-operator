@@ -3997,8 +3997,10 @@ async def _construct_child_session(
             ),
             # The CHILD's own id, the same field the ToolContext above carries
             # (``transcript.directory.name``), so a child can recognise its own
-            # row in ``sessions(op='list')`` too. A child is ~93% of sessions and
-            # holds ``sessions`` itself; leaving this call id-less would make the
+            # row in ``sessions(op='list')`` too. A child is ~93% of sessions —
+            # the figure ``.github/workflows/ci.yml`` records as the reason the
+            # subagent context budget has its own ratchet — and it holds
+            # ``sessions`` itself; leaving this call id-less would make the
             # commonest session shape the one that cannot tell itself apart from
             # a peer, and the listing marker would be the only half of the fix it
             # ever saw.
