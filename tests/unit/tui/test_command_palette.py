@@ -14,7 +14,6 @@ Two layers, tested for different reasons:
 
 from __future__ import annotations
 
-import asyncio
 import threading
 from typing import Any
 
@@ -126,6 +125,22 @@ class TestCatalogue:
         assert agent_routes == ["/agent =chart", "/agent =new", "/agent =coder"]
         assert team_routes == ["/team =chart", "/team =new", "/team =edit", "/team =lopdev"]
 
+    def test_agent_names_with_whitespace_are_not_offered(self) -> None:
+        """`/agent` addresses one whitespace-delimited token; spaced names cannot.
+
+        A row for a spaced profile would route `/agent =John Smith`, which
+        attaches `John` and sends `Smith` as a model turn — worse than the row
+        being absent. The handler's own docstring is the naming contract.
+        """
+        entries = _catalogue(
+            agent_rows=[
+                ("John Smith", "John Smith", "", ""),
+                ("John-Smith", "John-Smith", "", ""),
+            ]
+        )
+        labels = [e.label for e in entries if e.kind == KIND_AGENT]
+        assert labels == ["John-Smith"]
+
     def test_team_names_dedupe_on_the_picker_s_casefold(self) -> None:
         """One row per name, compared exactly as `_team_choices` compares."""
         entries = [
@@ -199,7 +214,7 @@ class TestBuildSeam:
         app = OperatorApp(lambda: _factory(FakeSession()))
         monkeypatch.setattr(app, "_agent_profile_rows", lambda: [("coder", "Coder", "", "d")])
         monkeypatch.setattr(app, "_known_team_names", lambda: ["lopdev"])
-        entries = app._palette_entries()
+        entries = app._palette_entries(session_rows=[])
         assert any(e.slash == "/agent =coder" for e in entries)
         assert any(e.slash == "/team =lopdev" for e in entries)
         assert any(e.slash == "/help" for e in entries)
@@ -310,8 +325,26 @@ class TestWidget:
             await pilot.press(*"fix")
             await pilot.pause()
             assert palette_is_open(app), "a bracketed name must not kill the gather worker"
+            survived = [
+                str(option.prompt).split("\n", 1)[0]
+                for option in app.screen.query_one(CommandList).options
+            ]
+            assert survived == ["fix [/] thing"], survived
+            await pilot.press("backspace", "backspace", "backspace")
+            await pilot.press(*"wip")
+            await pilot.pause()
+            assert palette_is_open(app)
+            wip = [
+                str(option.prompt).split("\n", 1)[0]
+                for option in app.screen.query_one(CommandList).options
+            ]
+            assert wip == ["[WIP] topic"], wip
 
     @pytest.mark.asyncio
+    # The DISCRIMINATING check for M2 is this thread-identity assertion. An
+    # elapsed-time variant was removed in round 2: its stub released itself, so
+    # even a synchronous scan would eventually finish and let the palette open,
+    # and the test could not fail on the defect.
     async def test_the_session_scan_runs_off_the_event_loop(
         self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -332,37 +365,6 @@ class TestWidget:
             assert (
                 seen[0] != main_thread
             ), "recent_session_rows ran on the event loop; the provider must offload it"
-
-    @pytest.mark.asyncio
-    async def test_a_slow_session_scan_does_not_hold_the_palette_shut(
-        self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The palette is usable while the store scan is still running.
-
-        This is the failure the thread offload exists to prevent: the scan is
-        uncapped and cold it costs seconds, so a synchronous call would leave
-        `ctrl+p` painting nothing until the walk finished.
-        """
-        started = threading.Event()
-        release = threading.Event()
-
-        def _rows() -> list[Any]:
-            started.set()
-            release.wait(5.0)
-            return []
-
-        monkeypatch.setattr(app, "_palette_session_rows", _rows)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await await_session_boot(app)
-            await pilot.press("ctrl+p")
-            for _ in range(100):
-                if started.is_set():
-                    break
-                await asyncio.sleep(0.01)
-            assert started.is_set(), "the provider never started its scan"
-            assert palette_is_open(app), "the frame is blocked on the session scan"
-            release.set()
-            await pilot.pause()
 
     @pytest.mark.asyncio
     async def test_a_reserved_agent_name_is_dispatched_literally(self, app: OperatorApp) -> None:
@@ -430,6 +432,55 @@ class TestWidget:
             assert "Quit" in labels and "Theme" in labels, labels
             assert "/help" in labels
             assert labels.index("Quit") < labels.index("/help")
+
+    @pytest.mark.asyncio
+    async def test_a_slash_hit_leaves_any_full_page_mode(
+        self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not just settings: the library page hides the transcript too.
+
+        Every full-page mode replaces the transcript region; the palette must
+        run the same closers a user's Esc reaches before dispensing, or the
+        receipt lands on a hidden surface.
+        """
+        calls: list[str] = []
+        monkeypatch.setattr(app, "_run_slash_command", lambda text: calls.append(text))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            app._open_library_view()
+            await pilot.pause()
+            assert app._library_view is not None
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            await pilot.press(*"/help")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert calls == ["/help"]
+            assert app._library_view is None, "the library page must not stay over the receipt"
+            assert app._transcript_view().display is True
+
+    @pytest.mark.asyncio
+    async def test_a_profile_named_clear_attaches_instead_of_detaching(
+        self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`/agent =clear` is a literal name; the bare word is the detach verb."""
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            session = app._session
+            assert isinstance(session, FakeSession)
+            cleared: list[bool] = []
+            monkeypatch.setattr(session, "clear_agent_profile", lambda: cleared.append(True))
+            await app._run_palette_entry(
+                PaletteEntry(
+                    kind=KIND_AGENT,
+                    label="clear",
+                    slash="/agent =clear",
+                )
+            )
+            await pilot.pause()
+            assert cleared == [], "the `=` escape must suppress the detach verb"
+            assert session.prompts == []
 
     @pytest.mark.asyncio
     async def test_no_match_query_shows_the_localized_empty_state(self, app: OperatorApp) -> None:
