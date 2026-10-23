@@ -1242,6 +1242,12 @@ class ConfigManager:
 
         Creates the config file first if it doesn't exist.
 
+        Preservation is applied to ``config["values"]`` IN PLACE, so the caller's
+        snapshot ends up agreeing with the file it just wrote — a manager that
+        kept its pre-write view would read a preserved key as absent until the next
+        reload. ``metadata`` (the timestamp) is mutated the same way and always has
+        been.
+
         Args:
             config (Dict[str, Any]): Configuration dictionary to write
             drop (Mapping[tuple[str, ...], str] | None): Paths this write retires,
