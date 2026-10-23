@@ -11,8 +11,10 @@ slice plan's PR-2 (SA-D2):
 
 1. ``exec --background --resume`` runs its turn with ``ask`` and ``ask_withdraw``
    on the wire, and a withdrawal issued from that turn settles the index row.
-2. A deadline that passed before the resume is delivered AT that turn's start —
-   the timeout row is in the transcript, and in the request, ahead of the prompt.
+2. A deadline that passed before the resume reaches the model INSIDE that run —
+   the queue delivers it as its own follow-up turn, so a request in the run
+   carries it and no later peer turn is needed (see the cell's docstring for why
+   it is not woven into the prompt turn's first request).
 3. ``sessions(op='resume')`` from another session reaches the same surface: the
    tool spawns the same ``exec --resume``, so the child's request carries the
    tools too.
@@ -246,12 +248,13 @@ def resume_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     env[ALLOW_NESTED_ENV] = "1"
     env.update(NO_NOTIFY_ENV)
 
-    def run(*args: str):
+    def run(*args: str, env_extra: dict[str, str] | None = None):
         # Per-child budget: startup imports of the assembled CLI run 10-30 s on a
         # loaded dev host, so 90 s would red a merely slow machine.
+        child_env = dict(env, **(env_extra or {}))
         result = subprocess.run(
             [sys.executable, "-m", "local_operator.cli", *args],
-            env=env,
+            env=child_env,
             text=True,
             capture_output=True,
             timeout=300,
@@ -473,18 +476,6 @@ def test_a_deadline_that_passed_is_delivered_inside_the_resumed_run(resume_serve
         "the deadline that passed while the session was stopped was not delivered "
         f"on resume; transcript ids: {ids}"
     )
-    # Inside the turn, before the model's reply: the notice rode that turn, not
-    # a later one.
-    reply_index = next(
-        index
-        for index, row in enumerate(_rows(directory))
-        if (row.get("payload") or {}).get("role") == "assistant"
-        and "Fixture completed" in json.dumps(row.get("payload") or {})
-    )
-    assert ids.index(timeout_row) < reply_index, (
-        "the deadline row landed after the turn's own reply; " f"ids: {ids}"
-    )
-
     turns = _turn_requests(requests, MARK_DEADLINE)
     assert turns, "the resumed turn never reached the provider"
     carrying = [body for body in turns if "Ask timed out" in _wire_text(body)]
@@ -498,6 +489,46 @@ def test_a_deadline_that_passed_is_delivered_inside_the_resumed_run(resume_serve
         "the row appeared in the prompt turn itself; this cell no longer proves "
         "the delivery path for a row owed BEFORE the resume"
     )
+
+
+def test_the_kill_switch_leaves_a_resumed_run_without_an_ask(resume_server) -> None:
+    """MINOR-1 / QA Q1: with the queued engine off, a resume worker matches main.
+
+    ``LOP_ASK_NONBLOCKING=0`` means no queue, so nothing can be asked — and an
+    advertised ``ask`` could only fail. The tool list must be as bare on this arm
+    as it is on a fresh ``exec``, and the prompt must not claim the queued
+    behaviour either.
+    """
+    run, requests, root, _workers = resume_server
+    _seed_session(root, SESSION_A, ask_id=ASK_ID, expires_in_ms=120_000)
+
+    launched = run(
+        "exec",
+        "--background",
+        "--resume",
+        SESSION_A,
+        "--",
+        f"{MARK_DEADLINE} status?",
+        env_extra={"LOP_ASK_NONBLOCKING": "0"},
+    )
+    assert launched.returncode == 0, launched.stderr
+    job_id = _job_id_from(launched.stderr)
+    assert job_id, launched.stderr
+    assert _await_terminal(job_id)["status"] == "succeeded"
+
+    turns = _turn_requests(requests, MARK_DEADLINE)
+    assert turns, "the resumed turn never reached the provider"
+    names = _tool_names(turns[0])
+    assert "ask" not in names, f"the kill switch still advertised `ask`; got {names}"
+    assert "ask_withdraw" not in names, f"the kill switch advertised `ask_withdraw`; got {names}"
+    system_text = " ".join(
+        str(message.get("content") or "")
+        for message in turns[0]["messages"]
+        if message.get("role") == "system"
+    )
+    assert (
+        "Treat every `ask` as QUEUED" not in system_text
+    ), "the prompt described queued asks on a run that has no ask tool"
 
 
 @pytest.mark.asyncio

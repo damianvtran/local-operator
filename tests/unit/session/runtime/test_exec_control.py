@@ -457,6 +457,33 @@ async def test_a_fresh_unsupervised_run_installs_no_ask_surface(
 
 
 @pytest.mark.asyncio
+async def test_the_kill_switch_leaves_a_resumed_run_with_no_ask_surface(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-1 / QA Q1: with the queued engine off, match ``main`` — no ``ask``.
+
+    ``LOP_ASK_NONBLOCKING=0`` means there is no queue, so a hook installed here
+    could only advertise a tool whose single outcome is the refusal, beside a
+    prompt describing the BLOCKING call. The predicate therefore requires
+    ``asks.policy.enabled()``; this cell pins that it is consulted rather than
+    assumed.
+    """
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=False, resumed=True)
+    try:
+        assert getattr(session, "_ask_handler", None) is None
+        # The consequence that matters is upstream of this handle: no hook makes
+        # `Session.ask_queue()` answer None, which is what keeps `ask` and
+        # `ask_withdraw` out of the inventory.
+        assert policy.enabled() is False
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
 async def test_a_resumed_supervised_run_keeps_the_real_ask_gate(
     isolated_config: Path,
 ) -> None:
