@@ -66,6 +66,14 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
     report.write_text("the Monday numbers", encoding="utf-8")
     seed_session(isolated_root, "feedfacecafe", write_rows("w1", 1.0, report))
     asset = index.build_catalog(isolated_root, budget_s=None).assets[0]
+    # The tool reads the derived index, which the background worker owns. A
+    # first look on a fresh config is legitimately `building` with no rows (the
+    # service starts the worker and answers immediately), so this test builds
+    # the index explicitly the way the other library fixtures do.
+    from local_operator.library import indexer
+
+    indexer.reset_for_tests()
+    indexer.rebuild_now(isolated_root)
 
     stats = json.loads(text(await execute_library("c1", {"op": "stats"}, None, None, None)))
     assert stats["assets"] == 1 and stats["state"] == "ready"
