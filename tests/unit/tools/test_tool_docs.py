@@ -390,7 +390,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
     # it exists to avoid a bypass, not to be a second file browser.
-    "read_public_copy": 237,
+    "read_public_copy": 121,
     "read_variable": 67,
     "secret": 184,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail

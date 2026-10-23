@@ -31,16 +31,13 @@ import pytest
 
 from local_operator.harness.loop import AgentLoop
 from local_operator.harness.redaction import PUBLIC_COPY_TOOLS
-from local_operator.harness.types import TextContent, ToolContext
+from local_operator.harness.types import Content, TextContent, ToolContext
 from local_operator.redaction_shapes import (
     is_registerable_component,
     scrub_shapes,
     scrub_shapes_for_arguments,
 )
-from local_operator.tools.public_copy import (
-    TOOL_NAME,
-    execute_read_public_copy,
-)
+from local_operator.tools.public_copy import TOOL_NAME, execute_read_public_copy
 from local_operator.tools.registry import TOOL_BUILDERS
 from local_operator.variables import VariableStore
 
@@ -155,9 +152,7 @@ def test_the_release_does_not_move_to_a_strong_name(case_id: str, text: str) -> 
     assert report.labels, f"{case_id}: no shape label on a masked strong position"
 
 
-@pytest.mark.parametrize(
-    "case_id,text,name", PUBLIC_COPY, ids=[row[0] for row in PUBLIC_COPY]
-)
+@pytest.mark.parametrize("case_id,text,name", PUBLIC_COPY, ids=[row[0] for row in PUBLIC_COPY])
 def test_public_copy_passes_every_masking_surface(case_id: str, text: str, name: str) -> None:
     """A non-secret is unchanged on the result, argument and bare shape passes."""
     store = VariableStore()
@@ -168,9 +163,9 @@ def test_public_copy_passes_every_masking_surface(case_id: str, text: str, name:
 
     assert store.redact_arguments(text) == text, f"{case_id}: argument pass masked a public name"
     assert scrub_shapes(text) == text, f"{case_id}: bare shape pass masked a public name"
-    assert scrub_shapes_for_arguments(text) == text, (
-        f"{case_id}: bare argument pass masked a public name"
-    )
+    assert (
+        scrub_shapes_for_arguments(text) == text
+    ), f"{case_id}: bare argument pass masked a public name"
 
     # Registration is the amplifier: even a mask that is released in place must
     # never promote a NAME into the session-wide redaction set.
@@ -234,15 +229,17 @@ def test_only_the_sanctioned_tool_is_exempt_from_result_redaction() -> None:
 @pytest.mark.asyncio
 async def test_public_copy_result_skips_the_result_pass() -> None:
     """``read_public_copy`` is verbatim; every other tool still masks."""
-    content = [TextContent(text="SECRET-VALUE")]
+    content: list[Content] = [TextContent(text="SECRET-VALUE")]
 
     def redact(text: str) -> str:
         return text.replace("SECRET-VALUE", "[redacted]")
 
     public = await AgentLoop._redact_content(content, redact, TOOL_NAME, {}, ".")
+    assert isinstance(public[0], TextContent)
     assert public[0].text == "SECRET-VALUE"
 
     ordinary = await AgentLoop._redact_content(content, redact, "bash", {}, ".")
+    assert isinstance(ordinary[0], TextContent)
     assert ordinary[0].text == "[redacted]"
 
 
@@ -281,9 +278,7 @@ def _public_repo(tmp_path: Path) -> Path:
     # ``read_public_copy`` serves COMMITTED bytes only (the review-1 blocker):
     # the fixture must be a real HEAD, not just a working tree.
     subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
-    subprocess.run(
-        ["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True
-    )
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
     subprocess.run(
@@ -422,9 +417,9 @@ async def test_public_copy_fails_closed_when_the_audit_cannot_be_written(
 
 def test_the_policy_document_names_its_owner_and_both_lists() -> None:
     """The prose policy is part of the control, not a comment beside it."""
-    text = (
-        Path(__file__).resolve().parents[3] / "docs/security/redaction-policy.md"
-    ).read_text(encoding="utf-8")
+    text = (Path(__file__).resolve().parents[3] / "docs/security/redaction-policy.md").read_text(
+        encoding="utf-8"
+    )
     assert "**Owner:** Damian Tran" in text
     assert "### 2.1 A secret" in text
     assert "### 2.2 Not a secret" in text

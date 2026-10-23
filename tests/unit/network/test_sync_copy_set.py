@@ -367,6 +367,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "stores through the import adapters and writes transcripts through the "
         "session store, so it owns no copy-set filename.",
     ),
+    "local_operator/tools/public_copy.py": (
+        3,
+        "``TOOL_NAME`` is the model-facing registry key; ``_AUDIT_DIRNAME`` and "
+        "``_AUDIT_FILENAME`` name the operator-level public-copy audit log under "
+        "``<config>/audit/``. None is an entry of a session directory, and the "
+        "copy set must neither carry nor exclude them.",
+    ),
     "local_operator/harness_import/manifest.py": (
         1,
         "``INDEX_NAME`` ('index.json') is the O(1) already-imported cache under "

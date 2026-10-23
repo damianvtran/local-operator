@@ -104,21 +104,10 @@ class ReadPublicCopyParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    path: str = Field(
-        description=(
-            "Repository-relative path to public i18n copy: a catalogue JSON "
-            "(``local_operator/i18n/catalogues/<locale>/<name>.json``), a key module "
-            "(``local_operator/i18n/keys/<name>.py``), or a generated key map "
-            "(``local_operator/mobile/web/src/i18n/keys.gen.ts``)."
-        )
-    )
+    path: str = Field(description="Repository-relative public i18n copy path.")
     key: str | None = Field(
         default=None,
-        description=(
-            "Catalogue or message key to return, e.g. ``wire.slash.credential``. "
-            "Required for key modules and generated maps; optional for a catalogue "
-            "(a whole small catalogue is returned when omitted)."
-        ),
+        description="Catalogue/message key; required for key modules and maps.",
     )
 
 
@@ -254,9 +243,7 @@ def _committed_public_copy(root: Path, relative: str) -> tuple[bytes, str | None
             return b"", f"{relative} is not committed at HEAD; commit the public copy first"
         clean = _git("diff", "--quiet", "HEAD", "--", relative)
         if clean.returncode == 1:
-            return b"", (
-                f"{relative} differs from HEAD; commit the public copy before auditing it"
-            )
+            return b"", (f"{relative} differs from HEAD; commit the public copy before auditing it")
         if clean.returncode != 0:
             return b"", f"could not compare {relative} with HEAD"
         blob = _git("show", f"HEAD:{relative}")
@@ -381,10 +368,9 @@ def build_read_public_copy_tool() -> AgentTool:
         name=TOOL_NAME,
         label="Read public copy",
         description=(
-            "Read public i18n copy that the credential redactor may mask: a catalogue "
-            "value by key, a key module line, or a generated key map. This is the "
-            "sanctioned route from docs/security/redaction-policy.md — it reads only "
-            "allowlisted i18n paths and appends an audit record for every read."
+            "Read committed public i18n copy through the audited route: a catalogue "
+            "key, a key-module line, or a generated key map. Allowlisted; every read "
+            "is recorded."
         ),
         parameters=ReadPublicCopyParams.model_json_schema(),
         approval_tier="read",
