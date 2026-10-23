@@ -29,6 +29,8 @@ from unittest.mock import patch
 from textual._types import MessageTarget
 from textual.timer import Timer, TimerCallback
 
+from tests.worker_code_identity import quality as worker_quality, task_label
+
 
 @dataclass(frozen=True)
 class CallbackSpan:
@@ -255,6 +257,9 @@ class CallbackSpans:
                 name = getattr(owner.get_coro(), "__qualname__", type(callback).__name__)
             else:
                 name = getattr(callback, "__qualname__", type(callback).__name__)
+            # Safe launch-root ID is registered before the task's first resume;
+            # lookup is outside the unchanged Handle execution clock boundary.
+            worker_detail = task_label(owner)
             cpu = self._cpu_clock()
             wall = self._wall_clock()
             serial = self._tick_serial
@@ -272,7 +277,7 @@ class CallbackSpans:
                     # Only a step that actually entered ``_tick`` gets the
                     # timer's identity; the sleep half of the same task does
                     # not, and must not be attributed to the last timer seen.
-                    self._tick_detail if self._tick_serial != serial else "",
+                    self._tick_detail if self._tick_serial != serial else worker_detail,
                 )
                 window = self._current
                 window.count += 1
@@ -335,6 +340,7 @@ class CallbackSpans:
         return {
             "process_id": os.getpid(),
             "loop_thread_id": self.thread_id,
+            "worker_identity": worker_quality(),
             "clock": "thread_time CPU / perf_counter wall, milliseconds",
             "attribution": "completed callbacks; probe-tail boundary mismatch, not verdict input",
             "worst_cpu_windows": [asdict(window) for window in self._cpu_windows],
