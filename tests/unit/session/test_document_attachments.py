@@ -907,19 +907,21 @@ async def test_a_document_turn_measures_and_renders_before_the_provider(
     ref = store.put_bytes(raw, "application/pdf")
     assert ref is not None
     seen: dict[str, object] = {}
+    measures: list[object] = []
 
     async def stream(request, api_key=None, oauth_access=None):
         # The real seam: this is what model/configure.py awaits before dispatch.
-        seen["measure"] = measure_request(request)
+        measures.append(measure_request(request))
         user = next(m for m in reversed(request.messages) if m.role == "user")
-        seen["part"] = _message_to_openai(
-            user,
-            document_form(
-                request.model.provider,
-                "openai-chat",
-                context_window=request.model.context_window,
-            ),
-        )["content"][1]
+        if "part" not in seen and any(isinstance(block, DocumentContent) for block in user.content):
+            seen["part"] = _message_to_openai(
+                user,
+                document_form(
+                    request.model.provider,
+                    "openai-chat",
+                    context_window=request.model.context_window,
+                ),
+            )["content"][1]
         async for event in MockClient().stream(request, api_key, oauth_access):
             yield event
 
@@ -932,11 +934,21 @@ async def test_a_document_turn_measures_and_renders_before_the_provider(
             command_id="c-recorder-1",
             wait_complete=True,
         )
+        # QA Q2's second half: a TEXT-ONLY follow-up in the same session must
+        # still measure, because the request key walks the document's row.
+        await handle.prompt("And the dates?", command_id="c-recorder-2", wait_complete=True)
     finally:
         await session.dispose()
 
-    measured = seen["measure"]
-    assert measured.tokens > 0
+    # The session makes more than one request (the title call is one), so
+    # locate the turns by shape instead of counting: the document's own request
+    # and the text-only follow-up that still carries its row in history.
+    assert len(measures) >= 2
+    assert all(measured.tokens > 0 for measured in measures)
+    follow_up = measures[-1]
+    # Each key tuple's third element is its block-tuple sequence; the first
+    # member of a block tuple is the discriminant.
+    assert any(block[0] == "document" for key in follow_up.messages for block in key[2])
     part = seen["part"]
     assert isinstance(part, dict)
     assert part["type"] == "file"
