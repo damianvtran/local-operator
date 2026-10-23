@@ -1519,7 +1519,10 @@ class DurableWriteIntent:
     #: ``sync`` is here because syncing rewrites installed account rows and its
     #: hub arm fetches account definitions — both are account mutations the
     #: seam is asked about, even though the tool's own verb is a different one.
-    operation: Literal["create", "update", "delete", "install", "reset", "sync"]
+    #: ``promote`` is the verb that copies a CONVERSATION definition into the
+    #: account (LOH-9 S4): the tool may propose it, and only the user's own
+    #: surface can authorise it, which is exactly what the seam answers.
+    operation: Literal["create", "update", "delete", "install", "reset", "sync", "promote"]
     name: str
     #: Always ``global`` today: a conversation-scoped write never asks. Kept
     #: explicit so a future scope cannot be read as "no consent needed" by

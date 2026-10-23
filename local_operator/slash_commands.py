@@ -282,12 +282,13 @@ def project_subcommand_rows() -> tuple[tuple[str, str], ...]:
     return tuple((word, PROJECT_SUBCOMMAND_HELP[word]) for word in PROJECT_SUBCOMMANDS)
 
 
-AGENT_SUBCOMMANDS: tuple[str, ...] = ("class", "new", "edit")
+AGENT_SUBCOMMANDS: tuple[str, ...] = ("class", "new", "edit", "promote")
 
 AGENT_SUBCOMMAND_HELP: dict[str, str] = {
     "class": "Show or switch an agent's class (proactive|reactive)",
     "new": "Create an agent role or specialist",
     "edit": "Edit an installed agent profile",
+    "promote": "Copy this conversation's role into your account",
 }
 
 
