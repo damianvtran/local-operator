@@ -92,7 +92,10 @@ def proto_supported(
 #: can be named by what it IS rather than by a framework-generated id.
 #: 0.1.24 is the first tree that serves `query` (CSS in, element descriptors
 #: out) — the read-only answer to "what is the id of this checkbox?".
-EXPECTED_EXTENSION_VERSION = "0.1.24"
+#: 0.1.25 is the first tree whose `element_not_found` carries
+#: `data.candidates` (role/name/locator) on a CSS miss as well as a locator
+#: miss, so the tool can name the closest real elements instead of a bare miss.
+EXPECTED_EXTENSION_VERSION = "0.1.25"
 
 #: The first extension version that serves each capability-gated method.
 #:

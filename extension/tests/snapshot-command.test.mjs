@@ -119,14 +119,26 @@ test("a selector is resolved before the tree is read, and scopes the walk", asyn
   }
 });
 
-test("a selector that matches nothing fails typed, before any a11y read", async () => {
+test("a selector that matches nothing fails typed, and names what does exist", async () => {
+  // The miss still refuses BEFORE a snapshot is printed — but it now reads the
+  // accessibility tree to name the closest real elements (diagnostics slice), so
+  // the call sequence ends with the a11y read rather than at `querySelector`.
   const { loaded, calls, close } = await loadWith({ selectorNodeId: 0 });
   try {
-    await assert.rejects(
-      () => loaded.snapshot({ tab: SURFACE, selector: "#hook_active" }),
-      (error) => error.code === "element_not_found" && /#hook_active/.test(error.message),
+    const error = await loaded.snapshot({ tab: SURFACE, selector: "#hook_active" }).then(
+      () => null,
+      (failure) => failure,
     );
-    assert.deepEqual(calls.map((call) => call.method), ["DOM.getDocument", "DOM.querySelector"]);
+    assert.equal(error?.code, "element_not_found");
+    assert.match(error.message, /#hook_active/);
+    assert.ok(Array.isArray(error.data?.candidates), JSON.stringify(error.data));
+    assert.deepEqual(calls.map((call) => call.method), [
+      "DOM.getDocument",
+      "DOM.querySelector",
+      "Accessibility.enable",
+      "Accessibility.getFullAXTree",
+      "Accessibility.disable",
+    ]);
   } finally {
     await close();
   }
