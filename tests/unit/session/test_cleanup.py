@@ -1363,6 +1363,40 @@ def test_an_inbox_only_session_is_listed_latest_and_resumable(tmp_path: Path) ->
     assert cleanup._guard(mailonly, tmp_path, NOW) == "has unread spooled mail"
 
 
+def test_the_deletion_guard_keeps_its_two_content_probes(tmp_path: Path) -> None:
+    """``_guard`` is unchanged by the split: mail and asks still refuse DELETION.
+
+    The narrower ``_transcript_write_guard`` answers the same directory
+    differently on purpose — compression is reversible and never reads these two
+    files, so it must not be held by them. Pinned together so a future edit
+    cannot quietly move a content probe into the shared half.
+    """
+    from local_operator.asks import store as ask_store
+    from local_operator.session.runtime.inbox import INBOX_NAME
+
+    mark_store(tmp_path / "sessions")
+    mailed = _session(tmp_path, "mailed", age_days=40)
+    (mailed / INBOX_NAME).write_text('{"from": "peer"}\n', encoding="utf-8")
+    asking = _session(tmp_path, "asking", age_days=40)
+    stamp = ask_store.now_ms()
+    assert ask_store.append_event(
+        asking,
+        {
+            "ask_id": "ask-1",
+            "kind": ask_store.EVENT_QUEUED,
+            "at": stamp,
+            "expires_at": stamp + 600_000,
+            "timeout_s": 600,
+        },
+    )
+
+    assert cleanup._guard(mailed, tmp_path, NOW) == "has unread spooled mail"
+    assert cleanup._guard(asking, tmp_path, NOW) == "has an open ask"
+    # The rewrite guard, by contrast, has no objection to either.
+    assert cleanup._transcript_write_guard(mailed, tmp_path, NOW) is None
+    assert cleanup._transcript_write_guard(asking, tmp_path, NOW) is None
+
+
 def test_latest_breaks_equal_stamps_the_way_the_picker_does(tmp_path: Path) -> None:
     """Same clock, same tie-break: with equal stamps ``@latest`` is the
     picker's first row (ascending id), not ``max``'s largest id."""

@@ -673,12 +673,14 @@ def _session_exists(config_dir: Path, session_id: str) -> bool:
 
     The transcript rather than the directory, matching
     ``multiplexer/broadcast.py``: a directory with no transcript is not a
-    session anything can resume.
+    session anything can resume. ``has_transcript`` rather than a stat of the
+    plain name, because a compressed session's conversation is in the archive
+    beside it — a plain stat would read it as a ghost and drop its wake.
     """
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
 
     try:
-        return (Path(config_dir) / "sessions" / session_id / TRANSCRIPT_NAME).is_file()
+        return compression.has_transcript(Path(config_dir) / "sessions" / session_id)
     except OSError:
         # Unreadable is not proof of absence, and the cost of the two errors
         # is asymmetric: skipping a real session loses its wake, while trying

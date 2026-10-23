@@ -132,6 +132,16 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_MAX_TOTAL_BYTES,
         DEFAULT_REMOVE_EMPTY,
     )
+
+    # The compression policy's own constants, from the module that READS them
+    # (``policy_from_config``). Aliased because ``cleanup`` exports the same
+    # names for its own, unrelated switch.
+    from local_operator.session.compression import (
+        DEFAULT_AFTER_DAYS as DEFAULT_COMPRESSION_AFTER_DAYS,
+    )
+    from local_operator.session.compression import (
+        DEFAULT_ENABLED as DEFAULT_COMPRESSION_ENABLED,
+    )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
     from local_operator.session.runtime.process import (
         DEFAULT_KEEP_ALIVE_MAX,
@@ -258,6 +268,11 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "session.cleanup.delegated.enabled": DEFAULT_DELEGATED_ENABLED,
         "session.cleanup.delegated.max_age_hours": DEFAULT_DELEGATED_MAX_AGE_HOURS,
+        # The compression switch and threshold. ``enabled`` defaults TRUE here,
+        # unlike every cleanup switch: nothing is removed, so the page must
+        # advertise the value the pass actually runs with.
+        "session.compression.enabled": DEFAULT_COMPRESSION_ENABLED,
+        "session.compression.after_days": DEFAULT_COMPRESSION_AFTER_DAYS,
         # The pad cap's reader falls back to this module constant when the key is
         # absent (``scratchpad.scratchpad_budget_bytes``); the registry row
         # carries a literal because settings_io stays off the write path's

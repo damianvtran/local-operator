@@ -85,12 +85,49 @@ login picks them up at the NEXT session start.
   can price the call, the estimated amount BEFORE the spend.
 - Spend lands in the `audio` channel of the session's cost ledger (and the
   analytics store) as "Generated audio", with the estimate flag preserved.
+- **Length is a spend lever on both sound-effect meters.** Radient bills
+  $0.002 per started second of generated audio (the server quotes and
+  settles it). A stored ElevenLabs key is billed by the vendor at 40 credits
+  per second of requested duration — this tool always supplies `duration_s`,
+  so a 30 s clip is about 1,200 credits. The rates differ; the meter does not.
+  A BYOK voiceover is priced per character instead.
+
+## Writing a sound-effect prompt
+
+Describe the sound you want, not the ones you don't. This endpoint has no
+negative-prompt parameter, and phrasing an exclusion — "no music, no
+voices", "no background noise" — is read as a request for a quieter, weaker
+result rather than as a filter (the vendor's prompting guidance and what
+users report in practice agree on this). Prefer "a single dry click of a
+wooden button" over "a click, no music": the unwanted element is least
+likely to appear when the prompt describes the wanted one precisely and
+never names it.
+
+`duration_s` is required (0.5–30 s) and the clip is generated to fit it.
+Length costs on both meters — Radient per started second, a BYOK key at the
+vendor's 40 credits per second of requested duration — so budget the length
+you actually need (see [Cost, honestly](#cost-honestly)).
+
+## What reaches the vendor
+
+A Radient generation runs on the platform under its retention terms. A BYOK
+generation is a different hop: the text (voiceover) or prompt (sound
+effect) goes to ElevenLabs or OpenAI under the user's own key. ElevenLabs'
+`enable_logging` defaults to TRUE, and turning it off — zero-retention mode
+— is an Enterprise feature; our measured refusal is a 403
+`feature_not_available` on `param=enable_logging`. So a BYOK prompt or
+voiceover text is logged by that vendor unless the user's own account is
+Enterprise, and whatever retention Radient offers does not extend to the
+vendor hop. The tools never send `enable_logging` themselves, and we cannot
+switch it off on the user's behalf — say this plainly rather than implying
+a privacy guarantee for the BYOK route.
 
 ## Limits worth knowing
 
 - Voiceover text: 1–10,000 characters. Sound-effect prompt: 1–600 characters.
 - `duration_s` on a sound effect is REQUIRED (0.5–30 s): there is no
-  auto-duration, and the length is the main cost knob for effects.
+  auto-duration, and length is the main cost lever on both sound-effect
+  meters (see [Cost, honestly](#cost-honestly)).
 - `language` is honoured only by the flash models
   (`radient/voiceover-flash`, `eleven_flash_v2_5`); the multilingual default
   (`radient/voiceover`, `eleven_multilingual_v2`) pronounces whatever it is
@@ -99,9 +136,12 @@ login picks them up at the NEXT session start.
 - There are NO pronunciation dictionaries or phoneme control. For tricky
   names, spell the pronunciation in the text or use `instructions` (honoured
   where the provider takes an instructions field).
-- Output is **MP3 only** (no WAV). Radient serves a signed URL the harness
-  downloads immediately (24 h life — nobody should rely on the URL later);
-  the artifact is the attached copy, not the URL.
+- Output is **MP3 only** (no WAV). 192 kbps where the account's plan allows
+  it, 128 kbps where the plan refuses it: the harness asks for the better
+  format and retries once at 128 on a plan refusal, so a lower-tier key still
+  gets audio rather than a failed generation. Radient serves a signed URL the
+  harness downloads immediately (24 h life — nobody should rely on the URL
+  later); the artifact is the attached copy, not the URL.
 - **The duration is a property of the bytes, not of the provider's response.**
   It is derived at artifact creation from the same decode the waveform peaks
   use (`audiogen.peaks.compute_duration`). A provider that states one
@@ -110,9 +150,16 @@ login picks them up at the NEXT session start.
   duration, because a sound record with no length renders with **no player at
   all** — a generated clip the user cannot play, and no error to explain it.
 - A busy platform answers the submit with "Audio generation is busy right
-  now." (`audio_rate_limited`); the harness retries that a few times with
-  backoff, then reports it as a busy—not a quota—failure. A job that hits a
-  vendor rate limit after admission fails with the same word and zero cost.
+  now." (`audio_rate_limited`). The harness retries that refusal four times
+  with backoff — attempts at 0, 10, 30 and 65 s — then reports it as a busy
+  failure (not a quota one), with the window it waited out in the receipt
+  (`4 attempts over 65 s`; a batch adds jitter, so up to ~75 s). The 65 s is
+  sized against the server's own
+  45 s hold on a running vendor call (`ElevenLabsSpeechTimeout`), not guessed:
+  a shorter ladder exhausted inside that window. Only the admission refusal is
+  retried (it creates no job and charges nothing); timeouts, network errors and
+  post-admission rate limits fail straight through. A job that hits a vendor
+  rate limit after admission fails with the same word and zero cost.
 - BYOK voice ids: `female` / `male` map to the vendors' canonical voices;
   a vendor id (an ElevenLabs voice id, an OpenAI voice name) passes through.
   A voice id for one vendor is not copied onto another during failover.
@@ -139,6 +186,31 @@ server, and the receipt says what the server said:
 Nothing is resumed after a stop: call again for a fresh generation. Retrying
 while the same job may still be running can pay twice — the receipt tells you
 which case you are in.
+
+### A stopped batch can leave the platform briefly full
+
+The provider has no cancel API, and the audio server deliberately does NOT
+abort a running vendor call when a client cancels. So a **batch** you stop does
+not free its capacity instantly: the calls already in flight keep their
+per-account slots until the provider's own 45 s timeout
+(`ElevenLabsSpeechTimeout`) expires. That is invisible by design — the next
+batch you call (for example, the remaining items of a 14-item batch stopped
+at 11) waits out the hold and retries instead of failing:
+
+- A submit refused while those slots are held is retried at 0, 10, 30 and
+  65 s. Since 65 s clears the 45 s hold, the resumed items are admitted without
+  the caller needing to know slots exist.
+- An exhausted ladder reads `Audio platform at capacity: 4 attempts over 65 s.`
+  — that sentence is the receipt on a single call and on each batch row, whose
+  details carry the attempt list and `error_type: audio_rate_limited`. It is
+  what distinguishes a genuinely sustained shortage from a one-off stop.
+- Jitter between parallel workers only ever LENGTHENS a wait (1.0–1.15×), so a
+  desynchronised retry cannot land back inside the hold.
+
+The trade: a batch is still bounded by one 225 s tool call, and under constant
+capacity a long batch could spend its budget waiting for admission. A 3-item
+resume waits at least 65 s — up to about 75 s with jitter — plus one
+generation.
 
 ## Naming the result
 

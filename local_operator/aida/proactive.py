@@ -1662,13 +1662,13 @@ def reap_orphan_rows(config_dir: Path | str, *, keep: str = "") -> tuple[str, ..
     someone else's rows keeps them (a different session's wakes are not this
     engine's to delete) and keeps its lateness stamps.
 
-    Synchronous and cheap: one directory listing plus one ``is_file`` per entry
+    Synchronous and cheap: one directory listing plus one ``has_transcript`` per entry
     carrying engine rows, and the whole scan is skipped for entries with none —
     the only wake-carrying sessions on a typical machine are a handful. Never
     raises; a failure to read the index answers ``()``. Returns the ids reaped,
     so the caller and the tests can assert on what actually moved.
     """
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.wakes import store as wake_store
 
     root = Path(config_dir)
@@ -1684,7 +1684,9 @@ def reap_orphan_rows(config_dir: Path | str, *, keep: str = "") -> tuple[str, ..
             continue
         if not _aida_ids(entry):
             continue
-        if (root / "sessions" / session_id / TRANSCRIPT_NAME).is_file():
+        # A compressed session still exists: its transcript is an archive, and
+        # reaping her rows for it would silently drop a live cadence.
+        if compression.has_transcript(root / "sessions" / session_id):
             continue
         kept = [
             row

@@ -3523,6 +3523,39 @@ def _protected_children(scan: _Scan) -> set[str]:
     return protected
 
 
+#: Rule 3: every session named in the roster of a live/recent session, transitively.
+#:
+#: Factored out of the delegated pass so a SECOND consumer can ask the same
+#: question without copying the answer: ``session.compression`` keeps a child's
+#: transcript uncompressed while its parent could still resume it, and "could
+#: still resume" must mean here exactly what it means to retention, or the two
+#: passes disagree about which children are in play. Same ``_scan`` (live or
+#: in-window sources) and same ``_protected_children`` (transitive through kept
+#: delegated children), so a fix to either rule reaches both callers.
+#:
+#: FAILS CLOSED: a scan that could not read a directory, or a roster that exists
+#: and cannot be parsed, raises ``_Unknowable`` rather than returning a shorter
+#: set — the caller keeps every candidate on that answer.
+def active_parent_sessions(
+    config_dir: Path,
+    now: float,
+    *,
+    window_hours: float = float(DEFAULT_DELEGATED_MAX_AGE_HOURS),
+) -> set[str]:
+    """Session ids a live or recently active session still names in its roster."""
+    scan = _scan(
+        Path(config_dir) / SESSIONS_DIRNAME,
+        now - float(window_hours) * 3600.0,
+        now,
+        None,
+    )
+    if scan.unreadable:
+        raise _Unknowable(
+            f"{scan.unreadable} session director{'y' if scan.unreadable == 1 else 'ies'}"
+        )
+    return _protected_children(scan)
+
+
 # ---------------------------------------------------------------------------
 # The pass
 # ---------------------------------------------------------------------------

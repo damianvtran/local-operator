@@ -249,8 +249,11 @@ def _forward_payloads(directory: Path) -> Iterable[dict[str, Any]]:
     exactly the journals whose fold here is expensive), and this is the shape it
     must stay in step with.
     """
+    path = _journal_for_read(directory)
+    if path is None:
+        return
     try:
-        with (directory / "transcript.jsonl").open(encoding="utf-8") as handle:
+        with path.open(encoding="utf-8") as handle:
             for line in handle:
                 # Large transcripts mostly contain messages. Do not parse
                 # their payloads just to recover a two-field selector.
@@ -315,7 +318,9 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
     Journals this build writes cannot contain such a byte: every append encodes
     the whole row before writing it.
     """
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -364,6 +369,24 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
                 # what this flag does on the way toward the head.
                 unusable = True
     return None
+
+
+def _journal_for_read(directory: Path) -> Path | None:
+    """A readable journal for ``directory``, archive included, or ``None``.
+
+    THE RESOLVER, so a resumed session keeps the model its journal names: a
+    compressed session stores its selector rows inside the archive, and reading
+    the plain name would answer "no stored selection" and silently resume on the
+    configured hosting instead. Every reader below opens the path this returns,
+    and the memo keys stat it — so the cache stays keyed on the bytes actually
+    read.
+    """
+    from local_operator.session import compression
+
+    try:
+        return compression.transcript_for_read(directory)
+    except (OSError, compression.ArchiveError):
+        return None
 
 
 def _memoised(
@@ -425,7 +448,9 @@ def read_model_selection(directory: Path) -> StoredModelSelection | None:
     this module's audit measured (see ``_SELECTION_MEMO``'s comment).
     """
     return _memoised(
-        _SELECTION_MEMO, directory / "transcript.jsonl", lambda: _read_selection(directory)
+        _SELECTION_MEMO,
+        _journal_for_read(directory) or (directory / "transcript.jsonl"),
+        lambda: _read_selection(directory),
     )
 
 
@@ -473,7 +498,9 @@ def refused_decision_only_selection(directory: Path) -> str | None:
     ``_SELECTION_MEMO``).
     """
     return _memoised(
-        _SELECTION_REFUSAL_MEMO, directory / "transcript.jsonl", lambda: _read_refusal(directory)
+        _SELECTION_REFUSAL_MEMO,
+        _journal_for_read(directory) or (directory / "transcript.jsonl"),
+        lambda: _read_refusal(directory),
     )
 
 
@@ -485,7 +512,9 @@ def _read_refusal(directory: Path) -> str | None:
         is_speech_only,
     )
 
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -635,7 +664,9 @@ def session_uses_test_hosting(directory: Path) -> bool:
         # only direction the escape can move, and the kill switch still wins
         # because every leg asks it first.
         return False
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return False
     try:
         info = path.stat()
     except OSError:
@@ -708,7 +739,10 @@ def _read_test_hosting(directory: Path) -> bool | None:
     try:
         from local_operator.providers.registry import is_mock_provider
 
-        with (directory / "transcript.jsonl").open("rb"):
+        path = _journal_for_read(directory)
+        if path is None:
+            return None
+        with path.open("rb"):
             pass
         settled = _settled_selection(directory)
         return settled is not None and is_mock_provider(settled.provider)

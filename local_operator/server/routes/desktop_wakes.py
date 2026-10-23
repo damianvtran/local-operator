@@ -972,7 +972,6 @@ def _rollback_created(config_dir: Path, session_id: str) -> bool:
     removal.
     """
     from local_operator.mobile.attach_client import find_runtime_record
-    from local_operator.resume import TRANSCRIPT_NAME
     from local_operator.session.cleanup import remove_fresh_session_dir
     from local_operator.wakes.store import read_entry
 
@@ -982,7 +981,11 @@ def _rollback_created(config_dir: Path, session_id: str) -> bool:
             return False
         if read_desktop_marker(path) is None:
             return False
-        if (path / TRANSCRIPT_NAME).exists():
+        # ANY physical form: a compressed draft is a session with content, so
+        # this rollback must refuse it exactly as it refuses a plain one.
+        from local_operator.session import compression
+
+        if compression.has_transcript(path):
             return False
         if read_entry(Path(config_dir), session_id) is not None:
             return False
