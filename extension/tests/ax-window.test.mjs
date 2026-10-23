@@ -75,7 +75,13 @@ test("a scoped snapshot renders only the subtree, rebased to depth zero", async 
     assert.equal(scoped.scoped, true);
     assert.ok(!scoped.snapshot.includes("RootWebArea"), "nothing above the scope survives");
     assert.ok(scoped.snapshot.startsWith("- form"));
-    assert.ok(scoped.snapshot.includes('textbox "GitHub App name" [e1]'), "refs restart inside the scope");
+    // `e1` here is the name the WHOLE-TREE mint gave this node (it is the first
+    // interactive node of the page), not a number restarted inside the scope:
+    // that restart was R1-1's wrong-target bug.
+    assert.ok(
+      scoped.snapshot.includes('textbox "GitHub App name" [e1]'),
+      "the scope renders the whole-tree mint's name for this node",
+    );
     assert.ok(scoped.snapshot.includes("Setting 2"));
     // Depth is rebased: the form is the root, its children are one level in.
     assert.ok(scoped.snapshot.includes('\n  - textbox "GitHub App name"'));
@@ -120,7 +126,10 @@ test("a collapsed disclosure is marked, and the walk continues past it", async (
       true,
       rendered,
     );
-    assert.ok(summary.includes("[e"), "the summary is clickable: it must carry a ref");
+    assert.ok(
+      summary.includes("[e"),
+      "the summary is clickable and carries the ref the whole-tree mint gave it",
+    );
   } finally {
     await close();
   }
@@ -248,6 +257,26 @@ test("state markers accumulate instead of hiding one another", async () => {
     const rendered = loaded.compactAX(nodes, 1).snapshot;
     assert.ok(rendered.includes('"Both" [e1] [checked] [disabled]'), rendered);
     assert.ok(rendered.includes('"Tri" [e2] [mixed]'), rendered);
+  } finally {
+    await close();
+  }
+});
+
+test("framesInScope counts only the scope's own frames", async () => {
+  // Agent review round 2, R2-1: a page-level frame count told a caller that a
+  // FRAMELESS section held a frame it was not seeing.
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    const nodes = [
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "" }, childIds: ["2", "3"] },
+      { nodeId: "2", backendDOMNodeId: 10, role: { value: "form" }, name: { value: "Outer" }, childIds: ["4"] },
+      { nodeId: "3", backendDOMNodeId: 11, role: { value: "region" }, name: { value: "Elsewhere" }, childIds: ["5"] },
+      { nodeId: "4", backendDOMNodeId: 12, role: { value: "Iframe" }, name: { value: "Payment" }, childIds: [] },
+      { nodeId: "5", backendDOMNodeId: 13, role: { value: "button" }, name: { value: "Inner" }, childIds: [] },
+    ];
+    assert.equal(loaded.compactAX(nodes, 1).framesInScope, 0, "an unscoped read reports no scope frames");
+    assert.equal(loaded.compactAX(nodes, 1, { rootBackendNodeId: 10 }).framesInScope, 1);
+    assert.equal(loaded.compactAX(nodes, 1, { rootBackendNodeId: 11 }).framesInScope, 0);
   } finally {
     await close();
   }

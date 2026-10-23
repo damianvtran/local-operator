@@ -60,6 +60,11 @@ export interface CompactOptions {
 export interface CompactResult {
   snapshot: string;
   refs: Record<string, SnapshotRef>;
+  /** How many frame nodes the SCOPE contains (0 unscoped). A scoped read does
+   *  not walk frames, and only the subtree's own count can tell a caller "the
+   *  thing you scoped into holds a frame you are not seeing" (agent review
+   *  round 2, R2-1: a page-level count said so about frameless sections too). */
+  framesInScope: number;
   /** Rendered lines before any `windowSnapshot` filter or page. */
   totalLines: number;
   /** True only when a scope was requested AND found in the tree. */
@@ -123,6 +128,7 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
    * small page, not a fragment indented 17 levels deep). */
   const scopeId = options.rootBackendNodeId;
   let scopeAt: number | null = null;
+  let framesInScope = 0;
   // Guard against cyclic or duplicated childIds in a malformed AX payload:
   // the walk trusts protocol data, and without this a cycle would recurse
   // forever inside the extension's service worker (review round 1, MINOR-1).
@@ -163,6 +169,7 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
     }
     const role = String(node.role?.value ?? "");
     const name = String(node.name?.value ?? "").trim();
+    if (inside && role === "Iframe") framesInScope += 1;
     const focusable = node.properties?.some((property) => property.name === "focusable" && property.value.value === true);
     const interesting = INTERACTIVE.has(role) || LANDMARKS.has(role) || focusable || Boolean(name && role !== "StaticText");
     if (interesting) {
@@ -191,11 +198,19 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
   const scopedRoot =
     scopeId === undefined ? undefined : nodes.find((node) => node.backendDOMNodeId === scopeId);
   if (scopeId !== undefined && scopedRoot === undefined) {
-    return { snapshot: "", refs, totalLines: 0, scoped: false };
+    return { snapshot: "", refs, framesInScope: 0, totalLines: 0, scoped: false };
   }
   const childIds = new Set(nodes.flatMap((node) => node.childIds ?? []));
   for (const root of nodes.filter((node) => !childIds.has(node.nodeId))) visit(root, 0);
-  return { snapshot: lines.join("\n"), refs, totalLines: lines.length, scoped: scopeId !== undefined };
+  return {
+    snapshot: lines.join("\n"),
+    refs,
+    // Unscoped means "the whole page", and every frame is then read by the
+    // caller's own frame walk: the count exists only to explain a SCOPE.
+    framesInScope: scopeId === undefined ? 0 : framesInScope,
+    totalLines: lines.length,
+    scoped: scopeId !== undefined,
+  };
 }
 
 /** The result of one page of a snapshot, and the numbers a footer needs. */
