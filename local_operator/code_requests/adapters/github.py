@@ -17,6 +17,13 @@ question (commit contexts, not workflow jobs) and reading both would count one
 CI twice. The design fixes check-runs, and the counters below come straight off
 its ``total_count`` and per-run ``status``/``conclusion`` fields.
 
+CI ACCOUNTING IS A MERGE GATE, NOT A BADGE. ``passed`` means a check concluded
+``success`` and nothing else; ``skipped`` and ``neutral`` are completed without
+running, so each keeps its own counter and neither can lift the pass count.
+``pending`` is every run that has not completed, and ``success`` is published
+only when every read check concluded ``success``. The precise rules and the
+incident that set them are on :meth:`GithubAdapter.ci`.
+
 THE HEAD SHA IS LOAD-BEARING for the CI piece, so a ``304`` on ``summary``
 still yields one: the check-runs URL is built from the STORED summary's
 ``head_sha`` when the fresh response was revalidated — which is why ``fetch``
@@ -60,8 +67,20 @@ _TIMEOUT_S = 15.0
 
 #: Check-run conclusions that end red in GitHub's own UI.
 _FAILURE_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure", "action_required"})
-#: Conclusions that mean "completed and not failing".
-_PASS_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
+#: THE ONLY CONCLUSION THAT COUNTS AS A PASS. ``skipped`` and ``neutral`` used
+#: to live in this set, which made a run whose checks were all skipped render
+#: "2 passed" with zero successes (measured on radient-ml/agent-server run
+#: 40002268730: 2 skipped + 7 queued -> "2 passed, 7 pending"). Branch
+#: protection may accept a skipped required check; a MERGE GATE must not, and
+#: the one number this payload publishes is the merge-gate number. Each of the
+#: non-pass conclusions gets its own counter below rather than being folded
+#: into ``passed``.
+_PASS_CONCLUSIONS = frozenset({"success"})
+#: Completed, deliberately not run. Settled (it will never turn green), so it
+#: is neither pending nor a failure -- its own state.
+_SKIPPED_CONCLUSIONS = frozenset({"skipped"})
+#: Completed with a non-blocking result. Also not a pass.
+_NEUTRAL_CONCLUSIONS = frozenset({"neutral"})
 #: Statuses that mean "not finished yet".
 _PENDING_STATUSES = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
 
@@ -212,19 +231,33 @@ class GitHubAdapter:
         return "open"
 
     def ci(self, pieces: Mapping[str, Any]) -> dict[str, Any]:
-        """The CI payload: ``{status, passed, failed, pending, total, url}``.
+        """The CI payload: ``{status, passed, failed, skipped, neutral, pending, total, url}``.
 
-        ``status`` is ``none`` when checks exist but none configured (a
-        definitive zero), ``unknown`` when the piece was never fetched, could
-        not be read, or carried a shape this version does not classify — the
-        design's "unknown is never a guess". Counters stay ``None`` when the
-        host did not carry them.
+        ``passed`` counts ONLY ``success`` conclusions. ``skipped`` and
+        ``neutral`` are their own counters because a completed check that did
+        not run is not a pass, and folding them into ``passed`` published a
+        green number no check had earned. ``pending`` counts every run that has
+        not completed (queued/in-progress), so a run with work still in flight
+        can never read as settled and can never read as green.
+
+        ``status`` precedence, and the rule behind it: **success requires every
+        read check to have concluded ``success``**. ``failure`` outranks
+        ``pending`` (a red check is decisive even while others run), ``pending``
+        outranks the settled non-pass words, and ``unknown`` covers anything
+        this version cannot classify -- including a set it did not read whole
+        (``total_count`` larger than the runs returned). ``none`` is a
+        definitive zero (checks exist but none are configured).
+
+        Counters stay ``None`` when the host did not carry them — never a
+        guessed number (the design's "unknown is never a guess" rule).
         """
         raw = pieces.get("ci")
         base: dict[str, Any] = {
             "status": "unknown",
             "passed": None,
             "failed": None,
+            "skipped": None,
+            "neutral": None,
             "pending": None,
             "total": None,
             "url": None,
@@ -237,39 +270,59 @@ class GitHubAdapter:
             if raw.get("fetched"):
                 # A definitive "no checks ran": red would be wrong and grey
                 # would say "cannot tell", so it gets its own word.
-                base.update(status="none", passed=0, failed=0, pending=0, total=0)
+                base.update(
+                    status="none", passed=0, failed=0, skipped=0, neutral=0, pending=0, total=0
+                )
             return base
-        passed = failed = pending = 0
+        passed = failed = skipped = neutral = pending = 0
         unknown = False
         for run in runs:
             if not isinstance(run, Mapping):
                 unknown = True
                 continue
-            status = str(run.get("status") or "")
+            run_status = str(run.get("status") or "")
             conclusion = str(run.get("conclusion") or "")
-            if status != "completed" or status in _PENDING_STATUSES:
+            if run_status != "completed" or run_status in _PENDING_STATUSES:
                 pending += 1
             elif conclusion in _FAILURE_CONCLUSIONS:
                 failed += 1
             elif conclusion in _PASS_CONCLUSIONS:
                 passed += 1
+            elif conclusion in _SKIPPED_CONCLUSIONS:
+                skipped += 1
+            elif conclusion in _NEUTRAL_CONCLUSIONS:
+                neutral += 1
             else:
                 unknown = True
+        total = raw.get("total")
+        total = total if isinstance(total, int) else len(runs)
+        if total > len(runs):
+            # The check-runs call reads ONE page (100). When ``total_count``
+            # exceeds what arrived, the unread tail may hold the failure that
+            # decides the gate, so a partial read is never a pass.
+            unknown = True
         if failed:
             status = "failure"
         elif pending:
             status = "pending"
-        elif unknown and not passed:
+        elif skipped:
+            # Settled, but not every check ran. Never ``success``.
+            status = "skipped"
+        elif neutral:
+            status = "neutral"
+        elif unknown:
             status = "unknown"
         else:
+            # Every read check completed with ``success``; nothing else is left.
             status = "success"
-        total = raw.get("total")
         return {
             "status": status,
             "passed": passed,
             "failed": failed,
+            "skipped": skipped,
+            "neutral": neutral,
             "pending": pending,
-            "total": total if isinstance(total, int) else len(runs),
+            "total": total,
             "url": base["url"],
         }
 

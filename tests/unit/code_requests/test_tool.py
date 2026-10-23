@@ -10,6 +10,7 @@ import pytest
 
 from local_operator.code_requests import cache, ledger
 from local_operator.code_requests import tool as code_requests_tool
+from local_operator.code_requests.adapters import github
 from local_operator.code_requests.refs import Ref, parse_any
 from local_operator.harness.types import ToolContext
 
@@ -170,6 +171,65 @@ async def test_show_quotes_remote_text_as_data(tmp_path: Path) -> None:
     assert hostile in text[fence_start:fence_end]
     # And the parse still classifies the real convention header that precedes it.
     assert "Agent review — round 1" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runs", "expected_line"),
+    [
+        # Run 40002268730 in radient-ml/agent-server, verbatim: 2 SKIPPED,
+        # 7 queued/in_progress, ZERO success. This rendered
+        # "CI: pending — 2 passed, 0 failed, 7 pending of 9".
+        (
+            [("completed", "skipped"), ("completed", "skipped")]
+            + [("queued", "")] * 3
+            + [("in_progress", "")] * 4,
+            "CI: pending — 0 passed, 0 failed, 2 skipped, 7 pending of 9",
+        ),
+        # The settled zero-success case: all skipped, nothing in flight. This is
+        # the one that used to print "CI: success — 2 passed, 0 failed of 2".
+        (
+            [("completed", "skipped"), ("completed", "skipped")],
+            "CI: skipped — 0 passed, 0 failed, 2 skipped, 0 pending of 2",
+        ),
+    ],
+)
+async def test_the_ci_line_never_reads_as_passed_without_a_success(
+    tmp_path: Path, runs: list[tuple[str, str]], expected_line: str
+) -> None:
+    """The rendered line is what the merge gate reads, so the count on it must
+    be the number of checks that actually concluded success."""
+    pieces = {
+        "ci": {
+            "fetched": True,
+            "runs": [
+                {"name": f"job-{i}", "status": s, "conclusion": c}
+                for i, (s, c) in enumerate(runs)
+            ],
+            "total": len(runs),
+            "url": None,
+        }
+    }
+    entry = {
+        "pieces": {"summary": {"head_sha": "b" * 12, "title": "t"}, **pieces},
+        "validators": {},
+        "summary": {"state": "open", "head_sha": "b" * 12},
+        "state": "open",
+        "ci": github.ADAPTER.ci(pieces),
+        "lanes": [],
+        "comments_total": 0,
+        "checked_at": time.time(),
+        "fetched_at": time.time(),
+        "stale": False,
+        "refresh_error": None,
+    }
+    assert cache.write_entry(tmp_path, entry, ref=REF)
+    result = await code_requests_tool.execute_code_requests(
+        "c3", {"op": "show", "ref": REF.url}, None, None, _context(tmp_path)
+    )
+    assert not result.is_error
+    ci_lines = [ln for ln in result.text.splitlines() if ln.startswith("CI:")]
+    assert ci_lines == [expected_line]
 
 
 def _entry_with_hostile_comment(tmp_path: Path) -> str:

@@ -132,6 +132,162 @@ async def test_github_fetch_maps_summary_comments_and_ci() -> None:
     assert outcome.validators["summary"]["etag"] == 'W/"sum-1"'
 
 
+# ---------------------------------------------------------------------------
+# CI ACCOUNTING. These four shapes are the ones that made a merge gate lie:
+# ``skipped`` and ``neutral`` were in _PASS_CONCLUSIONS, so a run with zero
+# successes published a pass count and (with nothing pending) the word
+# "success". Each shape below is a field-for-field subset of a LIVE GitHub
+# check-runs response; the run ids are named where the shape was measured.
+# ---------------------------------------------------------------------------
+
+
+def _github_ci(*runs: tuple[str, str], total: int | None = None) -> dict:
+    """The ``pieces["ci"]`` shape ``_fetch_ci`` stores, from (status, conclusion)."""
+    items = [
+        {"name": f"job-{i}", "status": run_status, "conclusion": conclusion}
+        for i, (run_status, conclusion) in enumerate(runs)
+    ]
+    return {
+        "ci": {
+            "fetched": True,
+            "runs": items,
+            "total": total if total is not None else len(items),
+            "url": None,
+        }
+    }
+
+
+def test_skipped_checks_are_never_counted_as_passes() -> None:
+    """(a) skipped-only -> not passed. Measured shape: radient-ml/agent-server
+    run 40002268730 (2 SKIPPED, 7 queued/in_progress, ZERO success) reported
+    "2 passed" from this exact payload."""
+    ci = github.ADAPTER.ci(
+        _github_ci(
+            ("completed", "skipped"),
+            ("completed", "skipped"),
+            ("queued", ""),
+            ("queued", ""),
+            ("queued", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+        )
+    )
+    assert ci["passed"] == 0, "a skipped check is not a pass"
+    assert ci["skipped"] == 2
+    assert ci["pending"] == 7
+    assert ci["status"] == "pending"
+    assert ci["status"] != "success"
+
+
+def test_queued_and_in_progress_checks_are_pending_not_passed() -> None:
+    """(b) queued/in_progress -> not passed, and the payload distinguishes the
+    states. The counters must PARTITION the run set (``skipped``/``neutral``
+    exist as their own keys); before the fix there was no ``skipped`` key at
+    all, which is how a skip could vanish into the pass count."""
+    ci = github.ADAPTER.ci(
+        _github_ci(
+            ("queued", ""),
+            ("queued", ""),
+            ("queued", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+        )
+    )
+    assert ci["passed"] == 0
+    assert ci["pending"] == 7
+    assert ci["failed"] == 0
+    assert ci["status"] == "pending"
+    assert ci["skipped"] == 0 and ci["neutral"] == 0
+    assert (
+        ci["passed"] + ci["failed"] + ci["skipped"] + ci["neutral"] + ci["pending"]
+        == ci["total"]
+    )
+
+
+def test_success_count_excludes_skips_in_a_mixed_run() -> None:
+    """(c) mixed success+skipped -> the pass count is successes only.
+
+    Measured shape: a 49-check run in damianvtran/local-operator with 5
+    success and 39 skipped, which used to report ``44 passed``.
+    """
+    ci = github.ADAPTER.ci(
+        _github_ci(
+            *([("completed", "success")] * 5),
+            *([("completed", "skipped")] * 39),
+            *([("queued", "")] * 5),
+        )
+    )
+    assert ci["passed"] == 5, "only successes are passes"
+    assert ci["skipped"] == 39
+    assert ci["pending"] == 5
+    assert ci["status"] == "pending"
+    assert (
+        ci["passed"] + ci["failed"] + ci["skipped"] + ci["neutral"] + ci["pending"]
+        == ci["total"]
+    )
+
+    # The settled version of the same mix: no work in flight, yet not green.
+    settled = github.ADAPTER.ci(
+        _github_ci(
+            ("completed", "success"),
+            ("completed", "success"),
+            ("completed", "skipped"),
+        )
+    )
+    assert settled["passed"] == 2
+    assert settled["skipped"] == 1
+    assert settled["status"] == "skipped", "a settled non-pass is not `success`"
+
+
+def test_a_run_with_zero_successes_never_reaches_success() -> None:
+    """(d) zero successes can never buy the success headline.
+
+    The dangerous case is not the one with pending work (that already said
+    ``pending``): it is a FULLY SETTLED run where every check was skipped,
+    which used to publish ``status: success, passed: N`` with no success at
+    all. Neutral and unclassifiable conclusions get the same treatment, and
+    the one genuinely all-success run still passes.
+    """
+    all_skipped = github.ADAPTER.ci(
+        _github_ci(("completed", "skipped"), ("completed", "skipped"))
+    )
+    assert all_skipped["passed"] == 0
+    assert all_skipped["status"] == "skipped"
+
+    all_neutral = github.ADAPTER.ci(
+        _github_ci(("completed", "neutral"), ("completed", "neutral"))
+    )
+    assert all_neutral["passed"] == 0
+    assert all_neutral["status"] == "neutral"
+
+    # A conclusion this version does not classify is never a pass either.
+    unclassified = github.ADAPTER.ci(
+        _github_ci(("completed", "success"), ("completed", "cancelled"))
+    )
+    assert unclassified["passed"] == 1
+    assert unclassified["status"] == "unknown"
+
+    # The control: every check concluded success -> the only path to `success`.
+    green = github.ADAPTER.ci(
+        _github_ci(("completed", "success"), ("completed", "success"))
+    )
+    assert green["passed"] == 2 and green["status"] == "success"
+
+
+def test_a_partial_check_run_read_is_never_a_pass() -> None:
+    """``total_count`` above the one page read means the unread tail could hold
+    the failure that decides the gate, so a partial read cannot be green."""
+    ci = github.ADAPTER.ci(
+        _github_ci(*([("completed", "success")] * 100), total=150)
+    )
+    assert ci["passed"] == 100
+    assert ci["status"] == "unknown"
+
+
 @pytest.mark.asyncio
 async def test_github_conditional_request_revalidates_with_304() -> None:
     calls: list[httpx.Request] = []
