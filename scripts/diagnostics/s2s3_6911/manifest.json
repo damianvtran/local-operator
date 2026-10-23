@@ -1,0 +1,19 @@
+{
+  "source_stage": "WIP_BLOCKED_NO_EXECUTION_GO",
+  "base": "8e117a67fc",
+  "textual_pin": null,
+  "textual_canonical_constraint": "textual>=8.0.0; no exact canonical version established in this source lease",
+  "python": [
+    3,
+    13,
+    16
+  ],
+  "sources": {
+    "tests/unit/test_tui_responsiveness.py": "d3db863252ca241bb88acfe64026070e37c5cf9853e9b7154ae97a21b8b75350",
+    "scripts/diagnostics/s2s3_6911/plugin.py": "0afd16210eb2cc35a32b1ccb19fe83faa0cfb3fb298beacf852d6cead1b5dcd9",
+    "scripts/diagnostics/s2s3_6911/driver.py": "5adee039d627641885065d6dda8bf2e01766eeb32f8e97201d4ad7d78f3ff00c",
+    "scripts/diagnostics/s2s3_6911/oracle.py": "d8b740fa59e90ee8bce26344de12f9e74f1e0079c1c4848bef7ba101cffc92b0"
+  },
+  "original_s2": "e1dc2a6c3532025f4caae8efcfc1adabee8ac719254eb12534268e176086bb22",
+  "original_s3": "267821af9ee635b81709eb7852bb1f3336974da6a84e60d2b5b18af5f6ecc749"
+}
