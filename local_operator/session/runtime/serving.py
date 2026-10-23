@@ -6976,9 +6976,11 @@ class ServingSessionHandle(SessionHandle):
                 except Exception:  # noqa: BLE001 — a card is never worth failing
                     configured = None
                 global_mode = configured if configured is not None else remembered
-                if global_mode or explicit is not None:
-                    live_auto = getattr(self, "_auto_approve", None)
-                    pinned = bool(getattr(self, "_approval_pinned", False))
+                live_auto = getattr(self, "_auto_approve", None)
+                pinned = bool(getattr(self, "_approval_pinned", False))
+                # A pinned run states its provenance even when the file half is
+                # unknown: `pin` is a fact about THIS process, not a guess.
+                if global_mode or explicit is not None or pinned:
                     mode, provenance = resolve_effective(
                         explicit,
                         global_mode or ("auto" if live_auto else "ask"),
