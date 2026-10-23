@@ -16659,6 +16659,66 @@
         "tui.palette.no_matches",
         "tui.palette.placeholder"
       ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.asks",
+      "reason": "This locale carries no catalogue BY DESIGN — the package ships six active locales (tests/unit/i18n/test_package_data.py) and zh-CN is security-held — so its bytes cannot exist for a new namespace in this change. The manifest gate checks every language in i18n/languages.json, so the debt is recorded here rather than closing the namespace as English-only.",
+      "owner": "i18n-translator lane (PR-4b coder)",
+      "payoff": "2026-12-31",
+      "missing": [
+        "tui.asks.context.messages",
+        "tui.asks.dismiss.answered_in_chat",
+        "tui.asks.dismiss.answered_in_chat_note",
+        "tui.asks.dismiss.hint",
+        "tui.asks.dismiss.moot",
+        "tui.asks.dismiss.moot_note",
+        "tui.asks.dismiss.title"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.ask",
+      "reason": "This locale carries no catalogue BY DESIGN — the package ships six active locales (tests/unit/i18n/test_package_data.py) and zh-CN is security-held — so its bytes cannot exist for a new namespace in this change. The manifest gate checks every language in i18n/languages.json, so the debt is recorded here rather than closing the namespace as English-only.",
+      "owner": "i18n-translator lane (PR-4b coder)",
+      "payoff": "2026-12-31",
+      "missing": [
+        "relay.ask.context.messages",
+        "relay.ask.dismiss.answered_in_chat",
+        "relay.ask.dismiss.cancel",
+        "relay.ask.dismiss.moot",
+        "relay.ask.dismiss.open"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.asks",
+      "reason": "This locale carries no catalogue BY DESIGN — the package ships six active locales (tests/unit/i18n/test_package_data.py) and zh-CN is security-held — so its bytes cannot exist for a new namespace in this change. The manifest gate checks every language in i18n/languages.json, so the debt is recorded here rather than closing the namespace as English-only.",
+      "owner": "i18n-translator lane (PR-4b coder)",
+      "payoff": "2026-12-31",
+      "missing": [
+        "tui.asks.context.messages",
+        "tui.asks.dismiss.answered_in_chat",
+        "tui.asks.dismiss.answered_in_chat_note",
+        "tui.asks.dismiss.hint",
+        "tui.asks.dismiss.moot",
+        "tui.asks.dismiss.moot_note",
+        "tui.asks.dismiss.title"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.ask",
+      "reason": "This locale carries no catalogue BY DESIGN — the package ships six active locales (tests/unit/i18n/test_package_data.py) and zh-CN is security-held — so its bytes cannot exist for a new namespace in this change. The manifest gate checks every language in i18n/languages.json, so the debt is recorded here rather than closing the namespace as English-only.",
+      "owner": "i18n-translator lane (PR-4b coder)",
+      "payoff": "2026-12-31",
+      "missing": [
+        "relay.ask.context.messages",
+        "relay.ask.dismiss.answered_in_chat",
+        "relay.ask.dismiss.cancel",
+        "relay.ask.dismiss.moot",
+        "relay.ask.dismiss.open"
+      ]
     }
   ]
 }

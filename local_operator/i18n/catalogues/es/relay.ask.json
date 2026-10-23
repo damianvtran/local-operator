@@ -1,0 +1,7 @@
+{
+  "relay.ask.context.messages": "{count, plural, one {# mensaje tuyo desde que se hizo esta pregunta (último {time})} many {# de mensajes tuyos desde que se hizo esta pregunta (último {time})} other {# mensajes tuyos desde que se hizo esta pregunta (último {time})}}",
+  "relay.ask.dismiss.answered_in_chat": "Respondido en la conversación",
+  "relay.ask.dismiss.cancel": "cancelar",
+  "relay.ask.dismiss.moot": "Ya no hace falta",
+  "relay.ask.dismiss.open": "descartar…"
+}

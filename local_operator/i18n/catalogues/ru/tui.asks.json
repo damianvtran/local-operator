@@ -1,0 +1,9 @@
+{
+  "tui.asks.context.messages": "{count, plural, one {# сообщение от вас после этого вопроса (последнее в {time})} few {# сообщения от вас после этого вопроса (последнее в {time})} many {# сообщений от вас после этого вопроса (последнее в {time})} other {# сообщения от вас после этого вопроса (последнее в {time})}}",
+  "tui.asks.dismiss.answered_in_chat": "Ответ дан в чате",
+  "tui.asks.dismiss.answered_in_chat_note": "вы уже ответили в чате",
+  "tui.asks.dismiss.hint": "enter убрать · esc назад",
+  "tui.asks.dismiss.moot": "Больше не нужно",
+  "tui.asks.dismiss.moot_note": "больше не ждите ответа",
+  "tui.asks.dismiss.title": "Убрать этот вопрос"
+}

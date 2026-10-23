@@ -48,7 +48,7 @@ import {
 	isLapsed,
 	unansweredQuestions,
 } from "../lib/asks";
-import { clearAskDraft, useAskDraft } from "../store";
+import { clearAskDraft, messageRuntime, useAskDraft } from "../store";
 import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
 
@@ -63,6 +63,34 @@ function refusalText(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
 	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
 	return message;
+}
+
+/** The stale-ask context line (SA-D7 / R5), or `null` when there is none.
+ *
+ *  "3 messages from you since this was asked (last 19:36)": operator messages
+ *  admitted since the ask was raised, and when the latest one was. It is the one
+ *  line on this card that says a question may ALREADY have been answered in
+ *  chat — the reason the card can be closed with `answered_in_chat`.
+ *
+ *  ABSENCE IS THE CONTRACT, exactly as `asks/store.pending_row` writes it: an
+ *  older runtime sends no field, and that draws NOTHING rather than a zero the
+ *  reader would have to disbelieve. A zero is a fact (the ask is newer than every
+ *  message) and draws nothing either — there is no staleness to report. An OPEN
+ *  ask only: a settled one has no wait left to be stale.
+ *
+ *  The clock is formatted HERE rather than through ICU: it is a wall-clock time,
+ *  not prose, and every locale's catalogue carries the finished string inside the
+ *  sentence it belongs to. Latin digits in 24-hour form, matching the terminal's
+ *  own rendering of the same pair (`tui.widgets.ask_queue.context_text`). */
+function contextLine(row: PendingAsk): string | null {
+	if (String(row.status || "open") !== "open") return null;
+	const count = row.user_messages_since;
+	if (typeof count !== "number" || count <= 0) return null;
+	const last = row.last_user_message_at;
+	if (typeof last !== "number" || last <= 0) return null;
+	const at = new Date(last);
+	const time = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+	return messageRuntime.t("relay.ask.context.messages", { count, time });
 }
 
 /** The sentence a row shows when the aggregate ALREADY reports its conversation
@@ -217,6 +245,11 @@ export function AskCard({
 	/** The conversation is GONE (`ask_session_gone`): terminal, so no control may
 	    stay live (design round 1, D3). */
 	const [gone, setGone] = useState(false);
+	/** The two reason buttons are showing (`close…` pressed on an open ask).
+	    A separate state from `busy`: revealing the choice sends NOTHING, so a
+	    card that showed the in-flight mark here would claim a dismissal the
+	    operator has not made. */
+	const [closing, setClosing] = useState(false);
 
 	/* THE COLD CASE, and only the known one (design round 1, D1/D4 = UX U1/U3/U4):
 	   `runtime_live === false` means the relay will have to bring the conversation
@@ -256,12 +289,17 @@ export function AskCard({
 	   not a dead end, and must keep its receipt. */
 	const goneFromWire = isDeadConversation(row) && answerable;
 	const terminal = gone || goneFromWire;
-	/* DISMISS IS `timed_out`-ONLY, and the queue is the authority: `AskQueue.dismiss`
-	   accepts no other status (`asks/queue.py`), and the design states the rule twice
-	   (§2.2's table and `:115`). Offering it on an open or answered ask collected a
-	   refusal whose sentence — "only a timed-out ask can be dismissed; it is still
-	   open." — is FALSE about the row it sat under (agent review round 1, R1). */
+	/* A LAPSED ASK KEEPS ITS ONE-TAP DISMISS (D11, §14), and an OPEN one now has a
+	   door of its own (R5 / SA-D4): `AskQueue.dismiss` accepts `open` on every live
+	   session (the live refusal was retired — see the design's amended §15 D6), so
+	   the refusal this comment used to record ("only a timed-out ask can be
+	   dismissed; it is still open.") no longer exists to collect. The two doors
+	   differ in what they ASK the operator, not in whether they are allowed: a
+	   lapsed ask was already walked past by the agent, so it goes at once; an open
+	   one is still owed an answer, so the card asks WHY first and sends nothing
+	   until a reason is chosen. */
 	const dismissible = status === "timed_out";
+	const reason_needed = status === "open";
 	const questions = useMemo(() => (Array.isArray(row.questions) ? row.questions : []), [row]);
 	const open_questions = useMemo(
 		() => (offered ? unansweredQuestions(row) : []),
@@ -362,9 +400,20 @@ export function AskCard({
 			sendCommand(sessionId, { op: "ask_decline", ask_id: row.ask_id }),
 		);
 
-	const dismiss = () =>
+	const dismiss = (reason?: "moot" | "answered_in_chat") =>
 		run("dismiss", () =>
-			sendCommand(sessionId, { op: "ask_dismiss", ask_id: row.ask_id }),
+			/* The reason rides only when there is one: a lapsed ask's door is the
+			   one-key dismissal the queue has always taken, whose body must stay the
+			   shape every older daemon accepts. An OPEN ask's reason is the whole
+			   point of the two-choice row — `moot` closes the question, and
+			   `answered_in_chat` tells the agent the answer is already in the
+			   conversation, so it stops waiting and reads what was typed. */
+			sendCommand(
+				sessionId,
+				reason
+					? { op: "ask_dismiss", ask_id: row.ask_id, reason }
+					: { op: "ask_dismiss", ask_id: row.ask_id },
+			),
 		);
 
 	const settledPairs = answeredPairs(row.questions, row.answers);
@@ -402,6 +451,22 @@ export function AskCard({
 					) : null}
 				</span>
 			)}
+
+			{/* THE STALE-ASK CONTEXT LINE (SA-D7 / R5), under the state line and
+			    above the questions: how many operator messages have been admitted
+			    since this was asked, and when the latest one was. It is the card's
+			    one statement that the question may already be settled in chat, which
+			    is exactly the case the `close…` reason `answered_in_chat` exists for.
+			    No line at all when the runtime sent no count (an older runtime), when
+			    the count is zero, or on a settled card — see `contextLine`. */}
+			{(() => {
+				const context = terminal ? null : contextLine(row);
+				return context ? (
+					<p className="text-meta text-ink-dim" data-testid="ask-context">
+						{context}
+					</p>
+				) : null;
+			})()}
 
 			{terminal ? (
 				/* TERMINAL, AND IT IS THE SENTENCE THAT SAYS SO (design round 1, D3 for
@@ -445,7 +510,10 @@ export function AskCard({
 								type="button"
 								disabled={busy !== ""}
 								aria-busy={busy === "dismiss" || undefined}
-								onClick={dismiss}
+								/* No reason: a lapsed ask's door is the one-key dismissal, and
+								   the queue records its own default (the agent already walked past
+								   that deadline, so nothing turns on the operator naming one). */
+								onClick={() => dismiss()}
 								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
 							>
 								{/* D1 (design round 1): the label IS the width, so it stays put while
@@ -583,6 +651,74 @@ export function AskCard({
 							{busy === "decline" ? "…" : "decline"}
 						</button>
 					</div>
+
+					{/* THE OPEN ASK'S OWN DOOR (R5, §15's amended D6): `close…` puts the
+					    QUESTION away without answering anybody, which is the act a stale
+					    ask needs and the one the card never offered on an open row. It
+					    asks WHY first — the two reasons are what the agent acts on — and
+					    a tap on `close…` sends nothing: the reason row is a choice, not a
+					    dismissal.
+
+					    IT IS NOT A SECOND `decline`. Declining ANSWERS the agent ("no"),
+					    buys nothing and is irreversible; closing says the question stopped
+					    mattering and asks the agent for nothing at all, and on a live
+					    conversation it need not even start a turn (a dismissal is held
+					    durably until the agent's next turn). */}
+					{reason_needed ? (
+						<div className="flex flex-col gap-2">
+							{closing ? (
+								<div className="flex flex-wrap items-center gap-2">
+									<button
+										type="button"
+										disabled={busy !== ""}
+										onClick={() => dismiss("moot")}
+										className="flex min-h-11 items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
+									>
+										{/* The label IS the width: the in-flight dismissal is one
+										    append, and a control that collapsed under the thumb
+										    would read as a glitch rather than as feedback. */}
+										{busy === "dismiss"
+											? "…"
+											: messageRuntime.t("relay.ask.dismiss.moot")}
+									</button>
+									<button
+										type="button"
+										disabled={busy !== ""}
+										onClick={() => dismiss("answered_in_chat")}
+										className="flex min-h-11 items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
+									>
+										{busy === "dismiss"
+											? "…"
+											: messageRuntime.t("relay.ask.dismiss.answered_in_chat")}
+									</button>
+									<button
+										type="button"
+										disabled={busy !== ""}
+										onClick={() => setClosing(false)}
+										className="flex min-h-11 items-center rounded-sm px-2 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
+									>
+										{messageRuntime.t("relay.ask.dismiss.cancel")}
+									</button>
+								</div>
+							) : (
+								<button
+									type="button"
+									disabled={busy !== ""}
+									onClick={() => setClosing(true)}
+									className="flex min-h-11 self-start items-center rounded-sm px-2 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
+								>
+									{messageRuntime.t("relay.ask.dismiss.open")}
+								</button>
+							)}
+							{/* THE REFUSAL SITS WITH THE CONTROL THAT PRODUCED IT (design
+							    round 1, D5): a relay or bridge ask refuses the dismissal in
+							    the queue's own words, and that sentence belongs beside the
+							    reason the operator pressed, not 60 px above it. */}
+							{error && errorOp === "dismiss" ? (
+								<p className="text-body-sm text-danger">{error}</p>
+							) : null}
+						</div>
+					) : null}
 				</>
 			) : (
 				<>

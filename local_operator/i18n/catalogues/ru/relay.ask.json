@@ -1,0 +1,7 @@
+{
+  "relay.ask.context.messages": "{count, plural, one {# сообщение от вас после этого вопроса (последнее в {time})} few {# сообщения от вас после этого вопроса (последнее в {time})} many {# сообщений от вас после этого вопроса (последнее в {time})} other {# сообщения от вас после этого вопроса (последнее в {time})}}",
+  "relay.ask.dismiss.answered_in_chat": "Ответ дан в чате",
+  "relay.ask.dismiss.cancel": "отмена",
+  "relay.ask.dismiss.moot": "Больше не нужно",
+  "relay.ask.dismiss.open": "убрать…"
+}

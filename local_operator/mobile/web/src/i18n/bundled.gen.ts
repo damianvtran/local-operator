@@ -18,6 +18,13 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, stri
     "relay.account_policy.title": "Computer settings",
     "relay.account_policy.unavailable": "Account routing settings are unavailable on this relay. Update Local Operator on this computer.",
   },
+  "relay.ask": {
+    "relay.ask.context.messages": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+    "relay.ask.dismiss.answered_in_chat": "Answered in chat",
+    "relay.ask.dismiss.cancel": "cancel",
+    "relay.ask.dismiss.moot": "No longer needed",
+    "relay.ask.dismiss.open": "close\u2026",
+  },
   "relay.library": {
     "relay.library.count": "{count, plural, one {# asset} other {# assets}}",
   },

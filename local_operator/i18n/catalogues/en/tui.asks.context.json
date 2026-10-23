@@ -1,0 +1,44 @@
+{
+  "tui.asks.context.messages": {
+    "role": "queued-ask list row, context line",
+    "tone": "plain, factual",
+    "maxCells": 78,
+    "note": "The line under an OPEN ask in the terminal's ask list, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the caller draws no line at all for 0 or for an uncountable ask) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. This line is CLIPPED to the list's width with an ellipsis, so keep the opening words (the count and 'from you') first: the tail may be cut. The list paints one line per ask plus this line on stale open rows only, so the string must never contain a newline."
+  },
+  "tui.asks.dismiss.answered_in_chat": {
+    "role": "ask dismiss chooser, option label",
+    "tone": "plain, decisive",
+    "maxCells": 34,
+    "note": "The second of two reasons the operator can give for closing an open ask, chosen with the arrow keys and Enter in the ask list's dismiss chooser. It means the operator already answered the question by typing in the conversation, so the agent should read their messages and treat the ask as settled (it is sent as reason=answered_in_chat). It is a reason, not a command: do not add a verb like 'send' or an exclamation mark. Keep it short — the label shares one painted row with its note. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented."
+  },
+  "tui.asks.dismiss.answered_in_chat_note": {
+    "role": "ask dismiss chooser, option note",
+    "tone": "plain, explanatory",
+    "maxCells": 44,
+    "note": "The clause after an em dash that explains the 'Answered in chat' reason in the ask list's dismiss chooser, e.g. 'Answered in chat — you already replied in the conversation'. It names what the operator did, in the second person, so they can recognise their own case. The em dash separator is drawn by the code, not part of this value; no trailing punctuation. Clipped with the label on a narrow terminal. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented."
+  },
+  "tui.asks.dismiss.hint": {
+    "role": "ask dismiss chooser, key hints",
+    "tone": "plain, instructional",
+    "maxCells": 40,
+    "note": "The key-hint row at the foot of the ask list's dismiss chooser: Enter sends the highlighted reason, Esc goes back to the list without dismissing. Key names (enter, esc) are kept as the terminal spells them and joined with the middle dot separator the terminal's other hint rows use; keep that separator. This row is dropped whole on a terminal too narrow for it, so it must stay one short line."
+  },
+  "tui.asks.dismiss.moot": {
+    "role": "ask dismiss chooser, option label",
+    "tone": "plain, decisive",
+    "maxCells": 34,
+    "note": "The first of two reasons the operator can give for closing an open ask, chosen with the arrow keys and Enter in the ask list's dismiss chooser. It means the question no longer matters to them (the work moved on, someone else decided), so the agent should drop it (it is sent as reason=moot). It is a reason, not a command, and it must not read as an approval or a refusal of the question itself. Keep it short — the label shares one painted row with its note. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented."
+  },
+  "tui.asks.dismiss.moot_note": {
+    "role": "ask dismiss chooser, option note",
+    "tone": "plain, explanatory",
+    "maxCells": 44,
+    "note": "The clause after an em dash that explains the 'No longer needed' reason in the ask list's dismiss chooser, e.g. 'No longer needed — stop waiting on it'. It says what happens to the waiting: the agent stops expecting an answer. The em dash separator is drawn by the code, not part of this value; no trailing punctuation. Clipped with the label on a narrow terminal. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented."
+  },
+  "tui.asks.dismiss.title": {
+    "role": "ask dismiss chooser, heading",
+    "tone": "plain, instructional",
+    "maxCells": 60,
+    "note": "The heading of the ask list's dismiss chooser: a line the operator reaches by pressing x on an OPEN ask, asking them to pick why the ask is going away. The code then joins the ask's own question after this heading with a middle dot separator (drawn by the code, not part of this value), so do not end the heading with punctuation or a separator. No exclamation mark; it names the act, it does not celebrate it."
+  }
+}

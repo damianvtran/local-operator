@@ -3572,6 +3572,196 @@
       },
       "status": "passed",
       "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 33e3917430cf3308ea04580d6fa31ace996a45f490d53d75082e9b27b8abb3af. Report: sessions/d71bc18a7798/scratchpad/audit-vi.json."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.asks",
+      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.ask",
+      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.asks",
+      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.ask",
+      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.asks",
+      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.ask",
+      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.asks",
+      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.ask",
+      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.asks",
+      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.ask",
+      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
     }
   ]
 }
