@@ -1725,7 +1725,15 @@ def _slash_receipt(outcome: Any, command: str) -> tuple[str, str, bool]:
         if isinstance(data, dict) and str(data.get("type") or "") in _SLASH_SUCCESS_TYPES
         else "neutral"
     )
-    refused = outcome.get("kind") == "error" or outcome.get("style") == "warning"
+    # ``data.ok`` is the runtime's structured verdict and OUTRANKS the tint: a
+    # successful loosening is deliberately painted `warning` (loosening is the
+    # loud direction), so the old rule turned every success into a refusal on
+    # the phone and kept the composer's draft (agent review round 1, B1). The
+    # tint rule remains only for an older runtime that sends no verdict.
+    if isinstance(data, dict) and "ok" in data:
+        refused = not bool(data.get("ok"))
+    else:
+        refused = outcome.get("kind") == "error" or outcome.get("style") == "warning"
     if len(text) > _SLASH_RECEIPT_CHARS:
         text = text[: _SLASH_RECEIPT_CHARS - 1].rstrip() + "\u2026"
     return text, tone, refused

@@ -58,6 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.session.approval_policy import OVERRIDE_FILENAME
+
 if TYPE_CHECKING:
     from local_operator.network.relay import RelayServer
 
@@ -495,6 +497,13 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # about a transcript to save exactly nothing. Leaving it behind costs one
     # bounded tail read, once: the process that paid it records the answer.
     "preview.json": "a listing cache derived from the archive's tail; the destination rebuilds it",
+    # The conversation's own approval choice (``session.approval_policy``). A
+    # copy is a NEW conversation and must not inherit a loosened consent; the
+    # same rule `fork` applies. Classified here rather than left unlisted, and
+    # never copied rather than carried: without the entry a move of any session
+    # that used the approvals feature refused with `unlisted_content` and told
+    # the user to delete the record (round-4 review, blocker).
+    OVERRIDE_FILENAME: "the conversation's own approval choice; a copy must start without it",
 }
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading

@@ -1228,12 +1228,19 @@ async def test_a_turn_start_racing_the_stop_cannot_revive_a_denied_ask() -> None
 
 
 @pytest.mark.asyncio
-async def test_approvals_auto_answers_the_question_on_screen() -> None:
-    """ "Every tool runs without asking" must include the one already asking.
+async def test_approvals_auto_leaves_the_question_on_screen_unanswered() -> None:
+    """ "Every tool runs without asking" governs the NEXT request, not this one.
 
-    Setting the mode without settling the live prompt left the loudest notice in
-    the app next to a question still waiting, with the tool behind it parked on
-    a future nothing would settle.
+    This test used to pin the opposite: `/approvals auto` answered the visible
+    prompt as allowed, through the widget, so the transcript kept an honest
+    receipt of a decision the USER never made. A mode change is a statement
+    about future requests; answering the one on screen on its behalf is the
+    class of "the setting did something the user did not ask for" this round
+    removes (2026-10-23).
+
+    What the user gets instead: the card stays parked and answerable, its own
+    reserved status slot says the mode was saved, and the next gate is the one
+    that skips.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1243,13 +1250,23 @@ async def test_approvals_auto_answers_the_question_on_screen() -> None:
         session.streaming = True
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: make"))
         await pilot.pause()
-        assert app.query(ApprovalPrompt)
+        card = app.query(ApprovalPrompt).first()
+        assert card
 
         app._run_slash_command("/approvals auto")
         await pilot.pause()
-        assert await asyncio.wait_for(pending, 2) is True
-        painted = [strip.text for strip in app.screen._compositor.render_strips()]
-        assert [row for row in painted if "allowed" in row]
+
+        assert not pending.done(), "a mode change answered a request nobody answered"
+        assert not card.answered
+        text = "\n".join(card.render_lines_for_test())
+        assert "Auto saved for this session, with this conversation" in text, text
+        assert app._approve_all is True
+
+        # The parked request still takes an answer, and then the gate is loose.
+        await pilot.press("n")
+        assert await asyncio.wait_for(pending, 2) is False
+        second = asyncio.ensure_future(_approval_gate(session)("bash", "run: make"))
+        assert await asyncio.wait_for(second, 2) is True
 
 
 @pytest.mark.asyncio
@@ -1910,6 +1927,16 @@ async def test_a_narrow_card_still_names_what_it_is_authorising() -> None:
     `rm -rf` that never named the tool, the command, or the target, with the
     cursor parked on the permissive option. The question now outranks both the
     option rows and the count, so the last thing to go is what is being asked.
+
+    RE-DERIVED for the inline auto handles (2026-10-23). The tight treatment
+    replaces the movement/enter/escape hint with the rail plus the mode and the
+    two destinations, which the design spec does deliberately: the answer
+    letters are all visible in the rail, so the hint is no longer the only place
+    the keys are named. The assertion that the exit is "still stated" moved with
+    it — what must hold now is that the frame names its SUBJECT and every
+    ANSWER it can take, including Deny. The D9 state this test was written for
+    (a frame whose entire content was the word for refusing) is impossible
+    while three labels are drawn.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1928,8 +1955,14 @@ async def test_a_narrow_card_still_names_what_it_is_authorising() -> None:
         # The subject is on screen: the tool AND its target.
         assert "bash" in text, lines
         assert "rm -rf" in text, lines
-        # And the exit is still stated.
-        assert "esc" in lines[-1], lines
+        # Every answer it can take is visible, including the refusal — the
+        # property D9's `esc deny`-only frame failed.
+        assert "y.Allow" in text, lines
+        assert "n.Deny" in text, lines
+        assert "A.Allow all" in text, lines
+        # ...and both setting destinations are named, so the row that used to
+        # carry the hint still carries an actionable sentence.
+        assert "[S]session" in lines[-1] and "[G]all sessions" in lines[-1], lines
 
         pending.cancel()
         try:

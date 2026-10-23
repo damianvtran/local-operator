@@ -929,6 +929,21 @@ class PendingRequest:
     # memory. The flag rides; the credential VALUE never does, same rule as
     # ``secret``. Defaulted for the same version-skew reason as ``recommended``.
     persist: bool = False
+    # The approval rule in force when this gate was raised, and where it came
+    # from (``session`` = the conversation's own record, ``global`` = the file,
+    # ``pin`` = a --yolo start). The phone and desktop need BOTH halves to show
+    # "Ask — session override; global Auto": the mode alone cannot say which
+    # precedence rung won, and a surface that re-derives it from config.yml is
+    # wrong exactly when the operator set a per-conversation mode. Empty on an
+    # ask card, and on a payload from an older runtime — defaulted for the same
+    # version-skew reason as ``recommended``.
+    approval_mode: str = ""
+    approval_provenance: str = ""
+    #: The machine default the mode outranks (``ask``/``auto``), or ``""`` when
+    #: the publisher cannot state it. Kept separate from ``approval_mode``
+    #: because a session override and the file can hold the same word, and a
+    #: viewer that derives "the other one" is wrong exactly then (U4).
+    approval_global_mode: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

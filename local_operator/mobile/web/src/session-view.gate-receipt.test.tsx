@@ -12,16 +12,25 @@
 //
 // U1/U6: the refusal is keyed on the typed code and passes the runtime's own copy
 // through, so the install step the copy names is not reworded here.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError, isAuthorityRefusalCode } from "./api";
 import { humanizeGateError } from "./components/gate-sheet";
 import { isAuthorityRefusal } from "./components/pending-card";
 import { SessionScreen } from "./screens/session-view";
-import type { SessionProjection } from "./types";
+import type { PendingRequest, SessionProjection } from "./types";
+
+/* The receipt shape these mocks answer with, typed here rather than inferred:
+   a zero-argument `vi.fn` gives `mock.calls` an empty tuple, so the assertions
+   that read the FRAME (the whole point — scope plus proof fields) would not
+   typecheck. `refused` is the routed op's own field. */
+type Receipt = { ok: boolean; detail: string; refused?: boolean };
+type SignedFrame = Record<string, unknown>;
 
 const mocks = vi.hoisted(() => ({
-	sendCommandWithProof: vi.fn(async () => ({ ok: true, detail: "" })),
+	sendCommandWithProof: vi.fn(
+		async (_sessionId: string, _op: SignedFrame): Promise<Receipt> => ({ ok: true, detail: "" }),
+	),
 	requestOperatorChallenge: vi.fn(async () => ({
 		challenge: "ab",
 		expires_s: 30,
@@ -121,6 +130,7 @@ async function openSheet() {
 beforeEach(() => {
 	slot = { projection: projection(), connected: true };
 	mocks.sendCommandWithProof.mockClear();
+	mocks.requestOperatorChallenge.mockClear();
 	mocks.operatorFieldsFor.mockClear();
 	mocks.storedCertificate.mockReset();
 	mocks.storedCertificate.mockReturnValue({ certificate: "cert", keyId: "kid" });
@@ -163,6 +173,10 @@ describe("the phone's gate sheet", () => {
 		await openSheet();
 		const said = screen.getByText(/will ask you to pair it first/);
 		expect(said.textContent).toContain("Keeping approvals at");
+		/* BOTH authority-increasing choices are named: the global scope is the one
+		   a reader is most likely to assume is exempt because it is "only a
+		   default", and it is not. */
+		expect(said.textContent).toContain("run without asking in all sessions");
 		// ...and it was there BEFORE the tap: no request had been made yet.
 		expect(mocks.sendCommandWithProof).not.toHaveBeenCalled();
 	});
@@ -180,6 +194,163 @@ describe("the phone's gate sheet", () => {
 		const shown = await screen.findByText(/remedies below cannot work yet/);
 		expect(shown.textContent).toContain("one approval and one admin password prompt");
 		expect(screen.getByRole("dialog")).toBeTruthy();
+	});
+
+	it("sends the global default with the same loosen proof, and says what it applied", async () => {
+		/* THE ESCAPE HATCH'S WIDER SCOPE. `default auto` changes every session
+		   that follows the default, so it must carry the same per-action proof
+		   `auto` does — a signature minted for one scope cannot be presented as
+		   the other, so the assertion is on the FRAME (scope + proof fields) and
+		   on the challenge action, not merely on a call having happened. */
+		await openSheet();
+		fireEvent.click(screen.getByText("run without asking in all sessions (default auto)"));
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+		expect(mocks.sendCommandWithProof).toHaveBeenCalledTimes(1);
+		expect(mocks.sendCommandWithProof.mock.calls[0][1]).toMatchObject({
+			op: "slash_result",
+			command: "approvals",
+			args: "default auto",
+			operator_sig: "aa",
+			operator_key_id: "bb",
+			operator_cert: "cc",
+		});
+		expect(mocks.requestOperatorChallenge).toHaveBeenCalledWith("s1", {
+			action: "loosen",
+			request_id: "",
+		});
+		/* The receipt survives the sheet — and states the DEFAULT, which is the
+		   scope this write actually reaches. "all sessions are now auto" would be
+		   a claim the phone cannot make: a session with its own override is not
+		   changed by a default write. */
+		await waitFor(() =>
+			expect(screen.getByRole("status").textContent).toContain(
+				"the default for sessions that follow it is now auto",
+			),
+		);
+		expect(screen.getByRole("status").textContent).not.toContain("all sessions are now");
+	});
+
+	it("prefers the runtime's account of a global write over the phone's", async () => {
+		/* "Do not claim all sessions changed if the runtime receipt says
+		   otherwise" — the runtime counts the set, the phone cannot, so its prose
+		   passes through unchanged when it has any. */
+		mocks.sendCommandWithProof.mockResolvedValueOnce({
+			ok: true,
+			detail: "the default is now auto (2 of 4 sessions follow it)",
+		});
+		await openSheet();
+		fireEvent.click(screen.getByText("run without asking in all sessions (default auto)"));
+		await waitFor(() =>
+			expect(screen.getByRole("status").textContent).toContain("2 of 4 sessions follow it"),
+		);
+	});
+
+	it("keeps a completed-but-refused global write in the sheet", async () => {
+		/* The routed op can report `refused` beside `ok`. Closing on that would put
+		   a header receipt on screen describing a change the runtime says did not
+		   happen; the refusal belongs in the sheet, in the runtime's words. */
+		mocks.sendCommandWithProof.mockResolvedValueOnce({
+			ok: true,
+			detail: "the global default cannot be set from this surface",
+			refused: true,
+		});
+		await openSheet();
+		fireEvent.click(screen.getByText("run without asking in all sessions (default auto)"));
+		expect(await screen.findByText(/cannot be set from this surface/)).toBeTruthy();
+		expect(screen.getByRole("dialog")).toBeTruthy();
+		expect(screen.queryByRole("status")).toBeNull();
+	});
+});
+
+describe("the sheet's effective-mode line (U2)", () => {
+	/* The sheet reads the mode off the projection's pending approval — the only
+	   place the runtime publishes it — so each case sets the pending the runtime
+	   would send and opens the sheet the reader actually uses. `within(dialog)`
+	   because the pending card underneath paints the same line; the assertion is
+	   about the SHEET's copy. */
+	function pendingApproval(overrides: Partial<PendingRequest>): PendingRequest {
+		return {
+			request_id: "req-approval",
+			kind: "approval",
+			title: "run shell command",
+			detail: "rm -rf build && make",
+			options: [],
+			secret: false,
+			question_index: 0,
+			question_total: 1,
+			...overrides,
+		};
+	}
+
+	it("names the REAL global behind a session override (U4)", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "ask",
+			approval_provenance: "session",
+			approval_global_mode: "ask",
+		});
+		await openSheet();
+		expect(
+			within(screen.getByRole("dialog")).getByText(
+				"Approvals: Ask — session override; global Ask.",
+			),
+		).toBeTruthy();
+	});
+
+	it("drops the global clause when the owner sends no global mode", async () => {
+		/* Half a true sentence beats a whole false one: the sheet must not
+		   negate the session mode into a claim about the machine. */
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "ask",
+			approval_provenance: "session",
+		});
+		await openSheet();
+		const dialog = screen.getByRole("dialog");
+		expect(within(dialog).getByText("Approvals: Ask — session override.")).toBeTruthy();
+		expect(within(dialog).queryByText(/global (Ask|Auto)/)).toBeNull();
+	});
+
+	it("says the global default, without the pending card's request clause", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "auto",
+			approval_provenance: "global",
+		});
+		await openSheet();
+		const dialog = screen.getByRole("dialog");
+		expect(within(dialog).getByText("Approvals: Auto — global default.")).toBeTruthy();
+		/* The sheet holds no request. "This request still needs your answer"
+		   belongs to the card, and a sheet that said it would name a card that
+		   is not on screen. */
+		expect(within(dialog).queryByText(/This request still needs your answer/)).toBeNull();
+	});
+
+	it("separates a run pin from both saved scopes", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "auto",
+			approval_provenance: "pin",
+		});
+		await openSheet();
+		expect(
+			within(screen.getByRole("dialog")).getByText("Approvals: Auto — this run."),
+		).toBeTruthy();
+	});
+
+	it("separates a run pin from both saved scopes", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "auto",
+			approval_provenance: "pin",
+		});
+		await openSheet();
+		expect(
+			within(screen.getByRole("dialog")).getByText("Approvals: Auto — this run."),
+		).toBeTruthy();
+	});
+
+	it("omits the line when the owner publishes neither field", async () => {
+		/* The default fixture has no pending at all — the state of an owner older
+		   than these fields. The sheet must say nothing rather than invent a
+		   "global default". */
+		await openSheet();
+		expect(within(screen.getByRole("dialog")).queryByText(/^Approvals:/)).toBeNull();
 	});
 });
 

@@ -1673,6 +1673,24 @@ class TuiSessionHandle(SessionHandle):
         if pending is None:
             pending = self._fold.projection.pending
         payload = pending.to_json() if pending is not None else None
+        if payload is not None:
+            # This handle publishes on the APP thread (it reads `_app._session`
+            # above), so the app's own policy view is the authority for the two
+            # keys — the same view the card paints, not a re-derivation here.
+            policy = getattr(self._app, "_approval_policy_view", None)
+            if callable(policy):
+                # `getattr` because a test host / older app may expose a policy
+                # view without both fields; an absent half is "not stated".
+                view = policy()
+                payload["approval_mode"] = str(getattr(view, "mode", "") or "")
+                payload["approval_provenance"] = str(getattr(view, "provenance", "") or "")
+                # The FILE default this pane follows when no override exists;
+                # an attached phone needs both halves to say "session Ask;
+                # global Auto" without guessing the complement (U4).
+                default_auto = getattr(self._app, "_approvals_default_auto", None)
+                payload["approval_global_mode"] = (
+                    ("auto" if default_auto else "ask") if default_auto is not None else ""
+                )
         store.mutate(pending_gate=payload)
 
     def _request_id_for_card(self, card: Any) -> str | None:

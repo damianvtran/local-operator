@@ -234,7 +234,6 @@ def native_action(spec: SlashCommand, session_id: str, args: str) -> dict[str, A
             "scope": "default",
             "source": "/v1/settings",
             "submit": {"method": "PATCH", "path": "/v1/settings/tool_approval_mode"},
-            "current_session_unchanged": True,
         }
     return {
         "kind": "native_action",

@@ -15,11 +15,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from local_operator.config import ConfigManager
+from local_operator.session.approval_policy import write_override
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.exec_control import (
@@ -39,6 +41,11 @@ class FakeSession:
     owns_runtime = True
     outcome_is_synchronous = True
     runtime_locality: RuntimeLocality = "this-process"
+
+    #: Some cases attach a transcript directory so the handle's sidecar read has
+    #: a real path; declared so the facade tests can set it without pyright's
+    #: attr-defined error (as ``test_serving.FakeSession`` does).
+    transcript: Any
 
     def __init__(self, *, graceful: bool = True) -> None:
         self.session_id = "exec-sess"
@@ -268,6 +275,57 @@ async def test_the_gate_is_seeded_from_the_saved_mode(isolated_config: Path) -> 
         assert await gate("bash", "echo probe-ok") is True
         # No card was ever queued — the answer came inline, before any park.
         assert control.handle._fold.projection.pending is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_conversations_choice_seeds_the_gate(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """The CONVERSATION outranks the config at the exec seed (2026-10-23).
+
+    ``start_exec_control`` builds the handle with the mode it read at t0, so a
+    resumed conversation that recorded ``auto`` must be seeded from that record
+    — not from ``config.yml``, which says ``ask`` here. Seeding from the file
+    would park the run's first card on a session whose human had already chosen
+    ``auto``, and the handle's own record read would then disagree with the
+    value it was constructed from (the posture hazard the module docstring
+    names).
+    """
+    ConfigManager(isolated_config).set_config_value("tool_approval_mode", "ask")
+    session_dir = tmp_path / "session"
+    write_override(session_dir, "auto")
+    session = FakeSession()
+    session.transcript = SimpleNamespace(directory=session_dir)
+
+    control = await start_exec_control(session, cwd="/tmp")
+    try:
+        assert control.handle._auto_approve is True, "the seed ignored the conversation's record"
+        assert control.handle._explicit_approvals_mode == "auto"
+        assert await control.handle._approval_gate("bash", "echo probe-ok") is True
+        assert control.handle._fold.projection.pending is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_yolo_outranks_a_resumed_conversations_recorded_ask(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """``--yolo`` is a flag on THIS run, so it outranks a stored conversation
+    choice in both of its properties: it approves inline AND it pins."""
+    ConfigManager(isolated_config).set_config_value("tool_approval_mode", "ask")
+    session_dir = tmp_path / "session"
+    write_override(session_dir, "ask")
+    session = FakeSession()
+    session.transcript = SimpleNamespace(directory=session_dir)
+
+    control = await start_exec_control(session, cwd="/tmp", yolo=True)
+    try:
+        assert control.handle._auto_approve is True
+        assert control.handle._approval_pinned is True
+        assert control.handle._explicit_approvals_mode is None
     finally:
         await control.aclose()
 

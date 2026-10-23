@@ -520,6 +520,14 @@ DEFAULT_CONFIG = Config(
             # previously took only ``--yolo``. A saved ``auto`` is the
             # operator's standing instruction that a run with nobody to ask
             # must not park or deny; ``--yolo`` still wins for one run.
+            #
+            # A BIRTH default, and only that (2026-10-23): a conversation in
+            # which someone typed ``/approvals ask|auto`` carries its own
+            # recorded choice (``session/approval_policy.py``) and this key no
+            # longer moves it in EITHER direction. That is what makes the
+            # command's name true — it sets the default for sessions that have
+            # none — and it is why the resolution rule lives in
+            # ``approval_policy.resolve_effective`` rather than in each reader.
             "tool_approval_mode": "ask",
             # Direct OpenAI GPT-5 calls use the public Responses API by default.
             # Set `providers.openai.api` to `chat_completions` for an explicit

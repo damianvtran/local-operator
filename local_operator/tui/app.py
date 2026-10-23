@@ -92,6 +92,7 @@ from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import (
     LOOSENING_KEPT_BY_ASK_NOTICE,
     LOOSENING_REFUSED_NOTICE,
+    REARM_KEPT_BY_AUTO_NOTICE,
     loosening_is_authorised,
 )
 from local_operator.harness.intent import (
@@ -360,7 +361,12 @@ from local_operator.tui.terminal_title import (
     terminal_title_enabled,
 )
 from local_operator.tui.widgets import welcome as welcome_mod
-from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
+from local_operator.tui.widgets.approval import (
+    ApprovalBlock,
+    ApprovalPolicy,
+    ApprovalPrompt,
+    ApprovalSettingOutcome,
+)
 from local_operator.tui.widgets.aside_panel import (
     ASIDE_PROMPT,
     AsidePanel,
@@ -6215,6 +6221,13 @@ class OperatorApp(App[None]):
         # write moves the gate, which is what keeps the keep notice's "set with
         # /approvals in this session" true.
         self._explicit_approvals_mode: str | None = None
+        #: True only inside the card's own `G` gesture. The config write that
+        #: gesture performs is delivered synchronously to
+        #: `_follow_configured_approvals`, and its parked-prompt NOTE would be
+        #: a second acknowledgement of one press beside the inline status the
+        #: card is about to paint (and, at 60x16, extra question copy that can
+        #: buy a row). A change from ANOTHER process still annotates the card.
+        self._card_setting_gesture = False
         # Which TURN a stop belongs to, rather than a flag someone has to clear.
         # `_turn_epoch` counts turn boundaries; `_approvals_denied_epoch` records
         # the epoch a stop/teardown armed the deny latch in. An asker captures the
@@ -12420,13 +12433,22 @@ class OperatorApp(App[None]):
         if source is None or source.retired:
             source = SessionInteraction(session)
             self._interactions[id(session)] = source
-        if source.draft.approve_all is None:
+        first_adoption = source.draft.approve_all is None
+        if first_adoption:
             source.draft.approve_all = (
                 self._approve_all
                 if self._interaction.session is None
                 else self._approvals_default_auto
             )
         self._interaction = source
+        # Load THIS conversation's recorded approval choice (or its absence)
+        # on every adoption. Doing it here rather than at boot is what stops
+        # one conversation's override leaking onto the next on `/resume` and
+        # `/new`; a conversation with no record follows the machine default.
+        # The source's own in-memory mode is authoritative when it already has
+        # one (a temporary `A` latch, or the choice restored when it was last
+        # parked): switching away and back must not silently re-arm it.
+        self._adopt_approval_override(session, first_adoption=first_adoption)
         # Adoption is the other way a source becomes current (boot, `/resume`,
         # takeover), and the displayed session must never carry a deadline —
         # a source leased by prewarm and later adopted would otherwise keep the
@@ -29447,6 +29469,16 @@ class OperatorApp(App[None]):
             on_answer=partial(
                 self._latch_source_approval_answer, source, gate_key, view_generation
             ),
+            # The card states the mode in force AND offers the two destinations,
+            # so the policy and the callbacks arrive together: a card that
+            # painted a mode it could not change, or a destination with no
+            # state to read, would be half a control. The callbacks are bound to
+            # the SOURCE conversation, not to whatever happens to be on screen
+            # when the key is pressed — a swap must not let one conversation's
+            # card write another's record.
+            policy=self._approval_policy_view(),
+            on_set_session_auto=partial(self._set_session_auto_for_card, source),
+            on_set_global_auto=partial(self._set_global_auto_for_card, source),
         )
         # A gate on a PEER's session carries the hint that says where an allow
         # happens: an allow from THIS origin would be refused by the owner's
@@ -30063,23 +30095,6 @@ class OperatorApp(App[None]):
         armed = self._approvals_denied_epoch
         return armed is not None and epoch <= armed
 
-    def _answer_live_approval_as_allowed(self) -> None:
-        """Answer the visible prompt with YES, the way the ``A`` key does.
-
-        Through the widget rather than around it, so the row repaints as a
-        receipt (`✓ allowed ...`) instead of vanishing with no record of what the
-        user just authorised.
-        """
-        approval = self._approval
-        if approval is not None and not approval.answered:
-            # `y`, not `a`: the COMMAND is what changed the mode, and it prints
-            # its own notice. Answering as the `A` key would run the keystroke's
-            # latch hook too, so the frame carried the same statement twice in the
-            # loudest ink it has.
-            approval.resolve(True, answer="y")
-            self._unmount_prompt(approval)
-        self._approval = None
-
     def _allow_approvals_again(self) -> None:
         """Retire the deny latch so tools can ask questions again.
 
@@ -30157,46 +30172,98 @@ class OperatorApp(App[None]):
         else:
             self._report_approvals(notice)
             return
+        if persist:
+            # `default` names the FILE. It is also the one form that CLEARS this
+            # conversation's own record: leaving a stored override in place
+            # would make the receipt's "this conversation follows it" false on
+            # the one surface the user is looking at, and the whole reason the
+            # record exists is that it outranks the file in both directions.
+            source = self._interaction
+            # The watcher's delivery happens INSIDE `_save_approvals_default`,
+            # so the record has to be out of the way for that call — otherwise
+            # `_follow_configured_approvals` takes the keep branch and refuses
+            # to move a gate this conversation is about to stop claiming. The
+            # runtime documents the same dance on `_approvals_default_slash`.
+            #
+            # ONLY THE MEMORY IS CLEARED FIRST. The sidecar is written after the
+            # config write succeeds: clearing it up front meant a failed write
+            # left the record gone and the in-memory override restored, so a
+            # resume followed the old config while this session followed a mode
+            # the receipt had just said was not saved (agent review, 2026-10-23).
+            previous_override = self._explicit_approvals_mode
+            self._explicit_approvals_mode = None
+            saved_to, problem = self._save_approvals_default(wanted_auto)
+            if problem:
+                self._explicit_approvals_mode = previous_override
+                if previous_override is not None:
+                    # This conversation keeps its recorded choice: the command
+                    # that would have released it failed, so moving the gate
+                    # anyway would leave the record and the gate describing
+                    # different modes.
+                    self._set_approve_all(previous_override == "auto")
+                else:
+                    # No record to keep, and a read-only config dir is a reason
+                    # not to promise the NEXT launch anything — not a reason to
+                    # refuse this run the mode it asked for (the behaviour
+                    # `test_an_unwritable_config_still_switches_the_session`
+                    # pins).
+                    self._apply_approvals_default_live(wanted_auto)
+                notice(
+                    f"tool approvals: {mode_word(wanted_auto)} — NOT saved: {problem}; "
+                    "new sessions will not follow it",
+                    "warning",
+                )
+                return
+            clear_problem = (
+                self._persist_approval_override(source, None) if source is not None else ""
+            )
+            self._approvals_default_auto = wanted_auto
+            self._apply_approvals_default_live(wanted_auto)
+            self._note_approvals_mode_on_parked_prompt(wanted_auto, scope="global")
+            kind = "warning" if wanted_auto else "info"
+            receipt = (
+                f"tool approvals: {mode_word(wanted_auto)} — saved to {saved_to}: "
+                f"tool_approval_mode {mode_word(wanted_auto)}; this conversation follows it; "
+                "other conversations with their own choice keep it"
+            )
+            if clear_problem and previous_override is not None:
+                receipt += (
+                    f" — but this conversation's saved choice was not cleared ({clear_problem})"
+                )
+            notice(receipt, kind)
+            return
+        # Session-scoped switch: remembered WITH the conversation and not with
+        # the machine. `A` and this command are the same commitment, so both
+        # write the sidecar; only `default` touches `config.yml`.
+        problem = ""
+        source = self._interaction
+        if source is not None:
+            problem = self._persist_approval_override(source, "auto" if wanted_auto else "ask")
+        # The user typed the mode in this pane, so a later file write leaves
+        # this gate alone IN BOTH DIRECTIONS (see
+        # `_follow_configured_approvals`). The MODE is recorded, not merely the
+        # fact of a choice: a recorded `auto` refuses a tightening, a recorded
+        # `ask` refuses a loosening.
+        self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         if wanted_auto:
-            # The prompt ON SCREEN is part of "every tool runs without asking".
-            # Setting the mode and leaving it pending printed the loudest notice
-            # in the app next to a question still waiting for an answer, with the
-            # tool behind it parked on a future nothing was going to settle — the
-            # `A` key never had this gap because it answers through the widget.
-            self._answer_live_approval_as_allowed()
+            self._set_approve_all(True)
         else:
             # Also clears the turn-scoped deny latch: this command's whole
             # promise is "tools will prompt again", and a latch left armed
             # would make that statement false for the rest of the run.
             self._allow_approvals_again()
-        saved_to = ""
-        problem = ""
-        if persist:
-            # Written BEFORE the flags move so the band cannot advertise `always`
-            # on the strength of a write that failed. The live switch happens
-            # either way: a read-only config dir is a reason not to promise the
-            # next launch anything, not a reason to refuse the session the mode
-            # it asked for.
-            saved_to, problem = self._save_approvals_default(wanted_auto)
-            if not problem:
-                self._approvals_default_auto = wanted_auto
-        # The user typed the mode in this pane, so a later LOOSENING disk write
-        # leaves this gate alone (see `_follow_configured_approvals`). The MODE
-        # is recorded, not merely the fact of a choice (review round 2, R6):
-        # both directions are recorded, but only a recorded `ask` refuses a file.
-        self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
-        self._set_approve_all(wanted_auto)
+            self._set_approve_all(False)
+        # A MODE CHANGE NEVER ANSWERS A PENDING PROMPT (2026-10-23). The card is
+        # deliberately left parked: the mode governs the NEXT request, and this
+        # request was not what the user was deciding when they typed or pressed
+        # the destination. It gets the spec's saved sentence in its reserved
+        # status slot, and the user still has to answer it.
+        self._note_approvals_mode_on_parked_prompt(wanted_auto)
         if problem:
-            notice(problem, "warning")
-        elif persist:
-            # Names the file and the key, like `/model default`. "Saved" alone is
-            # a claim the user cannot check without relaunching.
-            kind = "warning" if wanted_auto else "info"
             notice(
-                f"tool approvals: {mode_word(wanted_auto)} — saved to {saved_to}: "
-                f"tool_approval_mode {mode_word(wanted_auto)} "
-                "(this session and every new one)",
-                kind,
+                f"tool approvals: {mode_word(wanted_auto)} — applied for this session "
+                f"but NOT saved for resume ({problem})",
+                "warning",
             )
         elif wanted_auto:
             # The save hint is offered only while it is NEW information (UX
@@ -30220,6 +30287,34 @@ class OperatorApp(App[None]):
                 "tool approvals: ask — write and command tools prompt before running "
                 "(this session)"
             )
+
+    def _note_approvals_mode_on_parked_prompt(
+        self, wanted_auto: bool, *, scope: str = "session"
+    ) -> None:
+        """Confirm a mode change IN the card that is still waiting for an answer.
+
+        NOT through ``set_note``: that appends to the QUESTION, and its own
+        docstring records that a new chrome row is what took the footer off a
+        16-row card. The callout's state row is reserved from mount precisely
+        so this acknowledgement REPLACES a sentence instead of buying a row,
+        and the answer labels do not move.
+
+        This is the whole visible trace of the gesture in the CARD: the card's
+        own `s`/`g` destinations print no transcript notice at all (one
+        gesture, one sentence), while a typed ``/approvals`` keeps its receipt
+        as the transcript record of the command.
+        """
+        card = self._approval
+        if card is None or not isinstance(card, ApprovalPrompt) or card.answered:
+            return
+        policy = self._approval_policy_view()
+        card.set_policy(
+            ApprovalPolicy(
+                mode=policy.mode,
+                provenance=policy.provenance,
+                status="saved-session" if scope == "session" else "saved-global",
+            )
+        )
 
     def _report_approvals(self, notice: NoticeFn) -> None:
         """What a bare ``/approvals`` prints: the live mode AND the saved one.
@@ -30418,7 +30513,400 @@ class OperatorApp(App[None]):
             logger.debug("could not read the saved tool approval mode", exc_info=True)
             return
         self._approvals_default_auto = str(saved).strip().lower() == "auto"
+        self._explicit_approvals_mode = None
         self._set_approve_all(self._approvals_default_auto)
+
+    # -- the conversation's own approval choice ------------------------------
+    #
+    # `tool_approval_mode` is the machine's default for NEW conversations; a
+    # `s`/`g` press or a `/approvals ask|auto` typed into ONE conversation is
+    # the human's decision about THAT transcript, recorded beside it by
+    # `session/approval_policy.py`. The two are different facts and the card
+    # has to state both, so provenance travels with the mode everywhere here.
+
+    def _approval_policy_view(self) -> ApprovalPolicy:
+        """The effective mode and its provenance, as the card paints them.
+
+        Sources, highest first, mirroring ``approval_policy.resolve_effective``:
+        this pane's recorded choice, then the file. A ``--yolo`` pin is not
+        visible from here — the runtime that owns it states it in its own
+        receipt — so the card never guesses at one.
+        """
+        from local_operator.session.approval_policy import resolve_effective
+
+        global_mode = "auto" if self._approvals_default_auto else "ask"
+        mode, provenance = resolve_effective(self._explicit_approvals_mode, global_mode)
+        # The REAL global rides with the view so the provenance sentence can
+        # name what a session override outranks. Deriving the "other" mode from
+        # the live mode painted "global Auto" over a file that said ask (UX
+        # round 2, U4): the two agree only by accident.
+        return ApprovalPolicy(mode=mode, provenance=provenance, global_mode=global_mode)
+
+    def _adopt_approval_override(self, session: Any, *, first_adoption: bool = True) -> None:
+        """Load THIS conversation's recorded choice when it is adopted.
+
+        Without it, resuming a conversation the user had hardened to ``ask``
+        reopened on the machine default and silently asked nothing (or the
+        mirror: a session deliberately set to ``auto`` came back prompting).
+        The sidecar is the authority; a corrupt one is read as ``ask`` WITH a
+        warning by the policy module, and that warning is surfaced rather than
+        swallowed, because a silent downgrade to prompting is still a change.
+
+        An attached session's gate belongs to its owner's process, so the record
+        is still READ here but it only feeds the card's provenance — moving
+        ``_approve_all`` here would make the band claim a mode this app does not
+        control. The sidecar lives beside the transcript on THIS machine, so an
+        attached local session can show "session override"; a remote mesh
+        session has no local directory, ``read_override`` answers "no record",
+        and the card keeps the global default rather than inventing one.
+
+        ``first_adoption`` is False when the source already had an in-memory
+        ``draft.approve_all`` (a temporary `A` latch), and then the mode is NOT
+        moved: that latch is a decision about THIS conversation that was never
+        written to the sidecar, and switching away and back must not turn it
+        off. The record is still read for ``_explicit_approvals_mode`` so the
+        card's provenance line names the conversation's saved choice.
+        """
+        attached = self._gate_is_owned_elsewhere()
+        self._explicit_approvals_mode = None
+        source = self._interactions.get(id(session))
+        if source is None:
+            source = SessionInteraction(session)
+        directory = self._session_directory(source)
+        if directory is None:
+            if not attached and first_adoption:
+                self._set_approve_all(self._approvals_default_auto)
+            return
+        from local_operator.session.approval_policy import read_override
+
+        override, warning = read_override(directory)
+        if warning:
+            # FAIL CLOSED without claiming a choice: the record is unusable, so
+            # this is "we could not read one", not "the human typed ask". The
+            # policy module takes the same position on the runtime side.
+            self._system_notice(warning, "warning")
+            if not attached and first_adoption:
+                self._set_approve_all(False)
+            return
+        if override is None:
+            if not attached and first_adoption:
+                self._set_approve_all(self._approvals_default_auto)
+            return
+        # Provenance follows the record on EVERY adoption, even when an
+        # in-memory latch keeps the gate itself where it is.
+        self._explicit_approvals_mode = override
+        if not attached and first_adoption:
+            self._set_approve_all(override == "auto")
+
+    def _persist_approval_override(self, source: SessionInteraction, mode: str | None) -> str:
+        """Record (or clear) this conversation's choice; ``""`` on success.
+
+        Returns the failure CLASS rather than an exception: the caller's receipt
+        is the only place a storage failure can be said, and a traceback in a
+        chat transcript is noise. ``None`` writes the explicit "no choice"
+        document, which is how ``/approvals default`` makes this conversation
+        inherit the new default instead of keeping a stale record.
+        """
+        directory = self._session_directory(source)
+        if directory is None:
+            # No transcript to resume means no durability was promised.
+            return ""
+        try:
+            from local_operator.session.approval_policy import write_override
+
+            write_override(directory, mode)
+        except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
+            logger.warning("could not save the approval override", exc_info=True)
+            return error.__class__.__name__
+        return ""
+
+    def _set_session_auto_for_card(
+        self, source: SessionInteraction
+    ) -> ApprovalSettingOutcome | None:
+        """The card's `s`: this conversation's gate becomes ``auto`` now.
+
+        Owned gate: applied and recorded here, and the pending card is LEFT
+        PARKED — the user pressed a setting key, not an answer. Attached gate:
+        the command is routed to the process that holds the real gate, and the
+        card mirrors only the owner's acknowledgement (``None`` means "in
+        flight"; the route calls :meth:`ApprovalPrompt.show_setting_outcome`).
+        """
+        if self._gate_is_owned_elsewhere():
+            card = self._approval
+            if card is None:
+                return ApprovalSettingOutcome(kind="refused", mode="ask", provenance="global")
+            self.run_worker(
+                self._route_approvals_setting(card, "auto", "session"),
+                thread=False,
+                group="session",
+            )
+            return None
+        self._explicit_approvals_mode = "auto"
+        self._set_approve_all(True)
+        problem = self._persist_approval_override(source, "auto")
+        if problem:
+            # The MODE moved; only the record did not. "Not saved … approvals
+            # unchanged" would be false here — the gate really is auto now — so
+            # the card must say applied-and-not-saved instead of either lying
+            # claim.
+            return ApprovalSettingOutcome(
+                kind="applied-unsaved",
+                mode="auto",
+                provenance="session",
+                reason=problem,
+            )
+        return ApprovalSettingOutcome(kind="ok", mode="auto", provenance="session")
+
+    def _set_global_auto_for_card(
+        self, source: SessionInteraction
+    ) -> ApprovalSettingOutcome | None:
+        """The card's `g`: ``auto`` becomes the machine default.
+
+        It also CLEARS this conversation's own record so the issuing
+        conversation inherits the default it just set — the spec's case f:
+        otherwise a session-Ask override would watch the operator choose
+        "auto for all sessions" and go on asking.
+
+        Owned gate: the global write and the live move happen here. Attached
+        gate: routed to the owner, whose acknowledgement is mirrored.
+        """
+        if self._gate_is_owned_elsewhere():
+            card = self._approval
+            if card is None:
+                return ApprovalSettingOutcome(kind="refused", mode="ask", provenance="global")
+            self.run_worker(
+                self._route_approvals_setting(card, "default auto", "global"),
+                thread=False,
+                group="session",
+            )
+            return None
+        # Same order as the command and the runtime: the RECORD leaves the way
+        # for the watcher delivery (inside `_save_approvals_default`) in memory
+        # only. The sidecar is cleared after the config write lands, so a failed
+        # write leaves the conversation's own record exactly as it was.
+        previous_override = self._explicit_approvals_mode
+        self._explicit_approvals_mode = None
+        self._card_setting_gesture = True
+        try:
+            _saved_to, save_problem = self._save_approvals_default(True)
+        finally:
+            self._card_setting_gesture = False
+        if save_problem:
+            # The acknowledgement is about the DEFAULT, and a default that was
+            # not written is not one. `/approvals default` still moves the live
+            # session on a failed save (it names the session scope in its
+            # receipt); the card does not, because its copy is "auto is now the
+            # global default".
+            self._explicit_approvals_mode = previous_override
+            if previous_override is not None:
+                self._set_approve_all(previous_override == "auto")
+            return ApprovalSettingOutcome(
+                kind="error",
+                mode=self._approval_policy_view().mode,
+                provenance=self._approval_policy_view().provenance,
+                reason=save_problem,
+            )
+        problem = self._persist_approval_override(source, None)
+        self._approvals_default_auto = True
+        self._apply_approvals_default_live(True)
+        if problem and previous_override is not None:
+            # The default and this run are correct; what is not durable is this
+            # conversation releasing its old record, which would outrank the
+            # default on resume. Say applied-and-not-saved rather than claiming
+            # a persistence the next launch will not honour.
+            return ApprovalSettingOutcome(
+                kind="applied-unsaved",
+                mode="auto",
+                provenance="global",
+                reason=problem,
+            )
+        return ApprovalSettingOutcome(kind="ok", mode="auto", provenance="global")
+
+    def _apply_approvals_default_live(self, auto: bool) -> None:
+        """Move THIS gate to ``auto``/``ask`` after the default was written.
+
+        The watcher is the primary delivery (it is what re-arms sessions with no
+        choice immediately); this is the fallback for a host with no watcher and
+        the synchronous guarantee that the pane which issued the write shows the
+        new mode on the next frame.
+        """
+        if auto:
+            self._allow_approvals_again()
+        self._set_approve_all(auto)
+
+    def route_approvals_default_from_page(self, view: Any) -> None:
+        """Route a settings-page ``auto`` write to the process holding the gate.
+
+        The page already wrote ``config.yml``; when the live gate belongs to an
+        attached runtime, that write is only a DEFAULT for new sessions and the
+        session on screen keeps prompting. ``/approvals default auto`` is the
+        route that carries the operator's consent to the owner (the seam
+        classifies it as authority-increasing), so the page sends it through the
+        same channel every other routed command uses.
+
+        Only when the gate is owned elsewhere: an embedded app applies its own
+        page write directly through its config listener, and a second route
+        would be the same event told twice.
+        """
+        if not self._gate_is_owned_elsewhere():
+            return
+        from local_operator.tui.widgets.settings_view import SettingsGateRoute
+
+        session = self._session
+        route = getattr(session, "route_shared_slash", None)
+        if not callable(route):
+            view.post_message(
+                SettingsGateRoute(
+                    False,
+                    "saved as the default, but this session's runtime is not reachable "
+                    "to adopt it — it will follow on reopen",
+                )
+            )
+            return
+        self.run_worker(
+            self._route_approvals_default_worker(view, route, SettingsGateRoute),
+            thread=False,
+            group="session",
+        )
+
+    async def _route_approvals_default_worker(
+        self, view: Any, route: Any, message_type: Any
+    ) -> None:
+        """Send ``default auto`` to the owner and report ITS verdict.
+
+        Success is read from the receipt's first words, exactly as the card's
+        route does and for the same reason: the wire carries a sentence, not a
+        status code, and that sentence is what the user will read. A transport
+        failure is a refusal of THIS gesture, not a claim about the file.
+        """
+        try:
+            outcome = await route("approvals", "default auto", [])
+        except Exception as error:  # noqa: BLE001 — the page reports it, never crashes
+            view.post_message(
+                message_type(
+                    False,
+                    f"saved as the default, but this session's runtime did not accept "
+                    f"it ({error.__class__.__name__}) — it will follow on reopen",
+                )
+            )
+            return
+        text = str((outcome or {}).get("text") or "")
+        data = (outcome or {}).get("data") or {}
+        ok = data.get("ok")
+        if ok is None:
+            # Older owner that does not send the structured field: the failure
+            # family names itself, so a prefix alone is not evidence of a save.
+            ok = (
+                text.startswith("tool approvals: auto")
+                and "NOT saved" not in text
+                and "NOT applied" not in text
+            )
+        if ok:
+            mode = str(data.get("approval_mode") or "auto")
+            self._explicit_approvals_mode = None
+            self._approvals_default_auto = mode == "auto"
+            self._apply_approvals_default_live(mode == "auto")
+        view.post_message(
+            message_type(
+                bool(ok),
+                (
+                    text
+                    if text
+                    else "the session's runtime did not report back; it will follow on reopen"
+                ),
+            )
+        )
+
+    async def _route_approvals_setting(
+        self, card: ApprovalPrompt, argument: str, scope: str
+    ) -> None:
+        """Send one approvals change to the process that owns the gate.
+
+        The card mirrors ONLY the owner's answer: its receipt is the authority
+        for what the live gate now is, and an optimistic acknowledgement here
+        would claim a mode nobody confirmed. Success is read from the receipt's
+        own first words — ``tool approvals: auto`` is the one sentence both the
+        runtime and this app emit for a switch that took — rather than from a
+        status code the wire does not carry, so a refusal can never be painted
+        as a save.
+        """
+        session = self._session
+        route = getattr(session, "route_shared_slash", None)
+        before = self._approval_policy_view()
+        if not callable(route):
+            card.show_setting_outcome(
+                scope,
+                ApprovalSettingOutcome(
+                    kind="refused", mode=before.mode, provenance=before.provenance
+                ),
+            )
+            return
+        route_call = cast(Callable[[str, str, list[Any]], Awaitable[Any]], route)
+        try:
+            outcome = await route_call("approvals", argument, [])
+        except Exception as error:  # noqa: BLE001 — a broken link is a refusal here
+            card.show_setting_outcome(
+                scope,
+                ApprovalSettingOutcome(
+                    kind="error",
+                    mode=before.mode,
+                    provenance=before.provenance,
+                    reason=error.__class__.__name__,
+                ),
+            )
+            return
+        text = str((outcome or {}).get("text") or "")
+        data = (outcome or {}).get("data") or {}
+        ok = data.get("ok")
+        saved = data.get("approval_saved_for_resume", True)
+        if ok is None:
+            # Fallback for an owner built before the structured outcome. The
+            # runtime's DEFAULT-write failure receipt also begins
+            # "tool approvals: auto", which is exactly how a failed loosening
+            # used to be painted as saved; the failure family names itself, so
+            # its absence is part of the evidence, not decoration.
+            if text.startswith("tool approvals: auto") and "NOT saved for resume" in text:
+                # A session switch whose live half took and whose record did
+                # not. It is NOT a plain failure — the gate moved — so it gets
+                # the applied-and-unsaved sentence rather than "unchanged".
+                ok, saved = True, False
+            else:
+                ok = (
+                    text.startswith("tool approvals: auto")
+                    and "NOT saved" not in text
+                    and "NOT applied" not in text
+                )
+        if not ok:
+            failure = "NOT saved" in text or "NOT applied" in text
+            card.show_setting_outcome(
+                scope,
+                ApprovalSettingOutcome(
+                    kind="error" if failure else "refused",
+                    mode=before.mode,
+                    provenance=before.provenance,
+                    reason=str(data.get("approval_reason") or ("write failed" if failure else "")),
+                ),
+            )
+            return
+        mode = str(data.get("approval_mode") or "auto")
+        provenance = str(
+            data.get("approval_provenance") or ("session" if scope == "session" else "global")
+        )
+        if scope == "session":
+            self._explicit_approvals_mode = mode if provenance == "session" else None
+        else:
+            self._explicit_approvals_mode = None
+            self._approvals_default_auto = mode == "auto"
+        self._apply_approvals_default_live(mode == "auto")
+        card.show_setting_outcome(
+            scope,
+            ApprovalSettingOutcome(
+                kind="ok" if saved else "applied-unsaved",
+                mode=mode,
+                provenance=provenance,
+                reason=str(data.get("approval_reason") or "storage error"),
+            ),
+        )
 
     def _clear_transcript(self) -> None:
         self._transcript_view().clear_blocks()  # fires the on_clear hook
@@ -40975,11 +41463,11 @@ class OperatorApp(App[None]):
           See :func:`local_operator.harness.approval.loosening_is_authorised`;
           the runtime host applies the same predicate through
           ``ServingSessionHandle._on_config_change`` so the two cannot drift;
-        * loosening (``ask`` → ``auto``) does not move a pane whose human typed
-          ``/approvals ask`` in it, and prints a keep notice instead — the
-          CHOSEN MODE is what is consulted, so a pane whose human chose ``auto``
-          has no hardening to protect, but the unattributed refusal above still
-          holds it;
+        * a conversation whose human recorded a choice (``/approvals ask|auto``,
+          the card's ``s``/``g`` destinations) is not moved by the file in
+          EITHER direction (2026-10-23): the choice is the human's, about this
+          transcript, and the file is about the next one. The keep notice names
+          the direction and the command that adopts the file;
         * a pane that never chose follows the file in every direction it is
           allowed to, which is the operator's "goes into effect for all my
           agents" case and is what this change exists to deliver.
@@ -41005,12 +41493,12 @@ class OperatorApp(App[None]):
         band, so the band cannot say something the gate does not do; the cached
         default moves FIRST so the band's ``always`` marker is computed against
         the new default. A prompt already on screen is deliberately NOT answered
-        here — ``_answer_live_approval_as_allowed`` is the ``/approvals auto``
-        COMMAND's gesture, where the human typed the loosening in this very pane
-        — but it IS repainted with a note, so the frame stops saying "every tool
-        runs without asking" two lines above "the agent needs your approval"
-        (UX round 1, U6). The deny latch is released on a tightening, since
-        "tools prompt again" is the promise being printed.
+        here — a mode change governs the NEXT request and is not the answer to
+        the one being displayed (2026-10-23) — but it IS repainted with a note,
+        so the frame stops saying "every tool runs without asking" two lines
+        above "the agent needs your approval" (UX round 1, U6). The deny latch
+        is released on a tightening, since "tools prompt again" is the promise
+        being printed.
         """
         values = getattr(change, "values", {})
         mode = str(values.get("tool_approval_mode", "")).strip().lower()
@@ -41031,13 +41519,18 @@ class OperatorApp(App[None]):
         if wanted_auto == self._approve_all:
             self._set_approve_all(self._approve_all)  # re-assert the band's `always` marker
             return _ApprovalsFollow("", False)
-        if announce and wanted_auto and self._explicit_approvals_mode == "ask":
-            # Loosening against this pane's own deliberate hardening: keep the
-            # gate. Shaped like the model half's keep notice — what is kept,
-            # why, and the command that adopts the file.
+        if self._explicit_approvals_mode is not None:
+            # THE HUMAN'S OWN CHOICE OUTRANKS THE FILE IN BOTH DIRECTIONS
+            # (2026-10-23). This branch used to fire only for a typed ``ask``
+            # against a loosening; the mirror case is symmetric because the
+            # same fact is under it — a conversation set to ``auto`` for a long
+            # unattended run was re-armed by a default about OTHER sessions,
+            # mid-turn and silently. The file cannot describe this transcript's
+            # choice, so it does not move it; the notice names the direction and
+            # the one command that adopts the file.
             #
-            # `== "ask"` rather than a bare truth test (review round 2, R6):
-            # only a typed `ask` is a hardening worth refusing the file for.
+            # Shaped like the model half's keep notice — what is kept, why, and
+            # the command that adopts the file.
             #
             # The NOTICE is gated on ownership for the same reason the value
             # clause below is (design round 1 D1, extended to this branch by
@@ -41055,7 +41548,16 @@ class OperatorApp(App[None]):
             # to weight. See the refusal branch below for why `note` is not
             # available to either.
             if not self._gate_is_owned_elsewhere():
-                self._system_notice(LOOSENING_KEPT_BY_ASK_NOTICE, "warning")
+                self._system_notice(
+                    LOOSENING_KEPT_BY_ASK_NOTICE if wanted_auto else REARM_KEPT_BY_AUTO_NOTICE,
+                    "warning",
+                )
+            if not announce and wanted_auto:
+                # A page write that could not move this conversation's gate is
+                # the one case the page cannot see: it hides the transcript the
+                # notice lands in. Recorded so its row reports the refusal
+                # instead of a success (UX round 1, U1).
+                self._page_kept_loosening = "tool_approval_mode"
             self._set_approve_all(self._approve_all)
             return _ApprovalsFollow("", True)
         if wanted_auto and not loosening_is_authorised(
@@ -41098,23 +41600,23 @@ class OperatorApp(App[None]):
                 self._system_notice(LOOSENING_REFUSED_NOTICE, "warning")
             self._set_approve_all(self._approve_all)
             return _ApprovalsFollow("", True)
-        if not announce:
-            # A page write in this pane is a choice made here, so it REPLACES
-            # whatever `/approvals` had recorded rather than being refused by
-            # it. Without this a pane that had typed `/approvals ask` could
-            # never loosen itself from its own settings page.
-            self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
-        else:
-            # An ANOTHER-PROCESS write that reaches here is one that moves the
-            # gate, so the file now owns the value in force and a mode typed
-            # here earlier no longer describes it. Clearing is what makes the
-            # keep notice's "set with /approvals in this session" true rather
-            # than a claim about a value the file chose (review round 2, R6).
-            self._explicit_approvals_mode = None
+        # `_explicit_approvals_mode` is deliberately NOT touched here. Reaching
+        # this line means there is no recorded choice (the keep branch above
+        # returned for any choice), so there is nothing to replace or clear;
+        # assigning the file's value would invent an override the human never
+        # typed, and clearing one would discard a real choice. `/approvals
+        # default <mode>` is the only command that changes this bit.
         if not wanted_auto:
             self._allow_approvals_again()
         self._set_approve_all(wanted_auto)
-        if wanted_auto:
+        # A card already on screen states the mode in force; a followed change
+        # that left it saying "Ask" over a gate that now runs without asking is
+        # the contradiction `_note_approvals_on_parked_prompt` exists for in the
+        # other direction. Repaint the statement, never answer the request.
+        card = self._approval
+        if card is not None and isinstance(card, ApprovalPrompt) and not card.answered:
+            card.set_policy(self._approval_policy_view())
+        if wanted_auto and not self._card_setting_gesture:
             self._note_approvals_on_parked_prompt()
         if not announce or self._gate_is_owned_elsewhere():
             return _ApprovalsFollow("", False)
@@ -56061,20 +56563,88 @@ class OperatorApp(App[None]):
         persist = argument == "default" or argument.startswith("default ")
         mode = argument[len("default ") :].strip() if persist else argument
         if persist:
-            # The same two-truths split the runtime makes, in the SAME WORDS:
-            # the sentence is shared so the two hosts cannot drift, and it names
-            # the machine the session runs on rather than "this machine", which
-            # reads as the reader's own filesystem from a phone (design round 2
-            # D10 = UX round 2 U7; design round 3, D16).
-            from local_operator.harness.approval import approvals_default_notice
-            from local_operator.operator import operator_authority_unusable
-
+            # THIS HANDLER IS THE GATE OWNER in the topology that reaches it: it
+            # is the owner-side backend for a follower's routed slash, so the
+            # runtime's old "a default belongs to the launching terminal"
+            # refusal would be false here. This process writes config.yml for
+            # its own sessions and its watcher is what re-arms the ones that
+            # inherit it (2026-10-23).
+            #
+            # The one case that is still not ours to grant is a loosening this
+            # connection cannot authorise: `may_loosen` is the seam's answer,
+            # and writing the machine default to `auto` from here would hand a
+            # read-only viewer the loosening it was refused.
+            if mode in ("ask", "on", "prompt"):
+                wanted_default = False
+            elif mode in ("auto", "off", "yolo"):
+                wanted_default = True
+            elif not mode:
+                # Bare `default` keeps the mode this session is in, the app's
+                # own reading of the same frame (`_cmd_approvals`).
+                wanted_default = self._approve_all
+            else:
+                return SlashResult(
+                    kind="notice",
+                    text=f"unknown approval default {mode!r} — use /approvals default "
+                    "ask or /approvals default auto",
+                    style="warning",
+                )
+            if wanted_default and may_loosen is False:
+                return SlashResult(
+                    kind="notice",
+                    text="tool approvals: unchanged — this connection cannot set the "
+                    "auto default; /approvals default auto needs the operator's own "
+                    "consent",
+                    style="warning",
+                )
+            source = self._interaction
+            # Same order as the local command (and the runtime's own handler):
+            # the record leaves the WAY for the watcher delivery but is cleared
+            # from disk only after the config write lands, so a failed write
+            # restores this conversation exactly as it was.
+            previous_override = self._explicit_approvals_mode
+            self._explicit_approvals_mode = None
+            saved_to, problem = self._save_approvals_default(wanted_default)
+            if problem:
+                self._explicit_approvals_mode = previous_override
+                if previous_override is not None:
+                    self._set_approve_all(previous_override == "auto")
+                else:
+                    self._apply_approvals_default_live(wanted_default)
+                return SlashResult(
+                    kind="notice",
+                    text=f"tool approvals: {mode_word(wanted_default)} — NOT saved: "
+                    f"{problem}; new sessions will not follow it",
+                    style="warning",
+                )
+            clear_problem = (
+                self._persist_approval_override(source, None) if source is not None else ""
+            )
+            self._approvals_default_auto = wanted_default
+            self._apply_approvals_default_live(wanted_default)
+            self._note_approvals_mode_on_parked_prompt(wanted_default, scope="global")
+            text = (
+                f"tool approvals: {mode_word(wanted_default)} — saved to {saved_to}: "
+                f"tool_approval_mode {mode_word(wanted_default)}; this conversation follows "
+                "it; other conversations with their own choice keep it"
+            )
+            if clear_problem and previous_override is not None:
+                text += (
+                    " — but this conversation's saved choice was not cleared " f"({clear_problem})"
+                )
             return SlashResult(
                 kind="notice",
-                text=approvals_default_notice(
-                    may_loosen=may_loosen, anchor_unusable=operator_authority_unusable()
-                ),
-                style="warning",
+                text=text,
+                style="warning" if wanted_default else "info",
+                # Same machine-readable outcome the runtime sends: the card
+                # reads `ok` and the effective mode, never the sentence.
+                data={
+                    "approval_mode": mode_word(wanted_default).lower(),
+                    "approval_provenance": "global",
+                    "ok": True,
+                    "approval_saved_for_resume": clear_problem == "",
+                    "approval_reason": clear_problem,
+                },
             )
         if mode in ("ask", "on", "prompt"):
             wanted_auto = False
@@ -56125,16 +56695,22 @@ class OperatorApp(App[None]):
                 f"config.yml says {saved} — {remedy}",
                 style="warning" if self._approve_all else "info",
             )
-        if wanted_auto:
-            self._answer_live_approval_as_allowed()
-        else:
+        # A MODE CHANGE NEVER ANSWERS A PENDING PROMPT (2026-10-23): the guard
+        # that used to answer the card as allowed from here is gone. The card
+        # stays parked and gets the acknowledgement in its own reserved slot.
+        if not wanted_auto:
             self._allow_approvals_again()
-        # The user typed the mode here, so a later LOOSENING disk write leaves
-        # this pane's gate alone (see `_follow_configured_approvals`). The mode
-        # itself is recorded, so only a typed `ask` refuses a file loosening
-        # (review round 2, R6).
+        source = self._interaction
+        problem = (
+            self._persist_approval_override(source, "auto" if wanted_auto else "ask")
+            if source is not None
+            else ""
+        )
+        # The user typed the mode here, so a later file write leaves this pane's
+        # gate alone IN BOTH DIRECTIONS (see `_follow_configured_approvals`).
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._set_approve_all(wanted_auto)
+        self._note_approvals_mode_on_parked_prompt(wanted_auto)
         if wanted_auto:
             # Same rule as `_cmd_approvals`: the save hint is offered only while
             # it is new information (UX round 1, U5), and the live half is the
@@ -56144,17 +56720,40 @@ class OperatorApp(App[None]):
                 if self._configured_approvals_mode() == "auto"
                 else " — /approvals default auto saves it for new sessions"
             )
+            not_saved = (
+                f" — applied for this session but NOT saved for resume ({problem})"
+                if problem
+                else ""
+            )
             return SlashResult(
                 kind="notice",
                 text="tool approvals: auto — every tool runs without asking (this session)"
-                + save_hint,
+                + save_hint
+                + not_saved,
                 style="warning",
+                data={
+                    "approval_mode": "auto",
+                    "approval_provenance": "session",
+                    "ok": True,
+                    "approval_saved_for_resume": problem == "",
+                    "approval_reason": problem,
+                },
             )
+        not_saved = (
+            f" — applied for this session but NOT saved for resume ({problem})" if problem else ""
+        )
         return SlashResult(
             kind="notice",
             text="tool approvals: ask — write and command tools prompt before running "
-            "(this session)",
+            "(this session)" + not_saved,
             style="info",
+            data={
+                "approval_mode": "ask",
+                "approval_provenance": "session",
+                "ok": True,
+                "approval_saved_for_resume": problem == "",
+                "approval_reason": problem,
+            },
         )
 
     #: The CLOSED verb set ``/mcp`` accepts in its first argument slot, in the

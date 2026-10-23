@@ -73,6 +73,14 @@ from local_operator.resume import (
     write_goal_record,
 )
 
+#: The conversation's recorded ``/approvals`` choice, imported rather than
+#: spelled again for the reason :data:`MESH_STAMP_NAME` is: the string the
+#: deny-list excludes and the string the reader opens must be one string.
+#: ``approval_policy`` is stdlib-only, so this keeps the module's discipline.
+from local_operator.session.approval_policy import (
+    OVERRIDE_FILENAME as APPROVALS_SIDECAR_NAME,
+)
+
 #: The ownership stamp's name, imported rather than spelled again: the file this
 #: deny-list excludes and the file the resolver reads must be the same string, and
 #: a second literal here is how they would come apart (§1.2). ``placement`` is
@@ -174,6 +182,15 @@ COPIED_SIDECARS: tuple[str, ...] = (
 #:   conversation whose UI did not ask for it, or fail the revision guard against
 #:   a row it does not own. Intent is per-fork and re-recorded only when a new
 #:   fork request carries ``auto_tag``.
+#: - ``approvals.json``: the parent's recorded ``/approvals`` choice
+#:   (``session/approval_policy.py``; 2026-10-23). A fork is a NEW conversation
+#:   that happens to share history, so it starts with no choice of its own and
+#:   follows the config default — the same rule a fresh session gets. Copying
+#:   the parent's record would EXPAND consent silently in the loosening
+#:   direction: a user who typed ``/approvals auto`` for one long run would have
+#:   every fork of it open ungated too, with nothing in the fork's own history
+#:   saying anyone chose that here. (The narrowing direction is merely
+#:   unhelpful; the pair is why the file is excluded rather than inherited.)
 EXCLUDED_SIDECARS: tuple[str, ...] = (
     ".session.pid",
     "subagent-roster.v1.json",
@@ -181,6 +198,7 @@ EXCLUDED_SIDECARS: tuple[str, ...] = (
     "title-scan.json",
     MESH_STAMP_NAME,
     "auto-tag.json",
+    APPROVALS_SIDECAR_NAME,
 )
 
 #: Ceiling on the conversation-scoped definitions a fork will copy.
