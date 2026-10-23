@@ -1968,7 +1968,7 @@ def test_screenshot_into_an_over_cap_pad_is_refused_before_cmux(monkeypatch, tmp
 # and a search term — and the footer that makes a narrowed tree recoverable.
 
 SNAPSHOT_TREE = "\n".join(
-    ["- RootWebArea \"Create App\" [e1]", "  - form", '    - textbox "GitHub App name" [e2]']
+    ['- RootWebArea "Create App" [e1]', "  - form", '    - textbox "GitHub App name" [e2]']
     + [f'    - textbox "Setting {index}" [e{index + 3}]' for index in range(200)]
 )
 
@@ -2035,7 +2035,7 @@ def test_snapshot_footer_names_the_next_page_a_host_windowed(monkeypatch) -> Non
     _snapshot_bridge(
         monkeypatch,
         {
-            "snapshot": "\n".join(f"- textbox \"Field {i}\" [e{i}]" for i in range(50)),
+            "snapshot": "\n".join(f'- textbox "Field {i}" [e{i}]' for i in range(50)),
             "total_lines": 431,
             "matched_lines": 431,
             "returned_lines": 50,
@@ -2142,6 +2142,9 @@ def test_snapshot_says_when_the_host_ignored_the_selector(monkeypatch) -> None:
 
 
 def test_snapshot_window_is_refused_on_another_action(monkeypatch) -> None:
+    # Pin the host: `build_browser_tool` returns None without one, and the test
+    # then fails with an AttributeError that says nothing about windows.
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     tool = builtin.build_browser_tool(_ctx())
     result = _run(
         tool,
@@ -2155,6 +2158,7 @@ def test_snapshot_window_is_refused_on_another_action(monkeypatch) -> None:
 
 
 def test_snapshot_window_values_are_refused_when_unusable(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     tool = builtin.build_browser_tool(_ctx())
     for args, expected in (
         ({"action": "snapshot", "start": 0}, "'start' is 1-based"),
@@ -2280,27 +2284,33 @@ def test_a_start_past_the_end_never_prints_an_inverted_range(monkeypatch) -> Non
 
 
 def test_a_context_cut_page_does_not_name_a_next_start(monkeypatch) -> None:
-    """R1-6: following `start + returned` after a character cut skips whole lines."""
-    lines = [f"- textbox \"Field {n}\"" for n in range(1, 900)]
+    """R1-6: following `start + returned` after a character cut skips whole lines.
+
+    The page has to be BOTH windowed (returned < matched) and over the character
+    ceiling, or the branch this pins is unreachable and the test passes on the
+    defective head (agent review round 2, R2-1).
+    """
+    lines = [f"- textbox \"Field {n} {'.' * 180}\"" for n in range(1, 901)]
     _snapshot_bridge(
         monkeypatch,
         {
-            "snapshot": "\n".join(lines),
+            "snapshot": "\n".join(lines[:50]),
             "total_lines": len(lines),
             "matched_lines": len(lines),
-            "returned_lines": len(lines),
+            "returned_lines": 50,
             "start": 1,
-            "limit": 900,
+            "limit": 50,
         },
     )
     tool = builtin.build_browser_tool(_ctx())
     result = _run(
         tool,
         "t1",
-        {"action": "snapshot", "limit": 900},
+        {"action": "snapshot", "limit": 50},
         _secret_ctx(surface_id="bridge:9:nonce"),
     )
 
     assert not result.is_error, result.text
     assert "cut to fit the context" in result.text
     assert "pass start=" not in result.text
+    assert "lines 1-50 of 900" in result.text

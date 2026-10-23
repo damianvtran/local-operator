@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: driver/ax-compact.ts (host-free shared policy (chrome.*-free by construction)).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (11 modules: access-flow.ts, access-queue.ts, ax-compact.ts, deadline.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: d93dc45068af5e0212015fd0beb84350c56ff1e928b715eeebecb7654a00bb3e
+// Inputs sha256: 1d75a83d7521e48835b0e548a634d8a8ad576e1f20ae3560f99dbc7ccede0d4f
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -70,6 +70,11 @@ export interface CompactOptions {
 export interface CompactResult {
   snapshot: string;
   refs: Record<string, SnapshotRef>;
+  /** How many frame nodes the SCOPE contains (0 unscoped). A scoped read does
+   *  not walk frames, and only the subtree's own count can tell a caller "the
+   *  thing you scoped into holds a frame you are not seeing" (agent review
+   *  round 2, R2-1: a page-level count said so about frameless sections too). */
+  framesInScope: number;
   /** Rendered lines before any `windowSnapshot` filter or page. */
   totalLines: number;
   /** True only when a scope was requested AND found in the tree. */
@@ -133,6 +138,7 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
    * small page, not a fragment indented 17 levels deep). */
   const scopeId = options.rootBackendNodeId;
   let scopeAt: number | null = null;
+  let framesInScope = 0;
   // Guard against cyclic or duplicated childIds in a malformed AX payload:
   // the walk trusts protocol data, and without this a cycle would recurse
   // forever inside the extension's service worker (review round 1, MINOR-1).
@@ -173,6 +179,7 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
     }
     const role = String(node.role?.value ?? "");
     const name = String(node.name?.value ?? "").trim();
+    if (inside && role === "Iframe") framesInScope += 1;
     const focusable = node.properties?.some((property) => property.name === "focusable" && property.value.value === true);
     const interesting = INTERACTIVE.has(role) || LANDMARKS.has(role) || focusable || Boolean(name && role !== "StaticText");
     if (interesting) {
@@ -201,11 +208,19 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
   const scopedRoot =
     scopeId === undefined ? undefined : nodes.find((node) => node.backendDOMNodeId === scopeId);
   if (scopeId !== undefined && scopedRoot === undefined) {
-    return { snapshot: "", refs, totalLines: 0, scoped: false };
+    return { snapshot: "", refs, framesInScope: 0, totalLines: 0, scoped: false };
   }
   const childIds = new Set(nodes.flatMap((node) => node.childIds ?? []));
   for (const root of nodes.filter((node) => !childIds.has(node.nodeId))) visit(root, 0);
-  return { snapshot: lines.join("\n"), refs, totalLines: lines.length, scoped: scopeId !== undefined };
+  return {
+    snapshot: lines.join("\n"),
+    refs,
+    // Unscoped means "the whole page", and every frame is then read by the
+    // caller's own frame walk: the count exists only to explain a SCOPE.
+    framesInScope: scopeId === undefined ? 0 : framesInScope,
+    totalLines: lines.length,
+    scoped: scopeId !== undefined,
+  };
 }
 
 /** The result of one page of a snapshot, and the numbers a footer needs. */

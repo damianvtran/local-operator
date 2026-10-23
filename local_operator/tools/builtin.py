@@ -20150,10 +20150,7 @@ class BrowserParams(BaseModel):
     # extension/src/driver/ax-compact.ts.
     start: int | None = Field(
         default=None,
-        description=(
-            "'snapshot': 1-based line to start the page at (the footer names the "
-            "next line when a tree was cut)."
-        ),
+        description=("'snapshot': 1-based first line to return; the footer names the next."),
     )
     limit: int | None = Field(
         default=None,
@@ -20162,8 +20159,7 @@ class BrowserParams(BaseModel):
     search: str = Field(
         default="",
         description=(
-            "'snapshot': keep only lines whose role or accessible name contains "
-            "this text (case-insensitive), e.g. search='Active'."
+            "'snapshot': keep lines whose role or name contains this text, e.g. " "search='Active'."
         ),
     )
     text: str = Field(
@@ -20173,10 +20169,9 @@ class BrowserParams(BaseModel):
     )
     secret_ref: str = Field(
         default="",
-        description="'type': the NAME of a secret to enter instead of 'text' (e.g. "
-        "'SUDO_PASSWORD'); resolved session-first (the `ask` answer, /credential), then "
-        "the encrypted store; never shown in results, traces or logs, and registered "
-        "for redaction.",
+        description="'type': a stored secret's NAME instead of 'text' (e.g. "
+        "'SUDO_PASSWORD'); resolved session-first, then the encrypted store, never "
+        "shown or logged.",
     )
     # One new field for the whole feature (the tool-surface ladder's rung 1):
     # `download` needs no destination (the harness chooses it), so a comma-split
@@ -20186,9 +20181,8 @@ class BrowserParams(BaseModel):
     paths: list[str] = Field(
         default_factory=list,
         description=(
-            "'upload': the local files to attach, one or more (credential files "
-            "and the harness's own config dir are refused; relative paths "
-            "resolve against the session's cwd)."
+            "'upload': local files to attach (credential files and this "
+            "harness's config dir are refused; relative = session cwd)."
         ),
     )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
@@ -20196,13 +20190,11 @@ class BrowserParams(BaseModel):
     # extension/src/commands/scroll.ts).
     x: float | None = Field(
         default=None,
-        description="'scroll': horizontal pixel delta (positive = right); "
-        "with 'y', a precise scrollBy; for 'hit_test', the viewport x to probe.",
+        description="'scroll': x delta (right positive); for 'hit_test', the viewport x.",
     )
     y: float | None = Field(
         default=None,
-        description="'scroll': vertical pixel delta (positive = down); for "
-        "'hit_test', the viewport y to probe.",
+        description="'scroll': y delta (down positive); for 'hit_test', the viewport y.",
     )
     direction: str = Field(
         default="",
@@ -20216,16 +20208,14 @@ class BrowserParams(BaseModel):
     )
     limit: int | None = Field(
         default=None,
-        description="'logs' max entries to return (most recent kept); 'scroll' "
-        "ignores it. Omit for no cap.",
+        description="'snapshot'/'logs' max lines or entries; omit for no cap.",
     )
     # Read-action params (styles/hit_test/ancestors). Per-op semantics live in
     # the tool:// doc's ops table; these two descriptions carry only what the
     # caller must know to shape the value.
     properties: list[str] = Field(
         default_factory=list,
-        description="'styles': extra computed properties on top of the defaults "
-        "(max 20; letters, digits, dashes and underscores).",
+        description="'styles': extra computed properties (max 20).",
     )
     depth: int | None = Field(
         default=None,
@@ -20801,8 +20791,7 @@ def _snapshot_footer(
         # (agent review round 1, R1-6): the lines the cut removed are whole
         # lines, so following `start + returned` would skip them.
         notes.append(
-            "this page was also cut to fit the context; pass a smaller limit= "
-            "to get whole lines"
+            "this page was also cut to fit the context; pass a smaller limit= " "to get whole lines"
         )
     return f"[snapshot: {'; '.join(notes)}]" if notes else ""
 
@@ -25443,7 +25432,11 @@ async def _execute_browser(
             limit=params.limit or 0,
         )
         body = truncate_output(text, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)"
-        truncated = len(body) >= BROWSER_TEXT_LIMIT_CHARS
+        # Measured against the PRE-truncation text, like the bridge branch: at
+        # exactly the ceiling `truncate_output` returns the text unchanged, so
+        # `>=` reported a cut that never happened and (since R1-6) dropped the
+        # next-page hint for a page that was whole.
+        truncated = len(text) > BROWSER_TEXT_LIMIT_CHARS
         footer = _snapshot_footer(
             total=total,
             matched=matched,
@@ -25665,19 +25658,16 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             # correctly. The context-budget guard measures the whole surface; the
             # slimming wave (audit item 2) moved the lifecycle/file-transfer clauses
             # to `read tool://browser`.
-            "Drive the user's REAL browser — the desktop app's tab by default, their "
-            "paired extension, or a cmux panel ('backend' names a host for a fresh "
-            "'open'; actions: `read tool://browser`). Cookies and logins persist "
-            "across calls and sessions, and the user can sign in by hand when you ask "
-            "them to, so this reaches authenticated pages a throwaway browser cannot. "
-            "A fresh 'open' creates one NEW tab owned by this session; reuse it because "
-            "later opens navigate it. "
-            "Before your final response, call 'close' unless the user needs it left "
-            "open for a pending interaction; 'tabs' lists every agent-driven tab "
-            "(handles are redacted: awareness-only), and 'close' ends only your own tab. "
-            "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: call 'request_access', NOTIFY the operator to approve "
-            "it, and 'await_access' before navigating again. "
+            "Drive the user's REAL browser — the app's tab, their paired extension or a "
+            "cmux panel ('backend' picks a host; actions: `read tool://browser`). "
+            "Cookies and logins persist across calls and sessions and the user can sign "
+            "in by hand, so this reaches authenticated pages no throwaway browser can. "
+            "A fresh 'open' creates one NEW session-owned tab; reuse it, later opens "
+            "navigate it. Call 'close' before your final response unless a pending "
+            "interaction needs it; 'tabs' lists every tab (redacted handles) and 'close' "
+            "ends only your own tab. "
+            "An unapproved site fails with origin_not_allowed: call 'request_access', "
+            "NOTIFY the operator, then 'await_access' before retrying. "
             "Never install or script a browser engine instead. Playbook: `guide://browser`."
         ),
         parameters=BrowserParams.model_json_schema(),
