@@ -1032,6 +1032,19 @@ the two therefore agreed, which is precisely why nothing caught it. When you
 isolate a run, verify where its writes actually go, not merely that its reads
 are redirected.
 
+**And a rig's own fixture path must never come from an environment fallback.**
+An agent shell inherits `LOCAL_OPERATOR_CONFIG_DIR=/Users/<user>/.local-operator`,
+so a setup step that writes to
+`os.environ.get("LOCAL_OPERATOR_CONFIG_DIR") or <isolated-dir>/config.yml` writes
+the OPERATOR'S LIVE config — `env -i` is on the command that launches the app,
+not on the harness process that prepares its fixture — and the test still passes,
+because the app it launches gets the correct isolated value and creates the
+isolated file the assertions then read. That happened on 2026-10-23: a QA rig's
+setup wrote a 34-byte `values: {tool_approval_mode: ask}` over the operator's
+26-key live config at 04:21:42, and the nested loss was only found by hand
+afterwards. Set the fixture path explicitly, never with an environment fallback,
+and print or verify the absolute path written before launching the app.
+
 **A standby runtime is a CHILD of the host that warmed it, so an isolated run
 cannot leave one behind — but a run that fails to exit can.** Every interface
 host (a TUI, `lop serve`) may fork one pre-imported spare runtime per config
