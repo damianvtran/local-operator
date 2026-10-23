@@ -137,6 +137,12 @@ _SIDECAR_NAMES = frozenset(
         # action), and it is not user content, so it moves neither clock nor
         # size budget.
         "auto-tag.json",
+        # The listing cache written beside an archive at compression time
+        # (``compression.PREVIEW_SIDECAR_NAME``): two condensed strings ABOUT the
+        # transcript's tail, so a list row need not decompress the archive. It is
+        # written once, at compression, so it can only ever be older than the
+        # transcript it describes — bookkeeping, never activity.
+        "preview.json",
     }
 )
 

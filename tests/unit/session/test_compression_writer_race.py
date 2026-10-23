@@ -186,3 +186,125 @@ async def test_an_undecodable_archive_refuses_the_append_instead_of_shadowing_it
         assert not (directory / compression.PLAIN_FILENAME).exists()
     finally:
         live.close()
+
+
+# ---------------------------------------------------------------------------
+# L3 — the removal is atomic with the decision (review round 1, M2)
+# ---------------------------------------------------------------------------
+
+
+def _late_row() -> bytes:
+    return (
+        json.dumps(
+            {
+                "id": "rowlate",
+                "ts": 99.0,
+                "type": "message",
+                "payload": {"role": "user", "content": "written in the window"},
+            }
+        ).encode()
+        + b"\n"
+    )
+
+
+def test_a_late_append_in_the_retirement_window_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE REPRO: a writer appends after the publish, before the removal.
+
+    The old order (re-stat, then unlink) deleted the plain file the row had just
+    landed in, and the archive — a copy of the PRE-append bytes — became the only
+    copy: a silent hole. The protocol now renames the plain file first, so the
+    append lands in the renamed inode and the stat of THAT file sees it.
+    """
+    directory = _session(_store(tmp_path), "race05")
+    real_publish = compression._publish
+
+    def publishing_with_a_late_writer(tmp: Path, destination: Path) -> None:
+        if Path(destination).name == compression.QUARANTINE_NAME:
+            # Exactly where a writer that timed out on the lock appends: the
+            # plain path, an instant before the compressor renames it.
+            with (directory / compression.PLAIN_FILENAME).open("ab") as handle:
+                handle.write(_late_row())
+                handle.flush()
+                os.fsync(handle.fileno())
+        real_publish(tmp, destination)
+
+    monkeypatch.setattr(compression, "_publish", publishing_with_a_late_writer)
+
+    outcome = compression.compress_session(directory)
+
+    assert outcome.status == "skipped", outcome
+    plain = directory / compression.PLAIN_FILENAME
+    assert plain.exists()
+    ids = [json.loads(line)["id"] for line in plain.read_bytes().splitlines()]
+    assert "rowlate" in ids, ids
+    assert ids[:4] == ["row000", "row001", "row002", "row003"], ids
+    # The archive published from the pre-append bytes is withdrawn: two forms
+    # that disagree is the state this protocol exists to avoid.
+    assert compression.archive_path(directory) is None
+    assert not (directory / compression.QUARANTINE_NAME).exists()
+
+
+def test_a_normal_pass_leaves_no_quarantine(tmp_path: Path) -> None:
+    directory = _session(_store(tmp_path), "race06")
+    assert compression.compress_session(directory).status == "compressed"
+    assert not (directory / compression.QUARANTINE_NAME).exists()
+    assert not (directory / compression.PLAIN_FILENAME).exists()
+
+
+def test_a_crash_between_the_rename_and_the_unlink_is_recovered(tmp_path: Path) -> None:
+    """quarantine + archive + no plain: the open puts the plain file back."""
+    from local_operator.session.transcript import Transcript
+
+    directory = _session(_store(tmp_path), "race07")
+    original = (directory / compression.PLAIN_FILENAME).read_bytes()
+    assert compression.compress_session(directory, codec="gzip").status == "compressed"
+    archive = compression.archive_path(directory)
+    assert archive is not None
+
+    # The exact on-disk state a crash at the rename leaves: the verified archive
+    # published, and the plain file parked under the quarantine name.
+    quarantine = directory / compression.QUARANTINE_NAME
+    quarantine.write_bytes(original)
+    assert not (directory / compression.PLAIN_FILENAME).exists()
+
+    assert compression.restore_for_write(directory) is True
+
+    plain = directory / compression.PLAIN_FILENAME
+    assert plain.read_bytes() == original
+    assert compression.archive_path(directory) is None
+    assert not quarantine.exists()
+    # And the runtime opens it with every row, which is the point of recovering.
+    transcript = Transcript(directory)
+    try:
+        assert [entry.id for entry in transcript.entries()] == [row["id"] for row in _rows()]
+    finally:
+        transcript.close()
+
+
+def test_the_pass_recovers_a_quarantine_before_skipping_the_session(tmp_path: Path) -> None:
+    """The scan's own recovery: otherwise the session reads as already compressed."""
+    config = _store(tmp_path)
+    directory = _session(config, "race08")
+    original = (directory / compression.PLAIN_FILENAME).read_bytes()
+    # Old enough to be a candidate, in the crash state, with no archive at all:
+    # the plain file is the only copy and it is parked under the dot-name.
+    stamp = time.time() - 90 * 86400.0
+    quarantine = directory / compression.QUARANTINE_NAME
+    quarantine.write_bytes(original)
+    os.utime(quarantine, (stamp, stamp))
+    os.utime(directory, (stamp, stamp))
+    (directory / compression.PLAIN_FILENAME).unlink()
+
+    result = compression.run_compression(
+        config, compression.CompressionPolicy(enabled=True, after_days=30), budget_s=60.0
+    )
+
+    plain = directory / compression.PLAIN_FILENAME
+    assert plain.exists(), result
+    assert plain.read_bytes() == original
+    assert not quarantine.exists()
+    # The recovery happened BEFORE the eligibility decision, so this session went
+    # on to be compressed normally rather than skipped as "already compressed".
+    assert result.compressed or "already compressed" not in result.skipped_by_reason

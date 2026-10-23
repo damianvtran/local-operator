@@ -45,7 +45,15 @@ COMPRESSION_MODULE = "local_operator/session/compression.py"
 #: or bytes. ``mkdir``/``unlink``/``write_text`` are deliberately absent: a
 #: creation path legitimately holds the plain name, and removal is the subject
 #: of ``test_no_session_deletion``.
-_PROBE_METHODS = frozenset({"is_file", "exists", "stat", "read_bytes", "read_text", "open"})
+_PROBE_METHODS = frozenset({"is_file", "exists", "stat", "read_bytes", "read_text", "open", "glob"})
+
+#: ``os.path.<fn>(path)`` probes. Listed separately from :data:`_PROBE_METHODS`
+#: because the plain-name path is the FUNCTION'S ARGUMENT rather than the
+#: receiver, and the shape that shipped was exactly
+#: ``os.path.exists(os.path.join(directory, TRANSCRIPT_FILENAME))`` (review m1).
+_OS_PROBE_FUNCTIONS = frozenset(
+    {"exists", "isfile", "isdir", "stat", "getsize", "getmtime", "open"}
+)
 
 #: Names that are the plain transcript filename even when a module spells its
 #: own alias instead of importing ``resume.TRANSCRIPT_NAME``.
@@ -123,8 +131,15 @@ class _Flag:
 
 
 def _literal_names(tree: ast.Module) -> set[str]:
-    """Module-level names bound to the plain filename, plus the fixed spellings."""
+    """Module-level names bound to the plain filename, plus the fixed spellings.
+
+    Follows ALIASES to a fixpoint (``NAME = TRANSCRIPT_FILENAME``, and a second
+    hop onto that), because a module that renames the constant still spells the
+    same file and the guard exists to see the spelling, not the identifier
+    (review m1).
+    """
     names = set(_FIXED_NAMES)
+    assignments: list[tuple[ast.Name, ast.expr]] = []
     for node in tree.body:
         targets: list[ast.expr] = []
         value: ast.expr | None = None
@@ -134,21 +149,60 @@ def _literal_names(tree: ast.Module) -> set[str]:
             targets, value = [node.target], node.value
         if value is None:
             continue
-        if isinstance(value, ast.Constant) and value.value == _PLAIN_LITERAL:
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
+        for target in targets:
+            if isinstance(target, ast.Name):
+                assignments.append((target, value))
+    changed = True
+    while changed:
+        changed = False
+        for target, value in assignments:
+            if target.id in names:
+                continue
+            if isinstance(value, ast.Constant) and value.value == _PLAIN_LITERAL:
+                names.add(target.id)
+                changed = True
+            elif isinstance(value, ast.Name) and value.id in names:
+                names.add(target.id)
+                changed = True
     return names
 
 
-def _is_plain_path_expr(node: ast.expr, names: set[str]) -> bool:
-    """Whether ``node`` spells ``<expr> / <the plain filename>``."""
-    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
-        return False
-    right = node.right
-    if isinstance(right, ast.Name) and right.id in names:
+def _is_plain_name(node: ast.expr, names: set[str]) -> bool:
+    """Whether ``node`` IS the plain filename: a literal or a known alias."""
+    if isinstance(node, ast.Name) and node.id in names:
         return True
-    return isinstance(right, ast.Constant) and right.value == _PLAIN_LITERAL
+    return isinstance(node, ast.Constant) and node.value == _PLAIN_LITERAL
+
+
+def _is_plain_path_expr(node: ast.expr, names: set[str]) -> bool:
+    """Whether ``node`` spells a path ENDING in the plain filename.
+
+    Every spelling the codebase has used is covered: ``directory / NAME`` (the
+    pre-existing shape), ``Path(directory, NAME)``, ``os.path.join(directory,
+    NAME)`` and a further assignment hop, because a guard that knew only the
+    ``/`` operator reported ZERO flags on the ``os.path.join`` probe this PR had
+    to fix by hand (review m1). The name must be the LAST argument: every path
+    builder here appends the filename, so a trailing part is the statement being
+    made.
+    """
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _is_plain_name(node.right, names)
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == "Path" and node.args:
+        return _is_plain_name(node.args[-1], names)
+    if isinstance(func, ast.Attribute) and func.attr == "Path" and node.args:
+        return _is_plain_name(node.args[-1], names)
+    if (
+        isinstance(func, ast.Attribute)
+        and func.attr == "join"
+        and isinstance(func.value, ast.Attribute)
+        and func.value.attr == "path"
+        and node.args
+    ):
+        return _is_plain_name(node.args[-1], names)
+    return False
 
 
 def _probe_target(node: ast.expr, names: set[str], bindings: set[str]) -> bool:
@@ -161,33 +215,71 @@ def _scan_scope(
 ) -> None:
     """Flag probes in one function (or module) body.
 
-    ``bindings`` is the set of local names assigned a plain path expression in
-    THIS scope — ``transcript = directory / TRANSCRIPT_NAME`` followed by
-    ``transcript.is_file()`` is one site, not zero. A nested function is walked
-    by the caller as its own scope (its own ``function``), which is why the walk
-    here does not recurse into it.
+    ``bindings`` is the set of local names that RESOLVE to a plain path
+    expression in THIS scope — ``transcript = directory / TRANSCRIPT_NAME``
+    followed by ``transcript.is_file()`` is one site, not zero, and a second
+    hop (``raw = ...; path = raw``) is the same site. A nested function is
+    walked by the caller as its own scope (its own ``function``), which is why
+    the walk here does not recurse into it.
+
+    Assignments are collected before the probe scan so an alias is known for the
+    whole scope, not only from the statement that declared it onwards. That is
+    stricter than the code needs; a guard that depends on statement order is one
+    whose green run proves less than it looks.
     """
-    bindings: set[str] = set()
+    assignments: list[tuple[str, ast.expr]] = []
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
         for child in ast.walk(node):
-            if isinstance(child, ast.Assign) and _is_plain_path_expr(child.value, names):
+            if isinstance(child, ast.Assign):
                 for target in child.targets:
                     if isinstance(target, ast.Name):
-                        bindings.add(target.id)
+                        assignments.append((target.id, child.value))
             elif isinstance(child, ast.AnnAssign) and child.value is not None:
-                if _is_plain_path_expr(child.value, names) and isinstance(child.target, ast.Name):
-                    bindings.add(child.target.id)
+                if isinstance(child.target, ast.Name):
+                    assignments.append((child.target.id, child.value))
+    bindings: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for target, value in assignments:
+            if target in bindings:
+                continue
+            if _is_plain_path_expr(value, names) or (
+                isinstance(value, ast.Name) and value.id in bindings
+            ):
+                bindings.add(target)
+                changed = True
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
         # A method call on a bound name or on the path expression itself.
         for child in ast.walk(node):
             if not isinstance(child, ast.Call):
                 continue
             func = child.func
-            if not isinstance(func, ast.Attribute) or func.attr not in _PROBE_METHODS:
+            # ``os.path.exists(<plain path>)`` and friends FIRST: the path is the
+            # argument rather than the receiver, and ``os.path.exists``'s own
+            # receiver is ``os.path``, so the method branch below would take the
+            # call and look for the name in the wrong place.
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in _OS_PROBE_FUNCTIONS
+                and isinstance(func.value, ast.Attribute)
+                and func.value.attr == "path"
+            ):
+                if any(_probe_target(arg, names, bindings) for arg in child.args):
+                    out.append(_Flag(path, child.lineno, function))
                 continue
-            if _probe_target(func.value, names, bindings):
-                out.append(_Flag(path, child.lineno, function))
+            if isinstance(func, ast.Attribute) and func.attr in _PROBE_METHODS:
+                if _probe_target(func.value, names, bindings):
+                    out.append(_Flag(path, child.lineno, function))
+                continue
+            # ``open(<plain path>)``: the builtin copy of the same probe.
+            if isinstance(func, ast.Name) and func.id == "open" and child.args:
+                if _probe_target(child.args[0], names, bindings):
+                    out.append(_Flag(path, child.lineno, function))
 
 
 def scan_source(source: str, path: str) -> list[_Flag]:
@@ -332,3 +424,87 @@ def test_the_allow_list_excuses_a_named_site_and_nothing_else() -> None:
     finally:
         _ALLOWED.clear()
         _ALLOWED.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# The SPELLINGS: every shape the codebase has used for this name must flag
+# ---------------------------------------------------------------------------
+
+_PATH_CALL_FIXTURE = """
+from pathlib import Path
+
+TRANSCRIPT_NAME = "transcript.jsonl"
+
+
+def probes_a_constructed_path(directory: Path) -> bool:
+    return Path(directory, TRANSCRIPT_NAME).exists()
+"""
+
+_JOIN_FIXTURE = """
+import os
+
+TRANSCRIPT_NAME = "transcript.jsonl"
+
+
+def probes_a_joined_path(directory: str) -> bool:
+    return os.path.exists(os.path.join(directory, TRANSCRIPT_NAME))
+"""
+
+_TWO_STEP_FIXTURE = """
+from pathlib import Path
+
+TRANSCRIPT_NAME = "transcript.jsonl"
+
+
+def probes_a_two_step_alias(directory: Path) -> bytes:
+    raw = directory / TRANSCRIPT_NAME
+    path = raw
+    return path.read_bytes()
+"""
+
+_ALIAS_FIXTURE = """
+from pathlib import Path
+
+TRANSCRIPT_NAME = "transcript.jsonl"
+PLAIN = TRANSCRIPT_NAME
+
+
+def probes_through_an_alias(directory: Path) -> bool:
+    return (directory / PLAIN).is_file()
+"""
+
+_GLOB_FIXTURE = """
+from pathlib import Path
+
+TRANSCRIPT_NAME = "transcript.jsonl"
+
+
+def globs_the_plain_name(directory: Path) -> list[Path]:
+    return list((directory / TRANSCRIPT_NAME).glob("*.jsonl"))
+"""
+
+
+def test_the_guard_flags_a_constructed_path_call() -> None:
+    flags = scan_source(_PATH_CALL_FIXTURE, "fixture/path_call.py")
+    assert [flag.function for flag in flags] == ["probes_a_constructed_path"], flags
+
+
+def test_the_guard_flags_an_os_path_join_probe() -> None:
+    """The shape that shipped un-flagged before round 1 (review m1)."""
+    flags = scan_source(_JOIN_FIXTURE, "fixture/join.py")
+    assert [flag.function for flag in flags] == ["probes_a_joined_path"], flags
+
+
+def test_the_guard_flags_a_two_step_alias() -> None:
+    flags = scan_source(_TWO_STEP_FIXTURE, "fixture/two_step.py")
+    assert [flag.function for flag in flags] == ["probes_a_two_step_alias"], flags
+
+
+def test_the_guard_follows_an_alias_of_the_constant() -> None:
+    flags = scan_source(_ALIAS_FIXTURE, "fixture/alias.py")
+    assert [flag.function for flag in flags] == ["probes_through_an_alias"], flags
+
+
+def test_the_guard_flags_a_glob_on_the_plain_name() -> None:
+    flags = scan_source(_GLOB_FIXTURE, "fixture/glob.py")
+    assert [flag.function for flag in flags] == ["globs_the_plain_name"], flags
