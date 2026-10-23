@@ -1212,10 +1212,12 @@ class ServingSessionHandle(SessionHandle):
         if install_gates:
             self._install_gates()
         elif install_ask_surface:
-            # A RESUMED, UNSUPERVISED run (#2803): the conversation owes its ask
-            # queue, but no approval gate — nothing can answer a parked card
-            # here, which is why `lop sessions` withholds `--control` from a
-            # resume worker. See `_install_ask_surface` for what this half is.
+            # A RESUMED, UNSUPERVISED run with the queued engine ON (#2803): the
+            # conversation owes its ask queue, but no approval gate — nothing can
+            # answer a parked card here, which is why `lop sessions` withholds
+            # `--control` from a resume worker. The caller also requires
+            # `asks.policy.enabled()`, so the kill-switch arm advertises no tool
+            # at all (review round 1, MINOR-1). See `_install_ask_surface`.
             self._install_ask_surface()
         # THE ACCESS CLAIM IS PUBLISHED AT SESSION OPEN, before this host serves
         # a single frame, so a desktop session is never read with no claim at
@@ -1383,9 +1385,12 @@ class ServingSessionHandle(SessionHandle):
         ``handler`` is the host's real ask gate when the approval gates exist
         (:meth:`_install_gates` passes its closure in). Absent it, the surface is
         QUEUED-ONLY: the handler is :func:`_unanswerable_ask`, which can refuse
-        but never present, because the only run that reaches this arm has nobody
-        at a keyboard. The queued arm of `execute_ask` never awaits it; its
-        presence is what makes the tools exist.
+        but never present, because a run that reaches this arm has nobody at a
+        keyboard. That arm is BELT-AND-BRACES now: `exec_control` installs this
+        surface only while the queued engine is on, and the queued arm of
+        `execute_ask` never awaits the hook — its presence is what makes the
+        tools exist. The refusal is what a host that installs the surface
+        directly gets instead of a fabricated "the user closed the question".
 
         The reach probe and the state sink ride along for the reason they were
         installed with the gate in the first place: the receipt may name where an

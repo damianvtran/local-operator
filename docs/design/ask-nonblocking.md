@@ -79,9 +79,11 @@ deadline through the existing wake engine. Approvals are untouched and keep bloc
   (`builtin.py:24276+`), which preserves "subagents/headless hosts have no `ask`" and the
   `<interactivity>` channel logic (`prompts_api.py:588-680`). The cases that leaves without
   `ask` are a delegated child, a fresh `lop exec` and a scheduled run. A RESUMED top-level
-  session is the exception (added for #2803): `exec --resume` opens an existing conversation,
-  which owns the asks it left open, so an unsupervised resume worker installs the ask HALF
-  alone — the queue, with no approval gate — and both `ask` and `ask_withdraw` exist there.
+  session is the exception (added for #2803) **while the queued engine is on**:
+  `exec --resume` opens an existing conversation, which owns the asks it left open, so an
+  unsupervised resume worker installs the ask HALF alone — the queue, with no approval gate —
+  and both `ask` and `ask_withdraw` exist there. The kill switch (`LOP_ASK_NONBLOCKING=0`)
+  leaves it exactly as it was: no queue, no hook, no tool.
   `Session.set_ask_handler`
   (`session.py:8245`) stays the capability switch; its argument changes from "await answers"
   to an optional **presenter** (`on_ask_changed(record)`), and the queue itself lives on
