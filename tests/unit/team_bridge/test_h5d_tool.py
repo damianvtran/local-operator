@@ -153,6 +153,73 @@ async def test_ack_working_claims_and_done_releases_with_the_same_token(tmp_path
     assert again["ok"] is False and again["code"] == "not_holder"
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"account_id": "acc_2", "kind": "agent"},
+        {"endpoint_id": "bep_9", "kind": "agent"},
+        {"account_id": "acc_2", "endpoint_id": "bep_9"},
+        {},
+    ],
+)
+def test_tool_recipient_schema_is_closed(target):
+    from pydantic import ValidationError
+
+    from local_operator.team_bridge.tool import BridgeToolParams
+
+    with pytest.raises(ValidationError):
+        BridgeToolParams.model_validate({"op": "send", "to": target, "text": "synthetic"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["send", "reply"])
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"account_id": "acc_2", "kind": "agent"},
+        {"endpoint_id": "bep_9", "kind": "agent"},
+        {"account_id": "acc_2", "typo": "ignored-before"},
+        {"account_id": "acc_2", "endpoint_id": ""},
+        {"account_id": "acc_2", "endpoint_id": "bep_9"},
+        {"account_id": "   "},
+        {},
+    ],
+)
+async def test_send_recipient_is_closed_before_outbox(tmp_path, monkeypatch, op, target) -> None:
+    """A refused target cannot leave a retryable intent or dispatch a request."""
+    from local_operator.team_bridge.outbox import Outbox
+
+    records = []
+    admissions = []
+    original = Outbox.record_send
+
+    def record(self, *args, **kwargs):
+        records.append(kwargs)
+        return original(self, *args, **kwargs)
+
+    def admission(runtime, *, is_read=False):
+        admissions.append(runtime)
+        return None
+
+    monkeypatch.setattr(Outbox, "record_send", record)
+    monkeypatch.setattr(host_mod, "admission_refusal", admission)
+    requests = []
+    runtime = BridgeRuntime(
+        client=_client(lambda request: (requests.append(request), _ok({}))[1]),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    result = await execute_bridge(
+        runtime, {"op": op, "to": target, "text": "synthetic", "thread_id": "bth_1"}
+    )
+    assert result["ok"] is False and result["code"] == "invalid_request"
+    assert records == []
+    assert admissions == []
+    assert requests == []
+
+
 @pytest.mark.asyncio
 async def test_a_reply_pairs_thread_and_to_and_the_send_confirms_in_the_outbox(tmp_path) -> None:
     requests: list[httpx.Request] = []
