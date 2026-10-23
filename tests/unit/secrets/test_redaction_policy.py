@@ -24,6 +24,7 @@ record and its refusals.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -75,11 +76,6 @@ PUBLIC_COPY: tuple[tuple[str, str, str], ...] = (
         "--secret=wire.slash.credential",
         "wire.slash.credential",
     ),
-    (
-        "project key after key:",
-        "key: mda-internal-contribution-delivery",
-        "mda-internal-contribution-delivery",
-    ),
     ("cargo crate", "cargo test -p minerva-core-engine", "minerva-core-engine"),
     ("cargo worktree crate", "cargo test -p mda-category-sources", "mda-category-sources"),
     ("pip package", "pip install local-operator", "local-operator"),
@@ -110,6 +106,22 @@ SECRETS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def test_a_marked_identifier_field_passes_under_a_weak_name() -> None:
+    """Identifiers are released by the render-site span, not by a raw label.
+
+    LOH-28's design is the contract: a renderer that knows a field is an
+    identifier wraps it in ``VariableStore.identifier_span``. The project tool
+    does; a raw ``key: <long phrase>`` does not, and the base keep-masking
+    control for that spelling still holds. This test pins the sanctioned route.
+    """
+    store = VariableStore()
+    slug = "mda" + "-internal-contribution-delivery"
+    marked = "key: " + store.identifier_span(slug)
+    scrubbed, report = store.redact_with_report(marked)
+    assert scrubbed == "key: " + slug
+    assert not report.labels
+
+
 #: Controls for the WIDENING BOUNDARY. A long identifier is released only under
 #: a weak name (``key:``) or after ``--secret``. These rows prove the release did
 #: not move to a strong name, to ``token:`` or to ``--token``.
@@ -128,6 +140,8 @@ STRONG_NAME_NEGATIVES: tuple[tuple[str, str], ...] = (
     ),
     ("--secret value-shaped token", "--secret " + FAKE_GITHUB),
     ("--secret single lowercase word", "--secret " + "swordfish"),
+    ("--secret digit-bearing token", "--secret " + "hunter" + "2-prod-eu"),
+    ("--secret= digit-bearing token", "--secret=" + "my-api-key" + "-123"),
 )
 
 
@@ -193,6 +207,22 @@ def test_the_same_evidence_shows_the_secret_masked_and_the_key_readable() -> Non
     assert store.redact_arguments(secret_line) != secret_line
 
 
+def test_secret_argument_pass_releases_a_digit_bearing_name_but_the_result_masks() -> None:
+    """The pass distinction is deliberate, so it is pinned rather than implied.
+
+    ``--secret`` binds a store ENTRY NAME; the argument pass must leave the
+    command byte-identical or the lookup cannot run. A digit-bearing hyphenated
+    name is therefore released there, while the result pass still masks it (a
+    digit is evidence of an opaque token in output). If a future change tightens
+    or widens either side, this row forces the policy text to move with it.
+    """
+    value = "my" + "-api" + "-key" + "-123"
+    text = "--" + "secret=" + value
+    store = VariableStore()
+    assert store.redact_arguments(text) == text
+    assert store.redact_with_report(text)[0] != text
+
+
 def test_only_the_sanctioned_tool_is_exempt_from_result_redaction() -> None:
     """The exemption is a tool IDENTITY, not a caller-settable flag."""
     assert PUBLIC_COPY_TOOLS == frozenset({TOOL_NAME})
@@ -247,6 +277,18 @@ def _public_repo(tmp_path: Path) -> Path:
     keys.mkdir(parents=True)
     (keys / "wire_slash.py").write_text(
         'return Msg("wire.slash.credential", {})\n', encoding="utf-8"
+    )
+    # ``read_public_copy`` serves COMMITTED bytes only (the review-1 blocker):
+    # the fixture must be a real HEAD, not just a working tree.
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"],
+        check=True,
     )
     return root
 
@@ -380,7 +422,9 @@ async def test_public_copy_fails_closed_when_the_audit_cannot_be_written(
 
 def test_the_policy_document_names_its_owner_and_both_lists() -> None:
     """The prose policy is part of the control, not a comment beside it."""
-    text = Path("docs/security/redaction-policy.md").read_text(encoding="utf-8")
+    text = (
+        Path(__file__).resolve().parents[3] / "docs/security/redaction-policy.md"
+    ).read_text(encoding="utf-8")
     assert "**Owner:** Damian Tran" in text
     assert "### 2.1 A secret" in text
     assert "### 2.2 Not a secret" in text

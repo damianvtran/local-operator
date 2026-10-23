@@ -53,8 +53,10 @@ redaction set, even when they sit next to a credential word:
 
 * **Key names and entry names** — `OPENAI_API_KEY`, `GITHUB_TOKEN`,
   `MINERVA_UI_NPROD_USERNAME`, `wire.slash.credential`, a store entry after
-  `--secret`. A name is a reference; a reference must stay readable or the
-  lookup cannot be written.
+  `--secret` when it has name structure (dotted, hyphenated, or the store's
+  caps/underscore spelling). A name is a reference; a reference must stay
+  readable or the lookup cannot be written. A single lowercase word after
+  `--secret` remains masked (§6).
 * **Package, crate and module names** — `minerva-core-engine`,
   `mda-category-sources`, `local-operator`, `cargo test -p …`,
   `pip install …`.
@@ -64,9 +66,14 @@ redaction set, even when they sit next to a credential word:
   `bundled.gen.ts`. These strings are shipped to every user; they are not
   secret by construction.
 * **Documentation, help text and release notes** — prose that *describes*
-  credentials, including the guard's own source and test corpus.
-* **Identifiers and slugs** — project keys, session ids, agent/team keys,
-  skill names, DNS-1123 object names, file paths, dotted key paths.
+  credentials, including the guard's own source and test corpus. An **actual
+  credential pasted into prose** is still a secret: this bullet is about the
+  words, not a value that happens to sit in a document.
+* **Identifiers and slugs at their render sites** — project keys, session ids,
+  agent/team keys, skill names, DNS-1123 object names, file paths, dotted key
+  paths. A renderer that knows a field is an identifier wraps it in
+  `VariableStore.identifier_span` (LOH-28); a raw `key: <long phrase>` is not
+  that route and stays masked (§6).
 * **Placeholders and references** — `${TOKEN}`, `$GITHUB_TOKEN`, `<password>`,
   `%s`, `{{ … }}`, `changeme`, `your-token-here`.
 * **Explicitly fake test values** — fixtures labelled as fake in their own
@@ -80,14 +87,19 @@ store grammar: a dotted/path identifier (`wire.slash.credential`,
 `auth-svc.cluster.local`), a multi-segment hyphen identifier with no digits
 (`mda-internal-contribution-delivery`), or the store's caps/underscore spelling
 (`OPENAI_API_KEY`). A **strong** credential name (`SECRET_KEY`, `DB_PASSWORD`,
-`token:`) keeps its mask for a value with no name structure; a weak name
-(`key:`) releases a long readable identifier, and the accepted residual is that
-a genuinely long passphrase typed after the bare word `key:` is released.
+`token:`) keeps its mask for a value with no name structure. A weak name
+(`key:`) releases only the base readable-phrase class up to 32 characters; a
+longer raw phrase is ambiguous and stays masked. Identifier **fields** are
+released by the render-site span (`VariableStore.identifier_span`), not by
+label strength — that is the LOH-28 contract and the reason a raw
+`key: <long phrase>` remains a keep-masking control.
 
 `--secret` is the one flag whose argument is a store **entry name**, not a
 value (`secrets/cli.py`'s `NAME[=VAR]` metavar). Its argument is therefore
-released when it is a DNS-1123 name. `--password`, `--token` and `--api-key`
-bind values and keep masking.
+released when it has name structure: a dotted or hyphenated DNS-1123 name with
+no digits, or the store's caps/underscore spelling. A single lowercase word or
+a digit-bearing hyphenated token after `--secret` stays masked (§6), and
+`--password`, `--token` and `--api-key` bind values and keep masking.
 
 ## 3. The rule
 
@@ -114,6 +126,10 @@ is **not** a redaction toggle:
   `local_operator/mobile/web/src/i18n/keys.gen.ts`,
   `local_operator/mobile/web/src/i18n/bundled.gen.ts`. There is no directory
   rule and no extension rule; adding a root is an amendment under §5.
+* It serves **committed bytes only**: the file must be tracked and byte-identical
+  to `HEAD`. A working-tree difference, an untracked file and a hard link are
+  refused. Commit the public copy before auditing it; that keeps the route from
+  becoming a two-call bypass (write a secret into a catalogue, read it back).
 * It returns a named catalogue key, or the lines of a key module / generated
   map that name the key. A whole catalogue is returned only when it is small
   and no key was given.
@@ -153,17 +169,22 @@ exists to avoid). Review of changes under those roots is the control.
 Stated rather than implied away; each is pinned by a test row or a source
 comment.
 
-* A real credential whose value is literally `key: <long hyphen phrase>` is
-  released by the weak-name arm. Strong names and every value-evidence rule
-  still mask it, and the exact-value pass masks it once the session knows it.
+* A raw `key: <long hyphen phrase>` stays masked: it is indistinguishable from
+  a passphrase and is not a render-site identifier. The sanctioned route for an
+  identifier field is `VariableStore.identifier_span`, which the project tool
+  already uses.
+* A single lowercase word after `--secret` still masks in both passes. A
+  digit-bearing hyphenated name after `--secret` is released by the **argument**
+  pass (the flag is a name carrier and the command must execute) while the
+  **result** pass masks it; the exact-value pass covers it once the session
+  knows it. Both directions are pinned in the policy test.
 * A credential that is genuinely spelled as a DNS-1123 identifier with a
   workload/environment qualifier is released by name-driven rules. It is still
   masked by DSN, bearer, PEM and vendor rules, and by exact value once known.
-* A single-word lowercase store entry after `--secret` is still masked (the
-  release requires DNS-1123 structure). That is the safe direction.
-* `read_public_copy` trusts the allowlisted roots. A secret written into a
-  catalogue by a mistaken commit will be returned verbatim; review is the
-  control.
+* `read_public_copy` trusts the allowlisted roots **at `HEAD`**. A secret
+  committed into a catalogue by a mistaken commit will be returned verbatim;
+  review of changes under those roots is the control. The route refuses
+  working-tree changes precisely so an agent cannot create that state silently.
 
 ## 7. Enforcement map
 

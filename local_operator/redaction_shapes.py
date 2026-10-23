@@ -1969,52 +1969,6 @@ def _is_identifier_shaped_name(value: str) -> bool:
     return bool(set(value.split("-")) & _K8S_QUALIFIER_SEGMENTS)
 
 
-#: The longest hyphen-joined identifier this pass will release under a WEAK name.
-#: 63 is the DNS-1123 label ceiling; the readable-phrase class stops at 32, which
-#: is where an ordinary prose phrase ends and a long multi-segment identifier
-#: (``mda-internal-contribution-delivery``) begins. The cap is stated rather than
-#: derived so a future widening has one number to argue against.
-_LONG_IDENTIFIER_MAX_CHARS = 63
-
-
-def _is_long_readable_identifier(value: str) -> bool:
-    """Whether ``value`` is a long DNS-1123 identifier, not a passphrase.
-
-    WHY THIS EXISTS, and why it is gated on the NAME's strength. The
-    readable-hyphen-phrase class releases a phrase up to
-    :data:`_WORD_SHAPED_MAX_LEN` (32) characters under a weak name such as
-    ``key:``. A project key or object name can be longer than that —
-    ``mda-internal-contribution-delivery`` is 34 — and the operator reported it
-    masked as a credential (LOH-28, and the earlier key-names report). The
-    release is deliberately narrow:
-
-    * at least three hyphen-joined segments, every segment alphabetic (a digit
-      is the cheapest evidence of an opaque token, so a digit keeps the mask);
-    * no vendor prefix and no UUID, the same exclusions the identifier
-      predicate makes, so ``glpat-<name>`` and an opaque UUID still mask;
-    * only under a WEAK name. ``key:`` is ambiguous; ``SECRET_KEY=``,
-      ``DB_PASSWORD=`` and ``token:`` remain credential positions, and a
-      passphrase there is still masked by the strong arm.
-
-    ACCEPTED RESIDUAL: a genuinely long hyphenated passphrase typed after the
-    bare word ``key:`` is released. The alternative — deleting a project key the
-    agent needs, and registering it so every later occurrence disappears — is
-    the incident this class exists for; strong names and every value-evidence
-    rule (DSN, bearer, PEM, vendor) still mask.
-    """
-    if len(value) > _LONG_IDENTIFIER_MAX_CHARS:
-        return False
-    if value.count("-") < 2:
-        return False
-    if not _is_dns_name(value):
-        return False
-    if _VENDOR_PATTERN.search(value) is not None:
-        return False
-    if _UUID_SHAPED.fullmatch(value) is not None:
-        return False
-    return all(part.isalpha() for part in value.split("-"))
-
-
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
 
@@ -2040,11 +1994,6 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     if _is_code_keyword_value(value):
         return True
     if _is_identifier_shaped_name(value):
-        return True
-    # A long multi-segment identifier under a WEAK name is a NAME, not a
-    # passphrase. See :func:`_is_long_readable_identifier` for the boundary and
-    # the accepted residual; strong names keep their mask.
-    if not strong and _is_long_readable_identifier(value):
         return True
     if any(char in value for char in _EXPRESSION_CHARS):
         return True
@@ -2640,7 +2589,15 @@ def _is_reference_name(value: str) -> bool:
     """
     if _is_a_name_in_the_store_grammar(value):
         return True
-    return _is_dns_name(value) and ("." in value or "-" in value)
+    # A digit in a hyphenated/dotted name is the cheapest evidence of an opaque
+    # token (``my-api-key-123``, ``hunter2-prod-eu``), so it keeps the mask. The
+    # dotted catalogue keys this release exists for (``wire.slash.credential``)
+    # and the camel-free project slugs carry no digits.
+    return (
+        _is_dns_name(value)
+        and ("." in value or "-" in value)
+        and not any(char.isdigit() for char in value)
+    )
 
 
 def _value_is_a_reference_to_a_credential(value: str) -> bool:

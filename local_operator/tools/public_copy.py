@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -185,6 +186,9 @@ def _record_read(
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.write(fd, line.encode("utf-8"))
+        # The record is the control, not a log best-effort: flush it to stable
+        # storage before the caller gets the content.
+        os.fsync(fd)
     finally:
         os.close(fd)
     return path
@@ -233,7 +237,10 @@ async def execute_read_public_copy(
         )
     path_arg = str(arguments.get("path") or "")
     key = arguments.get("key")
-    key = str(key) if key is not None else None
+    if key is not None:
+        key = str(key).strip()
+        if not key:
+            return _text(tool_call_id, "key must not be empty", is_error=True)
     if not path_arg or "\x00" in path_arg:
         return _text(
             tool_call_id,
@@ -241,6 +248,7 @@ async def execute_read_public_copy(
             is_error=True,
         )
 
+    root = Path(context.cwd).expanduser().resolve()
     resolved, inside, resolvable = _resolve_workspace_path(path_arg, context.cwd)
     if not resolvable or not inside:
         return _text(
@@ -249,7 +257,7 @@ async def execute_read_public_copy(
             is_error=True,
         )
     try:
-        relative = resolved.relative_to(Path(context.cwd).expanduser().resolve()).as_posix()
+        relative = resolved.relative_to(root).as_posix()
     except ValueError:
         return _text(tool_call_id, "refused: the path escapes the workspace", is_error=True)
     if not _matches_public_copy(relative):
@@ -261,10 +269,58 @@ async def execute_read_public_copy(
             ),
             is_error=True,
         )
+
+    # THE BYTES MUST BE THE COMMITTED BYTES. The allowlisted roots are writable
+    # by the same agent that calls this tool, so trusting whatever is on disk is
+    # a two-call bypass: write a credential into a catalogue, read it back
+    # verbatim. HEAD is the reviewed copy, and a working-tree difference is
+    # refused rather than served. A hard link is refused for the same reason: it
+    # is another path to bytes that need not be the committed ones.
     try:
-        text = resolved.read_text(encoding="utf-8")
+        if resolved.stat().st_nlink > 1:
+            return _text(
+                tool_call_id,
+                "refused: a hard-linked public-copy file is not trusted",
+                is_error=True,
+            )
+    except OSError as exc:
+        return _text(tool_call_id, f"could not stat {relative}: {exc}", is_error=True)
+    try:
+        committed = subprocess.run(
+            ["git", "-C", str(root), "show", f"HEAD:{relative}"],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _text(
+            tool_call_id,
+            f"refused: could not read the committed copy of {relative} ({exc})",
+            is_error=True,
+        )
+    if committed.returncode != 0:
+        return _text(
+            tool_call_id,
+            f"refused: {relative} is not committed at HEAD; commit the public copy first",
+            is_error=True,
+        )
+    try:
+        current = resolved.read_bytes()
     except OSError as exc:
         return _text(tool_call_id, f"could not read {relative}: {exc}", is_error=True)
+    if current != committed.stdout:
+        return _text(
+            tool_call_id,
+            (
+                f"refused: {relative} differs from HEAD; commit the public copy "
+                "before auditing it"
+            ),
+            is_error=True,
+        )
+    try:
+        text = current.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return _text(tool_call_id, f"could not decode {relative} as UTF-8: {exc}", is_error=True)
 
     try:
         if relative.endswith(".json"):
