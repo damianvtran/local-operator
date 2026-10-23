@@ -20,8 +20,10 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 
-from checker import MODES, check_all, check_case, negative_controls, own_process, settled_for_cleanup
+from checker import (MODES, check_all, observation, negative_controls, qualified_exception,
+                     resource_data, NATIVE_IMAGE, NATIVE_EXE, NATIVE_SQLITE, own_process, settled_for_cleanup)
 
 PINNED = {"local_operator/memory.py": "a11dbc59357fb103a79c38086fa68e18bcced685",
           "local_operator/memory_capture.py": "86f5072abf06e8ec4d6d4acd8d10982d68782b3c"}
@@ -92,6 +94,12 @@ def files(paths):
     return rows
 
 
+def resources():
+    return resource_data(sys.platform, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                         {k: resource.getrlimit(getattr(resource, "RLIMIT_" + k))
+                          for k in ("AS", "DATA", "STACK", "CORE")})
+
+
 def child(args):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     root = Path(args.source_root).resolve()
@@ -99,7 +107,9 @@ def child(args):
     source = identity(root, args.head)
     if (source["runtime"]["executable"] != args.expected_exe or
             source["runtime"]["executable_sha256"] != args.expected_exe_hash or
-            sys.version_info[:3] != (3, 12, 15)):
+            sys.version_info[:3] != (3, 12, 15) or
+            args.image_os != "ubuntu26" or args.image_version != NATIVE_IMAGE or
+            source["runtime"]["executable_sha256"] != NATIVE_EXE):
         raise ValueError("unexpected child executable or Python target")
     lock = threading.Lock()
     count = size = 0
@@ -129,7 +139,7 @@ def child(args):
              ImageOS=args.image_os, ImageVersion=args.image_version,
              image_equivalence="UNKNOWN: family pinned, exact image version may differ",
              statvfs_bavail=stat.f_bavail, statvfs_frsize=stat.f_frsize,
-             telemetry=proc(os.getpid()), core_limit=resource.getrlimit(resource.RLIMIT_CORE)[0])
+             telemetry=proc(os.getpid()), core_limit=resource.getrlimit(resource.RLIMIT_CORE)[0], resources=resources())
         sys.path.insert(0, str(root))
         from local_operator.memory import MemoryIdentity, MemoryStore
         import local_operator.memory as memory
@@ -155,6 +165,8 @@ def child(args):
         # honestly; they do not initialize or warm up a candidate database.
         import sqlite3
         import _sqlite3
+        if sqlite3.sqlite_version != "3.46.1" or sha(_sqlite3.__file__) != NATIVE_SQLITE:
+            raise ValueError("native SQLite identity changed; no equivalence override")
         emit("metadata_sqlite_start")
         metadata_db = sqlite3.connect(":memory:")
         try:
@@ -171,7 +183,7 @@ def child(args):
              threadsafety=sqlite3.threadsafety, compile_options=options,
              binary=_sqlite3.__file__, binary_sha256=sha(_sqlite3.__file__),
              linked_libraries=linked.stdout, external_origins=external)
-        workers = 1 if args.mode == "sequential" else 2
+        workers = 2
         barrier = threading.Barrier(2, timeout=3) if workers == 2 else None
         stores = [MemoryStore(config=work / (f"separate-{i}" if args.mode == "separate-db"
                                              else "shared"),
@@ -180,36 +192,56 @@ def child(args):
         paths = {(f"slot-{i}" if args.mode == "separate-db" else "shared"): store.path
                  for i, store in enumerate(stores)}
         emit("before_workers", loaded_source=loaded, telemetry=proc(os.getpid()),
-             synthetic_files=files(paths))
+             synthetic_files=files(paths), resources=resources())
+
+        state = {}
+        failures = []
+        serialize = threading.Lock()
+
+        def phase(slot, iteration, label):
+            with lock:
+                state[slot] = dict(slot=slot, iteration=iteration, phase=label)
 
         def worker(slot):
             try:
-                for iteration in range(16 // workers):
+                for iteration in range(8):
+                    phase(slot, iteration, "before_emit")
                     emit("before_connection", slot=slot, iteration=iteration)
-                    if barrier is not None:
-                        barrier.wait()
-                    with stores[slot].connection() as db:
-                        emit("connection_entered", slot=slot, iteration=iteration)
-                        token = f"probe-{slot}-{iteration}"
-                        db.execute("INSERT INTO captures(session,compaction,status,n) "
-                                   "VALUES(?,?,?,?)", ("native-probe", token, "ok", 0))
-                        db.commit()
-                        row = db.execute("SELECT status,n FROM captures "
-                                         "WHERE session=? AND compaction=?",
-                                         ("native-probe", token)).fetchone()
-                        if tuple(row) != ("ok", 0):
-                            raise ValueError("synthetic row oracle")
-                    emit("connection_closed", slot=slot, iteration=iteration)
-            except BaseException:
-                if barrier is not None:
-                    barrier.abort()
+                    phase(slot, iteration, "before_barrier")
+                    barrier.wait()  # BEFORE harness lock, never inside it.
+                    phase(slot, iteration, "after_barrier")
+                    with serialize if args.mode == "same-db-serialized" else nullcontext():
+                        phase(slot, iteration, "before_context")
+                        with stores[slot].connection() as db:
+                            phase(slot, iteration, "entered_context")
+                            emit("connection_entered", slot=slot, iteration=iteration)
+                            token = f"probe-{slot}-{iteration}"
+                            phase(slot, iteration, "before_sql")
+                            db.execute("INSERT INTO captures(session,compaction,status,n) "
+                                       "VALUES(?,?,?,?)", ("native-probe", token, "ok", 0))
+                            db.commit()
+                            row = db.execute("SELECT status,n FROM captures "
+                                             "WHERE session=? AND compaction=?",
+                                             ("native-probe", token)).fetchone()
+                            phase(slot, iteration, "after_sql")
+                            if tuple(row) != ("ok", 0):
+                                raise ValueError("synthetic row oracle")
+                            phase(slot, iteration, "before_exit")
+                        phase(slot, iteration, "closed")
+                        emit("connection_closed", slot=slot, iteration=iteration)
+            except BaseException as exc:
+                with lock:
+                    failures.append(dict(state[slot], exception=qualified_exception(exc, str(root))))
+                barrier.abort()
                 raise
 
-        # Executor context physically joins both threads even on exceptions;
-        # outer process bound remains the safety valve for a blocked C call.
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(worker, range(workers)))
-        emit("after_workers", telemetry=proc(os.getpid()), synthetic_files=files(paths))
+        try:
+            # Context manager PHYSICALLY joins both workers, including peer abort.
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(worker, range(workers)))
+        finally:
+            emit("after_workers", telemetry=proc(os.getpid()), synthetic_files=files(paths),
+                 resources=resources(), threads_joined=True, worker_failures=failures)
         emit("case_done", completions=16, threads_joined=True)
         faulthandler.disable()
 
@@ -282,7 +314,14 @@ def control(args):
             row["stderr_bytes"] = (work / "stderr").stat().st_size
             rows.append(row)
             (out / "receipts.json").write_text(json.dumps(rows, indent=2))
-            check_case(row, expected)  # A setup/fault/missing receipt stops later cases.
+            # Clean THIS case only after physical child reap, before any next mode.
+            import shutil
+            shutil.rmtree(work)
+            row["case_root_removed"] = not work.exists()
+            row["case_pass"] = observation(row, expected)
+            (out / "receipts.json").write_text(json.dumps(rows, indent=2))
+            # Only qualified ordinary failure can reach the next DISTINCT mode;
+            # setup/signal/bound/privacy/settlement errors raise and stop here.
         result = check_all(rows, expected)
     finally:
         all_settled = active is None and all(settled_for_cleanup(row) for row in rows)
@@ -299,6 +338,8 @@ def control(args):
         }))
     (out / "result.json").write_text(json.dumps(dict(result=result, synthetic_cleanup=True)))
     print(result)
+    if result.startswith("FAIL:"):
+        raise SystemExit(1)
 
 
 def main():
@@ -319,10 +360,9 @@ def main():
         try:
             child(args)
         except BaseException as exc:
-            # Exception payloads may include paths or data. Only sanitized type
-            # and numeric errno are diagnostic; native signals bypass this.
-            print(json.dumps({"exception_type": type(exc).__name__,
-                              "errno": getattr(exc, "errno", None)}), file=sys.stderr)
+            # Actual traceback STRUCTURE only; never messages/args/locals/SQL.
+            print(json.dumps(qualified_exception(exc, str(Path(args.source_root).resolve()))),
+                  file=sys.stderr)
             raise SystemExit(1) from None
     else:
         control(args)
