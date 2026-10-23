@@ -9729,9 +9729,15 @@ class ServingSessionHandle(SessionHandle):
         ITS spec: a phone toggling the dial must reach the spec the next
         provider call is built from, and the app's copy of the rule is not
         loaded in a headless process. Bare toggles, ``on``/``off`` name the
-        resulting state, ``status`` only reports. Session-scoped and never
-        persisted — fast mode is billed at a premium, so it must not outlive
-        the task it was switched on for.
+        resulting state, ``status`` only reports.
+
+        CONVERSATION-scoped, and now DURABLE within that scope: ``set_model``
+        journals the dial beside the model and its level, so a reopen comes back
+        on the speed the operator chose instead of silently reverting
+        (``damianvtran/local-operator-ui#1266``). It is still NOT a global
+        default — nothing here writes config, so a new conversation starts at
+        the model's standard speed and premium pricing never becomes the
+        machine's resting state. This command only names the resulting state.
         """
         spec = getattr(session, "model", None)
         label = getattr(session, "model_label", "") or "this model"

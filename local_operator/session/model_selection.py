@@ -132,13 +132,28 @@ class StoredModelSelection:
     # This is the conversation's birth selector, not the pair configured while
     # constructing a resumed owner. Existing /effort journalling depends on it.
     boot_selector: str | None = None
+    #: The FAST dial the row recorded, or ``None`` on a row that has no opinion.
+    #:
+    #: ``None`` is "no evidence", never "off". Every row written before the dial
+    #: was journalled carries it, and reading those as a decision to keep the
+    #: dial off would silently disable fast mode on every conversation that
+    #: predates the fix — the same defect one layer down. ``False`` is a real
+    #: snapshot (the user turned it off), so the two spellings cannot collapse.
+    fast: bool | None = None
 
     @property
     def selector(self) -> str:
         return f"{self.provider}/{self.model_id}"
 
 
-def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot: Any = None):
+def _selection(
+    selector: Any,
+    effort: Any,
+    *,
+    authoritative: bool = False,
+    boot: Any = None,
+    fast: Any = None,
+):
     if not isinstance(selector, str) or "/" not in selector:
         return None
     provider, model_id = selector.split("/", 1)
@@ -183,6 +198,10 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
         boot_selector=(
             boot if isinstance(boot, str) and "/" in boot and all(boot.split("/", 1)) else None
         ),
+        # Only a real boolean is evidence. A hand-edited row spelling ``"yes"``
+        # says nothing this reader may act on, and the wire's own gate
+        # (``supports_fast_mode``) is what decides whether it may ever be sent.
+        fast=fast if isinstance(fast, bool) else None,
     )
 
 
@@ -203,6 +222,7 @@ def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSe
                 details.get("effort"),
                 authoritative=version == SELECTION_VERSION,
                 boot=details.get("boot"),
+                fast=details.get("fast"),
             )
             if selected is not None:
                 if selected.authoritative:
@@ -360,6 +380,7 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
                     details.get("effort"),
                     authoritative=True,
                     boot=details.get("boot"),
+                    fast=details.get("fast"),
                 )
                 if selected is not None:
                     return replace(selected, recovered=unusable)

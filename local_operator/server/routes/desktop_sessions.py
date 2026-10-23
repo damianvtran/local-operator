@@ -870,6 +870,22 @@ class DraftModel(Input):
     provider: str = Field(min_length=1, max_length=64)
     model_id: str = Field(min_length=1, max_length=256)
     reasoning_effort: str | None = Field(default=None, max_length=32)
+    #: The FAST dial for the first turn, or ``None`` for "the client said nothing".
+    #:
+    #: The third field of the same picker row, and the one ui#1265 reports: before
+    #: the first message there is no session to hold the dial, so a pane could
+    #: only offer fast mode once a conversation existed and had answered. It is
+    #: the picker's own vocabulary either way — ``selected_model`` on the wire is
+    #: a ``ModelSpec``, which already publishes ``fast_mode`` /
+    #: ``supports_fast_mode`` — so nothing is translated, only carried.
+    #:
+    #: ``None`` is the absence an older client sends, and it changes nothing
+    #: (``False`` is the spec's own default, so only ``True`` moves a byte). A
+    #: model whose route does not sell the tier REFUSES the pick below rather than
+    #: accepting it and running standard speed: the pane is the surface that has
+    #: to explain the limitation, and it can only explain a refusal it was told
+    #: about (the issue's own wording).
+    fast_mode: bool | None = None
 
 
 class CreateSession(Input):
@@ -1100,6 +1116,22 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
         # the RUNNING level — and the earlier comment here claimed they were the
         # same thing.
         spec = spec.model_copy(update={"reasoning_effort": None})
+    if model.fast_mode:
+        # The speed dial is the OTHER per-request capability a pick can name, and
+        # it is REFUSED here for the reason the level beside it is: the client drew
+        # a control the user turned on, so answering with a standard-speed turn is
+        # the disagreement this boundary exists to remove. The authority is the
+        # same one the wire uses — ``_fast_mode_support`` gates the key on
+        # ``supports_fast_mode``, which ``build_model_spec`` seeds from the ROUTE
+        # and model pair — so a pick accepted here sends the key the first turn.
+        # ``False`` needs no clause: off is what a freshly built spec already says,
+        # and an old client that sends nothing keeps today's bytes.
+        if not spec.supports_fast_mode:
+            raise HTTPException(
+                422,
+                _wd.fast_mode_unsupported(model=model_id).envelope(code="fast_mode_unsupported"),
+            )
+        spec = spec.model_copy(update={"fast_mode": True})
     return spec
 
 
@@ -1125,8 +1157,39 @@ def _preview_birth_model(root: pathlib.Path, model: DraftModel) -> ModelSpec:
     chosen = _draft_model_spec(model)
     spec = build_model_spec(chosen.provider, chosen.model_id)
     return spec.model_copy(
-        update={"reasoning_effort": resolve_birth_effort(spec, chosen.reasoning_effort, root)}
+        update={
+            "reasoning_effort": resolve_birth_effort(spec, chosen.reasoning_effort, root),
+            # The DIAL is the choice itself, not a resolved reading: unlike the
+            # level, ``fast_mode`` has no configured default to resolve against,
+            # so the pane publishes exactly what the first turn will send.
+            "fast_mode": chosen.fast_mode,
+        }
     )
+
+
+def _draft_marker_model(spec: ModelSpec) -> dict[str, Any]:
+    """The pick as BOTH create paths store it: this device's marker and the peer frame.
+
+    One builder because the two call sites must not drift: the marker is what a
+    later engage re-resolves, and the peer frame is what a remote session is born
+    on, so a field present in one and missing from the other is a first turn that
+    runs a different model than the chip named — the defect class this feature
+    exists to remove.
+
+    ``fast_mode`` rides ONLY when it is ON. ``reasoning_effort`` is always written
+    (``None`` included) because "this model, no level" is itself a choice; off is
+    the spec's default, so a client that never asked for the dial must leave the
+    marker's bytes exactly as the pre-fast-mode build wrote them — the additivity
+    contract ``test_a_created_drafts_choice_is_stored_additively`` pins.
+    """
+    model: dict[str, Any] = {
+        "provider": spec.provider,
+        "model_id": spec.model_id,
+        "reasoning_effort": spec.reasoning_effort,
+    }
+    if spec.fast_mode:
+        model["fast_mode"] = True
+    return model
 
 
 class Image(Input):
@@ -2906,15 +2969,7 @@ async def create_session(body: CreateSession, request: Request):
                     host(request).root,
                     body.peer,
                     cwd=body.cwd,
-                    model=(
-                        {
-                            "provider": spec.provider,
-                            "model_id": spec.model_id,
-                            "reasoning_effort": spec.reasoning_effort,
-                        }
-                        if spec is not None
-                        else None
-                    ),
+                    model=_draft_marker_model(spec) if spec is not None else None,
                     # THE PICK TRAVELS, and the peer resolves it. The relay on this
                     # side reconciles the definition first (``definitions.push_to_peer``),
                     # so this works against a peer that has never seen the profile —
@@ -3026,15 +3081,7 @@ async def create_session(body: CreateSession, request: Request):
             # The NORMALISED triple, not the raw body: the marker is what a later
             # engage re-resolves, so it stores the pair the validation just
             # proved servable (provider alias resolved, level lowercased).
-            model=(
-                {
-                    "provider": spec.provider,
-                    "model_id": spec.model_id,
-                    "reasoning_effort": spec.reasoning_effort,
-                }
-                if spec is not None
-                else None
-            ),
+            model=_draft_marker_model(spec) if spec is not None else None,
             # The pane's minted warm, when it has one (spec §1.4). It supplies
             # the ID and the already-running engage; the body above remains
             # authoritative for everything else. Unknown/expired ids fall back

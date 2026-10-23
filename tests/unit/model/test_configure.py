@@ -5037,33 +5037,51 @@ def test_muse_spark_listing_no_longer_overflows_its_window(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_fast_mode_refusal_is_narrated_once_and_forwarded_to_the_session() -> None:
-    """The stream fn's half of review F1: the provider's own words reach the
-    user as a warning, the session bridge is called so the dial comes off,
-    and `forget_fast_refusal` re-opens the latch for an explicit `/fast on`."""
-    stream = create_stream_fn(MagicMock(), None)
-    notices: list[str] = []
-    forwarded: list[tuple[str, str]] = []
-    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
-    stream.set_fast_refused_handler(lambda sel, msg: forwarded.append((sel, msg)))
+async def test_a_fast_mode_refusal_is_narrated_by_whoever_owns_the_dial() -> None:
+    """The stream fn's half of review F1, in the two shapes it now has.
 
-    state = stream._route_state
-    assert state.on_fast_refused is not None
-    first = await state.record_fast_refusal(
+    With a SESSION bridged (the production shape) the stream forwards and stays
+    quiet: the session is the side that can tell a first refusal from a latched
+    one on an already-standard route, and it narrates with a catalogue code
+    (``Session._on_fast_refused``). Without a bridge — a bare stream fn in a
+    harness or a subagent — the stream speaks for itself, or the provider's own
+    words would reach nobody. Either way one line per refusal, and
+    `forget_fast_refusal` re-opens the latch for an explicit `/fast on`.
+    """
+    bridged = create_stream_fn(MagicMock(), None)
+    bridged_notices: list[str] = []
+    forwarded: list[tuple[str, str]] = []
+    bridged.set_notice_handler(lambda text, kind: bridged_notices.append(f"{kind}:{text}"))
+    bridged.set_fast_refused_handler(lambda sel, msg: forwarded.append((sel, msg)))
+
+    bridged_state = bridged._route_state
+    assert bridged_state.on_fast_refused is not None
+    first = await bridged_state.record_fast_refusal(
         "anthropic/claude-opus-5", "Usage credits are required for fast mode."
     )
-    second = await state.record_fast_refusal("anthropic/claude-opus-5", "again")
+    second = await bridged_state.record_fast_refusal("anthropic/claude-opus-5", "again")
 
     assert (first, second) == (True, False), "latched: the second report is silent"
+    assert bridged_notices == [], "the session narrates; a second line is a duplicate"
+    assert forwarded == [("anthropic/claude-opus-5", "Usage credits are required for fast mode.")]
+    assert bridged_state.fast_refused_for("anthropic/claude-opus-5")
+
+    bridged.forget_fast_refusal()
+    assert not bridged_state.fast_refused_for("anthropic/claude-opus-5")
+
+    bare = create_stream_fn(MagicMock(), None)
+    notices: list[str] = []
+    bare.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+
+    bare_state = bare._route_state
+    assert bare_state.on_fast_refused is not None
+    assert await bare_state.record_fast_refusal(
+        "anthropic/claude-opus-5", "Usage credits are required for fast mode."
+    )
     assert notices == [
         "warning:fast mode: refused by anthropic/claude-opus-5 — Usage credits are "
         "required for fast mode; switched off, serving at standard speed"
     ]
-    assert forwarded == [("anthropic/claude-opus-5", "Usage credits are required for fast mode.")]
-    assert state.fast_refused_for("anthropic/claude-opus-5")
-
-    stream.forget_fast_refusal()
-    assert not state.fast_refused_for("anthropic/claude-opus-5")
 
 
 class TestTheConfiguredEffortClamp:

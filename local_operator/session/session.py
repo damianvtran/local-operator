@@ -2991,6 +2991,26 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             blocks[index] = str(value)
 
 
+def _fast_dial_from_row(stored: bool | None, spec: ModelSpec) -> bool:
+    """The speed dial a journal row implies for ``spec``, or ``False``.
+
+    Two independent answers, and BOTH have to be yes — the same conjunction the
+    failover carry uses (``providers.failover.spec_for_target``), because the
+    two failure modes are opposite: a row that says ``fast`` on a route that
+    does not sell the tier puts the speed key on a request the provider 400s
+    (the turn the restore exists to open), and honouring the dial on a route
+    this build cannot confirm is how a status band claims a premium nobody is
+    serving.
+
+    ``stored is None`` is a row with NO opinion — every row written before the
+    dial was journalled — and must never read as an OFF decision: the row is a
+    snapshot of a live dial, so treating absence as ``False`` would silently
+    disable fast mode on every conversation that predates this change, which is
+    the reported defect one layer down.
+    """
+    return bool(stored) and bool(getattr(spec, "supports_fast_mode", False))
+
+
 def _chosen_level_from(level: str | None, spec: ModelSpec) -> str | None:
     """The CONVERSATION-chosen level a journal row implies, or ``None``.
 
@@ -6848,7 +6868,7 @@ class Session:
                 withdraw = getattr(self._stream_fn, "withdraw_fallback", None)
                 if callable(withdraw):
                     withdraw()
-                self._journal_effort_if_selection_changed(previous, model, previous_choice)
+                self._journal_knobs_if_selection_changed(previous, model, previous_choice)
                 self.refresh_frontend_state()
                 # The label moved even though the pair did not (the pin came
                 # off), so the baked tier descriptions are stale for the same
@@ -6885,7 +6905,7 @@ class Session:
                 refreshed = self._spec_for_route(*self._active_route)
                 if refreshed is not None:
                     self._active_fallback = refreshed
-            self._journal_effort_if_selection_changed(previous, model, previous_choice)
+            self._journal_knobs_if_selection_changed(previous, model, previous_choice)
             self.refresh_frontend_state()
             return
         # A genuine model change is a SELECTION, and selections outlive the
@@ -6997,12 +7017,20 @@ class Session:
         """
         return self._chosen_effort
 
-    def _journal_effort_if_selection_changed(
+    def _journal_knobs_if_selection_changed(
         self, previous: ModelSpec, model: ModelSpec, previous_choice: str | None
     ) -> None:
-        """Re-journal the selection when an effort DECISION moved it.
+        """Re-journal the selection when an EFFORT or FAST decision moved it.
 
-        "Decision" covers both halves the row stores: the level the selected
+        Both dials are SAME-PAIR knob changes (``model_copy(update=...)``), so
+        both take ``set_model``'s same-pair early return and never reach the
+        switch's own journal write. Whatever this method does not re-write, a
+        resume silently reverts — which is the defect each half of the row
+        exists to prevent: an ``/effort max`` decaying to the seed (``#240``,
+        ``#797``) and the fast toggle coming back OFF after a reopen
+        (``damianvtran/local-operator-ui#1266``).
+
+        "Decision" covers both halves the EFFORT stores: the level the selected
         model now expresses, and the level the CONVERSATION chose
         (``effort_choice``). ``/effort auto`` can change only the second one
         when the spec already sits on its seed, and the row must still be
@@ -7035,13 +7063,16 @@ class Session:
 
         Bounded twice, and each bound is load-bearing:
 
-        - **Only an actual effort decision.** A sampling-only override
+        - **Only an actual effort or fast decision.** A sampling-only override
           (temperature / top_p, the server's ``ChatRequest.options`` path)
           rides ``set_model`` on the same pair too, and the journal stores no
           sampling — so re-journalling on those would append identical rows for
-          a change the row cannot even express. The spec level and the chosen
-          level are compared SEPARATELY; a settled call that moved neither is
-          still skipped.
+          a change the row cannot even express. The spec level, the CHOSEN
+          level and the speed dial are compared SEPARATELY; a settled call that
+          moved none of them is still skipped. That is what keeps the write
+          one-per-change rather than one-per-keystroke: the request path calls
+          ``set_model`` for every message, and ``/fast`` cycling re-writes
+          nothing until a toggle settles.
         - **Coalesced, not one append per keystroke.** ``/effort`` cycling
           (``shift+tab``) lands one write per SETTLED level: the writer
           snapshots the spec at write time, and a second change while a write
@@ -7057,6 +7088,7 @@ class Session:
         # the next restart to resurrect (review round 1, M3).
         if (
             previous.reasoning_effort == model.reasoning_effort
+            and previous.fast_mode == model.fast_mode
             and previous_choice == self._chosen_effort
         ):
             return
@@ -16350,13 +16382,33 @@ class Session:
 
         Through :meth:`set_model` so every consumer sees it the way a user's
         ``/fast off`` would be seen: the spec the next request is built from,
-        the frontend state the band repaints from, and a pinned fallback's
-        derived display spec. Not ``explicit`` — this is a knob adjustment on
-        the model that is serving, never a model choice.
+        the frontend state the band repaints from, a pinned fallback's derived
+        display spec, AND the durable row — a refusal is a real change to the
+        conversation's dial, so the journalled snapshot must record it or the
+        next resume would re-arm a tier this account cannot buy. Not
+        ``explicit`` — this is a knob adjustment on the model that is serving,
+        never a model choice.
         """
         if not getattr(self._model, "fast_mode", False):
             return
         self.set_model(self._model.model_copy(update={"fast_mode": False}))
+        # THE RESET IS STATED, from the side that owns the dial. The stream fn
+        # narrates the same edge from its own copy, but it cannot tell a latched
+        # refusal on an already-standard route (nothing to explain) from the
+        # first one, where a toggle the user set has just stopped applying — and
+        # "explain the effective limitation instead of silently losing the saved
+        # preference" is the issue's own wording (ui#1266). One narrator, the one
+        # that knows whether anything moved; emitted AFTER the dial so a host
+        # repainting from this notice reads the post-reset state.
+        await self._emit(
+            _notice(
+                _nt.fast_mode_refused(
+                    selector=selector,
+                    reason=message.strip().rstrip(".") or "no reason given",
+                ),
+                kind="warning",
+            )
+        )
 
     async def _on_route_settled(self, target: Any, reason: str) -> None:
         """The stream fn's effective route moved; record it and tell the host.
@@ -27289,6 +27341,12 @@ class Session:
             # target's ladder, so a restore re-derives exactly the level in
             # force — no clamped value is ever replayed as a choice.
             "effort": self._chosen_effort or model.reasoning_effort,
+            # A SNAPSHOT, so the dial is written on BOTH edges. An OFF that was
+            # not journalled leaves the earlier ``"fast": true`` row as the
+            # newest evidence on disk, and the backward scan then resurrects the
+            # toggle the user had already turned off — the same class of defect
+            # as an unjournalled level, one field over.
+            "fast": bool(model.fast_mode),
             "boot": self._boot_selector,
         }
         await self._transcript.append_custom(SELECTED_MODEL_CUSTOM_TYPE, payload)
@@ -27302,9 +27360,11 @@ class Session:
         if (
             f"{current.provider}/{current.model_id}",
             self._chosen_effort or current.reasoning_effort,
+            bool(current.fast_mode),
         ) == (
             payload["selector"],
             payload["effort"],
+            payload["fast"],
         ):
             self._selected_model_dirty = False
         else:
@@ -27390,6 +27450,12 @@ class Session:
             # The row names this very spec, so the birth spec IS the target and
             # its own seed is the right comparison.
             self._chosen_effort = _chosen_level_from(effort, self._model)
+            # The DIAL belongs here too, and this branch is exactly where the
+            # reported reset was NOT observed: the conversation was already on
+            # the row's pair, so nothing below ran and the dial stayed at the
+            # birth spec's ``False`` even after the row learned to carry it.
+            if _fast_dial_from_row(saved.fast, self._model):
+                self._model = self._model.model_copy(update={"fast_mode": True})
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`
         # builds the target model's own spec (its base_url, window,
@@ -27429,6 +27495,14 @@ class Session:
                     )
                 }
             )
+        # The DIAL last, against the target the row resolved to, so both halves
+        # of the clamp in ``_fast_dial_from_row`` are read from the spec that
+        # will actually serve. Placed after the effort clamp above because the
+        # dial is independent of it (a speed preference is orthogonal to how
+        # hard the model thinks) and before ``self._model`` is published, so no
+        # reader can observe a spec still carrying the birth dial's ``False``.
+        if _fast_dial_from_row(saved.fast, spec):
+            spec = spec.model_copy(update={"fast_mode": True})
         self._model = spec
         # AGAINST THE TARGET SPEC, not the birth spec (review round 2, M5). A
         # withdrawal row now stores the TARGET's seed, so comparing it to the
