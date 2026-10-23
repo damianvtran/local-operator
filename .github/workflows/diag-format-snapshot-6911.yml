@@ -28,6 +28,7 @@ jobs:
           out="$RUNNER_TEMP/format-delivery-6911"
           python -B scripts/run_bounded.py --timeout 220 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.format_snapshot_6911.controller "$work" "$out"
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: public-format-patch-6911-${{ github.run_id }}
           path: |
