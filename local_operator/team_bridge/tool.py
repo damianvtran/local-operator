@@ -63,7 +63,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -151,24 +151,23 @@ class ChannelMemberParams(BaseModel):
     display_label: str = ""
 
 
-class EndpointRecipientParams(BaseModel):
-    """One closed endpoint destination; never interpreted as a conversation."""
-
-    model_config = ConfigDict(extra="forbid")
-    endpoint_id: str = Field(min_length=1)
-
-
-class AccountRecipientParams(BaseModel):
-    """One closed account destination, resolved by the pair-inbox server."""
-
-    model_config = ConfigDict(extra="forbid")
-    account_id: str = Field(min_length=1)
+def _closed_recipient_schema(schema: dict[str, Any]) -> None:
+    # Derive explicit properties from Pydantic's Literal-key schema instead of
+    # requiring every provider to implement propertyNames. This preserves the
+    # closed key set without a second hand-maintained list or duplicate models.
+    for branch in schema.get("anyOf", [schema]):
+        if branch.get("type") == "object":
+            names = branch.pop("propertyNames")["enum"]
+            value = branch["additionalProperties"]
+            branch["properties"] = {name: value for name in names}
+            branch["additionalProperties"] = False
 
 
 class BridgeToolParams(BaseModel):
-    """Bridge args; ``extra="forbid"`` makes a hallucinated field a refusal."""
-
-    model_config = ConfigDict(extra="forbid")
+    # Keep implementation guidance in comments, not the model docstring: Pydantic
+    # publishes that prose in every tool call's schema. extra="forbid" already
+    # communicates the closed top-level contract without restating it as prose.
+    model_config = ConfigDict(extra="forbid", title="Bridge")
 
     op: Literal[
         "take_up",
@@ -183,9 +182,13 @@ class BridgeToolParams(BaseModel):
     message_id: str = ""
     body_sha256: str = ""
     state: Literal["working", "done"] | None = None
-    # Disjoint closed models advertise the same one-of as the shared runtime
-    # guard. An open dictionary would still invite unsupported nested fields.
-    to: EndpointRecipientParams | AccountRecipientParams | None = None
+    # Literal keys + cardinality publish the same closed one-of as two named
+    # recipient models, without duplicating object definitions, titles and
+    # descriptions in every prompt. Pydantic and JSON Schema both reject unknown
+    # keys; the shared pre-admission/client guard additionally rejects padding.
+    to: dict[Literal["endpoint_id", "account_id"], Annotated[str, Field(min_length=1)]] | None = (
+        Field(default=None, min_length=1, max_length=1, json_schema_extra=_closed_recipient_schema)
+    )
     type: Literal["note", "question", "request"] = "note"
     text: str = ""
     thread_id: str | None = None
