@@ -15,18 +15,24 @@ from local_operator.i18n.keys import tui_team_authoring
 def test_authoring_catalogue_is_complete_and_renderable(locale: str) -> None:
     source = catalogues.load_catalogue("en", "tui.team_authoring")
     translated = catalogues.load_catalogue(locale, "tui.team_authoring")
-    assert len(source) == 35
+    # 35 before S4; 36 with the promote picker hint, translated in every carried
+    # locale in the same slice.
+    assert len(source) == 36
     assert set(translated) == set(source)
     for key, value in translated.items():
         assert value
         rendered = runtime.render_message(
-            value, {"name": "crew", "reason": "test", "detail": "test"}, locale
+            value,
+            {"name": "crew", "reason": "test", "detail": "test", "names": "one"},
+            locale,
         )
         assert rendered
         assert "{name}" not in rendered
         assert "{reason}" not in rendered
         function = getattr(tui_team_authoring, key.removeprefix("tui.team_authoring."))
-        params = {key: "test" for key in ("name", "reason", "detail") if "{" + key + "}" in value}
+        params = {
+            key: "test" for key in ("name", "reason", "detail", "names") if "{" + key + "}" in value
+        }
         assert function(**params).code == key
 
 

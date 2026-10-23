@@ -290,6 +290,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
     ),
+    "local_operator/role_provenance.py": (
+        2,
+        "``PROVENANCE_FILENAME``/``PROVENANCE_LOCKNAME`` ('role-provenance.jsonl' and "
+        "its sidecar lock): the DEVICE-LEVEL promotion index at the config root, the "
+        "same family as ``DROPPED_ROLES_DIRNAME``. It records where an account "
+        "definition came from, keyed by definition id and not by conversation, so it "
+        "is deliberately a sibling of ``sessions/`` rather than an entry inside one — "
+        "no session copy may carry it, and a session travelling to another device "
+        "neither needs nor may inherit it",
+    ),
     "local_operator/paths.py": (
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "

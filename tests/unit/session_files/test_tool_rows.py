@@ -162,10 +162,25 @@ async def test_video_receipt_carries_the_artifacts(
         cost_usd=0.5,
         cost_source="reported",
         billing_basis="billed",
+        prompt="A kite over cliffs",
+        filename="Kite Over Cliffs",
     )
     (artifact,) = receipt["artifacts"]
     assert artifact["digest"] == receipt["digest"] and artifact["kind"] == "video"
+    assert artifact["name"] == "kite-over-cliffs.mp4", "the request names the asset"
     assert artifact["duration_s"] == 4.0 and "digest" in text
+    # Omitted, the name derives from the prompt (the old-record fallback path).
+    fallback, _ = video_jobs.finish_video_result(
+        record_job_id="job3",
+        route="fal",
+        model="wan/t2v",
+        assets=[asset],
+        cost_usd=0.5,
+        cost_source="reported",
+        billing_basis="billed",
+        prompt="A kite over cliffs",
+    )
+    assert fallback["artifacts"][0]["name"] == "kite-over-cliffs.mp4"
     # A failed registration advertises nothing.
     empty, _ = video_jobs.finish_video_result(
         record_job_id="job2",

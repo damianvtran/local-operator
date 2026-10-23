@@ -33,5 +33,6 @@
   "tui.team_authoring.new_hint": "Create a team",
   "tui.team_authoring.edit_hint": "Edit an installed team",
   "tui.team_authoring.subcommand": "subcommand",
-  "tui.team_authoring.talk_hint": "talk to team · {detail}"
+  "tui.team_authoring.talk_hint": "talk to team · {detail}",
+  "tui.team_authoring.promote_hint": "Copy this conversation's team into your account"
 }

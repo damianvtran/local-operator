@@ -40,12 +40,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import mimetypes
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from local_operator.artifacts.naming import media_filename
 from local_operator.artifacts.progress import ProgressFn
 from local_operator.artifacts.rung import CancelHandle, CancelSupport
 from local_operator.artifacts.walk import make_pause
@@ -67,6 +67,7 @@ __all__ = [
     "VideoWakeHandle",
     "make_video_job_runner",
     "make_video_watcher_runner",
+    "request_naming",
     "video_job_label",
 ]
 
@@ -186,12 +187,20 @@ class VideoWakeHandle:
 # ---------------------------------------------------------------------------
 
 
-def _video_artifact_name(model: str, content_type: str, index: int) -> str:
-    """A short human handle ("wan-text-to-video-01.mp4"); NEVER a filesystem path."""
-    slug = "".join(ch if ch.isalnum() else "-" for ch in (model or "video"))
-    slug = "-".join(part for part in slug.split("-") if part)[:40] or "video"
-    ext = mimetypes.guess_extension((content_type or "").split(";")[0].strip()) or ".mp4"
-    return f"{slug}-{index:02d}{ext}"
+def request_naming(record: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """``(prompt, filename)`` from a durable record's ``params``.
+
+    THE one reader of a record's request facts: the watcher, the cold follow
+    and the one-shot refetch all name their assets from it. A record written
+    before ``filename`` existed carries only the prompt — the prompt-derived
+    fallback is then the honest name, not a missing one.
+    """
+    raw = record.get("params")
+    params = raw if isinstance(raw, Mapping) else {}
+    return (
+        str(params.get("prompt") or "") or None,
+        str(params.get("filename") or "") or None,
+    )
 
 
 def _duration_text(seconds: float | None) -> str:
@@ -216,13 +225,17 @@ def _price_text(cost_usd: float | None, cost_source: str | None, billing_basis: 
 
 
 def _register_video_assets(
-    assets: Sequence[Any], model: str
+    assets: Sequence[Any], prompt: str | None, filename: str | None = None
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     """Register every asset once; ``(digests, failed_source_urls, artifacts)``.
 
     ``artifacts`` is the durable ``details.artifacts`` list (``artifact_details``): the receipt
     mirrors it so the per-session file index can list the video after compaction blanks the
     result text. Empty when nothing registered.
+
+    The REQUEST names the asset (agent-supplied ``filename``, else the prompt),
+    never the model template: a Library of generations must not read as one
+    repeated name.
 
     Lazy import of the attachment store (import weight): the store's contract
     is that a refusal is a caption note, never a raise.
@@ -237,7 +250,13 @@ def _register_video_assets(
             asset.data,
             asset.content_type or "video/mp4",
             kind="video",
-            name=_video_artifact_name(model, asset.content_type, index),
+            name=media_filename(
+                prompt,
+                asset.content_type,
+                suggested=filename,
+                kind="video",
+                index=index,
+            ),
             source_url=asset.source_url or None,
             width=asset.width,
             height=asset.height,
@@ -261,6 +280,8 @@ def finish_video_result(
     cost_usd: float | None,
     cost_source: str | None,
     billing_basis: str | None,
+    prompt: str | None = None,
+    filename: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """The completion's ``(receipt, text)`` — §5.1/§5.3 of the contract.
 
@@ -271,7 +292,7 @@ def finish_video_result(
     submit path (a walk ``JobOutcome``) and the watcher path (a single-rung
     ``RungResult``) end here.
     """
-    digests, failed, artifacts = _register_video_assets(assets, model)
+    digests, failed, artifacts = _register_video_assets(assets, prompt, filename)
     duration = next((asset.duration_s for asset in assets if asset.duration_s is not None), None)
     content_type = next((asset.content_type for asset in assets if asset.content_type), None)
     receipt: dict[str, Any] = {
@@ -429,6 +450,7 @@ def make_video_job_runner(
     audio: bool | None = None,
     seed: int | None = None,
     model: str | None = None,
+    filename: str | None = None,
     config_dir: Path | None = None,
     journal: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     wake_scheduler: Any | None = None,
@@ -448,6 +470,11 @@ def make_video_job_runner(
     only ever CANCELS it, on every settle path.
     """
     params: dict[str, Any] = {"prompt": prompt}
+    # The durable record carries the naming request too: the watcher that may
+    # outlive this process names the asset from it (an old record without the
+    # key falls back to the prompt in ``request_naming``).
+    if filename is not None:
+        params["filename"] = filename
     for key, value in (
         ("duration_s", duration_s),
         ("resolution", resolution),
@@ -564,6 +591,8 @@ def make_video_job_runner(
             cost_usd=result.cost_usd,
             cost_source=result.cost_source,
             billing_basis=result.billing_basis,
+            prompt=prompt,
+            filename=filename,
         )
         report_progress({"video_receipt": receipt})
         await _journal_best_effort(
@@ -654,6 +683,7 @@ def make_video_watcher_runner(
     record_ref = (
         record.get("provider_ref") if isinstance(record.get("provider_ref"), Mapping) else None
     )
+    request_prompt, request_filename = request_naming(record)
 
     async def run(
         job_id: str,
@@ -744,6 +774,8 @@ def make_video_watcher_runner(
             cost_usd=result.cost_usd,
             cost_source=result.cost_source,
             billing_basis=result.billing_basis,
+            prompt=request_prompt,
+            filename=request_filename,
         )
         report_progress({"video_receipt": receipt})
         await _journal_best_effort(

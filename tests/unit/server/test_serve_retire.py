@@ -1135,6 +1135,19 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         "/v1/desktop/sessions/{session_id}/command-entities",
         query="command=help",
     ),
+    # Promotion (LOH-9 S4): the copy's SOURCE is a conversation row, so this is a
+    # bridge-taking WRITE on the same seam `entities` reads through — its own row
+    # here, because the gate has to be proved rather than assumed.
+    _DoorRoute(
+        "promote_session_definition",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/promote",
+        {
+            "request_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "kind": "agent",
+            "name": "release-check",
+        },
+    ),
     _DoorRoute(
         "prompt",
         "POST",
