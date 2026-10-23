@@ -1,0 +1,51 @@
+name: Owned perturbed Python3.12 original S2 CPU callgraph 6911
+on:
+  push:
+    branches: [diag/s2-py312-cprofile-6911]
+permissions:
+  contents: read
+jobs:
+  native-then-original-s2:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        timeout-minutes: 1
+        with:
+          python-version: '3.12'
+      - name: Same dependency snapshot or STOP
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -B -c 'import sys; assert sys.version_info[:2] == (3,12)'
+          python -m pip install -e '.[dev]' textual==8.2.8
+      - name: Native prerequisite then exactly one original S2
+        timeout-minutes: 3
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          set +e
+          python -B scripts/run_bounded.py --timeout 60 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.native_worker_6911.controller "$RUNNER_TEMP/native-py312-6911"
+          native_rc=$?
+          set -e
+          python -B -m scripts.diagnostics.s2_py312_6911.gate "$RUNNER_TEMP/native-py312-6911/native.json" "$RUNNER_TEMP/py312-gate.json" "$native_rc"
+          python -B scripts/run_bounded.py --timeout 90 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.s2_static_6911.controller "$RUNNER_TEMP/s2-py312-6911"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        timeout-minutes: 1
+        with:
+          name: profiled-py312-6911-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-py312-6911/native.json
+            ${{ runner.temp }}/py312-gate.json
+            ${{ runner.temp }}/s2-py312-6911/s2.json
+          if-no-files-found: warn
+          retention-days: 3

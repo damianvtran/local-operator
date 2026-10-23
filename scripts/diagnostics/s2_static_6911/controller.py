@@ -40,13 +40,68 @@ def project_measurement(raw, labels):
     return out
 
 
+def serialize_profile(entries,catalog,restored):
+    from types import CodeType
+    import math
+    if type(restored) is not bool or not restored:raise ValueError('profile hook STOP')
+    if len(entries)>20000:raise ValueError('profile entry cap STOP')
+    def identity(code):
+        if type(code) is not CodeType:return ''
+        return catalog.get((code.co_filename,code.co_firstlineno,code.co_qualname),'')
+    def measure(entry):
+        values=dict(calls=entry.callcount,recursive=entry.reccallcount,inline_ms=entry.inlinetime*1000,cumulative_ms=entry.totaltime*1000)
+        if any(type(values[k]) is not int or values[k]<0 for k in ('calls','recursive')):raise ValueError('profile count STOP')
+        if any(type(values[k]) not in (int,float) or not math.isfinite(values[k]) or values[k]<0 for k in ('inline_ms','cumulative_ms')):raise ValueError('profile clock STOP')
+        return values
+    known=[];unknown=0
+    for entry in entries:
+        code_id=identity(entry.code)
+        if code_id:known.append((entry,dict(code_id=code_id,**measure(entry))))
+        else:unknown+=1
+    known.sort(key=lambda pair:pair[1]['cumulative_ms'],reverse=True)
+    roots=[p for p in known if p[1]['code_id'].endswith(':OperatorApp._boot_session')]
+    selected=(roots+[p for p in known if p not in roots])[:20]
+    ids={p[1]['code_id'] for p in selected};edges=[]
+    for entry,row in selected:
+        for child in entry.calls or ():
+            target=identity(child.code)
+            if target in ids:edges.append(dict(parent=row['code_id'],child=target,**measure(child)))
+    edges.sort(key=lambda row:row['cumulative_ms'],reverse=True)
+    return dict(scope='ORIGINAL_S2_CALL_APP_ONLY_THREAD_CPU',perturbed=True,hook_restored=restored,unknown_entries=unknown,dropped_rows=max(0,len(known)-len(selected)),rows=[p[1] for p in selected],edges=edges[:20])
+
+
+def validate_profile(profile,labels):
+    if type(profile) is not dict or set(profile)!={'scope','perturbed','hook_restored','unknown_entries','dropped_rows','rows','edges'}:raise ValueError('profile schema STOP')
+    if profile['scope']!='ORIGINAL_S2_CALL_APP_ONLY_THREAD_CPU' or profile['perturbed'] is not True or profile['hook_restored'] is not True:raise ValueError('profile scope STOP')
+    for key in ('unknown_entries','dropped_rows'):
+        if type(profile[key]) is not int or profile[key]<0:raise ValueError('profile quality STOP')
+    if not 1<=len(profile['rows'])<=20 or len(profile['edges'])>20:raise ValueError('profile output cap STOP')
+    ids=set()
+    for group in ('rows','edges'):
+        for row in profile[group]:
+            keys={'calls','recursive','inline_ms','cumulative_ms'}|({'code_id'} if group=='rows' else {'parent','child'})
+            if set(row)!=keys:raise ValueError('profile privacy STOP')
+            for key in ('code_id',) if group=='rows' else ('parent','child'):
+                if row[key] not in labels:raise ValueError('profile static ID STOP')
+            for key in ('calls','recursive'):
+                if type(row[key]) is not int or row[key]<0:raise ValueError('profile count STOP')
+            for key in ('inline_ms','cumulative_ms'):
+                if type(row[key]) not in (int,float) or not math.isfinite(row[key]) or row[key]<0:raise ValueError('profile clock STOP')
+            if group=='rows':
+                if row['code_id'] in ids:raise ValueError('profile duplicate STOP')
+                ids.add(row['code_id'])
+    if not any(v.endswith(':OperatorApp._boot_session') for v in ids):raise ValueError('profile boot root absent STOP')
+    if any(edge[key] not in ids for edge in profile['edges'] for key in ('parent','child')):raise ValueError('profile edge STOP')
+
+
 def qualify(proof, expected):
     if set(proof) != {'rows','reports','guards','exitstatus'} or len(proof['rows']) != 1 or proof['guards']:
         raise ValueError('S2 cardinality/schema STOP')
     row=proof['rows'][0]
-    if set(row) != {'token','identity','native_sources','phases','summary','effective','call_pass','performance_oracle','restored'} or row['token'] != 1 or row['restored'] is not True:
+    if set(row) != {'token','identity','native_sources','phases','summary','effective','call_pass','performance_oracle','restored','cpu_profile'} or row['token'] != 1 or row['restored'] is not True:
         raise ValueError('S2 row STOP')
     validate_identity(row['identity'],expected)
+    validate_profile(row['cpu_profile'],trusted_labels)
     if row['native_sources'] != expected_native: raise ValueError('Textual native source STOP')
     if type(row['call_pass']) is not bool or type(row['performance_oracle']) is not bool:
         raise ValueError('S2 outcome type STOP')
