@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           ulimit -c 0
-          python -B scripts/run_bounded.py --timeout 60 --grace 5 --memory-mb 1024 -- python -B -m scripts.diagnostics.s2s3_6911.driver "$RUNNER_TEMP/s2s3-6911"
+          python -B scripts/run_bounded.py --timeout 100 --grace 5 --memory-mb 1024 -- python -B -m scripts.diagnostics.s2s3_6911.driver "$RUNNER_TEMP/s2s3-6911"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

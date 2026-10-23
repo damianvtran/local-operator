@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from scripts.diagnostics.s2s3_6911.oracle import MODES, final, judge, finish_child, project
+from scripts.diagnostics.s2s3_6911.oracle import CHILD_SECONDS, MODES, final, judge, finish_child, project
 
 ROOT = Path(__file__).resolve().parents[3]
 HERE = Path(__file__).resolve().parent
@@ -79,7 +79,7 @@ def case(mode, out):
         child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT)  # INHERITS owned PG, no setsid.
         row.update(pid=child.pid, pgid=pgid)
-        deadline = time.monotonic()+12
+        deadline = time.monotonic()+CHILD_SECONDS
         with selectors.DefaultSelector() as select:
             select.register(child.stdout, selectors.EVENT_READ)
             while select.get_map():
