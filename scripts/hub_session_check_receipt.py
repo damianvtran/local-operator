@@ -240,9 +240,7 @@ def _run_receipt(
     print(f"   hub requests:    {after}")
     print(f"   delta:           {delta}  (before {before}, after {after})")
     print(f"   last_checked_at: {after_checked or '(absent)'}")
-    print(
-        f"   throttle clock:  +{SESSION_START_CHECK_THROTTLE_S + 1.0:.0f}s before the create"
-    )
+    print(f"   throttle clock:  +{SESSION_START_CHECK_THROTTLE_S + 1.0:.0f}s before the create")
     print()
     print("   hub requests seen, in order:")
     for method, path in hub.requests():
@@ -326,9 +324,7 @@ def main() -> int:
             )
 
         clock = _Clock()
-        runner = HubSyncRunner(
-            config_manager=cm, build_ctx=build_ctx, startup_delay=0, clock=clock
-        )
+        runner = HubSyncRunner(config_manager=cm, build_ctx=build_ctx, startup_delay=0, clock=clock)
 
         @contextlib.asynccontextmanager
         async def lifespan(app: FastAPI) -> AsyncIterator[None]:
