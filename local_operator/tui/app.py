@@ -20488,8 +20488,11 @@ class OperatorApp(App[None]):
             return []
         if first.lower() == "new" and space:
             return []
-        if first.lower() in {"chart", "edit"} and space:
-            # Second slot: names feed either the chart or installed-team editor.
+        if first.lower() in {"chart", "edit", "promote"} and space:
+            # Second slot: names feed the chart, the installed-team editor, or the
+            # promote rehearsal. The rehearsal takes its `replace`/`yes` flags as
+            # typed words: it offers team names here, and no flag rows (review
+            # round 1, NIT-2 — the old comment claimed rows that never existed).
             return [
                 ArgumentChoice(
                     f"{first.lower()} {team.name}",
@@ -20535,6 +20538,11 @@ class OperatorApp(App[None]):
                 ),
                 ArgumentChoice(
                     "edit", translate(keys.edit_hint()), detail=translate(keys.subcommand())
+                ),
+                ArgumentChoice(
+                    "promote",
+                    translate(keys.promote_hint()),
+                    detail=translate(keys.subcommand()),
                 ),
             ]
         )
@@ -21165,6 +21173,9 @@ class OperatorApp(App[None]):
         # implies charting — routing it to the talk path (attaching a team
         # literally named ``Chart``) would contradict what the UI just showed.
         # Consistent with ``get_team_by_name``'s own casefold.
+        if first.casefold() == "promote":
+            self._cmd_promote("team", rest.strip(), notice)
+            return
         if first.casefold() == "chart":
             self._cmd_team_chart(rest.strip(), registry, notice)
             return
@@ -21455,7 +21466,7 @@ class OperatorApp(App[None]):
                 for word, help_text in agent_subcommand_rows()
             )
             return rows
-        if first.casefold() not in {"class", "edit"}:
+        if first.casefold() not in {"class", "edit", "promote"}:
             return []
         return [
             ArgumentChoice(
@@ -21694,6 +21705,61 @@ class OperatorApp(App[None]):
         severity: NoticeKind = "warning" if getattr(result, "style", "") == "warning" else "info"
         notice(str(getattr(result, "text", "") or ""), severity)
 
+    def _cmd_promote(self, kind: str, rest: str, notice: NoticeFn) -> None:
+        """``/agent promote <name>`` / ``/team promote <name>`` — copy, rehearsed.
+
+        The grammar and the receipts live in :mod:`local_operator.promote_slash`,
+        SHARED with the runtime owner's dispatchers: ``/agent`` and ``/team`` are
+        authoritative-session commands, so a live terminal's line never reaches
+        this method (QA round 1, Q1). This branch still runs where nothing routes,
+        and it must word the confirmation exactly as the owner does — which is why
+        it delegates instead of composing its own notice.
+
+        Runs in a worker: the promotion reads and writes both registries on disk
+        and takes the composite write lock, none of which may park the event loop.
+        ``authorized_by="surface:tui"`` is the audit origin: the user typed the
+        command on this surface, which is what the account-write rule requires.
+        """
+
+        from local_operator.session.frontend_state import SlashResult
+
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        self.run_worker(
+            self._promote_worker(kind, rest, SlashResult),
+            thread=False,
+            group="session",
+        )
+
+    async def _promote_worker(self, kind: str, rest: str, SlashResult: Any) -> None:
+        """Run the SHARED promote grammar off the loop and paint its notice."""
+
+        import asyncio
+
+        from local_operator.promote_slash import notice_kind, promote_receipt
+
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        result = await asyncio.to_thread(
+            promote_receipt,
+            session,
+            kind,
+            rest,
+            SlashResult,
+            agents=getattr(session, "agent_registry", None),
+        )
+        self._system_notice(
+            str(getattr(result, "text", "") or ""),
+            # ``notice_kind`` answers a tier NAME from the shared module, which
+            # cannot import this app's ``NoticeKind`` alias (it is below both
+            # hosts), so the narrowing cast lives at the one call site.
+            cast(NoticeKind, notice_kind(str(getattr(result, "style", "") or "info"))),
+        )
+
     def _cmd_agent(
         self,
         arg: str,
@@ -21751,6 +21817,9 @@ class OperatorApp(App[None]):
         verb = first.strip().casefold()
         if verb == "class":
             self._cmd_agent_class(rest.strip(), notice)
+            return
+        if verb == "promote":
+            self._cmd_promote("agent", rest.strip(), notice)
             return
         if verb in ("new", "edit"):
             from local_operator.i18n.keys import tui_authoring as author_keys
@@ -38387,7 +38456,7 @@ class OperatorApp(App[None]):
         """One leading escape protects both reserved verbs and literal '=' names."""
         return (
             "=" + name
-            if name.casefold() in {"chart", "new", "edit"} or name.startswith("=")
+            if name.casefold() in {"chart", "new", "edit", "promote"} or name.startswith("=")
             else name
         )
 
@@ -41759,10 +41828,13 @@ class OperatorApp(App[None]):
                 self._notice(_loop_status_line(data), "info")
                 return
         if text:
-            notice_kind: NoticeKind = "warning" if style == "warning" else "info"
-            if style == "error":
-                notice_kind = "error"
-            self._notice(text, notice_kind)
+            # ``notice_kind`` rather than an inline warning/else: a promotion
+            # rehearsal is ``note`` and its receipt is ``success`` (LOH-9 S4),
+            # and the two branches that render one must agree on those tiers or
+            # the same sentence changes weight depending on which host ran it.
+            from local_operator.promote_slash import notice_kind as _notice_kind
+
+            self._notice(text, _notice_kind(style))  # type: ignore[arg-type]
         # The goal/attach mutation happened on the OWNER (that is where session
         # context lives); the request is sent from HERE so it carries this
         # terminal's own images and paste expansion, and so the transcript row

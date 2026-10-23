@@ -106,6 +106,12 @@ def static_feature_flags() -> dict[str, Any]:
         # a conversation-scoped row. A client that predates it keeps the fields it
         # already parsed.
         "profile_scope": 1,
+        # PROMOTION (LOH-9 S4): `POST /v1/desktop/sessions/{session_id}/promote`
+        # copies one conversation-scoped role or team into the account. Its own key
+        # beside `profile_scope`, by the rule below: a renderer that does not see
+        # it keeps rendering conversation rows without an action, and a renderer
+        # that does may offer "use in all conversations" on exactly those rows.
+        "profile_promote": 1,
         "team_catalogue": 1,
         # Agent Hub update availability: GET /v1/desktop/hub/updates (a store read,
         # no network) plus check/apply/apply-all/retry. A renderer gates the
