@@ -2,8 +2,11 @@
   "tui.asks.context.messages": "{count, plural, one {# संदेश आपने इस सवाल के बाद भेजा (आखिरी {time})} other {# संदेश आपने इस सवाल के बाद भेजे (आखिरी {time})}}",
   "tui.asks.dismiss.answered_in_chat": "चैट में जवाब दिया",
   "tui.asks.dismiss.answered_in_chat_note": "आप पहले ही बातचीत में जवाब दे चुके हैं",
-  "tui.asks.dismiss.hint": "enter हटाएँ · esc वापस",
+  "tui.asks.dismiss.fleet_gone": "यह सवाल अब उस बातचीत के लॉग में नहीं है।",
+  "tui.asks.dismiss.hint": "enter हटाएँ · esc रद्द करें",
   "tui.asks.dismiss.moot": "अब ज़रूरत नहीं",
-  "tui.asks.dismiss.moot_note": "इसका इंतज़ार छोड़ दें",
+  "tui.asks.dismiss.moot_note": "एजेंट अब जवाब का इंतज़ार नहीं करेगा",
+  "tui.asks.dismiss.notice_answered_in_chat": "हटा दिया — बातचीत में जवाब दिया गया",
+  "tui.asks.dismiss.notice_moot": "हटा दिया — अब ज़रूरत नहीं",
   "tui.asks.dismiss.title": "यह सवाल हटाएँ"
 }

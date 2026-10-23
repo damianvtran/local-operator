@@ -53,9 +53,19 @@ function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 	};
 }
 
-function renderCard(row: PendingAsk, onSettled?: () => void) {
+function renderCard(
+	row: PendingAsk,
+	onSettled?: () => void,
+	onDismissed?: (reason: "moot" | "answered_in_chat" | undefined) => void,
+) {
 	return render(
-		<AskCard row={row} sessionId="s1" nowMs={Date.now()} onSettled={onSettled} />,
+		<AskCard
+			row={row}
+			sessionId="s1"
+			nowMs={Date.now()}
+			onSettled={onSettled}
+			onDismissed={onDismissed}
+		/>,
 	);
 }
 
@@ -202,7 +212,7 @@ describe("AskCard", () => {
 		   WHY before anything is sent. What it must NOT offer is the lapsed row's
 		   one-tap dismissal, which says "send no reply" over an ask the agent is
 		   still owed an answer to. */
-		expect(screen.getByRole("button", { name: /^close…$/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^dismiss…$/ })).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
 	});
 
@@ -242,12 +252,12 @@ describe("AskCard", () => {
 	it("offers the one-tap dismissal on a timed-out ask and the reason row on an open one", () => {
 		const { unmount } = renderCard(ask());
 		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
-		expect(screen.getByRole("button", { name: /^close…$/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^dismiss…$/ })).toBeTruthy();
 		unmount();
 		renderCard(ask({ status: "timed_out" }));
 		expandLapsed();
 		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
-		expect(screen.queryByRole("button", { name: /^close…$/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^dismiss…$/ })).toBeNull();
 	});
 
 	it("closes an open ask with a reason, and sends nothing until one is chosen", async () => {
@@ -257,9 +267,9 @@ describe("AskCard", () => {
 		   what the agent acts on (`moot` closes the question, `answered_in_chat`
 		   tells it the answer is already in the conversation). */
 		renderCard(ask());
-		fireEvent.click(screen.getByRole("button", { name: /^close…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
 		expect(sendCommand).not.toHaveBeenCalled();
-		fireEvent.click(screen.getByRole("button", { name: /^No longer needed$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("s1", {
 				op: "ask_dismiss",
@@ -271,8 +281,8 @@ describe("AskCard", () => {
 
 	it("sends answered_in_chat when the operator says they replied in chat", async () => {
 		renderCard(ask());
-		fireEvent.click(screen.getByRole("button", { name: /^close…$/ }));
-		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("s1", {
 				op: "ask_dismiss",
@@ -284,10 +294,10 @@ describe("AskCard", () => {
 
 	it("puts the reasons away again on cancel, sending nothing", () => {
 		renderCard(ask());
-		fireEvent.click(screen.getByRole("button", { name: /^close…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
 		fireEvent.click(screen.getByRole("button", { name: /^cancel$/ }));
-		expect(screen.queryByRole("button", { name: /^No longer needed$/ })).toBeNull();
-		expect(screen.getByRole("button", { name: /^close…$/ })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /^No longer needed/ })).toBeNull();
+		expect(screen.getByRole("button", { name: /^dismiss…$/ })).toBeTruthy();
 		expect(sendCommand).not.toHaveBeenCalled();
 	});
 
@@ -300,14 +310,93 @@ describe("AskCard", () => {
 			new Error("this ask was asked by a relayed conversation — dismiss it there."),
 		);
 		renderCard(ask());
-		fireEvent.click(screen.getByRole("button", { name: /^close…$/ }));
-		fireEvent.click(screen.getByRole("button", { name: /^No longer needed$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
 		const sentence = await screen.findByText(/dismiss it there/);
-		const reason = screen.getByRole("button", { name: /^No longer needed$/ });
+		const reason = screen.getByRole("button", { name: /^No longer needed/ });
 		expect(
 			reason.compareDocumentPosition(sentence) & Node.DOCUMENT_POSITION_FOLLOWING,
 		).toBeTruthy();
-		expect((reason as HTMLButtonElement).disabled).toBe(false);
+		/* INERT NOW (UX round 1, U8): the sentence is shown beside the control that
+		   produced it, and the control stops inviting the same refusal again. */
+		expect((reason as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	it("does not promise a ~30 s bring-up for a dismissal on a cold conversation", async () => {
+		/* Agent review round 1, M1: the dismissal takes the no-boot door on every
+		   surface (`dismiss_cold`, §14/fork A), so the cold engage clock belongs to
+		   an ANSWER. The gate used to be `busy !== "" && cold`, and dismissing an
+		   open ask on a cold row printed "bringing the session up — ~30 s" beside
+		   two dead `…` buttons: the card asserted the opposite of the contract. */
+		let release: (value: unknown) => void = () => {};
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise((resolve) => { release = resolve; }),
+		);
+		renderCard(ask({ runtime_live: false }));
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		expect(screen.queryByText(/bringing the session up/)).toBeNull();
+		await act(async () => { release({ ok: true, detail: "dismissed" }); });
+	});
+
+	it("names the act, and states what each reason tells the agent", () => {
+		/* Design round 1, D1 = UX round 1, U6: the reveal used to be three controls
+		   on one line with no heading and no explanation, so "Answered in chat"
+		   could be read as "send my answer" while sitting 8.5 px under `decline`.
+		   The heading says "Dismiss", and each row carries its note. */
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		expect(screen.getByText("Dismiss this ask")).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^No longer needed/ }).textContent).toContain(
+			"stop waiting on it",
+		);
+		expect(
+			screen.getByRole("button", { name: /^Answered in chat/ }).textContent,
+		).toContain("you already replied in the conversation");
+	});
+
+	it("keeps the pressed reason's label while the dismissal is in flight", async () => {
+		/* UX round 1, U3 (design N3): both buttons used to become `…`, which erased
+		   the only on-screen statement of which reason had been sent. */
+		let release: (value: unknown) => void = () => {};
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise((resolve) => { release = resolve; }),
+		);
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat/ }));
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /^Answered in chat/ }).textContent).toContain(
+				"Answered in chat",
+			),
+		);
+		expect(
+			screen.getByRole("button", { name: /^Answered in chat/ }).getAttribute("aria-busy"),
+		).toBe("true");
+		await act(async () => { release({ ok: true, detail: "dismissed" }); });
+	});
+
+	it("hands the reason to the sheet on an accepted dismissal", async () => {
+		/* UX round 1, U2: the card leaves the aggregate, so the sheet needs the
+		   operator's own word to show a receipt instead of its empty state. */
+		const dismissed = vi.fn();
+		renderCard(ask(), undefined, dismissed);
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		await waitFor(() => expect(dismissed).toHaveBeenCalledWith("moot"));
+	});
+
+	it("draws the context line under the question it refers to", () => {
+		/* Design round 1, D3: state → context → question made "this" point at a
+		   line the reader had not reached yet; the terminal paints it under. */
+		const at = new Date(2026, 9, 23, 19, 36, 0).getTime();
+		renderCard(ask({ user_messages_since: 3, last_user_message_at: at }));
+		const context = screen.getByTestId("ask-context");
+		const questionText = screen.getByText("ship the fix?");
+		expect(
+			questionText.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
 	});
 
 	it("draws the stale-ask context line from the wire pair, and only when it can", () => {

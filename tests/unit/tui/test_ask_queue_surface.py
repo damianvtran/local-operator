@@ -1420,7 +1420,7 @@ async def test_the_bar_and_the_list_speak_from_one_fold(enabled):
     """
     session = _AskSession()
     app = _app(session)
-    async with app.run_test(size=(120, 30)) as pilot:
+    async with app.run_test(size=(170, 30)) as pilot:
         await _settle(pilot)
         app._sync_ask_surface(
             ask_rows(
@@ -1607,7 +1607,7 @@ async def test_the_urgency_word_counts_the_same_set_on_both_surfaces(enabled):
     """
     session = _AskSession()
     app = _app(session)
-    async with app.run_test(size=(120, 30)) as pilot:
+    async with app.run_test(size=(170, 30)) as pilot:
         await _settle(pilot)
         app._sync_ask_surface(
             ask_rows(

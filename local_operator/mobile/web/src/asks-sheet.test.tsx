@@ -159,6 +159,29 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(screen.getByText(/nothing waiting/)).toBeTruthy());
 	});
 
+	it("shows a receipt for the dismissal that emptied it, not the empty state", async () => {
+		/* UX round 1, U2: the daemon answers `{"ok": true, "detail": "dismissed"}`,
+		   the row leaves the aggregate, and "nothing waiting — questions the agent
+		   asks will appear here" was the whole trace of an act the operator had
+		   just completed. The receipt names the reason the agent was given. */
+		const { sendCommand } = await import("./api");
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [ask()] });
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [] });
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("mine", {
+				op: "ask_dismiss",
+				ask_id: "a1",
+				reason: "answered_in_chat",
+			}),
+		);
+		await waitFor(() => expect(screen.getByText("Dismissed — answered in chat")).toBeTruthy());
+		expect(screen.queryByText(/nothing waiting/)).toBeNull();
+	});
+
 	it("re-reads when the outstanding population moves, without a manual refresh", async () => {
 		const { rerender } = render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(getAsks).toHaveBeenCalledTimes(1));

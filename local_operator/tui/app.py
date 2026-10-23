@@ -132,6 +132,7 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
@@ -589,11 +590,26 @@ _t = tr("tui.app")
 #: terminal's conversation labels and sidebar grouping, and it has no desktop
 #: counterpart to keep translated in step.
 _t_tags = tr("tui.tags")
+#: The queued-ask surfaces' own namespace (R5). Read through the binding at every
+#: use site, never copied: a language move re-materialises the catalogue.
+_t_asks = tr("tui.asks")
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
 TAG_APPLIED_MARK = "[x]"
 TAG_UNAPPLIED_MARK = "[ ]"
+
+
+def dismiss_receipt(reason: str | None) -> str:
+    """The one-line receipt for an ACCEPTED dismissal (UX round 1, U2).
+
+    ``reason`` is the operator's own word from the chooser; ``None`` is the
+    lapsed row's one-key door, whose queue default is ``moot`` — so the receipt
+    may name it without claiming the operator chose it.
+    """
+    if reason == "answered_in_chat":
+        return _t_asks(_ask_keys.dismiss_notice_answered_in_chat())
+    return _t_asks(_ask_keys.dismiss_notice_moot())
 
 
 def _tag_header(applied: int, total: int) -> str:
@@ -28788,6 +28804,7 @@ class OperatorApp(App[None]):
         owner is the thing that settles the ask.
         """
         from local_operator.asks.dismiss import dismiss_cold
+        from local_operator.asks.render import NOT_IN_QUEUE
         from local_operator.mobile.attach_client import engage_session_client
         from local_operator.paths import config_dir
         from local_operator.session.runtime.launch import AskErrand
@@ -28840,6 +28857,12 @@ class OperatorApp(App[None]):
             # whole promise is that nothing is sent.
             if op == "dismiss":
                 failed = str(exc) or "the dismissal could not be recorded."
+                if failed == NOT_IN_QUEUE:
+                    # THE ROW IS ANOTHER CONVERSATION'S BY CONSTRUCTION (UX round
+                    # 1, U5): on this list "it may belong to another session"
+                    # contradicts the screen it is printed on, so the honest fact
+                    # is about the log the row named.
+                    failed = _t_asks(_ask_keys.dismiss_fleet_gone())
                 logger.warning("could not record a fleet dismissal", exc_info=True)
             else:
                 failed = str(exc) or "the answer could not be delivered."
@@ -28849,10 +28872,13 @@ class OperatorApp(App[None]):
             await self._reload_fleet_rows()
         if failed:
             self._ask_gesture_refusal(failed)
-        elif self._ask_scope == SCOPE_FLEET:
-            # Hand the user back to the fleet list — the queue is a place, and
-            # the answered row has left it.
-            self._mount_ask_list(scope=SCOPE_FLEET)
+        else:
+            if op == "dismiss":
+                self._ask_gesture_notice(dismiss_receipt(reason))
+            if self._ask_scope == SCOPE_FLEET:
+                # Hand the user back to the fleet list — the queue is a place, and
+                # the answered row has left it.
+                self._mount_ask_list(scope=SCOPE_FLEET)
 
     def _mount_ask_list(
         self, highlight: str | None = None, *, scope: str | None = None, passive: bool = False
@@ -29225,7 +29251,12 @@ class OperatorApp(App[None]):
         self._handle_ask_outcome(outcome, toast=True)
 
     def _handle_ask_outcome(
-        self, outcome: Any, *, toast: bool, clear_in_flight: str | None = None
+        self,
+        outcome: Any,
+        *,
+        toast: bool,
+        clear_in_flight: str | None = None,
+        notice: str = "",
     ) -> None:
         """Report a queued-ask op's verdict, whether it arrived sync or on the wire.
 
@@ -29244,15 +29275,22 @@ class OperatorApp(App[None]):
         """
         if inspect.isawaitable(outcome):
             self.run_worker(
-                self._await_ask_outcome(outcome, toast=toast, clear_in_flight=clear_in_flight),
+                self._await_ask_outcome(
+                    outcome, toast=toast, clear_in_flight=clear_in_flight, notice=notice
+                ),
                 exclusive=False,
                 exit_on_error=False,
             )
             return
-        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight)
+        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight, notice=notice)
 
     async def _await_ask_outcome(
-        self, pending: Any, *, toast: bool, clear_in_flight: str | None = None
+        self,
+        pending: Any,
+        *,
+        toast: bool,
+        clear_in_flight: str | None = None,
+        notice: str = "",
     ) -> None:
         """Await a viewer's ask op and report it in the owner's words."""
         try:
@@ -29260,18 +29298,28 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a dead transport is not a lost answer
             logger.warning("a queued-ask op failed on the wire", exc_info=True)
             outcome = {"ok": False, "error": str(exc) or "the ask was refused"}
-        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight)
+        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight, notice=notice)
 
     def _ask_refusal(
-        self, outcome: Any, *, toast: bool, clear_in_flight: str | None = None
+        self,
+        outcome: Any,
+        *,
+        toast: bool,
+        clear_in_flight: str | None = None,
+        notice: str = "",
     ) -> None:
         """The one place a refused ask op becomes words on screen.
 
         ``clear_in_flight`` ends a gesture's in-flight mark on a REFUSAL only: an
         accepted op keeps it until the snapshot that drops the row, so the row
         never flickers back to live between the reply and the frame.
+
+        ``notice`` is the ACCEPTED op's own receipt (UX round 1, U2), reported in
+        the same slot: an ask op that worked used to say nothing at all.
         """
         if outcome.get("ok"):
+            if notice:
+                self._ask_gesture_notice(notice)
             return
         if clear_in_flight:
             self._ask_dismiss_in_flight.discard(clear_in_flight)
@@ -29281,6 +29329,21 @@ class OperatorApp(App[None]):
             self._ask_gesture_refusal(text)
         else:
             self._system_notice(text, "warning")
+
+    def _ask_gesture_notice(self, text: str) -> None:
+        """Acknowledge a queued-ask gesture where it happened (UX round 1, U2).
+
+        The happy path used to be SILENT: the row left the list, the counts
+        changed, and nothing said what the queue had recorded — the only trace of
+        a dismissal was an absence, while an answered or declined ask keeps a
+        receipt chip. `yield_to_actionable` marks this as the courtesy it is: the
+        user did the thing, so their receipt must never evict a failure they have
+        not read yet.
+        """
+        try:
+            self.query_one(Toast).show(text, duration_ms=TOAST_DEFAULT_MS, yield_to_actionable=True)
+        except Exception:  # noqa: BLE001 — a stripped harness still gets the words
+            self._system_notice(text, "info")
 
     def _ask_gesture_refusal(self, text: str) -> None:
         """Report a refused `d`/`x` where the gesture happened, not in the transcript.
@@ -29330,7 +29393,9 @@ class OperatorApp(App[None]):
         self._ask_dismiss_in_flight.add(ask_id)
         self._mark_ask_in_flight(ask_id, True)
         outcome: Any = reader(ask_id, by="terminal", reason=reason)
-        self._handle_ask_outcome(outcome, toast=True, clear_in_flight=ask_id)
+        self._handle_ask_outcome(
+            outcome, toast=True, clear_in_flight=ask_id, notice=dismiss_receipt(reason)
+        )
 
     def on_ask_bar_toggled(self, message: AskBar.Toggled) -> None:
         """A click or Enter on the minimized bar: expand, or collapse if already up."""

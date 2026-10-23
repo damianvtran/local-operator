@@ -3576,7 +3576,7 @@
     {
       "locale": "fr",
       "namespace": "tui.asks",
-      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "source_sha256": "3f80874f65f4130f7d703a49068c8ef44991c01325983ee86d5d653d6ed5fa3f",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3590,12 +3590,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "fr",
       "namespace": "relay.ask",
-      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3609,12 +3609,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "es",
       "namespace": "tui.asks",
-      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "source_sha256": "3f80874f65f4130f7d703a49068c8ef44991c01325983ee86d5d653d6ed5fa3f",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3628,12 +3628,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "es",
       "namespace": "relay.ask",
-      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3647,12 +3647,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "ru",
       "namespace": "tui.asks",
-      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "source_sha256": "3f80874f65f4130f7d703a49068c8ef44991c01325983ee86d5d653d6ed5fa3f",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3666,12 +3666,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "ru",
       "namespace": "relay.ask",
-      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3685,12 +3685,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "vi",
       "namespace": "tui.asks",
-      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "source_sha256": "3f80874f65f4130f7d703a49068c8ef44991c01325983ee86d5d653d6ed5fa3f",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3704,12 +3704,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "vi",
       "namespace": "relay.ask",
-      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3723,12 +3723,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "hi",
       "namespace": "tui.asks",
-      "source_sha256": "f2807ecc681581718713a3227c458038de528e56b2b4b8a90be9e34b9dd75091",
+      "source_sha256": "3f80874f65f4130f7d703a49068c8ef44991c01325983ee86d5d653d6ed5fa3f",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3742,12 +3742,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     },
     {
       "locale": "hi",
       "namespace": "relay.ask",
-      "source_sha256": "92639f249c9fbe233c3dfe93dc38551aadd0d796453728847dc4b7f1082ffe04",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
       "translator": {
         "agent": "i18n-translator",
         "model": "radient/auto",
@@ -3761,7 +3761,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Round 1 raised 12 findings: three width overruns against the label/note caps, hi+ur+zh context lines that put the clause before the count, zh spacing and its six-dot ellipsis. The translator applied every finding; the two width caps were corrected in the English sidecars (label 34, note 44) because the reason controls are a flex-wrap row, and round 2 returned PASS on all seven locales. Translator lane: this session (lopdev coder, radient/auto)."
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     }
   ]
 }

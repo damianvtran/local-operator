@@ -289,6 +289,14 @@ DISMISS_CHOICES: tuple[tuple[str, Any, Any], ...] = (
 #: sub-line reads as belonging to the ask above it rather than as another ask.
 SUB_LINE_INDENT = 4
 
+#: The connector a context line leads with (design round 1, D6). The same indent
+#: is where a LAPSED ask's collapsed row sits, and that row carries no marker of
+#: its own, so without a cue the slot read as two different things at once ("a
+#: child line of the row above" and "another ask"). ``└`` is this surface's
+#: existing parent/child glyph — the sidebar's tree sections and the analytics
+#: panel both use it — and no ask row is ever painted with it.
+CONTEXT_CUE = "└ "
+
 
 @dataclass(frozen=True)
 class AskRow:
@@ -890,6 +898,51 @@ class AskBar(Widget):
         return text
 
 
+def _wrap_cells(text: str, room: int, *, max_lines: int = 2) -> list[str]:
+    """``text`` split into at most ``max_lines`` lines of ``room`` cells, on spaces.
+
+    The wrap side of :func:`_clip_cells`, for the two sub-lines that must stay
+    readable on a narrow panel (UX round 1, U4). A space is the only break: a
+    clause cut MID-WORD is what made the chooser's explanation unreadable at 60
+    cells, and a second line costs nothing — the block already scrolls.
+
+    The LAST line is clipped, never wrapped again: a bounded line count is what
+    keeps the painted sequence (and so the pointer's row map) a function of the
+    width rather than of the text's length.
+    """
+    if room <= 0:
+        return [""]
+    if cell_len(text) <= room:
+        return [text]
+    lines: list[str] = []
+    rest = text
+    while rest and len(lines) < max_lines - 1:
+        cut = -1
+        #: A space that OPENS a parenthetical wins over the last space: the
+        #: context line's "(last 14:14)" is one fact, and splitting it printed
+        #: `14:14)` alone on the second row (UX round 1, U4's own complaint in a
+        #: new place).
+        paren = -1
+        used = ""
+        for index, char in enumerate(rest):
+            if cell_len(used + char) > room:
+                break
+            used += char
+            if char == " ":
+                cut = index
+                if rest[index + 1 : index + 2] == "(":
+                    paren = index
+        if paren > 0:
+            cut = paren
+        if cut <= 0:
+            break
+        lines.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        lines.append(_clip_cells(rest, room))
+    return lines or [""]
+
+
 def _clip_cells(text: str, room: int) -> str:
     """``text`` clipped to ``room`` cells with an ellipsis, cheaply.
 
@@ -1037,9 +1090,12 @@ class AskQueueList(Widget):
         # THE CHOOSER'S OWN TWO (R5), last because they are live only while it is
         # up: `header_hints` filters by what the CURRENT view can honour, so the
         # list's hints and the chooser's never mix — and the order here is the
-        # order they paint in when it is up.
+        # order they paint in when it is up. `esc cancel` and not `esc back`
+        # (design N1): with no chooser up Esc collapses the whole surface, so one
+        # word cannot name two exits — the chooser's footer is the only place
+        # either key set is painted while it is up (`header_hints` returns none).
         "enter dismiss",
-        "esc back",
+        "esc cancel",
     )
 
     #: The cells between the scope clause and the filter control, and between
@@ -1154,13 +1210,22 @@ class AskQueueList(Widget):
         return filter_counts(self._rows)
 
     def set_filter(self, value: str) -> None:
-        """Select one half. The highlight follows the ROW, not the index."""
+        """Select one half. The highlight follows the ROW, not the index.
+
+        THE KEYBOARD PATH IS CLOSED WHILE A CHOOSER IS UP (agent review round 1,
+        m2): `1`/`2`/`3`/`[`/`]` and a click on a segment are inert, exactly like
+        `d`, `x`, `enter` and the arrows, because the chooser owns the keyboard
+        until a reason is chosen or Escaped out of. The earlier rule — a filter
+        key silently CANCELS the chooser — was defensible on paper and advertised
+        nowhere: the header named only `enter dismiss`/`esc`, so a reader who
+        pressed `2` lost their unconfirmed reason without being told.
+
+        This method stays the programmatic door (a caller re-pointing the slice
+        from outside the keyboard loop), and it closes the chooser rather than
+        letting it hover over a slice that may not draw its row.
+        """
         if value not in FILTER_LABELS or value == self._filter:
             return
-        # A FILTER CHANGED UNDER AN OPEN CHOOSER LEAVES THE QUESTION IT WAS
-        # ABOUT, so the chooser closes rather than sitting over a slice that may
-        # not draw its row. It CANCELS, never dismisses: the reader navigated, and
-        # a reason they did not press Enter on is not an answer they gave.
         self._dismiss_for = None
         current = self.current()
         self._filter = value
@@ -1261,11 +1326,19 @@ class AskQueueList(Widget):
         # A CHOOSER FOR A ROW THAT IS GONE IS A DOOR TO NOTHING: the ask was answered
         # on the phone, expired, or was dismissed elsewhere while the reason was
         # on screen, and the next Enter would post a dismissal for an id this list
-        # no longer draws. The chooser closes with the row it belongs to.
-        if self._dismiss_for is not None and self._dismiss_for not in {
-            row.ask_id for row in self._rows
-        }:
-            self._dismiss_for = None
+        # no longer draws — or, worse, for a row it no longer draws in THIS slice
+        # (the Pending filter drops a row the moment it times out). The chooser
+        # closes with the row it belongs to, and the row must be BOTH visible and
+        # still answerable: a row that settled to `answered` or `timed_out` keeps
+        # its id but has left the door the reason belongs to (agent review round
+        # 1, m1 — Enter used to be live on a state the reader never saw).
+        if self._dismiss_for is not None:
+            keeper = next(
+                (row for row in self.visible_rows if row.ask_id == self._dismiss_for),
+                None,
+            )
+            if keeper is None or not keeper.answerable:
+                self._dismiss_for = None
         self.refresh(layout=True)
 
     def set_now(self, now_ms: int) -> None:
@@ -1420,18 +1493,28 @@ class AskQueueList(Widget):
         self.refresh(layout=True)
 
     def action_filter_all(self) -> None:
+        if self.choosing:
+            return
         self.set_filter(FILTER_ALL)
 
     def action_filter_outstanding(self) -> None:
+        if self.choosing:
+            return
         self.set_filter(FILTER_OUTSTANDING)
 
     def action_filter_settled(self) -> None:
+        if self.choosing:
+            return
         self.set_filter(FILTER_SETTLED)
 
     def action_filter_next(self) -> None:
+        if self.choosing:
+            return
         self.cycle_filter(1)
 
     def action_filter_prev(self) -> None:
+        if self.choosing:
+            return
         self.cycle_filter(-1)
 
     # -- the pointer ---------------------------------------------------------
@@ -1453,13 +1536,15 @@ class AskQueueList(Widget):
         except Exception:  # noqa: BLE001 — pre-layout, when there is nothing to hit
             return 0
 
-    def _line_owners(self) -> list[tuple[str, int] | None]:
+    def _line_owners(self, width: int) -> list[tuple[str, int] | None]:
         """What each painted line BELOW THE HEADER belongs to.
 
-        ``("row", i)`` — a visible ask's own line; ``("context", i)`` — the stale-ask
-        context line under it; ``("reason", k)`` — a choice in the dismiss reason
-        block; ``None`` — a line that answers no click (the empty-half sentence and
-        the chooser's heading and hint).
+        ``("row", i)`` — a visible ask's own line; ``("context", i)`` — a stale-ask
+        context line under it (one entry per PAINTED line, so a wrapped context
+        line owns both its lines); ``("reason", k)`` — a choice in the dismiss
+        reason block (the label line and its note line both belong to that
+        reason); ``None`` — a line that answers no click (the empty-half sentence
+        and the chooser's heading and hint).
 
         ONE definition of the geometry, read by the painter's own sequence and by
         the pointer hit test. The two used to be the same arithmetic by luck: the
@@ -1468,6 +1553,13 @@ class AskQueueList(Widget):
         painted but unowned is exactly as visible here as one that is not painted,
         so the chooser and the context line cannot silently shift the rows below
         them.
+
+        ``width`` is the painted width the caller is laying out for: the context
+        line WRAPS to two lines on a narrow panel (UX round 1, U4 — clipping it
+        mid-sentence lost the countdown, which is the half that says how stale the
+        ask is), so its line count is a function of the width it was given. The
+        painter and the hit test pass the same number, which is why this takes it
+        rather than reading `content_size` twice.
         """
         visible = self.visible_rows
         owners: list[tuple[str, int] | None] = []
@@ -1475,18 +1567,27 @@ class AskQueueList(Widget):
             owners.append(None)
         for index, row in enumerate(visible):
             owners.append(("row", index))
-            if context_text(row):
-                owners.append(("context", index))
+            owners.extend([("context", index)] * self._context_line_count(row, width))
             if self._dismiss_for == row.ask_id:
                 owners.append(None)  # the heading
-                owners.extend(("reason", k) for k in range(len(DISMISS_CHOICES)))
+                for k in range(len(DISMISS_CHOICES)):
+                    owners.append(("reason", k))  # the label
+                    owners.append(("reason", k))  # its note, one line down
                 owners.append(None)  # the key hints
         return owners
+
+    @staticmethod
+    def _context_line_count(row: AskRow, width: int) -> int:
+        """How many painted lines ``row``'s context line takes at ``width``."""
+        context = context_text(row)
+        if not context:
+            return 0
+        return len(_wrap_cells(CONTEXT_CUE + context, max(1, width - SUB_LINE_INDENT)))
 
     def _line_at(self, y: int) -> tuple[str, int] | None:
         """The owned thing under a widget-relative y, or ``None``."""
         index = y - self._top_inset() - self.HEADER_ROWS
-        owners = self._line_owners()
+        owners = self._line_owners(max(1, int(self.content_size.width)))
         if 0 <= index < len(owners):
             return owners[index]
         return None
@@ -1564,19 +1665,21 @@ class AskQueueList(Widget):
             self._passive = False
             self.refresh(layout=True)
         y = int(event.y)
-        segment = self._segment_at(int(event.x), y)
-        if segment is not None:
-            self.set_filter(segment)
-            return
         if self.choosing:
             # THE CHOOSER TAKES THE CLICKS IT DRAWS: a tap on a choice sends THAT
             # reason — the pointer has already said which, so asking for a second
             # tap to confirm the row it is on would be a dead press. Every other
-            # line in the block is inert, the same rule the keys follow.
+            # line in the block is inert, the same rule the keys follow — and that
+            # now includes the header's filter segments (agent review round 1,
+            # m2), which used to cancel the chooser from under the pointer.
             choice = self._reason_at(y)
             if choice is not None:
                 self._dismiss_index = choice
                 self._choose_dismiss_reason()
+            return
+        segment = self._segment_at(int(event.x), y)
+        if segment is not None:
+            self.set_filter(segment)
             return
         row = self._row_at(y)
         if row is None:
@@ -1672,14 +1775,14 @@ class AskQueueList(Widget):
         visible = self.visible_rows
         live = {"esc collapse"}
         if self.choosing:
-            # THE CHOOSER OWNS THE KEYBOARD: every key the list advertises is
-            # inert until a reason is chosen or Escaped out of, so the header
-            # names the chooser's two keys and nothing else. A hint for a key
-            # this mode ignores is exactly the dead-end affordance this method
-            # exists to prevent.
-            return tuple(
-                hint for hint in self.HEADER_HINTS if hint in {"enter dismiss", "esc back"}
-            )
+            # THE CHOOSER OWNS THE KEYBOARD, AND ITS OWN BLOCK NAMES ITS KEYS.
+            # Every key the list advertises is inert until a reason is chosen or
+            # Escaped out of, and the block under the row paints `enter dismiss ·
+            # esc cancel` one line below the choices — so a second copy in the
+            # header was the same string twice within seven lines (design N2/n2).
+            # A hint for a key this mode ignores is the dead-end affordance this
+            # method exists to prevent; the header paints none at all.
+            return ()
         if self.passive:
             # A PASSIVE list owns no key: the composer holds the caret, so `enter`,
             # `d` and `x` would type into the composer, not act on a row. It names
@@ -1774,40 +1877,46 @@ class AskQueueList(Widget):
         # nothing; the drawer count goes first because the three segments below
         # it already carry those numbers.
         head: list[HeaderAtom] = []
-        # THE FIRST HINT OUTBIDS THE DRAWER CLAUSE (U3). The clause's own rung
-        # already argues it is expendable at a narrow width ("the segments carry
-        # the three counts"), but the ladder used to spend it WITHOUT leaving
-        # room for a single hint: at 80 columns — the repo's own default
-        # assumption — the auto-opened surface named no key at all. The rungs
-        # below therefore measure with the first hint RESERVED, so the clause
-        # yields to the hint the way it already yields to the numbers.
+        # THE CLAUSE YIELDS TO THE WHOLE LIVE HINT SET (design D2 = UX U1). It
+        # used to yield to the FIRST hint only, so at the default 100-column
+        # terminal an OPEN row reserved room for `enter answer` and then shed
+        # `d decline` and `x dismiss` — the one key R5 adds was never named at the
+        # widths this repo is used at, while a NARROWER window still named two of
+        # them. The clause repeats what the segments below already count, and the
+        # dock prints the same sentence in full one line away, so the clause is
+        # the thing that goes; the hints are what the ladder exists to keep.
         hints = self.header_hints()
-        reserve = [HeaderAtom("  ·  " + hints[0], "muted")] if hints else []
-        current = self.current()
-        if current is not None and current.lapsed and "enter view" in hints:
-            # A LAPSED row has two keys and neither is guessable: `x` is the only
-            # one that changes anything (U8) and `enter view` is the only way to
-            # read the whole question (U1). The clause yields to BOTH, so the look
-            # is discoverable at the default 80 columns (#2481 UX round 2, U10) —
-            # the segments already carry the counts the clause would repeat.
-            reserve = [HeaderAtom("  ·  " + hint, "muted") for hint in hints[:2]]
+        live_hints = [HeaderAtom("  ·  " + hint, "muted") for hint in hints]
         if clause:
             with_clause = [HeaderAtom(subject, "fg")] if subject else []
             with_clause.append(HeaderAtom(f"{' · ' if subject else ''}{clause}", "fg"))
-            if _atoms_width([*atoms, *with_clause, *_seg_block(True), *reserve]) <= width:
+            if _atoms_width([*atoms, *with_clause, *_seg_block(True), *live_hints]) <= width:
                 head = with_clause
         if not head and subject:
             candidate = [HeaderAtom(subject, "fg")]
-            if _atoms_width([*atoms, *candidate, *_seg_block(True), *reserve]) <= width:
+            if _atoms_width([*atoms, *candidate, *_seg_block(True), *live_hints]) <= width:
                 head = candidate
         atoms.extend(head)
         atoms.extend(_seg_block(bool(head)))
-        kept: list[HeaderAtom] = []
-        for hint in hints:
-            prefix = "  ·  "
-            if _atoms_width([*atoms, *kept, HeaderAtom(prefix + hint, "muted")]) > width:
-                break
-            kept.append(HeaderAtom(prefix + hint, "muted"))
+
+        def shed(prefix: str) -> list[HeaderAtom]:
+            """As many hints as fit, in order, from the left."""
+            kept: list[HeaderAtom] = []
+            for hint in hints:
+                candidate = HeaderAtom(prefix + hint, "muted")
+                if _atoms_width([*atoms, *kept, candidate]) > width:
+                    break
+                kept.append(candidate)
+            return kept
+
+        # THE SEPARATOR COMPACTS BEFORE A HINT IS DROPPED (design D2/UX U1). The
+        # measured case is the repo's own 80-column default: the three live hints
+        # need 80 cells with the roomy `  ·  ` separator and fit in 78 with the
+        # dock's own ` · ` — and 78 is exactly the content width that terminal
+        # leaves. A rung, not a second vocabulary: both separators are already in
+        # this header, and the compact one is only used when it keeps MORE hints
+        # than the roomy one does (never to prettify).
+        kept = max((shed("  ·  "), shed(" · ")), key=len)
         atoms.extend(kept)
         if _atoms_width(atoms) > width:
             # The floor: not even the control fits. CUT rather than wrap — a
@@ -2007,18 +2116,27 @@ class AskQueueList(Widget):
                     line.append(tail, style=chip_warning if row.urgent else muted)
             text.append(line)
             # THE STALE-ASK CONTEXT LINE (SA-D7/R5), on the row it belongs to and
-            # nowhere else: one line, indented under the question, in the muted
-            # register — it is context for the question, never a second ask.
+            # nowhere else: indented under the question, in the muted register —
+            # it is context for the question, never a second ask. It leads with a
+            # `└` connector (design D6): the same indent is also where a LAPSED
+            # ask's collapsed row sits, so without a cue of its own the slot meant
+            # two things at once. `└` is this surface's existing "child of the row
+            # above" glyph (the tree sections and the analytics panel use it), and
+            # no ask row ever starts with it.
             context = context_text(row)
             if context:
-                start_line()
-                sub = Text(no_wrap=True, overflow="ellipsis")
-                sub.append(" " * SUB_LINE_INDENT, style=muted)
-                sub.append(
-                    _clip_cells(context, max(1, width - SUB_LINE_INDENT)),
-                    style=muted,
-                )
-                text.append(sub)
+                for number, piece in enumerate(
+                    _wrap_cells(f"{CONTEXT_CUE}{context}", max(1, width - SUB_LINE_INDENT))
+                ):
+                    start_line()
+                    sub = Text(no_wrap=True, overflow="ellipsis")
+                    sub.append(" " * SUB_LINE_INDENT, style=muted)
+                    if number:
+                        # The continuation lines align under the words, not under
+                        # the connector: the cue marks the block once.
+                        sub.append(" " * cell_len(CONTEXT_CUE), style=muted)
+                    sub.append(piece, style=muted)
+                    text.append(sub)
             # THE CHOOSER SITS UNDER THE ROW IT IS ABOUT, never at the foot of the
             # list: with three asks on screen a reason card painted below the last
             # one reads as a question about THAT ask, and the operator has to hunt
@@ -2031,17 +2149,25 @@ class AskQueueList(Widget):
         return text
 
     def _chooser_lines(self, width: int, fg: Style, muted: Style, bold: Style) -> list[Text]:
-        """The dismiss reason block: its heading, its two choices, its key hints.
+        """The dismiss reason block: its heading, two choices, its key hints.
 
         No question text in the heading: the block sits DIRECTLY under the row it
         is about (`render`), so repeating the question one line below the row
         that asks it would be the same sentence twice — the distinction §5's
         preamble draws between stating a fact and padding a screen.
 
-        The notes are painted rather than left to the reader's memory: `moot` and
+        THE NOTES ARE PAINTED RATHER THAN LEFT TO THE READER'S MEMORY: `moot` and
         `answered_in_chat` both end the agent's wait and differ only in what the
         agent is told, which is precisely the distinction a bare label cannot
         carry (design D2's own argument for `x dismiss` over the row's glyph).
+
+        EACH CHOICE IS TWO PAINTED LINES — the label, then its note in the muted
+        register one line down (design round 1, U4 = D1's shape). They used to
+        share one row (`Answered in chat — you already replied in the conversation`)
+        and clipped MID-WORD against a panel with the sidebar up, cutting the
+        clause that carries the distinction. Two lines also give the geometry one
+        fixed shape at every width, which is what lets `_line_owners` stay a
+        function of the width alone.
         """
         head = _a(_asks.dismiss_title())
         out = [
@@ -2052,16 +2178,21 @@ class AskQueueList(Widget):
                 overflow="ellipsis",
             )
         ]
-        for index in range(len(DISMISS_CHOICES)):
+        room = max(1, width - SUB_LINE_INDENT - 2)
+        for index, (_, label, note) in enumerate(DISMISS_CHOICES):
             selected = index == self._dismiss_index
             line = Text(no_wrap=True, overflow="ellipsis")
             line.append(" " * SUB_LINE_INDENT, style=muted)
             line.append("❯ " if selected else "  ", style=bold if selected else muted)
             line.append(
-                _clip_cells(dismiss_choice_text(index), max(1, width - SUB_LINE_INDENT - 2)),
+                _clip_cells(_a(label()), room),
                 style=(bold + fg) if selected else muted,
             )
             out.append(line)
+            explanation = Text(no_wrap=True, overflow="ellipsis")
+            explanation.append(" " * (SUB_LINE_INDENT + 2), style=muted)
+            explanation.append(_clip_cells(_a(note()), room), style=muted)
+            out.append(explanation)
         out.append(
             Text(
                 " " * SUB_LINE_INDENT + _a(_asks.dismiss_hint()),
@@ -2093,12 +2224,6 @@ def context_text(row: AskRow) -> str:
     count, last_ms = stamp
     when = datetime.fromtimestamp(last_ms / 1000).astimezone().strftime("%H:%M")
     return _a(_asks.context_messages(count=count, time=when))
-
-
-def dismiss_choice_text(index: int) -> str:
-    """One chooser row's ``label — note``, assembled from its two keys."""
-    _reason, label, note = DISMISS_CHOICES[index]
-    return f"{_a(label())} — {_a(note())}"
 
 
 def expiry_text(row: AskRow, now_ms: int) -> str:

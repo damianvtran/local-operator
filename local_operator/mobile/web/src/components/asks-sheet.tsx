@@ -39,6 +39,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
+import { messageRuntime } from "../store";
 import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
 import {
@@ -91,6 +92,12 @@ export function AsksSheet({
 }) {
 	const [allRows, setRows] = useState<PendingAsk[]>([]);
 	const [loaded, setLoaded] = useState(false);
+	/** The receipt for the dismissal that just emptied this sheet (UX round 1,
+	    U2). The daemon answers `{"ok": true, "detail": "dismissed"}`, and the
+	    card leaves the aggregate — so without this the only trace of a completed
+	    dismissal was the sheet's generic "nothing waiting" line, which reads the
+	    same whether the user acted or nothing was ever there. */
+	const [receipt, setReceipt] = useState<"" | "moot" | "answered_in_chat" | "lapsed">("");
 	const [error, setError] = useState("");
 	const [nowMs, setNowMs] = useState(() => Date.now());
 	const revision = useAsksRevision();
@@ -134,7 +141,12 @@ export function AsksSheet({
 	   triggers: two effects keyed on `open` would each fire on the opening
 	   transition and fetch the aggregate twice for one tap. */
 	useEffect(() => {
-		if (!open) return;
+		if (!open) {
+			/* A RECEIPT BELONGS TO ONE OPENING: reopening later must not present
+			   a dismissal from the last visit as though it just happened. */
+			setReceipt("");
+			return;
+		}
 		void load();
 	}, [open, revision, rowsSignature, load]);
 
@@ -222,8 +234,14 @@ export function AsksSheet({
 					<p className="text-body-sm text-ink-muted">reading asks…</p>
 				) : null}
 				{loaded && rows.length === 0 && !error ? (
-					<p className="text-body-sm text-ink-muted">
-						nothing waiting — questions the agent asks will appear here.
+					<p className="text-body-sm text-ink-muted" data-testid="ask-sheet-empty">
+						{receipt === ""
+							? "nothing waiting — questions the agent asks will appear here."
+							: messageRuntime.t(
+									receipt === "lapsed"
+										? "relay.ask.dismiss.receipt"
+										: `relay.ask.dismiss.receipt_${receipt}`,
+								)}
 					</p>
 				) : null}
 				{listed.map((row) => {
@@ -269,6 +287,7 @@ export function AsksSheet({
 								sessionId={sessionId}
 								nowMs={nowMs}
 								onSettled={() => void load()}
+								onDismissed={(reason) => setReceipt(reason ?? "lapsed")}
 							/>
 						</div>
 					);

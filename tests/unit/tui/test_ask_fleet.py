@@ -479,20 +479,27 @@ async def test_the_primary_hint_outlives_the_irreversible_one():
             assert "enter answer" in painted, (width, painted)
         if "x dismiss" in painted:
             assert "d decline" in painted, (width, painted)
-    # U3/D4's own case: a SESSION-scope width with room for the clause and ONE
-    # hint — the surviving hint is the primary action, not the one that was there
-    # before the user pressed Tab. (80, not the original 100: D11 made the clause
-    # "1 question waiting", three cells shorter than "1 waiting, 1 moved on", and
-    # #2481's "Pending" segment is twelve cells shorter than "Waiting or moved on".)
-    assert "enter answer" in listing.header_text(80)
-    assert "d decline" not in listing.header_text(80)
-    # The FLEET scope spends 6 more cells on its subject, and the FIRST hint now
-    # outbids the drawer clause (U3), so a hint survives even where the clause
-    # does not fit with it.
+    # THE CLAUSE YIELDS TO THE WHOLE LIVE SET (design round 1, D2 = UX U1), and
+    # the separator compacts BEFORE a hint is dropped: at the repo's own 80-column
+    # default (78 content cells) an OPEN row names all three keys, where it used
+    # to name one and hide both `d` and the new `x`.
+    at_default = listing.header_text(78)
+    for hint in ("enter answer", "d decline", "x dismiss"):
+        assert hint in at_default, (hint, at_default)
+    # Below that, the ladder still keeps the primary action longest — a width
+    # where only ONE hint survives (56 cells is the list's content with the
+    # sidebar up at 100 columns) keeps `enter answer`.
+    assert "enter answer" in listing.header_text(56)
+    assert "x dismiss" not in listing.header_text(56)
+    # The FLEET scope spends 6 more cells on its subject, and the hints outbid
+    # the drawer clause (D2), so the three keys survive where the clause cannot.
     fleet = AskQueueList(rows, scope=SCOPE_FLEET)
-    assert "All conversations" in fleet.header_text(90)
     assert "enter answer" in fleet.header_text(90)
     assert "d decline" in fleet.header_text(90)
+    assert "x dismiss" in fleet.header_text(90)
+    # The subject is still what the clause loses to, and it returns when the row
+    # can carry both it and every hint.
+    assert "All conversations" in fleet.header_text(120)
     # The hints follow the row under the cursor (#2481 UX U3): `x` is offered
     # once the cursor is on the timed-out row, and the answer keys are not.
     fleet.action_move(1)

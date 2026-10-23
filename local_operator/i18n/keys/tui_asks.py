@@ -22,6 +22,10 @@ def dismiss_answered_in_chat_note() -> Msg:
     return Msg("tui.asks.dismiss.answered_in_chat_note", {})
 
 
+def dismiss_fleet_gone() -> Msg:
+    return Msg("tui.asks.dismiss.fleet_gone", {})
+
+
 def dismiss_hint() -> Msg:
     return Msg("tui.asks.dismiss.hint", {})
 
@@ -32,6 +36,14 @@ def dismiss_moot() -> Msg:
 
 def dismiss_moot_note() -> Msg:
     return Msg("tui.asks.dismiss.moot_note", {})
+
+
+def dismiss_notice_answered_in_chat() -> Msg:
+    return Msg("tui.asks.dismiss.notice_answered_in_chat", {})
+
+
+def dismiss_notice_moot() -> Msg:
+    return Msg("tui.asks.dismiss.notice_moot", {})
 
 
 def dismiss_title() -> Msg:
