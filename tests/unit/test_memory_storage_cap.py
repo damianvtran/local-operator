@@ -6,6 +6,11 @@ every write was refused, while `lop memory status` printed only the token quota
 The two regressions are (1) status not reporting bytes against the cap and (2)
 the cap refusal not naming its cause or remedy. The store is driven to the cap
 with a small override plus synthetic facts, never 64 MiB of real data.
+
+Round 2 adds the recovery state: forget/VACUUM leave reusable pages in the
+freelist, and a store at max_page_count with freelist > 0 still accepts writes.
+Status must not call that FULL (`storage_full` is "no free page AND no headroom")
+and the near-cap warning must exist for the 90-99.9% state where refusals land.
 """
 
 import json
@@ -33,6 +38,20 @@ def human_bytes(value):
     return f"{size:.1f} TiB"
 
 
+def enforced_cap():
+    """The byte cap SQLite is actually given: MAX_DB_BYTES floored to a page.
+
+    The denominator is repeated rather than imported so the file can run
+    against the pre-round-2 module and fail on assertions, not collection.
+    """
+    return (MAX_DB_BYTES // 4096) * 4096
+
+
+def unwrapped(text):
+    """Status prose wraps at 80 columns; assert on the sentence, not the layout."""
+    return " ".join(text.split())
+
+
 def make_store(tmp_path):
     identity = MemoryIdentity("cap-session", "", "")
     session_dir = tmp_path / "sessions" / "cap-session"
@@ -50,21 +69,41 @@ def status(tmp_path, identity):
     return json.loads(out)["usage"], render_human(out, failed)
 
 
+def fill_meta_to_page_cap(db):
+    """Consume pages until SQLite refuses one; leaves page_count == max_page_count.
+
+    Bounded on purpose: an unbounded loop would hang the suite if a future
+    change made the store grow without limit. 8 KiB rows reach a 32-page cap
+    in single-digit inserts (measured), so 500 is a wide ceiling, not a budget.
+    """
+    for index in range(500):
+        try:
+            db.execute("INSERT INTO meta VALUES (?,?)", (f"fill-{index}", "x" * 8192))
+            db.commit()
+        except sqlite3.OperationalError:
+            db.rollback()
+            return
+    pytest.fail("store never reached its page cap")
+
+
 def test_status_reports_bytes_against_the_cap_alongside_the_token_quota(tmp_path):
     store, identity = make_store(tmp_path)
     store.put("global", {"title": "Byte budget", "body": "A fact that uses a little space."})
 
     usage, text = status(tmp_path, identity)
-    assert usage["storage_cap_bytes"] == MAX_DB_BYTES
-    assert 0 < usage["storage_bytes"] < MAX_DB_BYTES
+    assert usage["storage_cap_bytes"] == enforced_cap()
+    assert 0 < usage["storage_bytes"] < usage["storage_cap_bytes"]
     assert usage["storage_percent"] == pytest.approx(
-        round(100.0 * usage["storage_bytes"] / MAX_DB_BYTES, 1)
+        round(100.0 * usage["storage_bytes"] / usage["storage_cap_bytes"], 1)
     )
+    assert usage["storage_free_bytes"] == 0
     assert usage["storage_full"] is False
     assert usage["database_path"].endswith("memory/memory.db")
     # The human page must carry BOTH budgets: the token quota alone is exactly
     # what reported headroom while the store was byte-full.
-    assert f"Storage: {human_bytes(usage['storage_bytes'])} of {human_bytes(MAX_DB_BYTES)}" in text
+    assert (
+        f"Storage: {human_bytes(usage['storage_bytes'])} of {human_bytes(enforced_cap())}" in text
+    )
     assert "% of the store cap" in text
     assert "Quota: global" in text
 
@@ -77,7 +116,7 @@ def test_page_cap_refusal_is_distinct_actionable_and_names_the_store(tmp_path, m
 
     writes = 0
     with pytest.raises(MemoryError) as refused:
-        while True:
+        for _ in range(200):
             writes += 1
             store.put(
                 "global",
@@ -85,7 +124,7 @@ def test_page_cap_refusal_is_distinct_actionable_and_names_the_store(tmp_path, m
             )
 
     message = str(refused.value)
-    assert writes > 1
+    assert 1 < writes < 200
     assert "Memory store is full" in message
     assert f"reached its {human_bytes(4096 * 32)} cap" in message
     assert str(store.path) in message
@@ -105,31 +144,118 @@ def test_full_store_status_says_so_plainly_and_offers_the_way_out(tmp_path, monk
     store, identity = make_store(tmp_path)
     with store.connection() as db:
         db.commit()
-        for size in (3000, 128):
-            index = 0
-            while True:
-                try:
-                    db.execute(
-                        "INSERT INTO meta VALUES (?,?)",
-                        (f"fill-{size}-{index}", "x" * size),
-                    )
-                    db.commit()
-                except sqlite3.OperationalError:
-                    db.rollback()
-                    break
-                index += 1
+        fill_meta_to_page_cap(db)
+        assert db.execute("PRAGMA page_count").fetchone()[0] == 32
+        assert db.execute("PRAGMA freelist_count").fetchone()[0] == 0
 
     usage, text = status(tmp_path, identity)
 
     assert usage["storage_full"] is True
     assert usage["storage_percent"] == 100.0
+    assert usage["storage_free_bytes"] == 0
     # The exact contradiction the defect reported: the TOKEN quota is empty of
     # use while the byte cap refuses writes. Both must be on the page.
     assert usage["active_tokens"] == 0
     assert "Quota: global 0/16000" in text
     assert "Store FULL" in text
+    assert "no new fact can be saved until space is freed" in unwrapped(text)
     assert "Reclaim: `lop memory forget SCOPE/ID --revision REV --yes`." in text
-    assert f"Compact: `sqlite3 {store.path} 'VACUUM'` — run this first" in text
+    assert f"Compact: `sqlite3 {store.path} 'VACUUM'`." in text
+    assert "Run the Compact command first if the forget is also refused." in text
+
+
+def test_free_pages_at_the_cap_are_not_reported_full_and_still_write(tmp_path, monkeypatch):
+    """Round-2 MAJOR: the state a successful remedy leaves behind must not say FULL.
+
+    forget/VACUUM leave reusable pages in the freelist. A store at
+    max_page_count with freelist > 0 accepts writes, so status must not claim
+    "nothing is saved" while the very next small write succeeds.
+    """
+    monkeypatch.setattr(memory, "MAX_DB_BYTES", 4096 * 32)
+    store, identity = make_store(tmp_path)
+    with store.connection() as db:
+        db.commit()
+        fill_meta_to_page_cap(db)
+        assert db.execute("PRAGMA page_count").fetchone()[0] == 32
+        db.execute("DELETE FROM meta WHERE key IN ('fill-0','fill-1','fill-2')")
+        db.commit()
+        pages = db.execute("PRAGMA page_count").fetchone()[0]
+        free = db.execute("PRAGMA freelist_count").fetchone()[0]
+    assert pages == 32 and free > 0
+
+    usage, text = status(tmp_path, identity)
+
+    assert usage["storage_full"] is False
+    assert usage["storage_percent"] == 100.0
+    assert usage["storage_free_bytes"] == free * 4096
+    assert "Store FULL" not in text
+    assert "Reusing freed pages" in text
+    # The claim has to be true, not merely softer: the next write must work.
+    item = store.put("global", {"title": "After the remedy", "body": "Reuses a freed page."})
+    assert item["status"] == "active"
+
+
+def test_near_cap_warning_covers_the_90_to_99_percent_state(tmp_path, monkeypatch):
+    """QA measured refusals at 96.9% (31/32 pages); that branch needs coverage.
+
+    Deleting one filled row and VACUUMing leaves a compacted store below the
+    page cap with no freelist and no headroom — the state the warning names.
+    """
+    monkeypatch.setattr(memory, "MAX_DB_BYTES", 4096 * 32)
+    store, identity = make_store(tmp_path)
+    with store.connection() as db:
+        db.commit()
+        fill_meta_to_page_cap(db)
+        db.execute("DELETE FROM meta WHERE key='fill-0'")
+        db.commit()
+    raw = sqlite3.connect(store.path)
+    try:
+        raw.execute("VACUUM")
+        raw.commit()
+    finally:
+        raw.close()
+
+    usage, text = status(tmp_path, identity)
+
+    assert usage["storage_full"] is False
+    assert usage["storage_free_bytes"] == 0
+    assert 90 <= usage["storage_percent"] < 100
+    flat = unwrapped(text)
+    assert "Near the storage cap" in flat
+    assert "with no free pages left" in flat
+    assert "Store FULL" not in text
+
+
+def test_reported_cap_is_the_enforced_page_aligned_cap(tmp_path, monkeypatch):
+    """QA Q3: a non-page-aligned override must not read 99.9% beside FULL.
+
+    The module constant is reported NOWHERE — status and the refusal both use
+    max_page_count * page_size, the number SQLite enforces.
+    """
+    unaligned = 4096 * 32 + 1000
+    monkeypatch.setattr(memory, "MAX_DB_BYTES", unaligned)
+    store, _ = make_store(tmp_path)
+
+    usage = store.inventory()
+    assert usage["storage_cap_bytes"] == 32 * 4096
+    assert usage["storage_percent"] == 0.0
+
+    writes = 0
+    with pytest.raises(MemoryError) as refused:
+        for _ in range(200):
+            writes += 1
+            store.put(
+                "global",
+                {"title": f"Fill fact {writes}", "body": f"payload {writes} " + "z" * 200},
+            )
+
+    assert f"reached its {human_bytes(32 * 4096)} cap" in str(refused.value)
+    assert human_bytes(unaligned) not in str(refused.value)
+    usage = store.inventory()
+    assert usage["storage_cap_bytes"] == 32 * 4096
+    assert usage["storage_percent"] == pytest.approx(
+        round(100.0 * usage["storage_bytes"] / (32 * 4096), 1)
+    )
 
 
 def test_non_cap_sqlite_errors_keep_the_generic_refusal(tmp_path):

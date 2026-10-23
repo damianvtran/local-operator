@@ -1045,6 +1045,7 @@ def _status_text(value: dict[str, Any]) -> str:
     used = int(usage.get("storage_bytes") or 0)
     cap = int(usage.get("storage_cap_bytes") or 0)
     percent = float(usage.get("storage_percent") or 0.0)
+    free_bytes = int(usage.get("storage_free_bytes") or 0)
     storage = (
         f"Storage: {format_bytes(used)} of {format_bytes(cap)} ({percent}% of the store cap)"
         if cap
@@ -1053,20 +1054,26 @@ def _status_text(value: dict[str, Any]) -> str:
     lines.append(storage)
     if usage.get("storage_full"):
         lines += _shaped(
-            "Store FULL: the memory database has reached its byte cap, so writes that "
-            "need a new page are refused and nothing is saved."
+            "Store FULL: the memory database has reached its byte cap, so no new fact "
+            "can be saved until space is freed."
         )
         lines.append("Reclaim: `lop memory forget SCOPE/ID --revision REV --yes`.")
-        lines.append(
-            f"Compact: {_compact_command(usage)} — run this first if the forget is refused."
-        )
-    elif cap and percent >= STORAGE_WARNING_PERCENT:
-        lines += _shaped(
-            f"Near the storage cap: {percent}% of the {format_bytes(cap)} cap is in use, "
-            "so a write that needs new pages will be refused."
-        )
-        lines.append("Free space: `lop memory forget SCOPE/ID --revision REV --yes`.")
         lines.append(f"Compact: {_compact_command(usage)}.")
+        lines.append("Run the Compact command first if the forget is also refused.")
+    elif cap and percent >= STORAGE_WARNING_PERCENT:
+        if free_bytes:
+            # Free pages are reused for any table, so this state still writes;
+            # claiming a refusal here was the round-2 MAJOR defect inverted.
+            lines += _shaped(
+                f"Reusing freed pages: {format_bytes(free_bytes)} is available at "
+                f"{percent}% of the store cap; a write uses it before the file must grow."
+            )
+        else:
+            lines += _shaped(
+                f"Near the storage cap: {percent}% of the {format_bytes(cap)} cap is in "
+                "use with no free pages left, so a write that needs new pages will be "
+                "refused."
+            )
     quotas = usage.get("quotas") or []
     if quotas:
         # Wrapped at the repo's row bar: a NoticeBlock clips a longer line at the
