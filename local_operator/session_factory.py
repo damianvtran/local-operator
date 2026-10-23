@@ -1166,18 +1166,36 @@ def _latest_compaction_id(transcript: Any) -> str | None:
     return None
 
 
-def _env_details(cwd: str | None = None) -> str:
+def _env_details(cwd: str | None = None, session_id: str = "") -> str:
     """Volatile environment facts for the env block (date rides there too,
     added by ``build_system_blocks``). Kept tiny and byte-stable within a
     run: no timestamps, no process ids. ``cwd`` comes from the session's
-    working directory, never the process-global value at call time."""
+    working directory, never the process-global value at call time.
+
+    ``session_id`` is the session's own directory name, and it rides HERE for
+    one reason: it is byte-stable for the life of the run, so an agent can
+    recognise its own row in ``sessions(op='list')`` output instead of reading
+    that row as another session working the same topic. It is the same id the
+    listing prints, so the comparison is exact string equality.
+
+    The session NAME is deliberately NOT here. Auto-naming runs mid-session and
+    a user rename can land at any time, so a name in the prefix would either
+    anchor a stale name for the whole run or force a stable-prefix rebuild on
+    every rename — both reprice the cached prompt for something the model does
+    not need to act on. The id is stable; the name is not.
+
+    Empty ``session_id`` renders the original three lines, which is what the
+    benchmark/preflight callers (no session directory) get."""
     import platform
 
-    return (
+    text = (
         f"Platform: {platform.system()} {platform.release()} ({platform.machine()})\n"
         f"Python: {platform.python_version()}\n"
         f"Working directory: {cwd if cwd is not None else os.getcwd()}"
     )
+    if session_id:
+        text += f"\nSession ID: {session_id}"
+    return text
 
 
 #: The SERVER-OWNED shape of a configuration run: the preamble a run is built
@@ -3621,6 +3639,7 @@ def _make_system_blocks_provider(
     repo_guidance: str = "",
     language_line: str = "",
     variable_store: "VariableStore | None" = None,
+    session_id: str = "",
 ) -> Callable[..., Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -3648,9 +3667,17 @@ def _make_system_blocks_provider(
     settings change takes effect at the next session (or the next stable-prefix
     rebuild), never mid-session — rewriting it mid-session would reprice the
     cached prefix from a settings edit nobody asked to be prompt-interrupting.
+
+    ``session_id`` is captured ONCE, like the two strings above and for the
+    same reason: it rides the env block, so re-reading it per turn could not
+    produce a different answer anyway. A FORK does not pass its own id here:
+    it loads the parent's frozen ``system_prefix`` byte-for-byte (so the
+    parent's provider cache still hits), and the fork's own id reaches it as
+    an ordinary ``[session-state]`` environment delta instead. Forcing it into
+    the inherited prefix is exactly the rebuild this split exists to avoid.
     """
 
-    environment = _env_details(cwd)
+    environment = _env_details(cwd, session_id)
     # The HOST capability answer, taken ONCE at construction and passed to every
     # render (see ``prompts_api.host_capability_probes`` for the measured
     # incident). It is read here for the same reason ``user_instructions`` and
@@ -4862,6 +4889,11 @@ async def _prepare(
         repo_guidance=repo_guidance,
         language_line=language_line,
         variable_store=variable_store,
+        # ``transcript_dir.name`` IS the session id (the directory is named for
+        # it, and every other ``session_id=`` below reads the same field), so
+        # the id a listing prints and the id the prompt carries are the same
+        # bytes — exact equality is what lets a row be recognised as this one.
+        session_id=transcript_dir.name,
     )
 
     # The MONITOR gate's callable (``docs/design/monitor-tool.md`` §8): the

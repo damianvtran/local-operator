@@ -15864,6 +15864,10 @@ def _sessions_tool_description() -> str:
         # The per-op INPUTS above stay: they are the incident fix.
         " `spawn` is for USER-requested work. Address exactly one of `session`"
         " (id), `target` (name/cwd) or `pid`. What each op does: op='help'."
+        # The self-identity sentence: list renders the caller's own row, and
+        # without the marker a model read it as a peer on the same topic.
+        " `list` marks your own row `(this session)` — that row is you, not a"
+        " duplicate."
     )
 
 
@@ -16853,12 +16857,24 @@ def _sessions_wait_phrase(row: Mapping[str, Any]) -> str:
     return f"waiting on {count} {'job' if count == 1 else 'jobs'}" if count > 0 else ""
 
 
-def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = None) -> str:
+def _session_row_brief(
+    row: Mapping[str, Any], context: ToolContext | None = None, own_session_id: str = ""
+) -> str:
     """One lean listing line: the fields a caller acts on. The full published
     row rides in ``details``, which costs no prompt tokens.
 
     Identifier fields: the conversation title and session id are marked as
     spans so redaction leaves them readable; neither is a credential.
+
+    ``own_session_id`` is the CALLER's id, and when a row matches it the row
+    is tagged ``(this session)``. The incident this answers: an agent read its
+    own row as a different session working on the same topic, then spawned a
+    duplicate or spent turns on a conflict with itself. The marker rides the
+    name segment — the first thing the eye lands on — rather than a trailing
+    field, because a suffix on a long line is what got skimmed past. The tag
+    applies to LOCAL rows only: ids are minted per device, so a peer's row
+    that happens to share this id is a different session (``locality ==
+    'remote'``).
     """
     block = row.get("peer") or {}
     unreachable = block.get("reachable") is False
@@ -16868,7 +16884,12 @@ def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = Non
         else str(row.get("state") or "?")
     )
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
-    bits = [f"[{state}] {name}"]
+    own = bool(
+        own_session_id
+        and str(row.get("session_id") or "") == own_session_id
+        and row.get("locality") != "remote"
+    )
+    bits = [f"[{state}] {name}{' (this session)' if own else ''}"]
     if row.get("session_id"):
         bits.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
@@ -17020,7 +17041,13 @@ async def _sessions_list(
     }
     if notes:
         details["notes"] = notes
-    lines: list[str] = [_session_row_brief(row, context) for row in shown]
+    lines: list[str] = [
+        # The CALLER's id, so the caller's own row says so (see
+        # ``_session_row_brief``). ``details['rows']`` above stays the
+        # published shape byte-for-byte: the marker is text only.
+        _session_row_brief(row, context, str(getattr(context, "session_id", "") or ""))
+        for row in shown
+    ]
     if len(deduped) > len(shown):
         if scope == "local":
             lines.append(
@@ -17068,6 +17095,10 @@ async def _sessions_list_query(
     )
     scanned = await asyncio.to_thread(registry.scan)
     live = {rec.session_id: (rec, state) for rec, state in scanned if state in ("live", "wedged")}
+    # ``query`` searches THIS device's store, so every match here is local: no
+    # ``locality`` guard is needed, but the id comparison is the same bytes-on-
+    # bytes rule the listing uses (see ``_session_row_brief``).
+    own_session_id = str(getattr(context, "session_id", "") or "")
     rows: list[dict[str, Any]] = []
     lines: list[str] = []
     for match in matches:
@@ -17086,6 +17117,11 @@ async def _sessions_list_query(
         # Identifier fields: the title and id this search row prints are names
         # a caller quotes back; both are marked spans, not credentials.
         name = identifier_text(context, session_row.name or "(unnamed)")
+        if own_session_id and session_row.id == own_session_id:
+            # Same marker, same position as the listing's (agent self-identity):
+            # a query result must not be the one view where the caller's own
+            # session is unrecognisable.
+            name += " (this session)"
         session_id = identifier_text(context, session_row.id)
         if entry:
             lines.append(f"- [live] {name}, session {session_id}, pid {entry[0].pid}")
@@ -17188,12 +17224,21 @@ def _sessions_disk_only_body(
 
 
 def _sessions_info_body(
-    row: Mapping[str, Any], extras: Mapping[str, Any], context: ToolContext | None = None
+    row: Mapping[str, Any],
+    extras: Mapping[str, Any],
+    context: ToolContext | None = None,
+    is_own: bool = False,
 ) -> str:
     """Two lines: the live-state row, then the durable facts about it.
 
     Identifier fields: the conversation title and session id are marked spans;
     both are names the caller quotes back, not credentials.
+
+    ``is_own`` adds one plain sentence saying this row IS the caller. The
+    wording is deliberately blunt: the failure it answers is a model reading a
+    correct id and a matching title as a *different* session doing the same
+    work, so "same topic, same title" must not be left to inference. Only the
+    local path passes it — a peer's row can share an id and is never us.
     """
     state = (
         _sessions_peer_status(row)
@@ -17220,7 +17265,10 @@ def _sessions_info_body(
         parts.append(waiting)
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
-    return ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
+    text = ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
+    if is_own:
+        text += "\nThis is YOUR session — the one you are running in. It is not a duplicate."
+    return text
 
 
 async def _sessions_info_mesh(
@@ -17374,7 +17422,11 @@ async def _sessions_info(
         )
     extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
     details: dict[str, Any] = {"op": "info", **row, **extras}
-    text = _sessions_info_body(row, extras, context)
+    # Local path only: the caller's own id, compared against the resolved row.
+    # ``_sessions_info_mesh`` returns before this point, so a peer's row — which
+    # can share an id, ids are minted per device — never claims to be us.
+    is_own = bool(context and context.session_id and target.session_id == context.session_id)
+    text = _sessions_info_body(row, extras, context, is_own=is_own)
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
