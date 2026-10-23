@@ -432,10 +432,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         except Exception as failure:
             return _error(f"the send did not confirm: {failure}", code="send_unconfirmed")
         message = (result or {}).get("message") or {}
-        # Compatibility: "sent" confirms server acceptance into the pair inbox,
-        # NOT conversation history or recipient agent execution. Even a later
-        # server read ACK precedes the recipient's local wake handoff.
-        return {"ok": True, "message_id": str(message.get("id") or ""), "state": "sent"}
+        # Keep the legacy fields/wire semantics, but make their limited meaning
+        # machine-readable in the actual result (including an idempotent reply).
+        # Acceptance is only into the peer inbox, never conversation history or
+        # proof of execution: even a read ACK precedes the local wake handoff.
+        # These are result-only constants, not request/body fields or a new
+        # outbox schema. Errors above must never acquire this success receipt.
+        return {
+            "ok": True,
+            "message_id": str(message.get("id") or ""),
+            "state": "sent",
+            "destination_type": "peer_inbox",
+            "receipt_stage": "server_accepted",
+            "conversation_history": False,
+            "execution_confirmed": False,
+        }
 
     if params.op == "channels":
         if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
