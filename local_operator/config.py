@@ -1308,11 +1308,14 @@ class ConfigManager:
 
         Creates the config file first if it doesn't exist.
 
-        Preservation is applied to ``config["values"]`` IN PLACE, so the caller's
-        snapshot ends up agreeing with the file it just wrote — a manager that
-        kept its pre-write view would read a preserved key as absent until the next
-        reload. ``metadata`` (the timestamp) is mutated the same way and always has
-        been.
+        Preservation is applied to a DEEP COPY of ``values``: the disk settings the
+        payload does not model are merged into that copy, and the merged copy is
+        assigned back into ``config`` at the DICT level. The caller's own nested
+        mappings are therefore never mutated — a caller may legitimately hand in a
+        shallow copy of the shipped defaults — while its snapshot still ends up
+        agreeing with the file it just wrote: a manager that kept its pre-write view
+        would read a preserved key as absent until the next reload. ``metadata``
+        (the timestamp) is still mutated in place, and always has been.
 
         Args:
             config (Dict[str, Any]): Configuration dictionary to write
@@ -1626,11 +1629,11 @@ class ConfigManager:
                 settings_io._reload_before_write(self)
 
             # Update each field individually to work with Config class. The COPY
-            # matters: `_write_config` applies preservation IN PLACE, so a caller's
-            # own mapping must not be the payload — a shallow `dict(DEFAULT_CONFIG
-            # .values["retry"])` would otherwise have the file's chains merged into
-            # the process's defaults (the `_fresh_default_config` incident, one
-            # layer out).
+            # matters even though `_write_config` merges into a copy of `values`:
+            # this snapshot is what the manager reads BETWEEN writes, and with
+            # `write=False` no write happens at all — holding the caller's own
+            # mapping would make the manager's state a view of somebody else's
+            # object (the `_fresh_default_config` incident, one layer out).
             for key, value in updates.items():
                 self.config.set_value(key, deepcopy(value))
 
