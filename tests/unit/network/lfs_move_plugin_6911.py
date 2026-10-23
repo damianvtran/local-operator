@@ -33,9 +33,16 @@ def _move_variant(request):
 
 
 def same_handshake(accepted, returned, network_id, a_device, b_device):
-    """Private causal binding only; never serialize handshake IDs/endpoints."""
+    """PeerLink exposes HandshakeResult's canonical .hex(), NOT LinkKeys bytes.
+
+    Keep this private and exact; no coercion or ID export. Matching a different
+    new connection still fails even when A happens to select that connection.
+    """
     left, right = accepted.link_id, returned.link_id
-    return (type(left) is bytes and bool(left) and type(right) is bytes
+    return (type(left) is str and len(left) == 32
+            and all(c in '0123456789abcdef' for c in left)
+            and type(right) is str and len(right) == 32
+            and all(c in '0123456789abcdef' for c in right)
             and left == right and accepted.network_id == returned.network_id == network_id
             and accepted.device_id == b_device and returned.device_id == a_device)
 
