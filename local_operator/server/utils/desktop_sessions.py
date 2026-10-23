@@ -3295,6 +3295,51 @@ class DesktopSessionBridge:
             )
         )
 
+    async def _cold_ask_rows(self) -> tuple[list[dict[str, Any]] | None, int] | None:
+        """This conversation's ask rows from the DERIVED INDEX, or ``None``.
+
+        ``None`` means "do not override": a live owner's own frame is
+        authoritative (it carries the drafts the index deliberately does not), and
+        a PEER's rows are the peer's to serve. The three gates are the same facts
+        ``_cold_fields`` publishes, read from the same place, so a frame can
+        never claim to be cold while serving a live owner's stale rows.
+
+        A cold facade that ATTACHED and is mid-resync (``is_cold`` while its
+        owner still answers) also lands here. That is not a regression: the
+        runtime writes this index on every ask change (``AskQueue._refresh``), so
+        the rows are the same ones its next frame will carry.
+
+        Off the loop: one small file read per cold snapshot, on the route that
+        already reads a journal page off it.
+        """
+        remote = self.remote
+        if remote is None or self.remote_row is not None or not remote.is_cold:
+            return None
+        from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
+
+        root = self.root
+        try:
+            entry = await asyncio.to_thread(store.read_entry, root, self.session_id)
+            if entry is None:
+                return None
+            # The same window the aggregate route applies (``asks.lapsed_visible_for``,
+            # decision D8), polled on the loop with its listener fan-out.
+            window = lapsed_visible_ms(root, poll_now=True)
+            rows = await asyncio.to_thread(
+                store.session_asks,
+                root,
+                self.session_id,
+                lapsed_visible_ms=window,
+            )
+        except Exception:  # noqa: BLE001 — a read of derived data never fails a paint
+            logger.debug("cold ask rows unavailable for %s", self.session_id, exc_info=True)
+            return None
+        # ``None`` rows beside a count is the wire's LIVE-BUT-EMPTY shape: the
+        # tally is the capability signal, and this conversation plainly has the
+        # engine (its index entry exists) while showing nothing.
+        return (rows or None), sum(1 for row in rows if store.is_outstanding(row.get("status")))
+
     def _shared_attention_refresh(self) -> asyncio.Task[dict[str, Any]]:
         """The one in-flight attention read, started if none is running.
 
@@ -3461,7 +3506,36 @@ class DesktopSessionBridge:
         # is already inside ``frontend``. Do NOT introduce an await between these
         # two lines and the ``return``; ``tests/unit/server/test_desktop_sessions.py``
         # pins it.
+        # COLD ASK ROWS COME FROM THE DURABLE INDEX (#1363 QA Q-1, SA-D8).
+        #
+        # A COLD FACADE'S ASK FOLD IS NOT DERIVABLE AND NOT TRUSTWORTHY. Two
+        # shapes reach here and both were the bug: a retained viewer that went
+        # cold keeps the LAST canonical state it was handed (``_go_cold`` keeps
+        # the conversation on screen), so its ``asks`` still say ``open`` long
+        # after the ask settled; and a fresh cold facade carries no asks at all,
+        # so a settled receipt never reaches the card. Neither can be repaired
+        # from the runtime — there is none — while the DURABLE answer is already
+        # on this disk: ``<config_dir>/asks/<sid>.json`` is what the cold door
+        # writes and what ``GET /v1/desktop/asks`` reads, and this method's own
+        # ``cold`` verdict is exactly "no verified owner to ask".
+        #
+        # READ BEFORE ``state()``, and that ordering is the contract above rather
+        # than tidiness: no await may sit between the state read, the watermark
+        # read and the return, or a subscriber's queued frame could be dropped as
+        # superseded on a watermark that never contained it. ``_cold_ask_rows`` is
+        # the one await, so it happens first. An index with no entry for this
+        # session leaves the facade's own values alone: absence of the file is
+        # "this conversation has no queued-ask entry", not a claim that its queue
+        # is empty, and a runtime that never ran the engine must keep reading as a
+        # host that cannot answer (``asks_open`` absent).
+        cold_asks = await self._cold_ask_rows()
         state = self.state()
+        if cold_asks is not None:
+            rows, open_count = cold_asks
+            snapshot = state.get("snapshot")
+            if isinstance(snapshot, dict):
+                snapshot["asks"] = rows
+                snapshot["asks_open"] = open_count
         seq, epoch = self.sequence, self.epoch
         if open_trace.enabled():
             open_trace.mark(

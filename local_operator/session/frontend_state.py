@@ -1791,6 +1791,18 @@ class PendingAskState(BaseModel):
     #: ``pending_row`` and the phone's ``PendingAskWire`` simply omit the key.
     user_messages_since: int | None = None
     last_user_message_at: int | None = None
+    #: THE DISMISSAL'S OWN PAIR (SA-D8, design §17): when the ask was put away and
+    #: the operator's reason for it. ``None`` for every status but ``dismissed``,
+    #: and for a dismissal written by a build before the keys existed — which is
+    #: also the row the surfaces hide, so absence never reads as a reason.
+    #:
+    #: DOCUMENTATION PLUS TYPING rather than validation (``extra="allow"`` above),
+    #: but not optional bookkeeping: the phone's projection filters a row against
+    #: its own field list before the client ever sees it, and the two models are
+    #: the same frozen shape, so a key missing heading here is a key the phone
+    #: would have to grow a second vocabulary for.
+    dismissed_at: int | None = None
+    dismissed_reason: str | None = None
 
 
 class _FrozenSequence(tuple[Any, ...]):

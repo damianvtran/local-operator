@@ -42,6 +42,7 @@ import { Disclosure } from "./ui/disclosure";
 import {
 	answeredPairs,
 	askStateLine,
+	dismissedReasonKey,
 	LAPSED_BODY,
 	isAnswerable,
 	isDeadConversation,
@@ -283,6 +284,12 @@ export function AskCard({
 	const cold = row.runtime_live === false;
 
 	const state = askStateLine(row, nowMs);
+	/* A DISMISSED ROW STATES ITS REASON (SA-D8, design §17). The reason is a
+	   catalogue sentence rather than a literal here, so the card says it in the
+	   operator's language: `askStateLine`'s `dismissed` arm is the fallback for a
+	   row that recorded none (and for an older daemon that never sent the key). */
+	const dismissReason = dismissedReasonKey(row);
+	const stateLine = dismissReason ? messageRuntime.t(dismissReason) : state.text;
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
 	/* A LAPSED ASK IS SHOWN, NOT OFFERED (Ben's report, 2026-10-15). Its deadline
@@ -481,7 +488,7 @@ export function AskCard({
 					{/* Under the `Timed out` badge the line starts at what that means:
 					    the badge says the word one line above (#2481 UX round 2, U13). A
 					    lapsed, non-terminal card is always inside that Disclosure. */}
-					<span role="status">{lapsed ? LAPSED_BODY : state.text}</span>
+					<span role="status">{lapsed ? LAPSED_BODY : stateLine}</span>
 					{row.urgent && offered ? (
 						<span className="text-ink-dim">· urgent</span>
 					) : null}
