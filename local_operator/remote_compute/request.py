@@ -132,9 +132,20 @@ RUN_NAME_TRUNCATION_MARK = "…"
 #: follows ``str.isspace``, whose definition adds the file/group/record/unit
 #: separators U+001C-U+001F (bidirectional class ``B``), so it trims characters
 #: the far end keeps.
+#: Interior characters an explicit run name may not carry (see
+#: ``resolve_run_name``): controls, and the line and paragraph separators.
+_REFUSED_NAME_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+
+#: The bidirectional formatting controls: LRE/RLE/PDF/LRO/RLO (U+202A-U+202E)
+#: and LRI/RLI/FSI/PDI (U+2066-U+2069). Other ``Cf`` characters (ZWJ in an
+#: emoji sequence, for one) are legitimate in a label and stay allowed.
+_BIDI_CONTROLS = frozenset(
+    chr(code_point) for code_point in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
+)
+
 _SERVER_WHITESPACE = (
     frozenset("\t\n\v\f\r \x85\xa0\u1680\u2028\u2029\u202f\u205f\u3000")
-    # EN QUAD .. HAIR SPACE, the six Zs code points between them.
+    # EN QUAD .. HAIR SPACE: the eleven Zs code points U+2000-U+200A.
     | frozenset(chr(code_point) for code_point in range(0x2000, 0x200B))
 )
 
@@ -161,7 +172,8 @@ _NON_SPACING_CATEGORIES = frozenset({"Mn", "Me"})
 #: in this class already uses, and the dedicated key belongs to the next
 #: translation wave.
 _BLANK_OR_LONG_NAME = (
-    "a run name must be a single line, non-blank and at most "
+    "a run name must be a single line without control or direction-override "
+    "characters, non-blank and at most "
     f"{MAX_RUN_NAME_BYTES} bytes of UTF-8; "
     "leave --name out and one is taken from the prompt"
 )
@@ -311,8 +323,14 @@ def resolve_run_name(
     # formatting choice: it breaks the row, or hides the rest of the label
     # wherever the name is shown. Leading and trailing WHITESPACE control
     # characters (\t, \r, \n) are fine because the server trims them; what is
-    # left after ``_server_trim`` is interior, and refused.
-    if any(unicodedata.category(character) == "Cc" for character in trimmed):
+    # left after ``_server_trim`` is interior, and refused. The same holds for
+    # the Unicode line and paragraph separators (Zl, Zp), which break the row
+    # just as \n does, and for the bidirectional embedding/override/isolate
+    # controls, which can make one run's label render as another's.
+    if any(
+        unicodedata.category(character) in _REFUSED_NAME_CATEGORIES or character in _BIDI_CONTROLS
+        for character in trimmed
+    ):
         raise ValueError(_BLANK_OR_LONG_NAME)
     return name
 
