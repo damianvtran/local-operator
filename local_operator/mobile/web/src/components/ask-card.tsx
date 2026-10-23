@@ -820,7 +820,17 @@ export function AskCard({
 							{settledPairs.map((pair) => (
 								<div key={pair.question} className="flex flex-col">
 									<dt className="text-body-sm text-ink-muted">{pair.question}</dt>
-									<dd className="text-body-sm text-ink">{pair.answer || "—"}</dd>
+									{/* A DISMISSED ROW RECORDS NO ANSWER, and it says so by
+									    OMISSION (UX round 1, U3). The bare `—` is the settled
+									    register's placeholder for "an answer was expected here
+									    and is missing" (a declined row's, pre-existing); on a
+									    dismissal it reads as a value that failed to load,
+									    because the operator did not answer — they put the
+									    question away. Every other settled status keeps the
+									    placeholder exactly as it was. */}
+									{pair.answer || status !== "dismissed" ? (
+										<dd className="text-body-sm text-ink">{pair.answer || "—"}</dd>
+									) : null}
 								</div>
 							))}
 						</dl>

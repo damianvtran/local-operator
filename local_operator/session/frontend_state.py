@@ -4848,6 +4848,22 @@ def bound_ask_rows(
     return kept, dropped
 
 
+def bound_ask_snapshot_in_place(snapshot: dict[str, Any]) -> None:
+    """The wire's ask bound, for a caller that replaces the rows AFTER serialization.
+
+    The desktop's COLD override (``server/utils/desktop_sessions._cold_ask_rows``)
+    serves a facade's ask rows from the durable index, and it does so on the
+    already-serialized snapshot — i.e. after :func:`sync_wire_payload` bounded the
+    facade's OWN list. Re-binding here is what keeps one policy for both: a frame
+    must not carry rows past ``ASK_WIRE_TEXT_BUDGET_CHARS`` just because they came
+    from the index, and ``asks_truncated`` must describe the rows it ships beside.
+    A second spelling of this policy at the call site is the leak this module
+    records twice for jobs ("a bound placed only at the snapshot boundary holds
+    for the first frame and leaks on every one after it").
+    """
+    _bound_asks_in_place(snapshot)
+
+
 def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
     """Clip the queued-ask list to its wire bound on the SNAPSHOT route.
 

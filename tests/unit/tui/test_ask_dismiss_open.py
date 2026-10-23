@@ -34,6 +34,7 @@ from local_operator.tui.widgets.ask_queue import (
     DISMISS_CHOICES,
     FILTER_ALL,
     FILTER_SETTLED,
+    IN_FLIGHT_MARK,
     SUB_LINE_INDENT,
     AskQueueList,
     ask_rows,
@@ -249,6 +250,52 @@ async def test_a_refused_dismiss_reports_and_clears_the_mark(enabled):
         await _settle(pilot)
         assert seen == ["this ask was already answered."]
         assert "a1" not in app._ask_in_flight
+
+
+async def test_a_dismissed_row_that_stays_drops_its_in_flight_mark(enabled):
+    """SA-D8 + UX U1: the mark ends when the row SETTLES, not when it leaves.
+
+    The mark's old life was "until the frame drops the row". A dismissal taken
+    before the ask's deadline now KEEPS the row as a settled receipt, so nothing
+    ever dropped it and the `…` glyph outlived the op — on a row that is
+    finished, holding one id for the life of the session. This cell dismisses a
+    live row, feeds the snapshot that carries it as `dismissed` (still present),
+    and asserts the row is there, settled, and unmarked.
+    """
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
+        await pilot.press("x")
+        await pilot.press("enter")
+        await _settle(pilot)
+        # The op landed and its mark is up while the reply has not been folded yet.
+        assert session.dismissed == [("a1", "terminal", store.DISMISS_REASON_DEFAULT)]
+        assert "a1" in app._ask_in_flight
+
+        # The next snapshot: the ask folds to `dismissed`, and the row STAYS.
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row(
+                        "a1",
+                        status="dismissed",
+                        dismissed_at=_NOW,
+                        dismissed_reason=store.DISMISS_REASON_DEFAULT,
+                    ),
+                    _row("a2"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        assert "a1" not in app._ask_dismiss_in_flight
+        assert "a1" not in app._ask_in_flight
+        assert "a1" in {row.ask_id for row in app._ask_rows}, "the receipt is the point"
+        painted = listing.render().plain.splitlines()
+        row_line = next(line for line in painted if "Question for a1?" in line)
+        assert IN_FLIGHT_MARK not in row_line, row_line
+        assert "dismissed" in row_line, row_line
 
 
 def test_the_offered_reasons_are_the_queue_vocabulary_in_chooser_order():

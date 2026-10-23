@@ -1818,8 +1818,13 @@ operator chose — `moot` or `answered_in_chat`, §15 — was visible only in a 
    scope here, as it was in §14.
 
 **One predicate, two readers.** `asks/store.py` gains `dismissed_hidden(status, dismissed_at,
-expires_at, now)` beside `lapsed_hidden`, and both `_shown_rows` (the aggregate index and the
-per-session read) and `AskQueue.projection` call it. A third surface that re-spells the status test
+expires_at, now, *, relay=False)` beside `lapsed_hidden`, and both `_shown_rows` (the aggregate index
+and the per-session read) and `AskQueue.projection` call it. `relay` is passed IN rather than inferred
+from the fields, because case 4 must not depend on which keys happen to be absent — a relay record's
+`expires_at` is 0 until a derivation copies the origin's, and an index row can carry any shape. A
+FALSY `dismissed_at` is read as absent, because `fold` records `int(at or 0)`: a damaged event
+stamping zero would otherwise be an early stamp to the projection and an unpublished key to the
+index, and the two readers would disagree about one row. A third surface that re-spells the status test
 is the drift `OUTSTANDING_STATUSES` was created to stop: the desktop card, the phone sheet and a
 running session's own bar must hide a dismissed row at the same instant, and the only way to be sure
 is one function.
@@ -1842,12 +1847,20 @@ below is an existing key — nothing here adds copy.
 - **Phone** (`lib/asks.ts`, the settled card): `dismissedReasonKey` names
   `relay.ask.dismiss.receipt_moot` / `receipt_answered_in_chat` through the message catalogue, so the
   card says it in the operator's language; a row that recorded no reason keeps the existing state
-  line.
+  line. The sheet's own session-local receipt (§15) becomes the INSTANT ECHO it was described as: it
+  renders only while no listed row carries its `ask_id`, because the row is the statement — the
+  LAPSED door excepted, whose row still leaves, so its receipt stays unconditionally. On a dismissed
+  row the settled answer slot is omitted rather than left as a bare `—`: the operator did not answer,
+  they put the question away, and the placeholder reads as a value that failed to load.
 - **Desktop**: renders `dismissed_reason` when present and falls back otherwise (local-operator-ui
   #1363), which is why the keys had to land here first.
 - **Fallback with no reason known**: the existing "no reply was sent" sentence. It is deliberately
   NOT used when the reason is known: since §15 the agent IS told (`ask-response-<id>`), so that
-  sentence would be false for an open-ask dismissal.
+  sentence would be false for an open-ask dismissal. It is a DEFENSIVE arm rather than a live state:
+  both writers normalise a missing reason (`store.fold` and `dismiss_cold` both go through
+  `normalize_dismiss_reason`), so a dismissed row a current runtime publishes always carries the
+  pair, and an unstamped legacy row is hidden before any surface sees it. The arm exists for an index
+  row written by hand or by a future writer that records the stamp and not the reason.
 
 **The cold mirror reads the index (#1363 QA Q-1).** A dismissal taken with no runtime writes the log
 and the derived index (`_dismiss_in_index`), and it now writes `status`, `dismissed_at` and
@@ -1878,6 +1891,7 @@ dismissed row or an unknown key (then gate the row on a capability flag); a post
 measured as noise — more than a handful of dismissed rows per operator per week.
 
 **Not in this change.** No new event kind, no fold change, no `PROTOCOL_VERSION` bump, no change to
-the caps or the timeout policy, and no change to what a dismissal tells the model. The phone's
-session-local receipt (§15) is left as the instant echo; dropping it once the row arrives is a
-follow-up in the phone, not a rule change here.
+the caps or the timeout policy, and no change to what a dismissal tells the model. A settled receipt
+keeps the card's chrome on the phone: giving declared/dismissed/withdrawn rows one receipt shape is a
+design decision covering three statuses, and the design round judged the present shape honest rather
+than this PR's to change.
