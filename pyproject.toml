@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.84.16"
+version = "0.85.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -111,6 +111,22 @@ dependencies = [
     # the ``mcp`` dependency already installs on every supported platform.
     "jsonschema>=4.18",
     "pillow-heif",
+    # The Library's background indexer watches the session journals so a list
+    # request never scans them. FSEvents (macOS), inotify (Linux) and
+    # ReadDirectoryChangesW (Windows) each need their own binding, and a
+    # hand-rolled ctypes FSEvents shim was measured NOT delivering events on the
+    # macOS host this ships to while watchdog 6.0.0 did — so this is a real
+    # dependency, not a convenience.
+    #
+    # INSTALL CAVEAT, measured on 2026-10-22: watchdog 6.0.0 publishes macOS
+    # wheels for cp39-cp313 only, so CPython 3.14 (the operator's runtime) builds
+    # the sdist and its ``_watchdog_fsevents`` C extension. That build works
+    # here (2.5 s with the Xcode toolchain) but a compiler-less 3.14 host cannot
+    # install it — and that failure happens before any of this code runs. Only a
+    # wheel that INSTALLS but whose extension cannot load is covered by
+    # ``indexer.py``'s optional-observer fallback, which hands over to the timed
+    # reconcile: a failed watch costs a slower refresh, not a broken runtime.
+    "watchdog>=6.0.0",
 ]
 requires-python = ">=3.12"
 

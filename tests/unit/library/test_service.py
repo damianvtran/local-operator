@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from local_operator import resume
 from local_operator.library import identity
 from local_operator.library import index as library_index
-from local_operator.library import service
+from local_operator.library import indexer, service
 from local_operator.library.metadata import MetadataStore
+from local_operator.library.store import LibraryStore
 from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
@@ -29,7 +31,14 @@ def listing(root: Path, query: service.Query) -> dict[str, Any]:
 
 
 def build(root: Path, rows: list[dict[str, Any]]) -> None:
+    """Write a session and build the index the way the operator's app would.
+
+    The service used to build from the journals inside ``list_assets``. It reads
+    the SQLite index now, so a test that wants a populated listing has to say so
+    — the same explicitness the daemon gets from its watcher.
+    """
     session(root, SESSION, rows)
+    indexer.rebuild_now(root)
 
 
 def test_row_projection_uses_effective_metadata_and_display_form(tmp_path, monkeypatch) -> None:
@@ -96,6 +105,9 @@ def test_cursor_pages_and_resets_on_a_moved_revision(tmp_path, monkeypatch) -> N
     extra = tmp_path / "late.txt"
     extra.write_text("late")
     session(root, "fedcba654321", write_rows("late", 9, extra))
+    # The indexer's pass is what moves the revision; a cursor minted before it
+    # must reset rather than skip the row that crossed the page boundary.
+    indexer.rebuild_now(root)
     moved = listing(root, service.Query(limit=2, cursor=first["next_cursor"]))
     assert moved["cursor_reset"] is True
     assert len(moved["rows"]) == 2
@@ -219,13 +231,13 @@ def test_user_fields_survive_agent_writes_and_locked_rows(monkeypatch) -> None:
     )
 
 
-def test_thumbnail_reads_the_persisted_catalog_without_a_session_scan(
-    tmp_path, monkeypatch
-) -> None:
-    """Content/thumbnail/get must not pay a journal scan or an index rewrite.
+def test_thumbnail_reads_the_index_without_a_session_scan(tmp_path, monkeypatch) -> None:
+    """Content/thumbnail/get must not pay a journal scan or an index rebuild.
 
-    A 60-card grid issues 60 thumbnail requests; each one running
-    ``build_catalog`` is what pushed a list past the desktop's 20 s deadline.
+    A 60-card grid issues 60 thumbnail requests; each one running a build is
+    what pushed a list past the desktop's 20 s deadline. The index is now a
+    SQLite read, so the negative control is that the journal scanner is never
+    even consulted.
     """
     from local_operator.library import index as library_index
 
@@ -239,32 +251,88 @@ def test_thumbnail_reads_the_persisted_catalog_without_a_session_scan(
     build(root, write_rows("w1", 1, image))
     asset_id = listing(root, service.Query())["rows"][0]["id"]
 
-    # A fresh process: no in-process aggregate, but the index file survives.
-    library_index._CACHE.clear()
-    scans: list[int] = []
-    asset_builds: list[int] = []
-    original = library_index._build_assets
-    monkeypatch.setattr(
-        library_index,
-        "_visible_sessions",
-        lambda *args, **kwargs: scans.append(1) or [],
-    )
-    monkeypatch.setattr(
-        library_index,
-        "_build_assets",
-        lambda sessions: asset_builds.append(1) or original(sessions),
-    )
+    def boom(*args, **kwargs):
+        raise AssertionError("a thumbnail read must not touch the journal scanner")
+
+    monkeypatch.setattr(library_index, "_visible_sessions", boom)
+    monkeypatch.setattr(library_index, "build_catalog", boom)
 
     first = service.thumbnail(root, asset_id, 120)
     second = service.thumbnail(root, asset_id, 120)
 
-    assert scans == [], "a thumbnail must not enumerate sessions"
-    assert asset_builds == [1], "assets are built once per persisted index"
-    assert first.path == second.path and first.path.is_file()
+    # The FIRST read has no cached WebP yet, so it serves the original and asks
+    # the worker for one; it must not resize inline. The SECOND may already be
+    # the cached file — the worker is a thread — but it is never a fresh resize
+    # on the request path, so it is either the original or a file the worker
+    # wrote under ``cache/library/thumbs``.
+    thumbs = root / "cache" / "library" / "thumbs"
+    assert first.path == image
+    assert second.path == image or second.path.parent == thumbs
 
 
-def test_a_read_miss_refreshes_once_for_a_just_indexed_asset(tmp_path, monkeypatch) -> None:
-    """A new asset is found without a rebuild, and the hit path still never scans."""
+class _NoWorker:
+    """Stands in for the indexer where a test wants no background thread."""
+
+    @staticmethod
+    def enqueue_thumbnail(_asset_id: str) -> None:
+        return None
+
+
+def test_a_cached_thumbnail_is_served_once_the_worker_made_it(tmp_path, monkeypatch) -> None:
+    """The request path serves a live cached WebP and never decodes the source."""
+    # No background worker here, and not just from now on: it starts lazily on
+    # the FIRST list request, so it must be stubbed before the fixture builds —
+    # a worker sweeping at 480 while the assertion runs is a race, not a bug.
+    monkeypatch.setattr(service, "ensure_started", lambda *args, **kwargs: _NoWorker())
+    root = config_root(monkeypatch, tmp_path)
+    image = tmp_path / "photo.png"
+    image.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06"
+        b"\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05"
+        b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    build(root, write_rows("w1", 1, image))
+    asset_id = listing(root, service.Query())["rows"][0]["id"]
+
+    pytest.importorskip("PIL")
+    # The width the route asks for: one cached size per asset, so a test at a
+    # different width would fight the worker that regenerates at 480.
+    made = LibraryStore(root).ensure_thumbnail(asset_id, width=service.THUMB_MAX_WIDTH, quality=82)
+    assert made is not None and Path(made).is_file()
+
+    served = service.thumbnail(root, asset_id, service.THUMB_MAX_WIDTH)
+    assert served.content_type == "image/webp" and served.path == Path(made)
+
+
+def test_a_thumbnail_is_invalidated_when_its_source_changes(tmp_path, monkeypatch) -> None:
+    """``thumb_src`` is the source's identity: a rewritten image is not the old one."""
+    root = config_root(monkeypatch, tmp_path)
+    image = tmp_path / "photo.png"
+    image.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06"
+        b"\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05"
+        b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    build(root, write_rows("w1", 1, image))
+    asset_id = listing(root, service.Query())["rows"][0]["id"]
+    store = LibraryStore(root)
+    made = store.ensure_thumbnail(asset_id, width=service.THUMB_MAX_WIDTH, quality=82)
+    if made is None:
+        pytest.skip("Pillow is not installed")
+    assert store.thumb_is_live(asset_id, service.THUMB_MAX_WIDTH) is not None
+
+    # Same size and content CAN repeat; the mtime identity is what moves.
+    image.write_bytes(image.read_bytes())
+    assert store.thumb_is_live(asset_id, service.THUMB_MAX_WIDTH) is None
+
+
+def test_a_just_indexed_asset_is_found_and_a_hit_never_scans(tmp_path, monkeypatch) -> None:
+    """The watcher indexes a new session; a read then answers from SQLite.
+
+    The old rule rebuilt the whole catalog on a miss. That rebuild WAS the
+    request-path cost, so the miss path is now the indexer's job and a hit must
+    stay a pure index read.
+    """
     from local_operator.library import index as library_index
 
     root = config_root(monkeypatch, tmp_path)
@@ -277,11 +345,12 @@ def test_a_read_miss_refreshes_once_for_a_just_indexed_asset(tmp_path, monkeypat
     build(root, write_rows("w1", 1, image))
     image_id = listing(root, service.Query())["rows"][0]["id"]
 
-    # Indexed after the last write: the read path has never seen this row.
     fresh = tmp_path / "fresh.txt"
     fresh.write_text("x")
     session(root, OTHER, write_rows("w9", 9, fresh))
     fresh_id = identity.asset_id(identity.key_for(str(fresh), None))
+    # This is the file-event pass, played synchronously.
+    indexer.rebuild_now(root)
 
     row = service.get_asset(root, fresh_id)
     assert row["name"] == "fresh.txt"
@@ -292,6 +361,7 @@ def test_a_read_miss_refreshes_once_for_a_just_indexed_asset(tmp_path, monkeypat
     monkeypatch.setattr(library_index, "_visible_sessions", boom)
     thumb = service.thumbnail(root, image_id, 120)
     assert thumb.path.is_file()
+    assert service.get_asset(root, fresh_id)["id"] == fresh_id
 
 
 def test_scope_final_keeps_generated_and_highlighted_assets(tmp_path, monkeypatch) -> None:
@@ -334,6 +404,7 @@ def test_scope_final_keeps_generated_and_highlighted_assets(tmp_path, monkeypatc
         }
     )
     session(root, "222222222222", rows)
+    indexer.rebuild_now(root)
 
     all_list = listing(root, service.Query())
     final = listing(root, service.Query(scope="final"))
@@ -399,40 +470,43 @@ def test_occurrence_session_title_is_the_stored_name_not_the_opening_line(
     resume.write_session_title(
         root / "sessions" / SESSION, "Victor support triage", user_set=False, past_names=[]
     )
+    # A rename moves no journal signature; the indexer re-reads the stored title
+    # on the session pass, which is what this exercises.
+    indexer.rebuild_now(root)
 
     row = listing(root, service.Query())["rows"][0]
 
     assert row["occurrences"][0]["session_title"] == "Victor support triage"
 
 
-def test_a_rename_reaches_a_budgeted_poll_before_the_write_interval_ends(
-    tmp_path, monkeypatch
-) -> None:
-    """A request-path poll publishes a rename immediately, not 10 s later.
+def test_a_rename_reaches_the_next_pass_without_a_journal_change(tmp_path, monkeypatch) -> None:
+    """A rename moves no journal signature, so it is applied on the session pass.
 
-    The index write is rate-limited for non-structural churn, and a rename moves
-    no journal signature — the transcript and the directory mtime are untouched.
-    Before a stored-title change counted as structural, the poll kept serving the
-    pre-rename aggregate until ``WRITE_INTERVAL_S`` expired (measured: converged
-    at 10 s). ``budget_s`` is the route's, and the freshness window is slept out
-    so this poll really sweeps.
+    ``/rename`` writes only the title sidecar. The transcript, and therefore the
+    signature the indexer compares, is untouched — before the stored title was
+    part of the per-session check the Library kept showing the pre-rename label
+    until the conversation was used again.
     """
     root = config_root(monkeypatch, tmp_path)
     path = tmp_path / "brief.md"
     path.write_text("# hi")
     opening = "Please review Victor's message"
     directory = session(root, SESSION, [user_row("u0", 0.5, opening), *write_rows("w1", 1, path)])
+    indexer.rebuild_now(root)
     first = listing(root, service.Query())
     assert first["rows"][0]["occurrences"][0]["session_title"] == opening
 
     resume.write_session_title(
         directory, "Victor support triage", user_set=True, past_names=[opening]
     )
-    time.sleep(library_index.FRESH_WINDOW_S + 0.1)
+    revision_before = first["revision"]
+    # ``budget_s`` is still accepted by the service — and ignored, because there
+    # is no scan on the request path any more.
+    indexer.rebuild_now(root)
 
     polled = service.list_assets(root, service.Query(), budget_s=library_index.DEFAULT_BUDGET_S)
-
     assert polled["rows"][0]["occurrences"][0]["session_title"] == "Victor support triage"
+    assert polled["revision"] > revision_before
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +523,7 @@ def test_path_decodes_are_serialised_on_the_one_child_decoder_slot(monkeypatch) 
     """
     import json
     import threading
+    import time
     import types
 
     active = 0
@@ -503,3 +578,32 @@ def test_a_decoder_answer_outside_the_frozen_bar_contract_is_refused(monkeypatch
         lambda *args, **kwargs: types.SimpleNamespace(stdout=json.dumps([1.5] * 240)),
     )
     assert service._decode_peaks_bounded(b"audio") is None
+
+
+def test_detail_paths_only_rebuild_for_damage(tmp_path, monkeypatch) -> None:
+    """R4-5: a BUSY/IO failure is a 503, not a licence to discard the index."""
+    from local_operator.library.store import IndexUnavailable
+
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, root.parent / "keep.txt"))
+    indexer.rebuild_now(root)
+    asset_id = listing(root, service.Query())["rows"][0]["id"]
+
+    calls: list[int] = []
+    monkeypatch.setattr(service, "_recover_index", lambda config: calls.append(1))
+
+    def busy(self, *args, **kwargs):
+        raise IndexUnavailable("database is locked", corrupt=False)
+
+    monkeypatch.setattr(LibraryStore, "asset", busy)
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, asset_id)
+    assert calls == [], "a transient failure must not trigger a rebuild"
+
+    def torn(self, *args, **kwargs):
+        raise IndexUnavailable("database disk image is malformed", corrupt=True)
+
+    monkeypatch.setattr(LibraryStore, "asset", torn)
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, asset_id)
+    assert calls == [1], "damage does try to recover"
