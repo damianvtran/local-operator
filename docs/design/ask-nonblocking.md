@@ -1570,7 +1570,10 @@ deferral, narrowly. Plan: `ask-dismiss-plan.md` (D1–D6); this PR is the engine
 4. **D3 — the cold door still removes the deadline wake row**, on the grounds in §14's amended
    paragraph. Cost: an idle cold asker no longer wakes at the deadline; if nothing starts it within
    7 d the row lapses unread. Parked sessions keep their wake row, as before.
-5. **D6 — an OPEN ask is dismissible only when no agent work is running.**
+5. **D6 — an OPEN ask is dismissible only when no agent work is running.** **(Superseded by §16
+   SA-D4, 2026-10-23: the `agent_running` refusal is retired, and an idle live runtime holds the
+   dismissal without spawning a turn. The table below is the rule this amendment replaced; it is
+   kept as the record of the D6 decision, not as live design.)**
 
    | owning session | open-ask dismissal | what the agent gets |
    |---|---|---|
@@ -1601,12 +1604,11 @@ separate PRs; until they ship no surface offers the new door, so nothing a user 
 ## 16. Amendment (2026-10-23): stale asks — settle what the chat already answered (SA-D1–SA-D7)
 
 **The gap.** The agent-side settle exists (§12) but nothing tells the model WHEN to use it. The
-investigation of 2026-10-22 (`~/workspace/artifacts/ask-staleness/investigation-2026-10-22.md`,
-issue #2803) measured, in one operator window: 40 asks, 16 of them settled only after a prompt, asks
-still open across three or more user messages, and 18 housekeeping messages in a week spent tidying
-them. Five fixes were approved by the operator on 2026-10-23 (R1–R5). This section is their design of
-record; the slice plan behind them is
-`~/workspace/artifacts/ask-staleness/slice-plan-2026-10-23.md` (`## Decisions`, SA-D1–SA-D7).
+investigation of 2026-10-22 measured, in one operator window: 40 asks, 16 of them settled only after
+a prompt, asks still open across three or more user messages, and 18 housekeeping messages in a week
+spent tidying them. Five fixes were approved by the operator on 2026-10-23 (R1–R5). This section is
+their design of record and carries everything a reader needs; the operator-local slice plan of
+2026-10-23 is a non-normative reference only (SA-D6 orders the work).
 
 Each decision below states what it commits us to and what would overturn it, in §8's shape.
 
@@ -1625,18 +1627,27 @@ that names an unknown id. No new event, no fold change, no wire or mobile type c
 
 1. **SA-D1 — the settle rule, and partial settles (PR-1).** `prompts_md/system.md`'s queued
    paragraph gains the rules a model cannot infer: settle every ask the user's messages answered
-   (`answered_in_chat`, their words) or mooted (`moot`: redirected, handed off, or decided under a
-   timeout) BEFORE ending the turn; when reporting open asks, settle the stale ones in that same
-   turn; an answer, even a paraphrase, is `answered_in_chat`, never `moot`; 24 h only for a decision
-   that stays valid for a day. The `ask` queued description gains one clause ("settle it with
-   `ask_withdraw` the moment it stops mattering"); `ask_withdraw`'s description carries the moot
-   cases, the never-moot-an-answer rule and the empty-list recipe; and `AskWithdrawParams.answers`
-   states the ids rule ("spelled exactly as it was asked"). The `answered_in_chat` receipt counts the
-   cells that closed unanswered — "N questions closed unanswered; re-ask any you still need" — and
-   `_whole_ask_cells` refuses a key that is not a question id, by name and with the ids the ask holds,
-   on every door that shares it (`respond`, `revise`, and `withdraw`'s chat path). An unknown key used
-   to be reported as a partial map at best and, when every real id was also present, written into the
-   log where nothing can attribute it. **Rejected:** a `partially_answered` event or per-question
+   (`answered_in_chat`, their words) or made irrelevant (`moot`: they dropped or handed off the work
+   the question was about, or the model decided it under a timeout) BEFORE ending the turn; when
+   reporting open asks, settle the ones the user's messages answered or made irrelevant in that same
+   turn; **an ask the user has not addressed stays open however old it is, and when unsure the model
+   leaves it open** — age is not a reason to withdraw, and neither is a change in what the user asked
+   for next; an answer, even in the user's own words rather than the options, is `answered_in_chat`,
+   never `moot`; a 24 h timeout only for a decision that stays valid for a day. The `ask` queued
+   description gains one clause ("settle it with `ask_withdraw` the moment it stops mattering");
+   `ask_withdraw`'s description carries the moot cases, the never-moot-an-answer rule, the empty-list
+   recipe and the all-empty refusal; and `AskWithdrawParams.answers` states the ids rule ("spelled
+   exactly as it was asked"). The `answered_in_chat` receipt counts the cells that closed
+   unanswered — "N questions closed unanswered; re-ask any you still need" — on the SAME rule the
+   response row uses, so a cell of `[" "]` counts as closed rather than leaving the receipt claiming
+   an answer the row renders as `(not answered)`; and a map whose every cell is empty or blank is
+   refused in words that name `moot`, because nothing was answered and a reroute to `moot` would
+   write a `withdrawn` row saying something the user did not say. `_whole_ask_cells` refuses a key
+   that is not a question id, by name and with the ids the ask holds, on every door that shares it
+   (`respond`, `revise`, and `withdraw`'s chat path); the echoed key is bounded so a hostile relay
+   client cannot put an unbounded string into model-facing text. An unknown key used to be reported
+   as a partial map at best and, when every real id was also present, written into the log where
+   nothing can attribute it. **Rejected:** a `partially_answered` event or per-question
    status — the fold, `render.py`, the wire enum and all three surface maps would move for a case the
    empty-list contract already covers; "answers plus a flag" — the flag carries no fact the empty list
    does not. **Commits us to:** "settle Q1, keep Q2/Q3 open" is answered-and-re-ask, never one ask
@@ -1721,6 +1732,18 @@ that names an unknown id. No new event, no fold change, no wire or mobile type c
    file's own index only — the card is where the operator decides, and it is the surface that was
    stale. **Commits us to:** the stamp landing in PR-4a rather than PR-3, so SA-D3's PR rebases onto
    it. **Overturned by:** the manager or the operator reverting the override.
+
+**The risk this set takes on, and the measurement that would overturn it.** Teaching a settle rule
+can produce FALSE MOOTS: a model that withdraws an approval the operator still meant to give. A
+withdrawal is terminal and hides the card on every surface, so the operator has to re-say the request
+in chat, which is worse than a stale card. The controls are the wording (age is never a reason; a
+change of task order is not a drop; when unsure, leave it open) and the measurement: count
+`withdrawn` events that land within one turn of an "Open asks" delta for a question the operator
+later answers in chat, and re-measure one week after this set ships against the investigation's
+baseline — prompted withdrawals 16 of 40 asks, 18 housekeeping messages a week, asks that stay open
+across three or more user messages. A prompted-withdrawal count that does not fall from 16/40 is what
+overturns SA-D1 and SA-D3 and reopens auto-supersede (frozen out today); a false-moot rate that rises
+while it falls overturns SA-D1's wording, not the mechanism.
 
 **Not in this change.** No new event kind, no `PROTOCOL_VERSION` bump, no fold change — `asks/store.py`
 is untouched by the whole set — and no change to the ask caps or the timeout policy. Nothing here

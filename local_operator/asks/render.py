@@ -512,6 +512,15 @@ WITHDRAW_MOOT_TAKES_NO_ANSWERS = (
     "reason 'moot' takes no answers — to record the user's words use reason " "'answered_in_chat'."
 )
 
+#: `answered_in_chat` with every cell empty or blank (design §16/SA-D1, review
+#: round 1 m2). Refused rather than rerouted to ``moot``: a moot writes a
+#: ``withdrawn`` row, which says something the user did not say, and a model that
+#: meant to record an answer has to hear that it recorded nothing.
+WITHDRAW_NO_ANSWER_WORDS = (
+    "every answer cell is empty — record the user's words, or use reason='moot' if "
+    "the question no longer needs an answer; nothing was recorded."
+)
+
 #: `answered_in_chat`'s secret refusal (design §12): there is no masked-entry
 #: hop from chat text and there must not be one, so the card remains the only
 #: secret path. Nothing is written, and the sentence says so.

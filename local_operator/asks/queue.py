@@ -1572,10 +1572,23 @@ class AskQueue:
         if map_refusal:
             return {"ok": False, "error": map_refusal}
         assert cells is not None  # ``_whole_ask_cells`` returns one with no refusal
+        # A CHAT ANSWER WITH NO WORDS IS NOT AN ANSWER (review round 1 m2): every
+        # cell empty or blank is a model asking to record words nobody said, and
+        # the empty-list recipe this release teaches every session makes it
+        # reachable. Refused rather than rerouted to ``moot`` — a moot writes a
+        # ``withdrawn`` row, a different fact about who acted — and nothing is
+        # appended either way.
+        if not any(any(text.strip() for text in values) for values in cells.values()):
+            return {"ok": False, "error": render.WITHDRAW_NO_ANSWER_WORDS}
         # The questions the message did not answer close with the ask (design
         # §16/SA-D1), and the receipt says how many: the model is the only party
-        # that can re-ask them.
-        closed_unanswered = sum(1 for values in cells.values() if not values)
+        # that can re-ask them. The ROW's own rule decides what "not answered"
+        # means — ``_ask_report`` drops blank text — so a cell of ``[" "]``
+        # counts as closed here too; counting only ``[]`` would tell the model
+        # nothing was left behind while the row renders ``(not answered)``.
+        closed_unanswered = sum(
+            1 for values in cells.values() if not any(text.strip() for text in values)
+        )
         by_map: dict[str, Any] = {"surface": "chat"}
         if message_id:
             by_map["message_id"] = str(message_id)
@@ -2712,6 +2725,15 @@ def _partial_answer_error(missing: Sequence[str]) -> str:
     )
 
 
+#: How much of an unknown answer key the refusal echoes (review round 1 NIT 3).
+#: The refusal quotes the key so a typo is obvious, but the map comes from a
+#: caller the queue does not trust — a hostile relay client can put a
+#: megabyte-long key in it, and this sentence is model-facing text that rides a
+#: turn. The ids the ask HOLDS are echoed whole: the model chose them.
+UNKNOWN_KEY_ECHO_MAX = 5
+UNKNOWN_KEY_ECHO_CHARS = 40
+
+
 def _unknown_answer_error(unknown: Sequence[str], valid: Sequence[str]) -> str:
     """The refusal for an answer map naming a question that is not on the ask.
 
@@ -2722,9 +2744,17 @@ def _unknown_answer_error(unknown: Sequence[str], valid: Sequence[str]) -> str:
     that carried every real id plus one unknown key settled the ask and wrote the
     stray cell into the log, where nothing can attribute it to a question. Shares
     :func:`_partial_answer_error`'s contract — the answer is atomic, so the whole
-    map is refused and no cell is dropped.
+    map is refused and no cell is dropped. The echo is BOUNDED
+    (:data:`UNKNOWN_KEY_ECHO_MAX`, :data:`UNKNOWN_KEY_ECHO_CHARS`) because the
+    keys come from the caller.
     """
-    listed = ", ".join(f"{qid!r}" for qid in unknown)
+    shown = [
+        key if len(key) <= UNKNOWN_KEY_ECHO_CHARS else key[:UNKNOWN_KEY_ECHO_CHARS] + "…"
+        for key in unknown[:UNKNOWN_KEY_ECHO_MAX]
+    ]
+    listed = ", ".join(f"{key!r}" for key in shown)
+    if len(unknown) > len(shown):
+        listed += f" (and {len(unknown) - len(shown)} more)"
     known = ", ".join(f"{qid!r}" for qid in valid) or "(none)"
     verb = "is" if len(unknown) == 1 else "are"
     return (

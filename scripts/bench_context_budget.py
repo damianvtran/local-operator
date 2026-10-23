@@ -1651,28 +1651,34 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # Ceiling = measured head + the 55 band. Do not pick either side of a budget
 # conflict: re-measure the composed tree.
 #
-# RAISED 32,872 -> 33,233 for STALE ASKS (PR-1, design ask-nonblocking §16 /
+# RAISED 32,872 -> 33,364 for STALE ASKS (PR-1, design ask-nonblocking §16 /
 # SA-D1): the guidance that tells a model WHEN to settle an ask it no longer
 # needs. Measured by THIS script on both trees with an isolated HOME, one run
-# each — tree 1 is origin/main eb21bbb5d, tree 2 this branch:
+# each — tree 1 is origin/main eb21bbb5d, tree 2 this branch's review-round 1
+# head (the wording grew once in the review: the rule now names its set,
+# excludes age and a change of task order, and the description reconciles
+# "latest or earlier" with VERBATIM):
 #   base (origin/main eb21bbb5d)  91,310 chars = ~32,845 billed  PASS, 27 headroom
-#   head (this branch)            92,235 chars = ~33,178 billed
-#   delta                           +925 chars = ~+333
+#   head (this branch)            92,599 chars = ~33,309 billed
+#   delta                         +1,289 chars = ~+464
 # The whole delta is deliberate copy, in two blocks:
-#   +414 chars of instructions — ``system.md``'s queued-ask paragraph gains the
-#     settle rule (settle what the chat answered or mooted in the same turn, an
-#     answer is never a `moot`, 24 h only for a day-long decision). It is the
-#     one place a model can learn WHEN, and the investigation measured 16 of 40
-#     asks left open until prompted without it;
-#   +511 chars of ``tool_schemas`` — one clause on the ``ask`` queued
-#     description, the moot cases and the empty-list recipe on
-#     ``ask_withdraw``'s description, and the ids rule on
-#     ``AskWithdrawParams.answers``. The child arm does not carry either tool.
+#   +626 chars of instructions — ``system.md``'s queued-ask paragraph gains the
+#     settle rule (settle what the user's messages answered or made irrelevant
+#     in the same turn, an unaddressed ask stays open however old it is, an
+#     answer is never a `moot`, a 24 h timeout only for a day-long decision).
+#     It is the one place a model can learn WHEN, and the investigation measured
+#     16 of 40 asks left open until prompted without it;
+#   +663 chars of ``tool_schemas`` — one clause on the ``ask`` queued
+#     description, the moot cases, the empty-list recipe, the all-empty refusal
+#     and the earlier-or-latest rule on ``ask_withdraw``'s description, and the
+#     ids rule on ``AskWithdrawParams.answers``. The child arm does not carry
+#     either tool.
 # Both blocks are model-facing English (no i18n keys). The copy was trimmed
-# once; what remains states facts a model cannot infer, and the alternative —
-# keeping the floor by not saying them — is the defect the PR exists to fix.
-# Ceiling = measured head + the 55 band (33,178 + 55).
-BUDGET_BILLED_TOKENS = 33_233
+# twice, once on each round; what remains states facts a model cannot infer, and
+# the alternative — keeping the floor by not saying them — is the defect the PR
+# exists to fix.
+# Ceiling = measured head + the 55 band (33,309 + 55).
+BUDGET_BILLED_TOKENS = 33_364
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1807,17 +1813,25 @@ BUDGET_BILLED_TOKENS = 33_233
 # tokens as the top arm (both authoring tools ride every surface, children
 # included), measured 82,821 chars = ~29,792. Ceiling = 29,792 + the 55 band.
 #
-# RAISED (with the top arm, same day, same trees) 29,847 -> 30,024 for STALE
+# RAISED (with the top arm, same day, same trees) 29,847 -> 30,100 for STALE
 # ASKS (PR-1, design ask-nonblocking §16 / SA-D1): the child arm carries neither
 # ``ask`` nor ``ask_withdraw``, so ``tool_schemas`` does NOT move and every char
 # of this arm's delta is the shared ``system.md`` paragraph:
 #   base (origin/main eb21bbb5d)  82,900 chars = ~29,820 billed  PASS, 27 headroom
-#   head (this branch)            83,314 chars = ~29,969 billed
-#   delta                           +414 chars = ~+149
-# The +414 is the same +414 the top arm's instructions block moves by — the
+#   head (this branch)            83,526 chars = ~30,045 billed
+#   delta                           +626 chars = ~+225
+# The +626 is the same +626 the top arm's instructions block moves by — the
 # check that the child delta is that one paragraph and nothing else.
-# Ceiling = measured head + the 55 band (29,969 + 55).
-BUDGET_CHILD_BILLED_TOKENS = 30_024
+# KNOWN LIMITATION, measured here rather than assumed (review round 1 m4): this
+# paragraph renders for EVERY queued-arm session, and a subagent
+# (``CHILD_NEVER_HOLDS``) holds no ``ask_withdraw``, so a child pays these 626
+# chars for an instruction it cannot follow. That is the existing
+# ``ask_queued``/``ask_inline`` limit — gating the paragraph on tool presence
+# needs a third state in that flag pair, which ``prompts_api`` refuses today —
+# so it is recorded as ``deferred — needs a third flag-pair state`` (SA-D2) and
+# not solved by a new flag here.
+# Ceiling = measured head + the 55 band (30,045 + 55).
+BUDGET_CHILD_BILLED_TOKENS = 30_100
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
