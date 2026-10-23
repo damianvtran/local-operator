@@ -71,7 +71,9 @@ class WorkerCodeIdentity:
         else:
             self.counts["unknown"] += 1
             return UNKNOWN
-        answer = self.allowlist.get((code.co_filename, code.co_firstlineno, code.co_qualname), UNKNOWN)
+        answer = self.allowlist.get(
+            (code.co_filename, code.co_firstlineno, code.co_qualname), UNKNOWN
+        )
         if answer == UNKNOWN:
             self.counts["unknown"] += 1
         return answer

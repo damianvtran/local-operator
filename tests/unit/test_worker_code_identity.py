@@ -1,6 +1,8 @@
 """Pure producer-shaped controls: stdlib asyncio only, no Textual/App clocks."""
 import asyncio
 import functools
+from pathlib import Path
+import tempfile
 import unittest
 from tests import worker_code_identity as identity
 
@@ -15,7 +17,8 @@ async def second():
 
 def allowlist():
     return {(f.__code__.co_filename, f.__code__.co_firstlineno, f.__code__.co_qualname):
-            'tests/unit/test_worker_code_identity.py:' + str(f.__code__.co_firstlineno) + ':' + f.__name__
+            'tests/unit/test_worker_code_identity.py:'
+            + str(f.__code__.co_firstlineno) + ':' + f.__name__
             for f in (first, second)}
 
 
@@ -89,13 +92,47 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError('repr inspected')
         registry = identity.WorkerCodeIdentity(allowlist())
         self.assertEqual(registry.code_id(Hostile()), identity.UNKNOWN)
-        self.assertEqual(registry.code_id(functools.partial(first, 'private-ignored')), registry.code_id(first))
+        self.assertEqual(
+            registry.code_id(functools.partial(first, 'private-ignored')), registry.code_id(first)
+        )
         coroutine = first()
         try:
             self.assertEqual(registry.code_id(coroutine), registry.code_id(first))
         finally:
             coroutine.close()
         self.assertFalse(registry.quality()['qualified'])
+
+    async def test_real_static_allowlist_decorators_bound_method_and_partial(self):
+        # Compile only owned pure source, not an imported App/module. Decoration
+        # shifts co_firstlineno to the FIRST decorator, not the async-def line.
+        source = (
+            "def keep(fn): return fn\n\n"
+            "@keep\nasync def task(): return None\n\n"
+            "class C:\n    @keep\n    async def method(self): return None\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'pkg' / 'trusted.py'
+            path.parent.mkdir()
+            path.write_text(source)
+            namespace = {}
+            exec(compile(source, str(path.resolve()), 'exec'), namespace)
+            registry = identity.WorkerCodeIdentity(
+                identity.source_allowlist(root, ('pkg/trusted.py',))
+            )
+            task, method = namespace['task'], namespace['C']().method
+            self.assertEqual(task.__code__.co_firstlineno, 3)
+            self.assertEqual(registry.code_id(task), 'pkg/trusted.py:3:task')
+            self.assertEqual(registry.code_id(method), 'pkg/trusted.py:7:C.method')
+            self.assertEqual(
+                registry.code_id(functools.partial(method)), registry.code_id(method)
+            )
+            coroutine = task()
+            try:
+                self.assertEqual(registry.code_id(coroutine), registry.code_id(task))
+            finally:
+                coroutine.close()
+            self.assertTrue(registry.quality()['qualified'])
 
     async def test_partial_setup_failure_restores_first_hook(self):
         old_init = FakeWorker.__init__
