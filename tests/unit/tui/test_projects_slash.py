@@ -1099,7 +1099,7 @@ async def test_a_paged_listing_states_the_dormant_tail(
     assert "live-row" in receipt
     assert "dormant-row" not in receipt
     assert "showing the 1 most recently active of 2 stored projects" in receipt
-    assert "/project show <name> still finds any project" in receipt
+    assert "/project show <name> resolves any project the store can read" in receipt
 
 
 def test_the_nameless_show_overview_states_the_dormant_tail(
@@ -1121,4 +1121,4 @@ def test_the_nameless_show_overview_states_the_dormant_tail(
     assert "live-row" in text
     assert "dormant-row" not in text
     assert "showing the 1 most recently active of 2 stored projects" in text
-    assert "/project show <name> still finds any project" in text
+    assert "/project show <name> resolves any project the store can read" in text

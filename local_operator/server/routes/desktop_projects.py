@@ -70,6 +70,7 @@ from pydantic import ValidationError
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.projects import (
     MilestoneEdit,
+    PageCounts,
     Project,
     ProjectDoneGateError,
     ProjectEdit,
@@ -221,7 +222,7 @@ def _live_counts(registry: ProjectRegistry, projects: list[Project]) -> dict[str
     }
 
 
-def _page_fields(registry: ProjectRegistry) -> dict[str, Any]:
+def _page_fields(registry: ProjectRegistry, counts: PageCounts | None = None) -> dict[str, Any]:
     """The page declaration every listing-shaped answer carries (M1).
 
     ONE reading of the registry's counts, so the listing, its search sibling and
@@ -232,11 +233,11 @@ def _page_fields(registry: ProjectRegistry) -> dict[str, Any]:
     page is still addressable — ``GET /v1/desktop/projects/{key}`` resolves
     through the disk-backed by-id/by-name lookups.
     """
-    counts = registry.page_counts
+    page = registry.page_counts if counts is None else counts
     return {
-        "total_rows": counts.total_rows,
-        "loaded_rows": counts.loaded,
-        "truncated": counts.truncated,
+        "total_rows": page.total_rows,
+        "loaded_rows": page.loaded,
+        "truncated": page.truncated,
     }
 
 
@@ -304,6 +305,7 @@ async def search(
         def read() -> ProjectSearchResults:
             registry = _registry(request)
             rows = registry.list_projects()
+            counts = registry.page_counts
             if not q.strip():
                 hits = [
                     ProjectSearchHit(
@@ -321,25 +323,31 @@ async def search(
                     )
                     for match in search_projects(rows, q, limit=limit)
                 ]
-                if not hits:
-                    # The ranking is page-scoped, so an EXACT name that lives
-                    # past the page would answer count=0 — the false absence
-                    # this change exists to remove, on the surface the desktop
-                    # list is built from. The by-name lookup is disk-backed, so
-                    # one exact hit is cheap; fuzzy tiers stay page-scoped and
-                    # `truncated` tells the client the ranking was partial.
+                # An EXACT name past the page must survive a page FUZZY hit: a
+                # client searching "hiring" must not be handed "hiring-2026"
+                # while the exact row is invisible (M3). Only a PARTIAL page can
+                # need this — on a whole store the ranking already saw every
+                # row, so the disk scan could add nothing and is skipped (M4).
+                # The fuzzy tiers stay page-scoped: ranking the whole store per
+                # keystroke is the cost the page exists to avoid.
+                exact_name = q.strip().casefold()
+                if counts.truncated and not any(
+                    hit.name.strip().casefold() == exact_name for hit in hits
+                ):
                     found = registry.get_project_by_name(q.strip())
-                    if found is not None:
+                    if found is not None and all(hit.id != found.id for hit in hits):
+                        # Appended FIRST: an exact match leads the ranking.
                         hits = [
                             ProjectSearchHit(
                                 id=found.id,
                                 name=display_name(found),
                                 score=1.0,
                                 fields=["name"],
-                            )
-                        ]
+                            ),
+                            *hits,
+                        ][:limit]
             return ProjectSearchResults(
-                projects=hits, query=q, count=len(hits), **_page_fields(registry)
+                projects=hits, query=q, count=len(hits), **_page_fields(registry, counts)
             )
 
         return reply(await asyncio.to_thread(read))

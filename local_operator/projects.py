@@ -1744,11 +1744,16 @@ class PageCounts(NamedTuple):
 
     @property
     def beyond_page(self) -> int:
-        """Rows the PAGE left out — the only count a listing may call hidden.
+        """Row FILES the page left out — the only count a listing may call hidden.
 
-        Deliberately NOT ``on_disk - loaded``: that would count unreadable rows
-        as hidden too, and a note promising "show still finds any project" over
-        a row no reader can parse is false (QA Q1).
+        Deliberately NOT ``on_disk - loaded``: that would count a row the page
+        REFUSED as hidden too (QA Q1). The reverse caveat is real and cannot be
+        fixed without parsing the tail: a TORN file beyond the page is counted
+        here until a later load admits and refuses it, so a surface must describe
+        this as rows not listed — never as rows every reader can open. Naming one
+        answers exactly as any unreadable row does: ``get_project`` and
+        ``get_project_by_name`` miss it, and the load only logged it once it was
+        inside the page.
         """
         return max(0, self.on_disk - self.page)
 
@@ -1843,9 +1848,7 @@ class ProjectRegistry:
             except OSError:
                 continue
             rows.append(
-                _RowFile(
-                    child, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino
-                )
+                _RowFile(child, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
             )
         # Descending mtime with a filename tiebreak: the tiebreak only decides
         # between rows written in the same nanosecond, but it makes the page
@@ -2322,19 +2325,23 @@ class ProjectRegistry:
                 target.unlink(missing_ok=True)
                 _fsync_dir(self.projects_dir)
             raise
+        was_loaded = project_id in self._projects
         self._projects[project_id] = project
-        if not existed:
-            # The store grew by one, and the counts must not wait for the next
-            # load to say so: a listing composed straight after a create would
-            # otherwise describe a store that no longer exists. ``page`` grows
-            # with it because this row IS in the snapshot the page now holds.
-            counts = self._counts
-            self._counts = PageCounts(
-                on_disk=counts.on_disk + 1,
-                page=counts.page + 1,
-                loaded=counts.loaded + 1,
-                refused=counts.refused,
-            )
+        # A save puts its row IN this snapshot, so the counts move with it —
+        # otherwise a listing paints a row it still counts as hidden (M2). An
+        # addressed update of a row past the page adds no FILE but does admit a
+        # row; a create does both. ``page`` is clamped to the files on disk: it
+        # cannot admit more rows than exist, and the page legitimately holds
+        # ``_MAX_ROWS`` plus rows this process has written since the last load.
+        counts = self._counts
+        on_disk = counts.on_disk + (0 if existed else 1)
+        page = counts.page if was_loaded else min(on_disk, counts.page + 1)
+        self._counts = PageCounts(
+            on_disk=on_disk,
+            page=page,
+            loaded=len(self._projects),
+            refused=counts.refused,
+        )
         self._dir_mtime_ns = self._dir_mtime()
         return project
 

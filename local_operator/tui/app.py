@@ -20932,9 +20932,14 @@ class OperatorApp(App[None]):
         Returns ``(views, hidden_rows)``. Both come from the SAME registry
         snapshot — the count is that snapshot's ``PageCounts.beyond_page`` — so a
         page can never paint one load's rows beside another load's numbers, and
-        the caller never has to know which value to read first. A session with
-        NO registry reads as ``([], 0)``: ``_project_registry()`` would build an
-        uncached registry whose counters describe nothing (M2).
+        the caller never has to know which value to read first.
+
+        A resolver that answers ``None`` (no facade and no usable config root)
+        reads as ``([], 0)``: an empty page, never a fabricated count. When the
+        resolver builds a FALLBACK registry instead — the bare-terminal path —
+        that one instance serves both values, which is the M2 fix: the old split
+        called the resolver twice and the second, freshly constructed registry
+        reported zero rows on disk.
         """
         registry = self._project_registry()
         if registry is None:
