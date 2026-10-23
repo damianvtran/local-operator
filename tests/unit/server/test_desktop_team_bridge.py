@@ -471,24 +471,42 @@ class FakeClient:
         FakeClient.behavior["last_conversation_id"] = conversation_id
         return self._answer("conversation")
 
-    async def create_conversation(self, body: Any, *, access: Any = None):
+    async def create_conversation(self, body: Any, *, access: Any = None, expected_account_id=None):
         FakeClient.behavior["last_create_body"] = dict(body)
         return self._answer("create_conversation")
 
     async def conversation_lifecycle(
-        self, conversation_id: str, action: str, *, access: Any = None
+        self,
+        conversation_id: str,
+        action: str,
+        *,
+        tenant_id=None,
+        access: Any = None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
         return self._answer("conversation_lifecycle")
 
     async def conversation_members(
-        self, conversation_id: str, members: Any, *, tenant_id=None, access=None
+        self,
+        conversation_id: str,
+        members: Any,
+        *,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_members"] = list(members)
         return self._answer("conversation_members")
 
     async def conversation_remove_member(
-        self, conversation_id: str, account_id: str, *, access=None
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_removed"] = (conversation_id, account_id)
         return self._answer("conversation_remove_member")
@@ -502,6 +520,7 @@ class FakeClient:
         consent_version: str,
         tenant_id=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_consent"] = (
             conversation_id,
@@ -511,11 +530,15 @@ class FakeClient:
         )
         return self._answer("conversation_consent")
 
-    async def conversation_join(self, conversation_id: str, *, tenant_id=None, access=None):
+    async def conversation_join(
+        self, conversation_id: str, *, tenant_id=None, access=None, expected_account_id=None
+    ):
         FakeClient.behavior["last_join"] = (conversation_id, tenant_id)
         return self._answer("conversation_join")
 
-    async def conversation_leave(self, conversation_id: str, *, access=None):
+    async def conversation_leave(
+        self, conversation_id: str, *, tenant_id=None, access=None, expected_account_id=None
+    ):
         FakeClient.behavior["last_leave"] = conversation_id
         return self._answer("conversation_leave")
 
@@ -549,6 +572,7 @@ class FakeClient:
         tenant_id=None,
         agent_label=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_send"] = {
             "conversation_id": conversation_id,
@@ -580,6 +604,7 @@ class FakeClient:
         tenant_id=None,
         endpoint_id=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_admit"] = (
             conversation_id,
@@ -599,6 +624,7 @@ class FakeClient:
         notify=None,
         tenant_id=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_read"] = (conversation_id, seq, muted, notify, tenant_id)
         return self._answer("conversation_read")
