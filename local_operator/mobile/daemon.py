@@ -1847,6 +1847,7 @@ def _durable_projection(
         _compact_multiline,
     )
     from local_operator.resume import stored_session_title
+    from local_operator.session import compression
     from local_operator.session.attention import AttentionStore
     from local_operator.tools.builtin import todo_snapshot
 
@@ -1855,6 +1856,19 @@ def _durable_projection(
         return None
     try:
         state = _durable_fold_cache().load(directory)
+    except compression.ArchiveError as exc:
+        # KEPT BEST EFFORT, BUT NO LONGER SILENT (review round 3, m-3). A transcript
+        # this build cannot decode answers no projection — the daemon must not take a
+        # 500 for one damaged archive — and the WARNING names the session and the
+        # archive+codec the typed error carries, so the blank frame has a trace. The
+        # history route reports the same condition to the surface as ``unavailable``;
+        # see ``_history_page``.
+        logger.warning(
+            "mobile: no projection for %s, its transcript could not be decoded: %s",
+            session_id,
+            exc,
+        )
+        return None
     except FileNotFoundError:
         return None
     except Exception as exc:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
@@ -2822,11 +2836,51 @@ def _journal_page(
     return rows if rows is not None else ([], False)
 
 
+class _UnavailablePage(list[Any]):
+    """An EMPTY history page that remembers WHY it is empty (review round 3, m-3).
+
+    The handler is best effort by contract — a phone that raises is worse than one
+    that says "unavailable" — but a compressed transcript this build cannot decode
+    used to arrive as a plain ``[]``, and an empty page reads as the TOP of the
+    conversation: the reader believes it has seen the whole thing. This type is still
+    a list (so every existing caller's ``if not entries`` keeps working) that carries
+    the typed reason the route puts on the wire as ``unavailable``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self.unavailable = reason
+
+
+def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
+    """The wire body for one history page, with the honest emptiness beside it.
+
+    ``unavailable`` is ADDITIVE and present only when the page is empty for a
+    REASON: an app build that ignores the key renders the old empty state, and one
+    that reads it can say "history unavailable" instead of "that was the top".
+    """
+    body: dict[str, Any] = {
+        "entries": [_transcript_entry_json(row) for row in page],
+        "has_more": has_more,
+    }
+    reason = getattr(page, "unavailable", "")
+    if reason:
+        body["unavailable"] = reason
+    return body
+
+
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
     """Return the page of folded entries immediately OLDER than ``before``
     (chronological within the page) plus whether more history exists beyond it.
+
+    THE EMPTINESS IS SPELLED WHEN IT IS A FAILURE (review round 3, m-3). A page
+    that could not be read is an :class:`_UnavailablePage` — empty, like an honest
+    end of history, but carrying the typed :class:`compression.ArchiveError`
+    message, which the route serves as ``unavailable``. The error is caught HERE,
+    before the blanket handler, and logged at WARNING with its own sentence (which
+    names the archive and codec) rather than as an unexplained fold failure.
 
     Reads through the daemon's incremental fold cache (:mod:`.durable`), so a
     page costs one fold per session per daemon lifetime plus the appended
@@ -2877,6 +2931,14 @@ def _history_page(
         return [], False
     try:
         state = _durable_fold_cache().load(directory)
+    except compression.ArchiveError as exc:
+        # NOT AN EMPTY CONVERSATION: the transcript exists, it just could not be
+        # decoded by this build (a truncated archive, or one written by a runtime
+        # with a codec this one does not have).
+        logger.warning(
+            "mobile: history for %s is unavailable rather than empty: %s", session_id, exc
+        )
+        return _UnavailablePage(str(exc)), False
     except FileNotFoundError:
         return [], False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
@@ -6153,9 +6215,7 @@ def build_app(daemon: MobileDaemon):
         page, has_more = await asyncio.to_thread(
             _history_page, child_session_id, before, limit, durable_only=False
         )
-        return JSONResponse(
-            {"entries": [_transcript_entry_json(entry) for entry in page], "has_more": has_more}
-        )
+        return JSONResponse(_history_response(page, has_more))
 
     async def api_session_history(request: Request) -> Response:
         """Older transcript entries for lazy loading.
@@ -6187,12 +6247,7 @@ def build_app(daemon: MobileDaemon):
         page, has_more = await asyncio.to_thread(
             _history_page, session_id, before, limit, durable_only=entry is None
         )
-        return JSONResponse(
-            {
-                "entries": [_transcript_entry_json(e) for e in page],
-                "has_more": has_more,
-            }
-        )
+        return JSONResponse(_history_response(page, has_more))
 
     async def api_session_checkpoints(request: Request) -> Response:
         """The checkpoint manifest for one conversation: the rail's ticks.
