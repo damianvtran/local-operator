@@ -77,7 +77,7 @@ class Completion(unittest.TestCase):
 
     def protocol(self, mode):
         from oracle import span_record, held_record
-        rows = [dict(kind="cleanup", worker_function_completed=True, task_settled=True), dict(kind="recorder", summary={})]
+        rows = [dict(kind="scope", supplemental_gc="NOT_COLLECTED", excluded_gc=0), dict(kind="outcome", call="fail" if mode == "s3-split" else "pass", exitstatus=1 if mode == "s3-split" else 0), dict(kind="cleanup", worker_function_completed=True, task_settled=True), dict(kind="recorder", summary={})]
         for i in range(3):
             rows.append(span_record("harvest", (0, i), (.001, i+.01), 1, manual=True, measured=True, i=i))
             rows.append(span_record("pause", (.001, i+.01), (.002, i+1), 1, manual=True, measured=True, i=i))
@@ -100,6 +100,84 @@ class Completion(unittest.TestCase):
         row = self.protocol("s3-held")
         row["data"]["records"][-2]["loop_ticks"] = 0
         with self.assertRaisesRegex(ValueError, "LOOP witness"): judge(row)
+
+
+
+
+class Capacity(unittest.TestCase):
+    def s2(self, records):
+        return dict(mode="s2-original", rc=0, reaped=True, timed_out=False, signal=None,
+                    cleanup_errors=[], identity_ok=True, data=dict(mode="s2-original",
+                    setup_ok=True, call="pass", assertion=None, records=records))
+
+    def suffix(self, budget):
+        budget.add("recorder", summary={"callbacks": {"loop_thread_id": 1,
+            "worst_cpu_windows": [{"callbacks": {"gc": [], "top_cpu": [], "top_wall": []}}],
+            "worst_wall_windows": []}})
+        for kind in ("s2_idle", "s2_emit_burst", "s2_settle"):
+            budget.add(kind, cpu_ms=1, wall_ms=2)
+        budget.add("cleanup", worker_function_completed=True, task_settled=True)
+        budget.add("outcome", call="pass", exitstatus=0)
+
+    def test_actual_budget_replay_excludes_startup_gc_retains_m15(self):
+        from oracle import RecordBudget, judge, project
+        budget = RecordBudget()
+        for i in range(244): self.assertFalse(budget.add("gc", thread=1, is_loop=None))
+        for i in range(4): budget.add("pause", manual=True, measured=False)
+        budget.add("harvest", manual=False, measured=False)
+        budget.add("recorder_start", thread=1)
+        self.suffix(budget)
+        records = budget.snapshot()
+        self.assertFalse(any(r["kind"] == "gc" for r in records))
+        self.assertEqual(records[-1]["excluded_gc"], 244)
+        self.assertEqual(judge(project(self.s2(records))), "PASS original")
+        summary = next(r for r in records if r["kind"] == "recorder")
+        del summary["summary"]["callbacks"]["worst_cpu_windows"][0]["callbacks"]["gc"]
+        with self.assertRaisesRegex(ValueError, "S2 M15/thread GC missing"): judge(self.s2(records))
+
+    def test_optional_capacity_keeps_critical_and_overflow_fails(self):
+        from oracle import RecordBudget, judge, project
+        budget = RecordBudget()
+        for i in range(1000): budget.add("pause", manual=False, measured=False)
+        self.suffix(budget)
+        records = budget.snapshot()
+        self.assertLessEqual(len(records), 250)
+        self.assertEqual(sum(r["kind"] == "pause" for r in records), 234)
+        self.assertTrue({"cleanup", "recorder", "outcome", "overflow"} <= {r["kind"] for r in records})
+        self.assertEqual(records[-1]["dropped_count"], 766)
+        with self.assertRaisesRegex(ValueError, "capacity overflow"): judge(project(self.s2(records)))
+        for i in range(100): budget.add("error")
+        self.assertEqual(len(budget.snapshot()), 250)
+        self.assertGreater(budget.snapshot()[-1]["critical_dropped"], 0)
+
+    def test_missing_unknown_critical_and_privacy_fail_right_oracle(self):
+        from oracle import RecordBudget, judge, project
+        budget = RecordBudget()
+        self.suffix(budget)
+        records = budget.snapshot()
+        with self.assertRaisesRegex(ValueError, "missing cleanup proof"):
+            judge(self.s2([r for r in records if r["kind"] != "cleanup"]))
+        with self.assertRaisesRegex(ValueError, "scope/outcome"):
+            judge(self.s2([r for r in records if r["kind"] != "outcome"]))
+        with self.assertRaisesRegex(ValueError, "unknown diagnostic record"):
+            budget.add("private-message", value="PRIVATE")
+        with self.assertRaisesRegex(ValueError, "unknown measurement record"):
+            judge(self.s2(records + [dict(kind="unknown")]))
+        records[0]["message"] = "PRIVATE"
+        with self.assertRaisesRegex(ValueError, "privacy"): project(self.s2(records))
+
+    def test_bytes_exhaustion_explicit_and_no_global_gc_callback(self):
+        from oracle import RecordBudget
+        from pathlib import Path
+        import ast
+        budget = RecordBudget()
+        budget.add("harvest", value="x" * 180001)
+        self.suffix(budget)
+        self.assertTrue(any(r["kind"] == "overflow" for r in budget.snapshot()))
+        self.assertTrue(any(r["kind"] == "cleanup" for r in budget.snapshot()))
+        tree = ast.parse(Path("plugin-source.txt").read_text())
+        self.assertFalse(any(isinstance(n, ast.Import) and any(a.name == "gc" for a in n.names) for n in ast.walk(tree)))
+        self.assertFalse(any(isinstance(n, ast.Attribute) and n.attr == "callbacks" and isinstance(n.value, ast.Name) and n.value.id == "gc" for n in ast.walk(tree)))
 
 
 if __name__ == "__main__":

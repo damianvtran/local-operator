@@ -36,8 +36,21 @@ def judge(row):
         raise ValueError("setup/call missing STOP")
     records = data.get("records", [])
     clean = [r for r in records if r.get("kind") == "cleanup"]
-    if len(clean) != 1 or not clean[0].get("worker_function_completed") or not clean[0].get("task_settled"):
-        raise ValueError("unsettled worker/task STOP")
+    if len(records) > 250 or any(r.get("kind") == "overflow" for r in records):
+        raise ValueError("measurement record capacity overflow STOP")
+    known = RecordBudget.CRITICAL | RecordBudget.OPTIONAL | {"scope"}
+    if any(r.get("kind") not in known for r in records):
+        raise ValueError("unknown measurement record STOP")
+    scopes = [r for r in records if r.get("kind") == "scope"]
+    outcomes = [r for r in records if r.get("kind") == "outcome"]
+    if len(scopes) != 1 or scopes[0].get("supplemental_gc") != "NOT_COLLECTED" or len(outcomes) != 1:
+        raise ValueError("missing critical scope/outcome proof STOP")
+    if outcomes[0].get("call") != data.get("call") or outcomes[0].get("exitstatus") != row.get("rc"):
+        raise ValueError("critical outcome mismatch STOP")
+    if len(clean) != 1:
+        raise ValueError("missing cleanup proof STOP; child reap is separate")
+    if not clean[0].get("worker_function_completed") or not clean[0].get("task_settled"):
+        raise ValueError("observed incomplete worker function/task STOP")
     summaries = [r for r in records if r.get("kind") == "recorder"]
     if len(summaries) != 1:
         raise ValueError("missing original recorder STOP")
@@ -156,7 +169,7 @@ def project(value):
     """Structural allowlist only; raw pytest logs NEVER leave the child pipe."""
     import math
     import re
-    allowed = {"rc", "signal", "reaped", "timed_out", "cleanup_errors", "identity_ok", "data", "pid", "pgid", "verdict", "mode", "exitstatus", "records", "identity", "call", "assertion", "setup_ok",
+    allowed = {"supplemental_gc", "excluded_gc", "dropped_count", "critical_dropped", "record_limit", "rc", "signal", "reaped", "timed_out", "cleanup_errors", "identity_ok", "data", "pid", "pgid", "verdict", "mode", "exitstatus", "records", "identity", "call", "assertion", "setup_ok",
                "controls", "ready", "trailing", "cpu_trip", "worst_cpu_ms", "worker_cpu_ms",
                "worker_thread", "loop_thread", "kind", "cpu_ms", "wall_ms", "start_wall",
                "end_wall", "thread", "manual", "measured", "i", "origin", "requests",
@@ -189,3 +202,65 @@ def project(value):
     if len(json.dumps(clean).encode()) > 200000:
         raise ValueError("privacy output bound")
     return clean
+
+
+class RecordBudget:
+    """Same 250 total slots, including two bounded control-plane trailers.
+
+    Supplemental global GC is outside the measurement scope; original M15's
+    scoped summary remains mandatory. Optional spans cannot consume reserved
+    slots/bytes for summary, restoration proof and outcome. Overflow is DATA,
+    never an exception from a collector, and makes the measurement invalid.
+    """
+    CRITICAL = frozenset({"recorder", "cleanup", "outcome", "error", "recorder_start",
+                          "s2_idle", "s2_emit_burst", "s2_settle", "held_witness",
+                          "controlled_async_delay"})
+    OPTIONAL = frozenset({"harvest", "pause", "worker_entry", "held_loop_tick", "held_release"})
+
+    def __init__(self):
+        self.rows = []
+        self.optional = self.critical = self.used_bytes = self.optional_bytes = 0
+        self.dropped = self.critical_dropped = self.excluded_gc = 0
+
+    def add(self, kind, **values):
+        if kind == "gc":
+            # Defensive exclusion for the obsolete producer seam, not silent
+            # loss of an in-scope M15 event. No callback is registered anymore.
+            self.excluded_gc += 1
+            return False
+        if kind not in self.CRITICAL | self.OPTIONAL:
+            raise ValueError("unknown diagnostic record kind")
+        row = dict(kind=kind, **values)
+        size = len(json.dumps(row).encode()) + 2
+        critical = kind in self.CRITICAL
+        full = (self.critical >= 14 if critical else self.optional >= 234)
+        # Bound an individual summary independently of optional occupancy.
+        # One128KiB-ish summary +13small critical proofs +32k optional bytes
+        # fits below172k, leaving the fixed trailers inside the old180k cap.
+        if critical:
+            full = full or size > (128000 if kind == "recorder" else 512)
+        full = full or self.used_bytes + size > 172000
+        if not critical:
+            full = full or self.optional_bytes + size > 32000
+        if full:
+            self.dropped += 1
+            self.critical_dropped += int(critical)
+            return False
+        self.rows.append(row)
+        self.used_bytes += size
+        if critical:
+            self.critical += 1
+        else:
+            self.optional += 1
+            self.optional_bytes += size
+        return True
+
+    def snapshot(self):
+        rows = list(self.rows)
+        rows.append(dict(kind="scope", supplemental_gc="NOT_COLLECTED", excluded_gc=self.excluded_gc))
+        if self.dropped:
+            rows.append(dict(kind="overflow", dropped_count=self.dropped,
+                             critical_dropped=self.critical_dropped, record_limit=250))
+        # At most234 optional +14 critical +scope +overflow =250. The byte
+        # reserve covers trailers; no cap is raised and no proof is fabricated.
+        return rows
