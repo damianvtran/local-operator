@@ -51,7 +51,11 @@ STATUS READ DISCIPLINE (RFC §5.1). :class:`StatusDiscipline` is the only reader
 natural boundaries; the answer is cached per account for at least
 :data:`STATUS_CACHE_TTL_S`; concurrent readers coalesce onto one in-flight read; and
 there is structurally NO background poll loop — nothing here starts a task or a
-timer, and while the feature is off the module performs no traffic at all.
+timer. The sole local-identity exception is a successful, effective desktop
+settings mutation: :meth:`StatusDiscipline.reconcile_identity_mutation` permits
+one fresh, coalesced reconciliation without waiting for the 300-second floor.
+It grants no enrollment/consent authority and never runs from a cached read,
+shared settings writer, watcher or timer. See docs/design/team-bridge-identity-mutations.md.
 """
 
 from __future__ import annotations
@@ -2287,6 +2291,9 @@ class _AccountState:
     last_attempt: float
     check: StatusCheck
     texts: AcceptedTexts
+    # A read started before an edit cannot satisfy that edit, even if its
+    # response finishes afterwards. Ordinary reads still obey the TTL alone.
+    identity_revision: int = 0
 
 
 def _api_supported(payload: Mapping[str, Any]) -> bool:
@@ -2437,11 +2444,13 @@ class StatusDiscipline:
     Rules, from §5.1 and enforced here structurally:
 
     * read only when SIGNED IN — a signed-out account produces no traffic;
-    * read only at :class:`Boundary` points (the only public entry point);
+    * ordinary reads only at :class:`Boundary` points; successful effective UI
+      identity edits have the narrow ``reconcile_identity_mutation`` exception;
     * coalesce per account across sessions (one shared read under a per-account
       lock, the process-wide instance served by :func:`get_status_discipline`);
-    * cache the answer for at least :data:`STATUS_CACHE_TTL_S` (failures for
-      :data:`STATUS_ERROR_TTL_S`, and never AS success);
+    * cache ordinary answers for at least :data:`STATUS_CACHE_TTL_S` (failures
+      for :data:`STATUS_ERROR_TTL_S`, and never AS success); mutation revisions
+      bypass that floor only until a read started at/after the explicit edit;
     * NEVER a background poll loop — no task or timer exists in this module, and
       nothing here runs while nobody asks.
     """
@@ -2460,6 +2469,7 @@ class StatusDiscipline:
         )
         self._states: dict[str, _AccountState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._identity_revision = 0
         #: ``endpoint_id -> agent_name`` this process last re-sent SUCCESSFULLY.
         #: The debounce for :meth:`_sync_agent_name`: a hub that lags its own
         #: echo is not re-PUT on every fresh read. Recorded only after a 2xx
@@ -2497,7 +2507,31 @@ class StatusDiscipline:
         so a timeout must not blank a surface the user can still reach.
         """
 
-        check = await self._check(boundary)
+        return self._observe(await self._check(boundary))
+
+    async def reconcile_identity_mutation(self) -> StatusCheck:
+        """Reconcile a persisted, effective UI identity edit without waiting 300s.
+
+        Only the explicit desktop PATCH/reset orchestration calls this, after
+        comparing canonical identity before/after persistence. It is NOT a
+        general force-refresh flag on the status read API. Revisions are sampled
+        before a read's first await, so concurrent queued edits share the latest
+        read while an edit arriving during an older read cannot be lost. The
+        existing per-account lock, transport/auth fences and publisher guards
+        still apply; no owner receipt or consent can be created by this path.
+
+        The caller bounds the wait and reports local persistence honestly. The
+        returned payload remains the actual pre-PUT status answer, not an echo
+        invented from the desired name or an extra confirmation GET.
+        """
+
+        self._identity_revision += 1
+        revision = self._identity_revision
+        return self._observe(await self._check(Boundary.SURFACE_OPEN, identity_revision=revision))
+
+    def _observe(self, check: StatusCheck) -> StatusCheck:
+        """Record visibility identically for ordinary and explicit mutation reads."""
+
         projection = surface_projection(check)
         if projection["surface_state"] is not None or check.state == STATE_SIGNED_OUT:
             # The record carries the POSTURE, not just visibility: the two
@@ -2514,7 +2548,7 @@ class StatusDiscipline:
             )
         return check
 
-    async def _check(self, boundary: Boundary | str) -> StatusCheck:
+    async def _check(self, boundary: Boundary | str, *, identity_revision: int = 0) -> StatusCheck:
         """The cached-or-fresh read behind :meth:`check`."""
 
         boundary = Boundary.parse(boundary)
@@ -2548,17 +2582,26 @@ class StatusDiscipline:
             )
         key = access.account_id or f"credential:{access.credential_id}"
         state = self._states.get(key)
-        if state is not None and now - state.last_attempt < self._ttl(state):
+        if (
+            state is not None
+            and state.identity_revision >= identity_revision
+            and now - state.last_attempt < self._ttl(state)
+        ):
             return self._cached(state, boundary)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             # Re-check under the lock: a sibling that arrived first already read.
             state = self._states.get(key)
-            if state is not None and time.monotonic() - state.last_attempt < self._ttl(state):
+            if (
+                state is not None
+                and state.identity_revision >= identity_revision
+                and time.monotonic() - state.last_attempt < self._ttl(state)
+            ):
                 return self._cached(state, boundary)
             return await self._read(key, boundary, access)
 
     async def _read(self, key: str, boundary: Boundary, access: OAuthAccess) -> StatusCheck:
+        revision = self._identity_revision
         prior = self._states.get(key)
         texts = prior.texts if prior is not None else AcceptedTexts()
         try:
@@ -2594,13 +2637,18 @@ class StatusDiscipline:
                 texts=texts.snapshot(),
             )
             self._states[key] = _AccountState(
-                last_attempt=time.monotonic(), check=check, texts=texts
+                last_attempt=time.monotonic(),
+                check=check,
+                texts=texts,
+                identity_revision=revision,
             )
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
         check = self._sync_local_designation(check)
         await self._sync_agent_name(check, access)
-        self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
+        self._states[key] = _AccountState(
+            last_attempt=time.monotonic(), check=check, texts=texts, identity_revision=revision
+        )
         return check
 
     def _payload_check(
@@ -2713,6 +2761,9 @@ class StatusDiscipline:
         the existing, already-rate-limited boundary (§5.1: boundaries only,
         ≥ :data:`STATUS_CACHE_TTL_S` apart, coalesced per account), so this
         runs only on a FRESH read — never from the cache, never on a timer.
+        A successful effective desktop identity edit may explicitly request that
+        fresh read early via ``reconcile_identity_mutation``; other writers keep
+        the ordinary cache floor. This does not expand any publishing guard.
 
         WHY SO GUARDED. ``PUT /messaging/settings`` is a state ASSERTION with
         no precondition field: a re-sync must send ``state=active``, and if the
@@ -2784,7 +2835,10 @@ class StatusDiscipline:
                 endpoint=endpoint,
                 expected_account_id=access.account_id,
             )
-        except Exception:  # noqa: BLE001 - a display name never fails a status read
+        except Exception as exc:  # noqa: BLE001 - a display name never fails a status read
+            # Do not log exception prose/tracebacks: transport errors can carry
+            # private URLs, credentials or the name. Keep failures diagnosable.
+            logger.warning("team_bridge: name synchronization deferred (%s)", type(exc).__name__)
             return
         self._agent_name_sent[endpoint_id] = wanted
 
