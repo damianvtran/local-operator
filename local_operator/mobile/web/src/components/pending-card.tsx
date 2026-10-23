@@ -3,7 +3,10 @@
  * most prominent element on screen (branding §7: a question for the user is
  * the only thing that needs a decision, and it must be unmissable).
  *
- * Approval: tool name + detail + Approve/Deny (+ remember). Ask: the
+ * Approval: tool name + detail + Approve/Deny (+ remember), plus two
+ * SUBORDINATE mode links beneath them (loosen this session / loosen the global
+ * default) — a mode change is never an answer, see the block at the control.
+ * Ask: the
  * question plus options as tap targets (each with its consequence line, U3),
  * or a paste field — masked when the ask is a secret credential (D1/U2) —
  * when the daemon offered no options. A multi-question ask shows a
@@ -71,6 +74,7 @@ import {
 import { cn } from "../lib/cn";
 import { PENDING_CARD_FRACTION, columnCap } from "../lib/column";
 import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
+import { setApprovalsPolicy } from "../lib/approval-policy";
 import { PairPromptSheet } from "../screens/pair";
 import type { PendingRequest } from "../types";
 
@@ -151,6 +155,17 @@ export function PendingCard({
 	   survived to the next question would offer a pairing for a card nobody is
 	   looking at any more. */
 	const [pairPrompt, setPairPrompt] = useState(false);
+
+	/* THE MODE LINKS' OWN TRANSIENT STATE, deliberately separate from
+	   `busy`/`error` above. Those two belong to the ANSWER, and `error !== ""`
+	   makes every control inert (D7) for the length of a stale-tap refusal. A
+	   mode change is not an answer: a refused policy write must leave the card
+	   answerable, and a policy write in flight must not grey out approve/deny for
+	   a request that is still perfectly answerable on another surface. Sharing
+	   the state would silently give one the other's lifetime. */
+	const [policyBusy, setPolicyBusy] = useState<"auto" | "default auto" | null>(null);
+	const [policyNotice, setPolicyNotice] = useState("");
+	const [policyError, setPolicyError] = useState("");
 
 	/* Whether the body has content below the fold, which drives the bottom fade
 	   (U4). Derived by measurement rather than from the content, because whether
@@ -278,6 +293,58 @@ export function PendingCard({
 				question_index: pending.question_index,
 			}),
 		);
+
+	/* A MODE CHANGE, NEVER AN ANSWER — and that distinction is the whole reason
+	   these two links exist here instead of sending the reader to the gate sheet.
+	   The card is what stands between a gated call and its execution: leaving it
+	   to find `/approvals` costs the session the decision it is waiting on, and
+	   in practice invites an approve just to get moving. So the policy can be
+	   loosened from the spot. But `approval_answer` is a statement about THIS
+	   request; `/approvals` is a statement about the gate for FUTURE ones. Sending
+	   the latter must not settle the former — the call in front of the reader
+	   still needs a decision, and a card that silently vanished (or a receipt
+	   claiming it was handled) would be the phone answering a question the user
+	   never answered. Hence: no `sendCommand` to `approval_answer` on this path,
+	   the card keeps its request_id pending, and the inline sentence says so
+	   out loud.
+
+	   THE PROOF SEQUENCE IS NOT REPEATED HERE either — `lib/approval-policy` holds
+	   the one implementation both this card and the gate sheet send, so a
+	   challenge minted for `loosen` cannot end up shaped differently on one of
+	   the two surfaces. */
+	const setPolicy = async (mode: "auto" | "default auto") => {
+		if (policyBusy) return;
+		setPolicyBusy(mode);
+		setPolicyError("");
+		setPolicyNotice("");
+		try {
+			const receipt = await setApprovalsPolicy(pid, mode);
+			if (receipt.refused) {
+				/* The routed op can report a refusal in its receipt rather than as an
+				   HTTP failure; it changed nothing, so it must not be confirmed. The
+				   runtime's own sentence goes inline — this line is NOT the card's
+				   `error`, which would grey out the answer controls. */
+				setPolicyError(receipt.detail.trim() || "that was refused — nothing changed");
+				return;
+			}
+			setPolicyNotice(
+				mode === "auto"
+					? "auto for this session — this call still needs your answer"
+					: "auto for all sessions — this call still needs your answer",
+			);
+		} catch (failure) {
+			if (failure instanceof NotPairedError) {
+				setPairPrompt(true);
+				setPolicyError(
+					"This phone is not paired with that machine yet — pair it once and it can give this consent itself.",
+				);
+				return;
+			}
+			setPolicyError(humanizeError(String((failure as Error).message ?? failure)));
+		} finally {
+			setPolicyBusy(null);
+		}
+	};
 
 	/* A multi-question ask advances one question at a time (U1): show which
 	   question this is so the user knows the card is not the whole prompt. */
@@ -462,6 +529,58 @@ export function PendingCard({
 						>
 							{busy ? "…" : "deny"}
 						</button>
+					</div>
+					{/* THE ESCAPE HATCH: a mode change, not an answer.
+
+					    SECONDARY ON PURPOSE, and that is a design constraint rather than
+					    taste. `approve`/`deny` are the decision this card exists to take;
+					    these two are a side door for the reader who wants future calls to
+					    stop asking. Rendered as buttons they would compete with the
+					    decision (one accent, two verdicts, and a third equal-looking
+					    control on a card that must be answerable at a glance), so they are
+					    text links with an underline — a non-colour affordance, so the
+					    distinction survives a monochrome screen — while KEEPING the 44px
+					    target floor the rest of the card holds. Two handles rather than a
+					    menu because the scope is the thing being chosen: "this session"
+					    and "all sessions" must be distinguishable before the tap.
+
+					    THEY DO NOT RESOLVE THE CARD. Sending `/approvals` changes the gate
+					    for future calls; it never answers `request_id`, so the pending
+					    request stays pending and these controls stay independent of
+					    `busy`/`error` (which are the answer's own state). The line below
+					    confirms the mode change AND says the call still needs an answer —
+					    otherwise a successful tap reads as "handled", and the reader walks
+					    away from a session that is still blocked. A refusal stays here
+					    too, in the runtime's words, with approve/deny still live. */}
+					<div className="flex flex-col gap-1">
+						<div className="flex flex-wrap items-center gap-x-4">
+							<button
+								type="button"
+								disabled={policyBusy !== null}
+								onClick={() => void setPolicy("auto")}
+								className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
+							>
+								Set auto for this session
+							</button>
+							<button
+								type="button"
+								disabled={policyBusy !== null}
+								onClick={() => void setPolicy("default auto")}
+								className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
+							>
+								Set auto for all sessions
+							</button>
+						</div>
+						{policyNotice ? (
+							<p role="status" className="text-meta text-ink-dim">
+								{policyNotice}
+							</p>
+						) : null}
+						{policyError ? (
+							<p role="alert" className="text-meta break-words text-danger">
+								{policyError}
+							</p>
+						) : null}
 					</div>
 				</div>
 			) : optionCount === 0 ? (
