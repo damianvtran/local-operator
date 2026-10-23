@@ -56,7 +56,7 @@ function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 function renderCard(
 	row: PendingAsk,
 	onSettled?: () => void,
-	onDismissed?: (reason: "moot" | "answered_in_chat" | undefined) => void,
+	onDismissed?: (askId: string, reason: "moot" | "answered_in_chat" | undefined) => void,
 ) {
 	return render(
 		<AskCard
@@ -340,6 +340,22 @@ describe("AskCard", () => {
 		await act(async () => { release({ ok: true, detail: "dismissed" }); });
 	});
 
+	it("clears a refusal's sentence when the reasons are cancelled", async () => {
+		/* UX round 2, U10 = agent review round 2, m1: the sentence renders outside
+		   the `closing` ternary, so `cancel` left an old refusal sitting under a
+		   fresh-looking `dismiss…` until the next op happened to clear it. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new Error("you already dismissed this."),
+		);
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		await screen.findByText("you already dismissed this.");
+		fireEvent.click(screen.getByRole("button", { name: /^cancel$/ }));
+		expect(screen.queryByText("you already dismissed this.")).toBeNull();
+		expect(screen.getByRole("button", { name: /^dismiss…$/ })).toBeTruthy();
+	});
+
 	it("names the act, and states what each reason tells the agent", () => {
 		/* Design round 1, D1 = UX round 1, U6: the reveal used to be three controls
 		   on one line with no heading and no explanation, so "Answered in chat"
@@ -384,7 +400,10 @@ describe("AskCard", () => {
 		renderCard(ask(), undefined, dismissed);
 		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
 		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
-		await waitFor(() => expect(dismissed).toHaveBeenCalledWith("moot"));
+		/* THE ASK ID RIDES WITH THE REASON (agent review round 2, M1): the sheet
+		   keys its receipt to the ask it was about, so a later dismissal cannot be
+		   confused with this one. */
+		await waitFor(() => expect(dismissed).toHaveBeenCalledWith("ask-1", "moot"));
 	});
 
 	it("draws the context line under the question it refers to", () => {

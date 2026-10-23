@@ -297,6 +297,14 @@ SUB_LINE_INDENT = 4
 #: panel both use it — and no ask row is ever painted with it.
 CONTEXT_CUE = "└ "
 
+#: The hints that can be spent as their KEY ALONE when the header runs out of
+#: cells (design round 2, D7). Only `x dismiss`: a single letter with no other
+#: `x` binding on this surface, and its verb is carried by the chooser it opens.
+#: `enter answer`/`enter view` cannot be shortened to `enter` (the row's own
+#: primary key would become ambiguous) and `esc collapse` to `esc` would collide
+#: with the chooser's `esc cancel`.
+KEY_ONLY_HINTS = {"x dismiss": "x"}
+
 
 @dataclass(frozen=True)
 class AskRow:
@@ -1899,13 +1907,27 @@ class AskQueueList(Widget):
         atoms.extend(head)
         atoms.extend(_seg_block(bool(head)))
 
-        def shed(prefix: str) -> list[HeaderAtom]:
-            """As many hints as fit, in order, from the left."""
+        def shed(prefix: str, *, key_fallback: bool = False) -> list[HeaderAtom]:
+            """As many hints as fit, in order, from the left.
+
+            ``key_fallback`` spends the hint that would otherwise BREAK the row as
+            its key alone — the rung design round 2's D7 asked for. The counts are
+            part of the header, so a tenth ask (or any three-digit count) spends the
+            cell the three-key row had and `x dismiss` vanished again at exactly the
+            width it had just been restored to; `x` still names the key that opens
+            the chooser. The fallback applies only to that breaking hint: every
+            earlier one keeps its verb, and nothing is abbreviated to prettify.
+            """
             kept: list[HeaderAtom] = []
             for hint in hints:
                 candidate = HeaderAtom(prefix + hint, "muted")
                 if _atoms_width([*atoms, *kept, candidate]) > width:
-                    break
+                    short = KEY_ONLY_HINTS.get(hint) if key_fallback else None
+                    if short is None:
+                        break
+                    candidate = HeaderAtom(prefix + short, "muted")
+                    if _atoms_width([*atoms, *kept, candidate]) > width:
+                        break
                 kept.append(candidate)
             return kept
 
@@ -1916,7 +1938,20 @@ class AskQueueList(Widget):
         # leaves. A rung, not a second vocabulary: both separators are already in
         # this header, and the compact one is only used when it keeps MORE hints
         # than the roomy one does (never to prettify).
-        kept = max((shed("  ·  "), shed(" · ")), key=len)
+        #
+        # THE KEY-ONLY RUNG COMES LAST (design D7): it keeps three hints where the
+        # full set keeps two, but it costs the verb, so it only wins when it wins a
+        # hint — `max` takes the first of equal-length candidates, which keeps the
+        # spelled-out form on a tie.
+        kept = max(
+            (
+                shed("  ·  "),
+                shed(" · "),
+                shed("  ·  ", key_fallback=True),
+                shed(" · ", key_fallback=True),
+            ),
+            key=len,
+        )
         atoms.extend(kept)
         if _atoms_width(atoms) > width:
             # The floor: not even the control fits. CUT rather than wrap — a

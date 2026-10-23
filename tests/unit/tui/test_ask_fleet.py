@@ -487,10 +487,26 @@ async def test_the_primary_hint_outlives_the_irreversible_one():
     for hint in ("enter answer", "d decline", "x dismiss"):
         assert hint in at_default, (hint, at_default)
     # Below that, the ladder still keeps the primary action longest — a width
-    # where only ONE hint survives (56 cells is the list's content with the
-    # sidebar up at 100 columns) keeps `enter answer`.
-    assert "enter answer" in listing.header_text(56)
-    assert "x dismiss" not in listing.header_text(56)
+    # where only ONE hint survives keeps `enter answer`. 63 cells is the list's
+    # content at a 100-column terminal with the default sidebar open (design
+    # round 2, D9: this comment used to say 56, which is what a ~93-column
+    # terminal gives; at 98 columns the sidebar leaves 57 and the hint is gone).
+    assert "enter answer" in listing.header_text(63)
+    assert "x dismiss" not in listing.header_text(63)
+    # THE KEY-ONLY RUNG (design round 2, D7): the counts are part of the header, so
+    # a tenth ask spends the cell the three-key row had. `x` keeps the door named
+    # where the full `x dismiss` no longer fits, and it is only ever the hint that
+    # would otherwise BREAK the row.
+    ten = AskQueueList(ask_rows([_row(f"a{i}") for i in range(1, 11)]))
+    at_ten = ten.header_text(74)
+    assert "x" in at_ten.split("·")[-1], at_ten
+    assert "x dismiss" not in at_ten
+    assert "enter answer" in at_ten and "d decline" in at_ten
+    # One cell wider and the verb comes back.
+    assert "x dismiss" in ten.header_text(78)
+    # A row that fits in full is never abbreviated to save nothing.
+    assert "x dismiss" in listing.header_text(78)
+
     # The FLEET scope spends 6 more cells on its subject, and the hints outbid
     # the drawer clause (D2), so the three keys survive where the clause cannot.
     fleet = AskQueueList(rows, scope=SCOPE_FLEET)

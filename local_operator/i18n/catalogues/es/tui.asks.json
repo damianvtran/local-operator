@@ -8,5 +8,6 @@
   "tui.asks.dismiss.moot_note": "el agente dejará de esperar respuesta",
   "tui.asks.dismiss.notice_answered_in_chat": "Descartada — respondida en la conversación",
   "tui.asks.dismiss.notice_moot": "Descartada — ya no hace falta",
+  "tui.asks.dismiss.notice_no_reply": "Descartada — no se envió respuesta",
   "tui.asks.dismiss.title": "Descartar esta pregunta"
 }

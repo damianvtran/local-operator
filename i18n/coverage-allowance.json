@@ -16676,6 +16676,7 @@
         "tui.asks.dismiss.moot_note",
         "tui.asks.dismiss.notice_answered_in_chat",
         "tui.asks.dismiss.notice_moot",
+        "tui.asks.dismiss.notice_no_reply",
         "tui.asks.dismiss.title"
       ]
     },
@@ -16715,6 +16716,7 @@
         "tui.asks.dismiss.moot_note",
         "tui.asks.dismiss.notice_answered_in_chat",
         "tui.asks.dismiss.notice_moot",
+        "tui.asks.dismiss.notice_no_reply",
         "tui.asks.dismiss.title"
       ]
     },

@@ -46,5 +46,9 @@ def dismiss_notice_moot() -> Msg:
     return Msg("tui.asks.dismiss.notice_moot", {})
 
 
+def dismiss_notice_no_reply() -> Msg:
+    return Msg("tui.asks.dismiss.notice_no_reply", {})
+
+
 def dismiss_title() -> Msg:
     return Msg("tui.asks.dismiss.title", {})

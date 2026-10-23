@@ -226,12 +226,16 @@ export function AskCard({
 	    from `expires_at` locally, never from a server-computed at-push string). */
 	nowMs: number;
 	/** Called after this surface settles, declines or dismisses the ask, so an
-	    aggregate list can re-read the index rather than guess the new state. */
-	onSettled?: () => void;
-	/** Called after a DISMISSAL is accepted, with the reason that was sent.
-	    The sheet needs the word, not just the fact: the card leaves the list and
-	    its absence used to be the only trace of the act (UX round 1, U2). */
-	onDismissed?: (reason: "moot" | "answered_in_chat" | undefined) => void;
+	    aggregate list can re-read the index rather than guess the new state. It
+	    names the OP: a sheet holding a dismissal receipt must retire it when the
+	    operator's next act was an answer, not keep describing the old one
+	    (agent review round 2, M1 = UX round 2, U9). */
+	onSettled?: (kind: "respond" | "decline" | "dismiss") => void;
+	/** Called after a DISMISSAL is accepted, with the ask it was about and the
+	    reason that was sent. The sheet needs both: the reason for the receipt's
+	    words, and the id so a later dismissal replaces this one instead of being
+	    confused with it (M1). */
+	onDismissed?: (askId: string, reason: "moot" | "answered_in_chat" | undefined) => void;
 }) {
 	/* The draft map: question id → the labels (or the typed string) the user has
 	   chosen but not yet sent. IT LIVES IN THE STORE, not in this component
@@ -366,7 +370,7 @@ export function AskCard({
 			   can come back in the list, and a re-filled card the user already
 			   answered reads as if their answer never landed. */
 			clearAskDraft(row.ask_id);
-			onSettled?.();
+			onSettled?.(kind);
 		} catch (failure) {
 			setError(refusalText(failure));
 			setErrorOp(kind);
@@ -444,7 +448,7 @@ export function AskCard({
 						? { op: "ask_dismiss", ask_id: row.ask_id, reason }
 						: { op: "ask_dismiss", ask_id: row.ask_id },
 				),
-			() => onDismissed?.(reason),
+			() => onDismissed?.(row.ask_id, reason),
 		);
 	};
 
@@ -717,6 +721,13 @@ export function AskCard({
 								   agent will be told, in the same shape the answer options above
 								   already use. */
 								<div className="flex flex-col gap-2">
+									{/* THE QUIET CONTROLS SIT ON THE CARD'S TEXT AXIS (design round
+									    2, D10): `cancel` and the `dismiss…` reveal are borderless, and
+									    their `px-2` box put their words 7.5 px inside the heading and
+									    the question, which the eye reads as a misalignment. `px-0`
+									    aligns the words to the box's own edge; `min-h-11` keeps the
+									    44 px target and the label's width keeps it above the 24 px
+									    floor. */}
 									<span className="text-meta text-ink-dim">
 										{messageRuntime.t("relay.ask.dismiss.title")}
 									</span>
@@ -753,10 +764,16 @@ export function AskCard({
 										type="button"
 										disabled={busy !== ""}
 										onClick={() => {
+											/* THE REFUSAL GOES WITH THE BLOCK IT EXPLAINED (UX round 2,
+											   U10 = agent review round 2, m1): the sentence renders
+											   outside the `closing` ternary, so leaving it behind put
+											   an old refusal under a fresh-looking `dismiss…`. */
 											setClosing(false);
 											setDismissRefused(false);
+											setError("");
+											setErrorOp("");
 										}}
-										className="flex min-h-11 self-start items-center rounded-sm px-2 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
+										className="flex min-h-11 self-start items-center rounded-sm px-0 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
 									>
 										{messageRuntime.t("relay.ask.dismiss.cancel")}
 									</button>
@@ -766,7 +783,7 @@ export function AskCard({
 									type="button"
 									disabled={busy !== "" || dismissRefused}
 									onClick={() => setClosing(true)}
-									className="flex min-h-11 self-start items-center rounded-sm px-2 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
+										className="flex min-h-11 self-start items-center rounded-sm px-0 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
 								>
 									{messageRuntime.t("relay.ask.dismiss.open")}
 								</button>

@@ -159,6 +159,59 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(screen.getByText(/nothing waiting/)).toBeTruthy());
 	});
 
+	it("acknowledges a dismissal while another ask is still waiting", async () => {
+		/* UX round 2, U9 = agent review round 2, M1(a): the receipt used to render
+		   only inside the `rows.length === 0` branch, so dismissing one of two asks
+		   — the ordinary queue — said nothing at all. It now sits above whatever
+		   remains, where the card left. */
+		const { sendCommand } = await import("./api");
+		let current = [ask({ ask_id: "a1" }), ask({ ask_id: "a2" })];
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ asks: current }));
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+			current = current.filter((row) => row.ask_id !== "a1");
+			return { ok: true, detail: "dismissed" };
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
+		fireEvent.click(screen.getAllByRole("button", { name: /^dismiss…$/ })[0]);
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		await waitFor(() =>
+			expect(screen.getByTestId("ask-receipt").textContent).toBe(
+				"Dismissed — no longer needed",
+			),
+		);
+		/* AND THE OTHER ASK IS STILL THERE: the receipt is a line, not a replacement
+		   for the list. */
+		expect(screen.getAllByTestId("ask-card").length).toBe(1);
+		expect(screen.queryByTestId("ask-sheet-empty")).toBeNull();
+	});
+
+	it("retires the receipt when the operator's next act is an answer", async () => {
+		/* M1(b): with the receipt kept only by "not empty", answering a second ask
+		   left "Dismissed — no longer needed" over an answer — the receipt outliving
+		   the act it described and naming the wrong one. A non-dismissal settlement
+		   clears it. */
+		const { sendCommand } = await import("./api");
+		let current = [ask({ ask_id: "a1" }), ask({ ask_id: "a2" })];
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+			current = current.filter((row) => row.ask_id !== "a1");
+			return { ok: true, detail: "dismissed" };
+		});
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ asks: current }));
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
+		fireEvent.click(screen.getAllByRole("button", { name: /^dismiss…$/ })[0]);
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		await waitFor(() => expect(screen.getByTestId("ask-receipt")).toBeTruthy());
+
+		/* The operator answers the remaining ask. */
+		fireEvent.change(screen.getByPlaceholderText("your answer"), {
+			target: { value: "yes — dark behind the flag" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
+		await waitFor(() => expect(screen.queryByTestId("ask-receipt")).toBeNull());
+	});
+
 	it("shows a receipt for the dismissal that emptied it, not the empty state", async () => {
 		/* UX round 1, U2: the daemon answers `{"ok": true, "detail": "dismissed"}`,
 		   the row leaves the aggregate, and "nothing waiting — questions the agent
