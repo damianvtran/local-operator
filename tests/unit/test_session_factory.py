@@ -3202,10 +3202,11 @@ async def test_a_childs_env_block_carries_its_own_session_id(tmp_config_dir: Pat
 
     ``_construct_child_session`` builds its own blocks (the factory is not
     reused), so threading the id into the factory's provider alone would have
-    left the COMMONEST shape — a delegated child, ~93% of sessions — with the
-    old three-line env block and no way to recognise its own row. The id here
-    is the same field its ToolContext carries, so the prompt and the listing
-    agree byte-for-byte.
+    left a delegated child — the shape ``.github/workflows/ci.yml`` records as
+    ~93% of sessions, the reason children get their own context ratchet — with
+    the old three-line env block and no way to recognise its own row. The id
+    here is the same field its ToolContext carries, so the prompt and the
+    listing agree byte-for-byte.
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
