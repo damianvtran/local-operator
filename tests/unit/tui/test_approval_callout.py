@@ -264,12 +264,20 @@ async def test_the_mode_line_distinguishes_session_override_from_global() -> Non
     cases = [
         (ApprovalPolicy(mode="ask", provenance="global"), "Approvals: Ask — global default."),
         (
-            ApprovalPolicy(mode="ask", provenance="session"),
-            "Approvals: Ask — this session overrides global Auto.",
+            ApprovalPolicy(mode="ask", provenance="session", global_mode="ask"),
+            "Approvals: Ask — this session overrides global Ask.",
         ),
         (
-            ApprovalPolicy(mode="auto", provenance="session"),
+            ApprovalPolicy(mode="auto", provenance="session", global_mode="auto"),
+            "Approvals: Auto — this session overrides global Auto.",
+        ),
+        (
+            ApprovalPolicy(mode="auto", provenance="session", global_mode="ask"),
             "Approvals: Auto — this session overrides global Ask.",
+        ),
+        (
+            ApprovalPolicy(mode="ask", provenance="session"),
+            "Approvals: Ask — this session override.",
         ),
         (
             ApprovalPolicy(mode="auto", provenance="global"),
@@ -279,6 +287,25 @@ async def test_the_mode_line_distinguishes_session_override_from_global() -> Non
     for policy, expected in cases:
         card = ApprovalPrompt("bash", "run: one", policy=policy)
         assert card._state_text(96) == expected
+
+    # THE REAL VIEW, both same-mode cases. The old renderer invented the
+    # complement of the live mode, so a fresh global=ask session switched with
+    # `/approvals ask` painted "global Auto" (UX round 2, U4).
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(100, 30)):
+        app._approvals_default_auto = False
+        app._explicit_approvals_mode = "ask"
+        policy = app._approval_policy_view()
+        assert policy.global_mode == "ask", policy
+        card = ApprovalPrompt("bash", "run: one", policy=policy)
+        assert card._state_text(96) == "Approvals: Ask — this session overrides global Ask."
+
+        app._approvals_default_auto = True
+        app._explicit_approvals_mode = "auto"
+        policy = app._approval_policy_view()
+        assert policy.global_mode == "auto", policy
+        card = ApprovalPrompt("bash", "run: one", policy=policy)
+        assert card._state_text(96) == "Approvals: Auto — this session overrides global Auto."
 
 
 @pytest.mark.asyncio
@@ -647,7 +674,7 @@ async def test_the_allow_consequence_follows_the_saved_policy(config_dir: Path) 
         await pilot.pause()
         assert card._policy.mode == "auto", card._policy
         after = "\n".join(_lines(card))
-        assert "run this call; later calls will not ask" in after, after
+        assert "run this call; later calls are auto" in after, after
         assert "run this call and ask again next time" not in after, after
         assert len(_lines(card)) == before_rows, "the swap moved a row"
 
@@ -716,8 +743,9 @@ async def test_lowercase_letters_type_rather_than_change_the_gate(config_dir: Pa
     The lowercase pair were instant accelerators in the first cut, which made
     the most common letters in a sentence write the machine-wide default with no
     confirmation — the footgun `A` is already uppercase to avoid (agent review
-    round 1, M1). Lowercase must fall through to the composer and leave BOTH the
-    gate and the record untouched.
+    round 1, M1). The safety property is INERTNESS: while the card holds focus,
+    printable keys that are not settings or answers are dropped rather than
+    delivered to the composer, so `s`/`g` change neither the gate nor the record.
     """
     session = GatedSession()
     app = OperatorApp(lambda: _factory(session))
@@ -736,3 +764,96 @@ async def test_lowercase_letters_type_rather_than_change_the_gate(config_dir: Pa
 
         await pilot.press("n")
         await asyncio.wait_for(pending, 2)
+
+
+def _answer_rows(app: OperatorApp, card: ApprovalPrompt) -> tuple[int, dict[str, int]]:
+    """(card height, painted row offset per answer label) from the COMPOSITOR.
+
+    The promise is about the frame the reader sees, not the renderer's string:
+    a row that wraps moves the rows BELOW it, and only the composited frame
+    shows that.
+    """
+    region = card._body.region
+    strips = app.screen._compositor.render_strips()
+    positions: dict[str, int] = {}
+    for offset, strip in enumerate(strips[region.y : region.y + region.height]):
+        text = strip.text[region.x : region.x + region.width]
+        for needle in ("y. Allow", "n. Deny", "A. Allow all"):
+            if needle in text:
+                positions[needle] = offset
+    return card.size.height, positions
+
+
+@pytest.mark.asyncio
+async def test_auto_copy_does_not_move_rows_at_46_columns(config_dir: Path) -> None:
+    """D5: the auto Allow consequence must fit the prose column at 46x30.
+
+    "run this call; later calls will not ask" is 39 cells; the prose column at a
+    46-column terminal is 37, so it wrapped and pushed Deny/Allow all down one
+    row (measured 46x30: card 12→13, Deny 5→6, Allow all 7→8). The replacement
+    is 35 cells. Both setting gestures are exercised because both repaint the
+    same description.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(46, 30)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
+        card = await _card(pilot, app)
+
+        before = ""
+        for _ in range(40):
+            await pilot.pause()
+            before = "\n".join(_lines(card))
+            if "run this call and ask again next time" in before:
+                break
+        assert "run this call and ask again next time" in before, before
+        height, rows = _answer_rows(app, card)
+        assert rows, "the answer rail never painted"
+
+        await pilot.press("S")
+        after = ""
+        for _ in range(40):
+            await pilot.pause()
+            after = "\n".join(_lines(card))
+            if "run this call; later calls are auto" in after:
+                break
+        assert "run this call; later calls are auto" in after, after
+        assert _answer_rows(app, card) == (height, rows), "S moved an answer row"
+
+        await pilot.press("G")
+        saved = ""
+        for _ in range(40):
+            await pilot.pause()
+            saved = "\n".join(_lines(card))
+            if "Global auto saved" in saved:
+                break
+        assert "Global auto saved" in saved, saved
+        assert _answer_rows(app, card) == (height, rows), "G moved an answer row"
+
+        await pilot.press("n")
+        await asyncio.wait_for(pending, 2)
+
+
+@pytest.mark.asyncio
+async def test_saved_callout_copy_never_clips_at_40_cells() -> None:
+    """The saved sentence is chosen for the CONTENT box, so it has to fit it.
+
+    At 40-44 cells the short form used to be "…Answer this request." (45/47
+    cells) and clipped to "…Answer this r". The full forms clipped from 63 to
+    their own lengths too. Every width >= 40 must return a sentence no wider
+    than the box.
+    """
+    from rich.cells import cell_len
+
+    for status in ("saved-session", "saved-global"):
+        for mode in ("auto", "ask"):
+            for width in range(40, 101):
+                policy = ApprovalPolicy(
+                    mode=mode,
+                    provenance="session" if status == "saved-session" else "global",
+                    global_mode="ask",
+                    status=status,
+                )
+                text = ApprovalPrompt("bash", "run: one", policy=policy)._state_text(width)
+                assert cell_len(text) <= width, (status, mode, width, text)

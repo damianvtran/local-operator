@@ -977,18 +977,58 @@ async def test_the_published_gate_carries_the_policy_and_its_provenance(tmp_path
     payload = store.calls[-1]["pending_gate"]
     assert payload["approval_mode"] == "ask", payload
     assert payload["approval_provenance"] == "global", payload
+    assert payload["approval_global_mode"] == "ask", payload
 
+    # GLOBAL ASK + SESSION ASK: the two words agree, and the payload must still
+    # carry the global half instead of letting a viewer derive the complement
+    # (the U4 defect said "global Auto" here).
+    handle._explicit_approvals_mode = "ask"
+    handle._publish_pending_gate()
+    payload = store.calls[-1]["pending_gate"]
+    assert payload["approval_mode"] == "ask", payload
+    assert payload["approval_provenance"] == "session", payload
+    assert payload["approval_global_mode"] == "ask", payload
+
+    # Session AUTO over a global ASK: the interesting cross direction.
     handle._explicit_approvals_mode = "auto"
     handle._publish_pending_gate()
     payload = store.calls[-1]["pending_gate"]
     assert payload["approval_mode"] == "auto", payload
     assert payload["approval_provenance"] == "session", payload
+    assert payload["approval_global_mode"] == "ask", payload
 
     pending = handle._fold.projection.pending
     assert pending is not None
     await handle.approval_answer(pending.request_id, False, False)
     assert await parked is False
     await handle.dispose()
+
+    # GLOBAL AUTO + SESSION AUTO, the mirror. A gate can be PARKED under auto
+    # only because it was raised before the mode moved (that is the saved-state
+    # card), so drive the real writes in that order rather than hand-setting the
+    # fields: default auto first, then this conversation's own auto.
+    from local_operator.session.frontend_state import SlashResult
+
+    (tmp_path / "mirror").mkdir()
+    auto_handle, auto_session, _auto_watcher, _auto_emitted = _handle(
+        tmp_path / "mirror", auto_approve=False
+    )
+    auto_store = _Store()
+    auto_session._frontend_state_store = auto_store  # type: ignore[attr-defined]
+    auto_parked = asyncio.ensure_future(auto_handle._approval_gate("bash", "probe"))
+    await asyncio.sleep(0)
+    auto_handle._approvals_default_slash("default auto", SlashResult)
+    auto_handle._approvals_slash(auto_handle._session, "auto", SlashResult)
+    auto_handle._publish_pending_gate()
+    auto_payload = auto_store.calls[-1]["pending_gate"]
+    assert auto_payload["approval_mode"] == "auto", auto_payload
+    assert auto_payload["approval_provenance"] == "session", auto_payload
+    assert auto_payload["approval_global_mode"] == "auto", auto_payload
+    auto_pending = auto_handle._fold.projection.pending
+    assert auto_pending is not None
+    await auto_handle.approval_answer(auto_pending.request_id, False, False)
+    assert await auto_parked is False
+    await auto_handle.dispose()
 
 
 @pytest.mark.asyncio

@@ -384,8 +384,18 @@ export function PendingCard({
 	const optionCount = pending.kind === "approval" ? 0 : pending.options.length;
 
 	/* The runtime's own answer about the gate, when it sends one (U2). Empty on
-	   an older owner and on every ask card, which renders no line. */
-	const policyLine = pending.kind === "approval" ? approvalPolicyLine(pending) : "";
+	   an older owner and on every ask card, which renders no line. When the
+	   effective mode is AUTO the card appends a second sentence: a request can
+	   still be waiting under auto (it was opened before a loosen, or the tool is
+	   one the gate always asks for), and the line must not let a reader read
+	   "runs without asking" as "this card is stale". The GATE SHEET paints the
+	   same `approvalPolicyLine` without that clause — it has no request in hand,
+	   so the sentence would name something that does not exist. */
+	const policyState = pending.kind === "approval" ? approvalPolicyLine(pending) : "";
+	const policyLine =
+		policyState && pending.approval_mode === "auto"
+			? `${policyState} This request still needs your answer.`
+			: policyState;
 
 	return (
 		<>

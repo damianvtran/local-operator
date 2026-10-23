@@ -289,24 +289,54 @@ describe("the pending card's approval-policy links", () => {
 });
 
 describe("the pending card's effective-mode line", () => {
-	it("says a session override and the global it overrides", async () => {
-		await renderCard(approval({ approval_mode: "ask", approval_provenance: "session" }));
-		expect(screen.getByText("Approvals: Ask — session override; global Auto.")).toBeTruthy();
+	it("names the REAL global when a session ask overrides it (U4)", async () => {
+		/* The defect: the global half was negated from the session mode, so
+		   global=ask with a session ask override claimed "overrides global Auto"
+		   — a statement about every other conversation, invented on the phone. */
+		await renderCard(
+			approval({
+				approval_mode: "ask",
+				approval_provenance: "session",
+				approval_global_mode: "ask",
+			}),
+		);
+		expect(screen.getByText("Approvals: Ask — session override; global Ask.")).toBeTruthy();
 	});
 
-	it("mirrors the session override in the auto direction", async () => {
-		await renderCard(approval({ approval_mode: "auto", approval_provenance: "session" }));
-		expect(screen.getByText("Approvals: Auto — session override; global Ask.")).toBeTruthy();
+	it("names the real global in the auto direction too, and says the card still waits", async () => {
+		await renderCard(
+			approval({
+				approval_mode: "auto",
+				approval_provenance: "session",
+				approval_global_mode: "auto",
+			}),
+		);
+		expect(
+			screen.getByText(
+				"Approvals: Auto — session override; global Auto. " +
+					"This request still needs your answer.",
+			),
+		).toBeTruthy();
+	});
+
+	it("drops the global clause rather than inventing one from an older owner", async () => {
+		await renderCard(approval({ approval_mode: "ask", approval_provenance: "session" }));
+		expect(screen.getByText("Approvals: Ask — session override.")).toBeTruthy();
+		expect(screen.queryByText(/global (Ask|Auto)/)).toBeNull();
 	});
 
 	it("says a global default when that is what is in force", async () => {
 		await renderCard(approval({ approval_mode: "ask", approval_provenance: "global" }));
 		expect(screen.getByText("Approvals: Ask — global default.")).toBeTruthy();
+		// An ask-mode card has nothing to warn about; the request clause is for auto.
+		expect(screen.queryByText(/This request still needs your answer/)).toBeNull();
 	});
 
-	it("separates a run pin from both saved scopes", async () => {
+	it("separates a run pin from both saved scopes, and keeps the request clause", async () => {
 		await renderCard(approval({ approval_mode: "auto", approval_provenance: "pin" }));
-		expect(screen.getByText("Approvals: Auto — this run.")).toBeTruthy();
+		expect(
+			screen.getByText("Approvals: Auto — this run. This request still needs your answer."),
+		).toBeTruthy();
 	});
 
 	it("renders no line when the owner publishes neither field", async () => {

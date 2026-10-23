@@ -53,6 +53,7 @@ export function GateSheet({
 	onReceipt,
 	approvalMode,
 	approvalProvenance,
+	approvalGlobalMode,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -76,6 +77,11 @@ export function GateSheet({
 	    when it is the runtime's answer. */
 	approvalMode?: ApprovalMode | "";
 	approvalProvenance?: ApprovalProvenance | "";
+	/** The machine default as the runtime resolved it, so a session override can
+	    name the scope it overrides (U4). Absent on an older owner, in which case
+	    `approvalPolicyLine` drops that clause rather than negating this
+	    conversation's mode into a claim about every other one. */
+	approvalGlobalMode?: ApprovalMode | "";
 }) {
 	const [busy, setBusy] = useState<Mode | null>(null);
 	const [error, setError] = useState("");
@@ -91,6 +97,7 @@ export function GateSheet({
 	const policyLine = approvalPolicyLine({
 		approval_mode: approvalMode,
 		approval_provenance: approvalProvenance,
+		approval_global_mode: approvalGlobalMode,
 	});
 
 	async function choose(mode: Mode) {

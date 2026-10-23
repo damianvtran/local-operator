@@ -307,6 +307,13 @@ export interface PendingRequest {
 	    memory of the last gesture it made from this screen. */
 	approval_mode?: ApprovalMode | "";
 	approval_provenance?: ApprovalProvenance | "";
+	/** The MACHINE default (`tool_approval_mode`) as the runtime resolves it, so a
+	    session override can state the mode it overrides without deriving it.
+	    Optional/empty on an older owner; `approvalPolicyLine` then drops that
+	    clause rather than negating the session mode into a claim about the
+	    machine (UX round 2, U4: global=ask + a session `ask` override rendered
+	    "overrides global Auto" because the runtime never sent this). */
+	approval_global_mode?: ApprovalMode | "";
 }
 
 export interface CompletionAttention {

@@ -274,6 +274,7 @@ function Header({
 				   sheet renders as no line rather than a guess. */
 				approvalMode={projection.pending?.approval_mode}
 				approvalProvenance={projection.pending?.approval_provenance}
+				approvalGlobalMode={projection.pending?.approval_global_mode}
 			/>
 		</header>
 		{gateReceipt ? (

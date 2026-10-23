@@ -1728,6 +1728,9 @@ class PendingGateState(BaseModel):
     #: ``mobile.types.PendingRequest`` for the vocabulary.
     approval_mode: str = ""
     approval_provenance: str = ""
+    #: The machine default the mode outranks; ``""`` when not stated. See
+    #: ``mobile.types.PendingRequest`` for why it is not derivable.
+    approval_global_mode: str = ""
 
 
 class PendingAskState(BaseModel):
