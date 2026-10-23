@@ -6222,6 +6222,49 @@ def build_app(daemon: MobileDaemon):
 
         return JSONResponse(await manifest_payload(config_dir(), session_id))
 
+    def _ranged_media_response(
+        request: Request, data: bytes, media_type: str, cache: dict[str, str]
+    ) -> Response:
+        """One media body, honouring a single byte Range.
+
+        THE ONE RANGE SPELLING for every sound/attachment byte route. Phone Safari
+        will not play audio or video that arrives as a full-body 200, and a media
+        element asking for a byte window is its normal case. A range set the
+        server does not honour (malformed, multi, inverted) is IGNORED into a
+        full 200 — the spec's remedy — while a start at or past EOF is a genuine
+        416 so the client learns its request was refused.
+        """
+        window = _range_window(request.headers.get("range", ""), len(data))
+        if isinstance(window, str):
+            # "unsatisfiable": the spec's own answer for a range set nothing
+            # can satisfy (a start at or past EOF).
+            return Response(
+                content=b"",
+                status_code=416,
+                headers={
+                    "Content-Range": f"bytes */{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **cache,
+                },
+            )
+        if window is not None:
+            first, last = window
+            return Response(
+                content=data[first : last + 1],
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Content-Range": f"bytes {first}-{last}/{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **cache,
+                },
+            )
+        return Response(
+            content=data,
+            media_type=media_type,
+            headers={"Accept-Ranges": "bytes", **cache},
+        )
+
     async def api_session_image(request: Request) -> Response:
         """One image attachment's bytes, fetched lazily by the transcript.
 
@@ -6301,36 +6344,102 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": "no such attachment"}, status_code=404)
         data, mime_type = found
         cache = {"Cache-Control": "public, max-age=31536000, immutable"}
-        window = _range_window(request.headers.get("range", ""), len(data))
-        if isinstance(window, str):
-            # "unsatisfiable": the spec's own answer for a range set nothing
-            # can satisfy (a start at or past EOF).
-            return Response(
-                content=b"",
-                status_code=416,
-                headers={
-                    "Content-Range": f"bytes */{len(data)}",
-                    "Accept-Ranges": "bytes",
-                    **cache,
-                },
+        return _ranged_media_response(request, data, mime_type, cache)
+
+    async def api_session_sound(request: Request) -> Response:
+        """One supplement sound's audio bytes, keyed by its attachment digest.
+
+        WHY A DIGEST-KEYED ROUTE AND NOT ANOTHER ``kind``. ``api_session_attachment``
+        indexes MESSAGE blocks by ``(entry, kind, i)``; a sound generated for a turn
+        is a supplement artifact carried on the beat's own ``sounds[]`` as
+        ``{attachment, mime, title, duration_s}``. It has no message block to index,
+        so the digest IS its whole address — the same shape the component document
+        route uses, and the shape the desktop plane's sound family uses.
+
+        GATES: the cookie (``gate``), the session existing as a LOCAL USER
+        conversation (``_durable_user_session_dir`` — a live generation and an ended
+        conversation both qualify, because a played-back answer must still play), and
+        the digest resolving in the content-addressed store. Deliberately NOT
+        ``_entry_for_session``: that serves only live generations, which would mute
+        every historical turn's sounds.
+
+        RANGE + CACHE mirror the attachment route: phone Safari will not play a
+        sound that arrives as a full-body 200, and the bytes are content-addressed so
+        the year-long ``immutable`` cache is safe (the digest changes when the audio
+        does). ``Content-Type`` is the sidecar's own ``mime_type``; ``audio/mpeg``
+        stands in only when the sidecar states none (``get_bytes``'s
+        ``application/octet-stream`` sentinel), never as a guess over a stated type.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        digest = request.query_params.get("digest", "")
+        from local_operator.supplements.contract import is_digest
+
+        if not is_digest(digest):
+            return JSONResponse({"error": "bad digest"}, status_code=400)
+
+        def load() -> tuple[bytes, str] | None:
+            from local_operator.session.attachments import AttachmentStore
+
+            if _durable_user_session_dir(session_id) is None:
+                return None
+            return AttachmentStore().get_bytes(digest)
+
+        found = await asyncio.to_thread(load)
+        if found is None:
+            return JSONResponse({"error": "no such sound"}, status_code=404)
+        data, mime_type = found
+        if mime_type == "application/octet-stream":
+            mime_type = "audio/mpeg"
+        cache = {"Cache-Control": "public, max-age=31536000, immutable"}
+        return _ranged_media_response(request, data, mime_type, cache)
+
+    async def api_session_waveform(request: Request) -> Response:
+        """One supplement sound's waveform sidecar, keyed by the same digest.
+
+        The reply is the stored ``<digest>.peaks.json`` payload
+        (``{version, bars, peaks}``), read through the core reader the desktop
+        library route also uses (``audiogen.recovery.waveform_payload``) so there is
+        ONE sidecar decoder and its bounded legacy repair is not re-implemented
+        here. ``no-store``: peaks are cheap to re-ask and a surface that renders a
+        waveform must never draw yesterday's bars for a re-generated digest.
+
+        A missing sidecar is a 404, NEVER a fabricated flat line: the phone draws
+        its honest flat scrubber from the absence itself, and a zero envelope the
+        audio does not have would be a lie about the sound.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        digest = request.query_params.get("digest", "")
+        from local_operator.supplements.contract import is_digest
+
+        if not is_digest(digest):
+            return JSONResponse(
+                {"error": "bad digest"},
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
             )
-        if window is not None:
-            first, last = window
-            return Response(
-                content=data[first : last + 1],
-                status_code=206,
-                media_type=mime_type,
-                headers={
-                    "Content-Range": f"bytes {first}-{last}/{len(data)}",
-                    "Accept-Ranges": "bytes",
-                    **cache,
-                },
+
+        def load() -> dict[str, Any] | None:
+            from local_operator.audiogen.recovery import waveform_payload
+            from local_operator.session.attachments import AttachmentStore
+
+            if _durable_user_session_dir(session_id) is None:
+                return None
+            return waveform_payload(AttachmentStore(), digest)
+
+        payload = await asyncio.to_thread(load)
+        if payload is None:
+            return JSONResponse(
+                {"error": "no waveform"},
+                status_code=404,
+                headers={"Cache-Control": "no-store"},
             )
-        return Response(
-            content=data,
-            media_type=mime_type,
-            headers={"Accept-Ranges": "bytes", **cache},
-        )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     # -- the supplement read family (memo §2.7; RFC D5) ----------------------------------
     #
@@ -8321,6 +8430,27 @@ def build_app(daemon: MobileDaemon):
             headers["Cache-Control"] = "private, max-age=300"
         return headers
 
+    async def api_library_waveform(request: Request) -> Response:
+        """One audio asset's waveform payload, through the library service.
+
+        A PROXY, not a decoder: ``library.service.waveform`` owns the two sources
+        of truth (a digest-backed asset's sidecar, a path-backed asset's one
+        bounded decode cached under ``cache/library/peaks``) and its refusals are
+        the ordinary 404s ``_library_call`` already maps. ``no-store`` for the same
+        reason the session route is: a re-indexed asset may change its peaks, and
+        a player must not draw an envelope the audio no longer has.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        response = await _library_call(
+            "waveform_payload", config_dir(), str(request.path_params["asset_id"])
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     async def api_library_bytes(request: Request) -> Response:
         """One asset's bytes. Addressed by id, Range-capable, never a path."""
         denied = gate(request)
@@ -8454,6 +8584,12 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
+        # The supplement sound family (sound parity, lane C): digest-addressed audio
+        # bytes with Range support, and the peaks sidecar beside them. Both are
+        # keyed by the beat's own ``sounds[].attachment`` rather than a message
+        # block index, because a turn's generated sound has no message block.
+        Route("/api/sessions/{session_id:str}/sound", api_session_sound),
+        Route("/api/sessions/{session_id:str}/waveform", api_session_waveform),
         Route(
             "/api/sessions/{session_id:str}/supplements/{digest:str}/document",
             api_session_supplement_document,
@@ -8534,6 +8670,7 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/library/assets/{asset_id:str}/content", api_library_bytes),
         Route("/api/library/assets/{asset_id:str}/thumbnail", api_library_thumb),
+        Route("/api/library/assets/{asset_id:str}/waveform", api_library_waveform),
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),
