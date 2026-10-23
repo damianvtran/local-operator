@@ -24,7 +24,7 @@
   "tui.authoring.no_change": "không có thay đổi để lưu",
   "tui.authoring.notice_read_only": "Chỉ đọc: runtime của cuộc trò chuyện này ở thiết bị khác nên không thể sửa hồ sơ tại đây.",
   "tui.authoring.proactive": "chủ động",
-  "tui.authoring.promote_failed": "không thể chuyển vào tài khoản: {reason}",
+  "tui.authoring.promote_failed": "không thể áp dụng thay đổi vào tài khoản: {reason}",
   "tui.authoring.promote_mixed_plan": "Thay thế định nghĩa hiện có trong tài khoản: {replaced} bằng bản sao của cuộc trò chuyện này. Đồng thời sao chép {created}. Thêm `yes` để thay thế và sao chép — chưa có gì thay đổi.",
   "tui.authoring.promote_plan": "Thêm `yes` để sao chép {names} vào tài khoản của bạn — chưa có gì thay đổi.",
   "tui.authoring.promote_receipt_created": "Đã sao chép {names} vào tài khoản của bạn.",

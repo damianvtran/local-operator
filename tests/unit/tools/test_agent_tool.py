@@ -2214,12 +2214,13 @@ async def test_a_tool_promote_is_refused_without_a_host_grant(context, registry)
     )
 
     assert "this run has no way to ask" in result.text
-    # U3 (round 1): the remedy names only surfaces that exist — the TUI verb,
-    # and the desktop session ROUTE as a capability, never a button no client
-    # in this slice draws.
-    assert "session promote route" in result.text
-    assert "Use-in-all-conversations" not in result.text
+    # U3 (rounds 1-2): the remedy names only the surface that exists — the TUI
+    # verb. A desktop action no client draws (and a route a user cannot take) is
+    # not a remedy, so no desktop clause survives.
     assert "/agent promote release-check" in result.text
+    assert "desktop" not in result.text.lower()
+    assert "Use-in-all-conversations" not in result.text
+    assert "cannot be run on their behalf" in result.text
     assert registry.global_registry.get_agent_by_name("release-check") is None
     assert registry.store_for("session").get_agent_by_name("release-check") is not None
 

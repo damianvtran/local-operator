@@ -328,16 +328,16 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
         # The copy already exists HERE; what is missing is the user's own act on a
         # surface that can show them exactly what will be copied.
         noun = "/agent promote" if intent.kind == "agent" else "/team promote"
-        # The remedy names only what exists: the TUI verb, and the desktop
-        # session route as a capability (``POST …/sessions/<id>/promote``) rather
-        # than a button. Round 1 (U3) caught the copy naming a desktop action no
-        # client in this slice draws; a surface that cannot be found is not a
-        # remedy.
+        # The remedy names only what exists: the TUI verb. Round 1 (U3) caught the
+        # copy naming a desktop action no client draws; round 2 caught the
+        # replacement sentence still hedging with "where that client offers one",
+        # which is not a surface a user can find. The desktop ROUTE exists, but a
+        # route is not an action the person in front of the account can take, and
+        # a remedy that has to be qualified is not one.
         return (
-            f"{opening} Ask them to promote it themselves: `{noun} {intent.name}` in "
-            "the TUI, or the desktop client's promote action where that client offers "
-            "one (the session promote route). Both name exactly what will be copied, "
-            "and neither can be run on their behalf."
+            f"{opening} Ask them to run the TUI's `{noun} {intent.name}` verb "
+            "themselves: it names exactly what will be copied, and it cannot be run "
+            "on their behalf."
         )
     if intent.kind == "team":
         action = "the TUI `/team` form"
