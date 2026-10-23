@@ -1055,10 +1055,12 @@ class TestTheRevalidationWindow:
         Six hidden directories and one user session, so the two answers differ
         by exactly the marker stats the skip suppresses — the number a CLI
         invocation pays per hidden directory today and stops paying inside the
-        window. The base four are the one user session's own checks: its own
-        marker probe, the archived-index probe, and its two activity files
-        (transcript, inbox). The final +1 is the save's own ``is_dir`` probe on
-        an existing cache directory, paid by any scan that writes.
+        window. The base six are the one user session's own checks: its own
+        marker probe, the archived-index probe, and its FOUR activity files
+        (transcript, inbox, and the two transcript-archive names that joined
+        ``retention._ACTIVITY_FILES`` with transcript compression). The final
+        +1 is the save's own ``is_dir`` probe on an existing cache directory,
+        paid by any scan that writes.
         """
         from local_operator import resume as resume_mod
 
@@ -1077,8 +1079,8 @@ class TestTheRevalidationWindow:
             _recent_sessions_with_origin(tmp_path)
 
         assert armed.counts["scandir"] == revalidating.counts["scandir"] == 1
-        assert armed.counts["stat"] == 4
-        assert revalidating.counts["stat"] == 4 + 6 + 1
+        assert armed.counts["stat"] == 6
+        assert revalidating.counts["stat"] == 6 + 6 + 1
 
     def test_the_boundary_is_the_window_and_future_stamps_are_distrusted(
         self, tmp_path: Path
@@ -1182,12 +1184,12 @@ class TestTheRevalidationWindow:
         resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
         with _counting() as armed:
             _recent_sessions_with_origin(tmp_path)
-        assert armed.counts["stat"] == 4, "the window is honoured: the skip stays armed"
+        assert armed.counts["stat"] == 6, "the window is honoured: the skip stays armed"
 
         resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
         with _counting() as forced:
             _recent_sessions_with_origin(tmp_path, None, revalidate=True)
-        assert forced.counts["stat"] == 4 + 6 + 1, "forced: the slow path regardless"
+        assert forced.counts["stat"] == 6 + 6 + 1, "forced: the slow path regardless"
 
         refreshed = json.loads(cache.read_text(encoding="utf-8"))["revalidated_at"]
         assert time.time() - refreshed < 5, "a completed revalidation moves the stamp"
@@ -1210,7 +1212,7 @@ class TestTheRevalidationWindow:
         resume_mod._SCAN_COUNT[str(tmp_path)] = resume_mod.REVALIDATE_EVERY
         with _counting() as epoch:
             _recent_sessions_with_origin(tmp_path)
-        assert epoch.counts["stat"] == 4 + 6 + 1
+        assert epoch.counts["stat"] == 6 + 6 + 1
 
     def test_an_armed_write_preserves_the_stamp(self, tmp_path: Path) -> None:
         """A write an ARMED scan makes — the entry set moved, a new session
