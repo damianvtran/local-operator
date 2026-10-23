@@ -4504,6 +4504,12 @@ async def _prepare(
         resolve_birth
     )
     yolo = bool(getattr(args, "yolo", False))
+    # The BIRTH SPEED DIAL (ui#1265): its viewer's choice for a conversation that
+    # did not exist yet, read exactly as ``birth_effort`` above is. A separate
+    # name because no CLI flag sets it -- only a viewer can pick a tier before a
+    # session exists -- so every other caller (the CLI, the TUI, ``exec``) leaves
+    # the attribute off and is constructed on the bytes it always was.
+    birth_fast = bool(getattr(args, "birth_fast", False))
 
     transcript_dir, agent_id, is_new = _transcript_dir_and_agent_id(agent, args, agent_registry)
 
@@ -4655,6 +4661,16 @@ async def _prepare(
         )
     )
     spec = model_configuration.spec
+    # THE BIRTH DIAL, clamped on the route's own ``supports_fast_mode`` -- the
+    # same conjunction the journal restore (``model_selection.fast_dial_from_row``)
+    # and the spawn environment (``launch._spawn_runtime``) apply, and for the
+    # same reason: a stored pick can outlive the catalogue that offered it, and
+    # putting the speed key on a request the provider refuses would fail the very
+    # turn this construction exists to open. CLAMPED rather than raised because
+    # the refusal belongs to the moment the user picks (the create/preview 422);
+    # by the time a birth record reaches here it is a decision already taken.
+    if birth_fast and spec.supports_fast_mode:
+        spec = spec.model_copy(update={"fast_mode": True})
 
     # ONE CONSTRUCTION SITE, and ``build_auth_store`` returns the very same
     # ``AuthStore`` on a device that borrows nothing — no network, no placement, or

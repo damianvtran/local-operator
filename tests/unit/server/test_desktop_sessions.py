@@ -2778,7 +2778,9 @@ CHOSEN_MODEL = {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning
 CONFIGURED = {"hosting": "anthropic", "model_name": "claude-sonnet-5"}
 
 
-def draft_model(provider: str = "deepseek", model_id: str = "deepseek-flash", effort=None, fast=None):
+def draft_model(
+    provider: str = "deepseek", model_id: str = "deepseek-flash", effort=None, fast=None
+):
     body = {"provider": provider, "model_id": model_id, "reasoning_effort": effort}
     # Omitted unless a test names it, so every pre-existing call builds the exact
     # body it built before this field existed (``None`` and absence are distinct
@@ -3012,6 +3014,25 @@ async def test_the_preview_says_a_model_with_no_tier_cannot_go_fast(draft_api) -
     )
     assert result.status_code == 422, result.text
     assert result.json()["detail"]["code"] == "fast_mode_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_the_backend_advertises_that_a_draft_can_pick_fast(draft_api) -> None:
+    """A client must be able to ASK before it sends the dial.
+
+    ``DraftModel`` inherits ``extra="forbid"``, so an older backend refuses the
+    whole create body over one unknown field — not just the dial. That is the
+    rule ``draft_selection`` sits beside ``draft_preview`` to state, one field
+    down: a renderer that does not see ``draft_fast`` keeps its speed toggle
+    inert rather than letting it dispatch into a 422, while the model and effort
+    chips it already had keep working.
+    """
+    client, _root = draft_api
+
+    capabilities = (await client.get("/v1/capabilities")).json()["result"]["features"]
+
+    assert capabilities["draft_fast"] == 1
+    assert capabilities["draft_selection"] == 1, "the picker the dial rides on must stay advertised"
 
 
 def _marker(root: Path, session_id: str) -> dict[str, Any]:
