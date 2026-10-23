@@ -228,6 +228,168 @@ def test_loop_reissue_and_cursor_persistence(tmp_path, monkeypatch) -> None:
     assert calls[1]["after"] == 7
 
 
+def test_pending_feed_refs_retry_on_204_without_poison_starvation(tmp_path, monkeypatch, caplog):
+    """A committed feed cursor is not proof that its refs reached screening.
+
+    Synthetic upgrade/receive shape: seven durable refs, one materialized
+    unread message, no hold/attempt. A pre-screen policy refusal must retain
+    only that failed ref, not strand it until somebody sends another message
+    or starve the six other refs. No live account or message ids are used.
+    """
+    from local_operator.team_bridge.types import project_message_ref
+
+    store, owner = _enroll(tmp_path)
+    ids = [f"bmsg_synthetic_{index}" for index in range(7)]
+    refs = [f"message_available:message_id={mid}" for mid in ids]
+    item = _item()
+    item["message"]["id"] = ids[0]
+    item["message"]["recipient"] = {
+        "account_id": owner.account_id,
+        "endpoint_id": owner.endpoint_id,
+    }
+    item["message"]["seq"] = 5  # message sequence is independent of feed cursor 7
+    store.merge_refs(owner, [project_message_ref(item)])
+    calls = []
+    polls = []
+    refusal = StoreRefused("policy_stale", "PRIVATE_EXCEPTION_CANARY")
+
+    async def events(owner_, **kwargs):
+        polls.append(int(kwargs["after"]))
+        if len(polls) == 1:
+            store.record_feed_batch(owner, feed_seq(7), refs, resync_required=False)
+            return {"cursor": 7, "refs": refs, "resync": False}
+        return None  # no new traffic, only the already committed ref remains
+
+    async def handle(owner_, mid, **kwargs):
+        calls.append(mid)
+        if mid == ids[0] and calls.count(mid) == 1:
+            raise refusal
+        return {"action": "delivered", "message_id": mid}
+
+    monkeypatch.setattr(pull_mod, "events", events)
+    monkeypatch.setattr(loop_mod, "handle_message_available", handle)
+    with caplog.at_level("WARNING"), pytest.raises(StoreRefused) as caught:
+        asyncio.run(
+            loop_mod.run_iteration(
+                owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+            )
+        )
+    assert caught.value is refusal  # steady-state failure backoff still owns retry pacing
+    assert calls == ids  # a poison first ref does not starve later messages
+    assert store.drain_feed_refs(owner, 7) == refs[:1]
+    assert store.screening_hold(owner, ids[0]) is None
+    assert "stage=pair_handling code=policy_stale" in caplog.text
+    assert "PRIVATE_EXCEPTION_CANARY" not in caplog.text
+    with store._connect() as conn:  # noqa: SLF001 — metadata-only test assertions
+        assert conn.execute("SELECT last_observed_at FROM sync").fetchone()[0] is None
+        assert conn.execute("SELECT count(*) FROM screening_attempts").fetchone()[0] == 0
+
+    result = asyncio.run(
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    assert polls == [0, 7]
+    assert result["reissued"] is True
+    assert result["handled"] == [{"action": "delivered", "message_id": ids[0]}]
+    assert store.drain_feed_refs(owner, 7) == []
+    asyncio.run(
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    assert calls == ids + ids[:1]  # a following 204 does not replay terminal work
+
+
+def test_204_empty_queue_has_no_delivery_or_resync_effects(tmp_path, monkeypatch):
+    store, owner = _enroll(tmp_path)
+    before = store.sync_state(owner)
+
+    async def timeout(*args, **kwargs):
+        return None
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("empty queue must not fetch, screen, wake or resync")
+
+    monkeypatch.setattr(pull_mod, "events", timeout)
+    monkeypatch.setattr(loop_mod, "handle_message_available", forbidden)
+    monkeypatch.setattr(loop_mod, "handle_conversation_available", forbidden)
+    monkeypatch.setattr(loop_mod, "resync_walk", forbidden)
+    result = asyncio.run(
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    assert result["handled"] == [] and result["events"] == 0
+    assert store.sync_state(owner) == before
+
+
+@pytest.mark.parametrize("action", ["claimed_elsewhere", "delivered", "bounce", "skipped"])
+def test_204_pending_ref_keeps_existing_once_only_outcomes(tmp_path, monkeypatch, action):
+    """The fix changes scheduling, not the spine's claim/terminal authority."""
+    store, owner = _enroll(tmp_path)
+    store.record_feed_batch(
+        owner,
+        feed_seq(3),
+        ["message_available:message_id=bmsg_synthetic"],
+        resync_required=False,
+    )
+    calls = []
+
+    async def timeout(*args, **kwargs):
+        return None
+
+    async def handle(owner_, mid, **kwargs):
+        calls.append(mid)
+        return {"action": action, "message_id": mid}
+
+    monkeypatch.setattr(pull_mod, "events", timeout)
+    monkeypatch.setattr(loop_mod, "handle_message_available", handle)
+    for _ in range(2):
+        asyncio.run(
+            loop_mod.run_iteration(
+                owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+            )
+        )
+    assert calls == ["bmsg_synthetic"]
+    assert store.drain_feed_refs(owner, 3) == []
+
+
+def test_204_pending_ref_stale_generation_cannot_fetch_or_wake(tmp_path, monkeypatch):
+    store, owner = _enroll(tmp_path)
+    _enable_bridge(tmp_path)
+    store.record_feed_batch(
+        owner,
+        feed_seq(3),
+        ["message_available:message_id=bmsg_synthetic"],
+        resync_required=False,
+    )
+    store.invalidate(owner)
+
+    async def timeout(*args, **kwargs):
+        return None
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("old owner generation must not cross a traffic boundary")
+
+    monkeypatch.setattr(pull_mod, "events", timeout)
+    monkeypatch.setattr(pull_mod, "message", forbidden)
+    monkeypatch.setattr(wake_mod, "screen_item", forbidden)
+    monkeypatch.setattr(wake_mod, "deliver_wake", forbidden)
+    with pytest.raises(StoreRefused):
+        asyncio.run(
+            loop_mod.run_iteration(
+                owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+            )
+        )
+    assert store.drain_feed_refs(owner, 3) == ["message_available:message_id=bmsg_synthetic"]
+
+
+@pytest.mark.parametrize("code", ["policy_stale", "PRIVATE_CODE_CANARY", None])
+def test_pre_screen_diagnostic_is_closed_and_never_logs_exception_prose(caplog, code):
+    failure = StoreRefused(code, "PRIVATE_BODY_CANARY token=PRIVATE_TOKEN_CANARY")
+    with caplog.at_level("WARNING"):
+        loop_mod._log_delivery_failure("pair_handling", failure)
+    expected = "policy_stale" if code == "policy_stale" else "unexpected_failure"
+    assert f"stage=pair_handling code={expected}" in caplog.text
+    assert "PRIVATE_" not in caplog.text
+    assert not any(record.exc_info for record in caplog.records)
+
+
 def test_resync_walk_completes_only_after_terminal_page(tmp_path, monkeypatch) -> None:
     store, owner = _enroll(tmp_path)
     from local_operator.team_bridge.types import InboxPage
