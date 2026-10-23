@@ -742,7 +742,6 @@ def _fatal_report_excerpt(output: str, limit: int = 4) -> str:
     return ""
 
 
-
 def _sanitized_fault_context(data: bytes) -> list[str]:
     """Only fatal markers and frame metadata; never echo arbitrary dump contents.
 
@@ -784,10 +783,13 @@ def _postmortem_receipt(child: Any) -> str:
         "returncode": child.process.returncode,
         "signal": -child.process.returncode if child.process.returncode < 0 else None,
         "reaped": child.process.returncode is not None,
+        "output_reader_joined": not child.reader.is_alive(),
         "startup": identity,
         "parent_path": str(source),
         "parent_sha256": expected,
-        "source_matches": identity.get("sha256") == expected and identity.get("path") == str(source),
+        "source_matches": (
+            identity.get("sha256") == expected and identity.get("path") == str(source)
+        ),
         "executable_matches": identity.get("executable") == str(Path(sys.executable).resolve()),
     }
     try:
@@ -1123,7 +1125,6 @@ def _scripted_spawn(
 _RIG_SENTINELS: tuple[str, ...] = ("ARM-PATH-RETURNED", "LOOP-SURVIVED")
 _DEAD_OUTPUT = "TICK 1\nTIMER-ARMED control\nGO"
 _GREEN_OUTPUT = "TICK 1\nTIMER-ARMED control\nGO\nARM-PATH-RETURNED\nLOOP-SURVIVED"
-
 
 
 def test_the_postmortem_context_keeps_the_fatal_frame_not_arbitrary_payload() -> None:
