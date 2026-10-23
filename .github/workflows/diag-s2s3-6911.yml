@@ -1,0 +1,42 @@
+name: S2 S3 bounded clock diagnostic 6911
+on:
+  push:
+    branches: [diag/s2s3-loop-clock-6911]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13.16'
+      - name: Exact closure setup or STOP
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -B -c 'import json,sys; assert sys.version_info[:3]==(3,13,16); assert json.load(open("scripts/diagnostics/s2s3_6911/manifest.json"))["textual_pin"], "canonical exact Textual pin unresolved; SOURCE WIP NOT READY"'
+          python -m pip install -e '.[dev]'
+      - name: Four fixed serial observations
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python -B scripts/run_bounded.py --timeout 60 --grace 5 --memory-mb 1024 -- python -B -m scripts.diagnostics.s2s3_6911.driver "$RUNNER_TEMP/s2s3-6911"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: s2s3-6911-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/s2s3-6911/*.json
+            ${{ runner.temp }}/s2s3-6911/*.log
+          if-no-files-found: warn
+          retention-days: 3
