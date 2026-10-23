@@ -449,18 +449,21 @@ def project_page_truncation_text(registry: Any) -> str:
     addressing verbs still resolve (the ordinal-502 incident). ONE copy for both
     ``/project`` listing renderers (the `list` branch and the nameless `show`
     overview), so the two receipts cannot disagree; the TUI page states the same
-    fact through its own renderer's existing overflow row.
+    fact through its own renderer's existing overflow row. The count is the PAGE
+    CUT (``PageCounts.beyond_page``), never ``on_disk - loaded``: an unreadable
+    row is not hidden-by-page, and the sentence promises the row is addressable.
     """
-    on_disk = int(getattr(registry, "rows_on_disk", 0) or 0)
-    loaded = int(getattr(registry, "rows_loaded", 0) or 0)
-    hidden = on_disk - loaded
+    counts = getattr(registry, "page_counts", None)
+    if counts is None:
+        return ""
+    hidden = counts.beyond_page
     if hidden <= 0:
         return ""
     noun = "row is" if hidden == 1 else "rows are"
     return (
-        f"showing the {loaded} most recently active of {on_disk} stored projects "
-        f"— {hidden} dormant {noun} not listed; /project show <name> still finds "
-        "any project."
+        f"showing the {counts.loaded} most recently active of {counts.total_rows} stored "
+        f"projects — {hidden} {noun} not listed; /project show <name> still "
+        "finds any project."
     )
 
 

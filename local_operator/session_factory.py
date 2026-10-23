@@ -2379,6 +2379,13 @@ def _projects_fingerprint(hooks: _KnowledgeHooks) -> tuple[int, float] | None:
     ``updated_at``, a delete moves at least one of the two — while an update the
     store itself refused as a no-op (identical text on a fresh record) writes
     nothing and correctly changes nothing here.
+
+    PAGE-SCOPED, deliberately: ``list_projects`` is the registry's recency page,
+    so this signal watches the rows a session can currently see. A change to a
+    row that has aged off the page is not detected here — but a write to that
+    row moves its mtime and promotes it back, which changes this pair on the
+    next read, and a delete of an invisible row changes nothing a session could
+    have been told about. The signal is an optimisation, never a gate (m2).
     """
     registry = hooks.project_registry
     if registry is None:
