@@ -85,6 +85,7 @@ from local_operator.compaction.marker import (
     marker_details,
     render_compaction_marker,
     replayed_user_message,
+    with_attachment_manifest,
     with_capture_elision_frontier,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
@@ -171,6 +172,7 @@ from local_operator.harness.types import (
     CompactionStartEvent,
     Content,
     CustomMessage,
+    DocumentContent,
     EventHandler,
     HistoryDeltaEvent,
     ImageContent,
@@ -8801,6 +8803,7 @@ class Session:
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: Sequence[AudioContent] | None = None,
+        documents: Sequence[DocumentContent] | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -9002,7 +9005,7 @@ class Session:
                 extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
             elif input_path is not None:
                 extra["input_path"] = input_path
-            user = Message.user(text, images, audio=audio, **extra)
+            user = Message.user(text, images, audio=audio, documents=documents, **extra)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -9071,6 +9074,7 @@ class Session:
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: Sequence[AudioContent] | None = None,
+        documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
     ) -> None:
         """Inject an identified steering message into the running turn.
@@ -9131,7 +9135,7 @@ class Session:
             extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
         elif input_path is not None:
             extra["input_path"] = input_path
-        message = Message.user(text, images, audio=audio, **extra)
+        message = Message.user(text, images, audio=audio, documents=documents, **extra)
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -22351,6 +22355,14 @@ class Session:
                 summarized
                 if summarized is not None
                 else await self._produce_summary(compaction_api, to_summarize, plan.strategy)
+            )
+            # THE ATTACHMENTS MANIFEST, on the session's own compaction path:
+            # merged once, after either strategy produced its payload, exactly
+            # as ``run_compaction_pass`` does (contract amendment 5). Without
+            # this the primary path (/compact) would lose files while the
+            # detached pass kept them.
+            preserve_data = with_attachment_manifest(
+                preserve_data, to_summarize, world_root=self._confinement_root
             )
             # STRUCTURAL guarantee that a user turn is never paraphrased away.
             # The summarizer still ran over ``to_summarize`` above — the summary

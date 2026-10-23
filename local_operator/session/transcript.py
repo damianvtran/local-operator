@@ -57,6 +57,7 @@ from local_operator.harness.types import (
     AgentMessage,
     AudioContent,
     CustomMessage,
+    DocumentContent,
     Message,
     TextContent,
     drop_blank_text_blocks,
@@ -503,6 +504,7 @@ def encode_message_payload(
     message = _without_blank_user_text(message)
     payload = message.model_dump(exclude_defaults=True, exclude={"id"})
     _stamp_audio_discriminants(message, payload)
+    _stamp_document_discriminants(message, payload)
     _externalize_attachments(payload, attachments)
     for call in payload.get("tool_calls") or ():
         raw = call.get("raw_arguments")
@@ -587,6 +589,32 @@ def _stamp_audio_discriminants(message: Message | CustomMessage, payload: dict[s
             encoded["type"] = block.type
 
 
+def _stamp_document_discriminants(
+    message: Message | CustomMessage, payload: dict[str, Any]
+) -> None:
+    """Re-add ``type: "document"`` to encoded document blocks, in place.
+
+    Same trap as audio (see :func:`_stamp_audio_discriminants`): the encoder
+    dumps with ``exclude_defaults`` and ``type`` IS the model default, so a
+    typeless durable row with a ``data`` string parses back as
+    :class:`ImageContent` — a PDF replayed as an image on every later turn.
+    Stamped from the SOURCE blocks rather than guessed from ``filename``/
+    ``mime_type``: a live block is the authority on what it is.
+
+    Documents are stamped ALWAYS (unlike audio, which only needs the stamp
+    when it exists): the contract's durable shape carries the discriminant,
+    which is also what lets a reader tell a document row from an attachment
+    reference without inferring from key combos.
+    """
+    content = payload.get("content")
+    source = getattr(message, "content", None)
+    if not isinstance(content, list) or not isinstance(source, list):
+        return
+    for block, encoded in zip(source, content):
+        if isinstance(block, DocumentContent) and isinstance(encoded, dict):
+            encoded["type"] = block.type
+
+
 def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentStore | None) -> None:
     """Move inline base64 image payloads out of ``payload`` into the store.
 
@@ -603,6 +631,26 @@ def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentSto
         return
     for block in content:
         if not isinstance(block, dict):
+            continue
+        # DOCUMENTS are externalized like images but on their own arm, because
+        # the identifying key is ``type`` (stamped just above) and the durable
+        # row also drops the live ``digest`` field: the reference lives under
+        # ``attachment``, mirroring the image convention. Below the floor the
+        # bytes stay inline -- a small text file costs less than a reference
+        # plus a store round-trip on every replay.
+        if block.get("type") == "document" or (
+            "filename" in block and "mime_type" in block and "data" in block
+        ):
+            data = block.get("data")
+            if not isinstance(data, str) or len(data) < _ATTACHMENT_FLOOR_BYTES:
+                continue
+            ref = attachments.put(data, str(block.get("mime_type", "application/octet-stream")))
+            if ref is None:
+                continue
+            block.pop("data", None)
+            block.pop("digest", None)
+            block[ATTACHMENT_KEY] = ref.digest
+            block["mime_type"] = ref.mime_type
             continue
         # An ARTIFACT block is ref-based by construction — its bytes were
         # cached by its producer before the block existed — so there is
@@ -649,6 +697,42 @@ def _resolve_attachments(payload: dict[str, Any], attachments: AttachmentStore) 
         return
     for block in content:
         if not isinstance(block, dict):
+            continue
+        # DOCUMENTS: the mirror of the externalize arm above, and the digest is
+        # RESTORED onto the block rather than popped (amendment 4) -- a
+        # resolved document row keeps naming its retained copy, which the path
+        # hint and a later compaction manifest both read. A missing blob
+        # becomes a named TEXT notice: an empty document block would render as
+        # nothing at all, which is how the operator's PDF silently vanished in
+        # the first place.
+        if block.get("type") == "document" or (
+            "filename" in block and "mime_type" in block and ATTACHMENT_KEY in block
+        ):
+            digest = block.get(ATTACHMENT_KEY)
+            if not isinstance(digest, str):
+                continue
+            resolved_document = attachments.get(digest)
+            if resolved_document is None:
+                filename = str(block.get("filename") or "an attached file")
+                mime = str(block.get("mime_type") or "unknown type")
+                logger.warning("transcript references missing attachment %s", digest)
+                block.clear()
+                block.update(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"[The attached file {filename} ({mime}) could not be loaded from "
+                            "the attachment store; its retained copy is missing. Ask the user "
+                            "to attach the file again.]"
+                        ),
+                    }
+                )
+                continue
+            data, mime_type = resolved_document
+            block.pop(ATTACHMENT_KEY, None)
+            block["data"] = data
+            block["mime_type"] = mime_type
+            block["digest"] = digest
             continue
         # Artifact blocks are NOT resolved here, deliberately. This pass
         # inlines bytes for consumers that need them in memory and, for a

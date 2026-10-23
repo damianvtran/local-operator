@@ -13,7 +13,17 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, Any, Callable, Literal, NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
@@ -21,6 +31,7 @@ from pydantic import (
     Field,
     StrictBool,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from starlette.background import BackgroundTask
@@ -65,6 +76,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionList,
     SessionSearch,
     SessionSnapshot,
+    StoredFile,
     SupplementReceipt,
     WarmReceipt,
     WatchReceipt,
@@ -318,15 +330,34 @@ def _admission_failure_detail(error: BaseException) -> str:
     distinction a caller acts on. Everything else gets the generic sentence.
     """
     from local_operator.session.errors import (
+        AttachmentMissing,
         AttachmentUnavailable,
         AudioInputUnsupported,
+        DocumentCarriageUnsupported,
         ProfileRegistryUnavailable,
+        RemoteDocumentUnsupported,
         RuntimeRetiring,
     )
 
+    if isinstance(error, AttachmentMissing):
+        # The FILE NAME is client-supplied, so it is bounded and stripped
+        # here rather than quoted through the category's sentence: the frame
+        # may be replayed to later viewers, and this method's rule is that no
+        # owner-supplied text crosses. The HTTP 409 carries the full sentence
+        # to the composer that can act on it.
+        name = "".join(character for character in error.filename if character.isprintable())[:120]
+        subject = name or "an attached file"
+        return f"failed; {subject} could not be found in the attachment store"
     if isinstance(
         error,
-        (AttachmentUnavailable, AudioInputUnsupported, ProfileRegistryUnavailable, RuntimeRetiring),
+        (
+            AttachmentUnavailable,
+            AudioInputUnsupported,
+            DocumentCarriageUnsupported,
+            ProfileRegistryUnavailable,
+            RemoteDocumentUnsupported,
+            RuntimeRetiring,
+        ),
     ):
         # Safe by construction: these carry no owner-supplied text.
         return f"failed; {error}"
@@ -1110,6 +1141,31 @@ class Image(Input):
         return value
 
 
+class PromptImage(Image):
+    """An image on the MESSAGE route, with optional file provenance.
+
+    Separate from :class:`Image` rather than a field on it because the ANSWER
+    route's body is compared key-for-key with what was sent (its own tests pin
+    ``model_dump`` equality), and a new null key on every answer image would
+    change a wire shape that has nothing to do with documents. The wrap
+    serializer drops the key when unset, so a composer that pasted a
+    screenshot sends the exact frame it always did.
+
+    ``origin_path`` is the client's absolute path for a dropped/picked file:
+    provenance and display only (``ImageContent.path``). No serializer reads
+    it.
+    """
+
+    origin_path: str | None = Field(default=None, max_length=4096)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_origin(self, handler: Any, info: Any) -> Any:
+        data = handler(self)
+        if isinstance(data, dict) and data.get("origin_path") is None:
+            data.pop("origin_path", None)
+        return data
+
+
 class AnswerImage(Image):
     """One image on a QUEUED-ASK answer, tagged with the question it answers.
 
@@ -1153,10 +1209,37 @@ class Audio(Input):
         return value
 
 
+class FileRef(Input):
+    """One staged document the composer is sending, BY REFERENCE.
+
+    The bytes live in the attachment store from the upload
+    (``POST /v1/desktop/attachments``); this record is ~120 bytes, which is
+    what lets a PDF ride a 900 kB control frame. ``name``/``path`` are the
+    SEND's provenance (contract amendment 7): the store's sidecar keeps only
+    MIME and size, so a second upload of identical bytes cannot inherit an
+    earlier chip's name.
+
+    ``digest`` is validated here as 32 lowercase hex — the store's own
+    filename shape — before a handler can touch the disk. A digest that does
+    not RESOLVE on the owner is a refusal of the send (409), never a drop.
+    """
+
+    digest: str = Field(pattern=r"^[a-f0-9]{32}$")
+    name: str | None = Field(default=None, max_length=260)
+    mime_type: str | None = Field(default=None, max_length=200)
+    bytes: int | None = Field(default=None, ge=0)
+    path: str | None = Field(default=None, max_length=4096)
+
+
 class Prompt(Input):
     request_id: RequestID
     text: str = Field(max_length=200_000)
-    images: list[Image] = Field(default_factory=list, max_length=8)
+    images: list[PromptImage] = Field(default_factory=list, max_length=8)
+    # Documents ride as REFERENCES: the upload route stored the bytes, and the
+    # frame carries only digests. The eight-file bound matches the image
+    # bound, and the bytes do not ride the frame, so the 900 kB body cap is
+    # untouched (contract §1.2).
+    files: list[FileRef] = Field(default_factory=list, max_length=8)
     # The recording door: at most one block in v1 (a send is one recording —
     # the sidecar forks once per block, and the wire budgets in `stt/audio.py`
     # are sized for a single capture inside the 900 kB body cap).
@@ -1187,7 +1270,7 @@ class Prompt(Input):
 
     @model_validator(mode="after")
     def nonempty(self):
-        if not self.text.strip() and not self.images and not self.audio:
+        if not self.text.strip() and not self.images and not self.audio and not self.files:
             raise ValueError("Enter a message or attach an image or recording")
         # A slash CONTROL must never become paid model chat, and this is the one
         # test that decides it: a draft that, as a whole, IS a command was meant
@@ -2006,10 +2089,13 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         from local_operator.session.errors import (
             AsideAdoptRefused,
             AsideUnanswered,
+            AttachmentMissing,
             AttachmentUnavailable,
             AudioInputUnsupported,
+            DocumentCarriageUnsupported,
             ForkRefused,
             ProfileRegistryUnavailable,
+            RemoteDocumentUnsupported,
             RuntimeRetiring,
         )
         from local_operator.session.model_admission import RuntimeUpgradeNeededError
@@ -2083,9 +2169,12 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         if isinstance(
             error,
             (
+                AttachmentMissing,
                 AttachmentUnavailable,
                 AudioInputUnsupported,
+                DocumentCarriageUnsupported,
                 ProfileRegistryUnavailable,
+                RemoteDocumentUnsupported,
                 RuntimeRetiring,
             ),
         ):
@@ -3800,6 +3889,92 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
     )
 
 
+@router.post("/v1/desktop/attachments", response_model=CRUDResponse[StoredFile])
+async def upload_attachment(
+    request: Request,
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+    origin_path: str | None = Form(default=None),
+):
+    """Store one composer attachment and return its digest-bearing reference.
+
+    THE UPLOAD IS THE ONLY PATH THAT CARRIES THE BYTES, and it is deliberately
+    NOT session-scoped: a composer stages a file before the conversation it
+    will be sent to exists (the first message of a new chat), and the store is
+    content-addressed and shared across conversations by design (the byte
+    route beside this one states the same rule). ``session_id`` would be an
+    existence check with nothing to check against.
+
+    MULTIPART rather than base64 JSON: a 32 MB file is 43 MB of base64, and
+    the control-frame limit (900 kB) is not a number this route may raise —
+    the frame carries DIGESTS, never bytes.
+
+    MIME COMES FROM THE BYTES (``sniff_document_mime``), never from the
+    client's ``file.content_type``: the browser derives that from the
+    extension, which is exactly the claim a renamed PDF has to survive. The
+    sidecar keeps MIME and size only (contract amendment 7); ``name`` and
+    ``origin_path`` ride this response and ``Prompt.files``, so a second
+    upload of identical bytes cannot inherit an earlier chip's name.
+
+    IDEMPOTENT by content digest: the store's own contract — the second write
+    is a hash and a stat, and both sends get the same record.
+
+    Refusals: an empty file is 400, over :data:`MAX_ATTACHMENT_UPLOAD_BYTES`
+    is 413 (the cap matches Anthropic's request ceiling, the tightest native
+    document limit), and a store write failure is 503 with the ladder's
+    envelope. All three name the file: a chip that silently vanished is the
+    class of defect this whole contract exists to remove.
+    """
+    from local_operator.i18n.keys import wire_errors_desktop as _wd
+    from local_operator.session.attachments import (
+        MAX_ATTACHMENT_UPLOAD_BYTES,
+        AttachmentStore,
+        sniff_document_mime,
+    )
+
+    display_name = name or (file.filename or "")
+    # One byte over the cap is enough to answer 413; reading the whole upload
+    # first would be the memory the cap exists to bound.
+    raw = await file.read(MAX_ATTACHMENT_UPLOAD_BYTES + 1)
+    if not raw:
+        raise HTTPException(
+            400,
+            _wd.desktop_refusal(error=f"{display_name or 'the file'} is empty").envelope(
+                code="attachment_empty"
+            ),
+        )
+    if len(raw) > MAX_ATTACHMENT_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            _wd.desktop_refusal(
+                error=(
+                    f"{display_name or 'the file'} is larger than "
+                    f"{MAX_ATTACHMENT_UPLOAD_BYTES // (1024 * 1024)} MB"
+                )
+            ).envelope(code="attachment_too_large"),
+        )
+    mime_type = sniff_document_mime(raw, display_name)
+    store = AttachmentStore()
+    ref = await asyncio.to_thread(store.put_bytes, raw, mime_type)
+    if ref is None:
+        raise HTTPException(
+            503,
+            _wd.desktop_refusal(
+                error="the attachment store could not save the file; check free disk space"
+            ).envelope(code="attachment_store_unavailable"),
+        )
+    return reply(
+        StoredFile(
+            digest=ref.digest,
+            name=display_name or None,
+            mime_type=ref.mime_type,
+            bytes=ref.bytes,
+            path=origin_path or None,
+            stored_path=str(store.path_for(ref.digest)),
+        )
+    )
+
+
 @router.get("/v1/desktop/sessions/{session_id}/attachments/{digest}/waveform")
 async def attachment_waveform(session_id: str, digest: AttachmentDigest, request: Request):
     """Precomputed waveform peaks for one attachment: ``{version, bars, peaks}``.
@@ -3957,6 +4132,12 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                         body.text,
                         command_id=body.request_id,
                         images=images,
+                        # Documents ride as REFERENCES and are resolved by the
+                        # OWNER (its store holds them for a local session).
+                        # A peer owner is refused on this side before the frame
+                        # is sent — ``admit_prompt`` raises
+                        # ``RemoteDocumentUnsupported`` (contract amendment 2).
+                        files=[reference.model_dump() for reference in body.files],
                         # Recordings travel UNSTAGED, deliberately: the peer
                         # image stage exists so the SENDER's viewer can resolve
                         # the digest the owner journals, and v1 has no audio
