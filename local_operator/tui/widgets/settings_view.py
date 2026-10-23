@@ -810,6 +810,23 @@ class SettingsViewDismissed(Message):
     """
 
 
+class SettingsGateRoute(Message):
+    """The owner's answer to a routed approval-default change.
+
+    Posted back to the settings page rather than painted by the app because the
+    page HIDES the transcript the owner's receipt lands in (`_open_settings_view`)
+    — a success or refusal the user cannot see is the two-truths split this
+    message exists to close (UX round 1, U1). ``ok`` is the owner's own verdict
+    (`tool approvals: auto` at the head of its receipt), never the local write's
+    success, so a refusal can never be painted as a save.
+    """
+
+    def __init__(self, ok: bool, text: str) -> None:
+        super().__init__()
+        self.ok = ok
+        self.text = text
+
+
 class SettingsChanged(Message):
     """A setting was written. Carries the key so the app can react live.
 
@@ -2227,6 +2244,40 @@ class SettingsView(Vertical):
             return
         self.post_message(SettingsChanged(setting.key, value))
         self._notice_alert = self._take_gate_kept_notice(setting.key)
+        # A `tool_approval_mode: auto` write is a DEFAULT for new sessions. When
+        # an attached runtime owns the live gate, the file write alone would
+        # leave the session the user is looking at prompting while this page
+        # reported success — the same two-truths split the `/approvals` handler
+        # documents. The platform's existing authority-bearing route is
+        # `default auto`; asking the app to send it is what turns the write into
+        # the operator's own instruction to the process that holds the gate.
+        # The answer arrives as :class:`SettingsGateRoute`, because the route is
+        # a socket round-trip and this page must report the ACTUAL outcome.
+        route = getattr(self.app, "route_approvals_default_from_page", None)
+        if (
+            setting.key == "tool_approval_mode"
+            and str(value).strip().lower() == "auto"
+            and callable(route)
+        ):
+            route(self)
+        self._repaint()
+
+    def on_settings_gate_route(self, message: SettingsGateRoute) -> None:
+        """Paint the gate owner's verdict where the page can be read.
+
+        Refusals keep the page's existing refusal alert (`_notice_alert`), so
+        the row looks like every other failed write on this page rather than
+        inventing a second error vocabulary; a success replaces the provisional
+        "saved" line with the owner's own receipt.
+        """
+        if message.ok:
+            self._notice = message.text
+            self._error = ""
+            self._notice_alert = False
+        else:
+            self._error = message.text
+            self._notice = ""
+            self._notice_alert = True
         self._repaint()
 
     def _take_gate_kept_notice(self, key: str) -> bool:
