@@ -11,6 +11,13 @@ The arms therefore take ``client_for_tenant(tenant_id)`` and pick per item, and
 the tenant a row was pulled from comes from its baseline record — never from the
 remote. A 404 is "unavailable / hub-item-missing" and is NEVER read as "the hub
 removed it, delete locally": removal and lost membership are indistinguishable.
+
+THE SKILL READ IS CONDITIONAL (client half of agent-server #175). The skill arm
+sends the revision the link already holds as ``If-None-Match``, so an unchanged
+row answers ``304`` and transfers headers instead of the whole manifest. A
+``304`` means exactly what "remote equals baseline" means everywhere below --
+unchanged, no body, no merge, no revision advance -- and is NEVER a failed
+check. See :func:`check_hub_skills`.
 """
 
 from __future__ import annotations
@@ -595,6 +602,7 @@ def check_hub_skills(
     it always had.
     """
 
+    from local_operator.clients.radient import NotModified
     from local_operator.hub_sync.adapters import SkillAdapter
     from local_operator.hub_sync.skill_storage import ManagedSkillStorage
 
@@ -684,8 +692,33 @@ def check_hub_skills(
             )
             continue
         fetcher = fetch or _fetch_skill
+        conditional_match = False
+        matched_revision: str | None = None
+        # CONDITIONAL READ (client half of agent-server #175): revalidate against
+        # the revision this link already holds -- the same baseline
+        # ``remote_revision`` the push CAS sends as ``If-Match`` -- so an unchanged
+        # row costs headers instead of the whole manifest (~55 KiB each across the
+        # catalogue, hourly, per client). ``None`` (a first pull, or a legacy
+        # baseline that recorded no revision) sends NO header: there is nothing to
+        # revalidate against, and an unconditional 200 is the only honest read.
         try:
-            document = fetcher(client, record.hub_id, timeout=REQUEST_TIMEOUT_S)
+            document = fetcher(
+                client,
+                record.hub_id,
+                timeout=REQUEST_TIMEOUT_S,
+                if_none_match=record.remote_revision,
+            )
+        except NotModified as not_modified:
+            # THE HUB SAYS THE REPRESENTATION WE HOLD IS STILL CURRENT, which is
+            # the "remote equals baseline" case with zero bytes on the wire.
+            # Continuing with the baseline fields as R takes the SAME downstream
+            # path a 200 carrying identical bytes takes -- canonical projection,
+            # name-space comparison, classification, merge, apply -- so a 304 can
+            # never read as a change; `matched_revision` below keeps the revision
+            # from advancing. It is emphatically NOT a failed check.
+            document = dict(record.fields)
+            conditional_match = True
+            matched_revision = record.remote_revision or not_modified.etag
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error)
             checks.append(
@@ -733,6 +766,13 @@ def check_hub_skills(
             continue
         remote_fp = prov.fingerprint_snapshot("skill", remote)
         revision, sync_contract = _remote_meta(document)
+        if conditional_match:
+            # A 304 has no body, so no ``revision``/``sync_contract`` keys to read.
+            # The revision is the one the hub just CONFIRMED as current -- the
+            # value we already held, never an advance -- and a contract can only be
+            # observed in a body, so this response records none (the per-source
+            # attestation stays exactly as the last real response left it).
+            revision = matched_revision
         publisher = _document_publisher(document)
         if absent:
             # NO LOCAL SIDE TO COMPARE. The remote is reported as AVAILABLE, which
@@ -834,7 +874,13 @@ def _document_publisher(document: Mapping[str, Any]) -> dict[str, str] | None:
     return publisher
 
 
-def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, Any]:
+def _fetch_skill(
+    client: Any,
+    skill_id: str,
+    *,
+    timeout: float,
+    if_none_match: str | None = None,
+) -> Mapping[str, Any]:
     """Default skill fetch: the client's manifest pull, through the tested seam.
 
     PUBLIC skill rows are readable UNAUTHENTICATED -- the server registers
@@ -843,10 +889,17 @@ def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, 
     the signed-in client still carries its bearer (an org row answers 404 to
     anyone who cannot prove membership). Before this, a public skill link was
     'unavailable: Radient API key is required' with zero requests (round-2 QN3).
+
+    ``if_none_match`` is the validator the caller holds (this link's baseline
+    revision). The client turns a match into ``NotModified`` -- HTTP 304, no
+    body -- and this seam passes that through untouched: translating it here
+    would hide the one fact the caller needs, that the row did not move.
     """
 
     send_bearer = bool(getattr(client, "api_key", None))
-    return client.get_skill(skill_id, timeout=timeout, **{"with_credential": send_bearer})
+    return client.get_skill(
+        skill_id, timeout=timeout, if_none_match=if_none_match, **{"with_credential": send_bearer}
+    )
 
 
 def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:
