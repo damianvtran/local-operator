@@ -1,0 +1,32 @@
+{
+  "base": "6dd1af9d7340702746ec34f7eb2d98b0ce9ad602",
+  "sources": {
+    "tests/unit/test_tui_responsiveness.py": "110e619be5aec16de33a6b20c45583be8d0a56c9d1b83307adf1f714cbd30c5a",
+    "tests/conftest.py": "18766004614a9796f7d9d92336c71316d3bf128115ce0ddfd9b5db171376ac08",
+    "tests/unit/tui/test_app_pilot.py": "bb35f366770549f3dfbfd4874184702a228792ee0e9b8cde6b18d8b4aec72b7d",
+    "tests/worker_code_identity.py": "a0188d982df70ca9f0ac724f4aa1d5cd8d73324c70981f38c36c29e610212374",
+    "tests/loop_callback_spans.py": "8ba82012c4a6f8b869e00b9b2afda2ee59bdbe569164b9a244cba69aebf7bfab",
+    "local_operator/tui/app.py": "077043affe367773c58b203d2c482058d3f4bd142b425a3878a56733f68b5eb0",
+    "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
+    "scripts/diagnostics/native_worker_6911/carrier.py": "144cc6f0493395462b5aa31ee89955e6312143572868e8dfad5e0cb08f19912e",
+    "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
+    "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
+    "tests/unit/lfs_s2_static_plugin_6911.py": "0067a6390b52df93db3e31c5c77a5cc6e7ff8a5651a35881c19ce64c5d9c1ac4",
+    "scripts/diagnostics/s2_static_6911/controller.py": "14653639126657f99f43c7d73599e0a47aff95dff554daa4180c52575f5ba572"
+  },
+  "loaded_sources": [
+    "tests/unit/test_tui_responsiveness.py",
+    "tests/unit/lfs_s2_static_plugin_6911.py",
+    "tests/conftest.py",
+    "tests/unit/tui/test_app_pilot.py",
+    "tests/worker_code_identity.py",
+    "tests/loop_callback_spans.py",
+    "local_operator/tui/app.py"
+  ],
+  "original_s2_sha256": "e1dc2a6c3532025f4caae8efcfc1adabee8ac719254eb12534268e176086bb22",
+  "trusted_assert_lines": [
+    285,
+    291
+  ],
+  "scope": "App-only catalog; unknown attribution stays partial; ratio descheduling not throughput"
+}
