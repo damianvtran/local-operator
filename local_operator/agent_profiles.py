@@ -116,12 +116,17 @@ SEED_SHA256_PREFIX = "seed_sha256:"
 #: is an unbounded per-turn bill. Generous enough for a detailed role brief,
 #: bounded enough that a pasted log cannot become a permanent tax.
 #:
-#: 10,000 and not the old 8,000 because real briefs outgrew it: a
-#: chief-of-staff role written for this fleet measures 16,496 characters, so
-#: the read path below silently cut 8,496 of them and over half the brief never
-#: reached a session — a loss that size is a silent behaviour change, not a
-#: guard doing its job. 10,000 admits a deliberately detailed brief and still
-#: bounds the per-turn tax.
+#: 10,000 and not the old 8,000 because real briefs outgrew it: the ``aida``
+#: role's stored prompt measures 9,055 characters, so the read path below cut
+#: 1,055 of them and the role ran as a shorter version of itself with nothing
+#: reporting the loss — a loss that size is a silent behaviour change, not a
+#: guard doing its job. 10,000 admits that brief whole and still bounds the
+#: per-turn tax.
+#:
+#: The bound is not a promise that every brief fits: a 16,496-character
+#: chief-of-staff brief is still cut here, by 6,496 characters, and the honest
+#: answer to that is raising the number again (the one place to do it), not
+#: pretending the cut is a guard working as intended.
 MAX_INSTRUCTIONS_CHARS = 10_000
 
 #: The tag that marks a registry row as a delegation ROLE. A registry also
