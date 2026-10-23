@@ -293,10 +293,11 @@ class ProjectSearchResults(BaseModel):
     projects: list[ProjectSearchHit] = Field(default_factory=list)
     query: str = ""
     count: int = 0
-    #: Addressable rows the store holds, and how many of them the ranking saw.
-    #: When ``truncated`` is true the search covered ``loaded_rows`` rows only:
-    #: an empty answer means "not on the loaded page", never "not in the store",
-    #: and a project past the page is still reachable by key or name.
+    #: Addressable rows the store holds, and how many of them the FUZZY ranking
+    #: saw. When ``truncated`` is true that ranking covered ``loaded_rows`` rows
+    #: only — but an exact name matching a row past the page is still returned,
+    #: because the by-name lookup is disk-backed; a miss therefore means "no
+    #: match on the loaded page", never "not in the store".
     total_rows: int = 0
     loaded_rows: int = 0
     truncated: bool = False

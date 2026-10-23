@@ -856,11 +856,21 @@ async def test_a_paged_store_is_declared_and_every_row_stays_addressable(
     by_id = await client.get("/v1/desktop/projects/aaa-dormant")
     assert by_id.status_code == 200
 
+    # An EXACT name past the page is still found: the ranking is page-scoped, the
+    # by-name lookup is not, so this is the false absence the PR exists to end.
     searched = (
         await client.get("/v1/desktop/projects/search", params={"q": "dormant-row"})
     ).json()["result"]
-    assert searched["count"] == 0
+    assert searched["count"] == 1
+    assert [row["id"] for row in searched["projects"]] == ["aaa-dormant"]
     assert (searched["total_rows"], searched["loaded_rows"], searched["truncated"]) == (2, 1, True)
+
+    # A query that matches nothing on the page still declares the page it ranked.
+    missed = (
+        await client.get("/v1/desktop/projects/search", params={"q": "no-such-project"})
+    ).json()["result"]
+    assert missed["count"] == 0
+    assert (missed["total_rows"], missed["loaded_rows"], missed["truncated"]) == (2, 1, True)
 
     timeline = (await client.get("/v1/desktop/projects/timeline")).json()["result"]
     assert [row["id"] for row in timeline["projects"]] == ["zzz-live"]

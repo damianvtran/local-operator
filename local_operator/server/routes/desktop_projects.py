@@ -321,6 +321,23 @@ async def search(
                     )
                     for match in search_projects(rows, q, limit=limit)
                 ]
+                if not hits:
+                    # The ranking is page-scoped, so an EXACT name that lives
+                    # past the page would answer count=0 — the false absence
+                    # this change exists to remove, on the surface the desktop
+                    # list is built from. The by-name lookup is disk-backed, so
+                    # one exact hit is cheap; fuzzy tiers stay page-scoped and
+                    # `truncated` tells the client the ranking was partial.
+                    found = registry.get_project_by_name(q.strip())
+                    if found is not None:
+                        hits = [
+                            ProjectSearchHit(
+                                id=found.id,
+                                name=display_name(found),
+                                score=1.0,
+                                fields=["name"],
+                            )
+                        ]
             return ProjectSearchResults(
                 projects=hits, query=q, count=len(hits), **_page_fields(registry)
             )
