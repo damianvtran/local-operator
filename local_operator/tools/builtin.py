@@ -17179,8 +17179,17 @@ def _sessions_facts_line(extras: Mapping[str, Any], context: ToolContext | None 
     return "; ".join(second)
 
 
+#: The one sentence that says "this row IS the caller". A constant, because two
+#: renderers print it (the row-backed and the disk-only ``info`` bodies) and two
+#: spellings of one identity claim is the drift this change exists to prevent.
+_OWN_SESSION_SENTENCE = "This is YOUR session — the one you are running in. It is not a duplicate."
+
+
 def _sessions_disk_only_body(
-    facts: _SessionsDiskFacts, extras: Mapping[str, Any], context: ToolContext | None = None
+    facts: _SessionsDiskFacts,
+    extras: Mapping[str, Any],
+    context: ToolContext | None = None,
+    is_own: bool = False,
 ) -> str:
     """The ``info`` text when no listing row describes the session.
 
@@ -17194,6 +17203,12 @@ def _sessions_disk_only_body(
     ``sidebar_visibility``, ``archived_ids``, ``session_activity_path``), so
     the sentence and the scan cannot disagree. The per-row reads need only
     the id, which is why the answer can be composed here at all.
+
+    ``is_own`` carries the same self sentence the row-backed body prints (QA
+    round 1, Q1): an ``agent-shell`` session never appears in a listing scan at
+    any limit, so this is the ONLY way it can be told ``info`` is describing
+    itself. Ids still come from the local store — a peer's row never reaches
+    this body.
     """
     # Identifier field: the stored title is a name the caller reads; it is
     # marked as a span so redaction leaves it readable.
@@ -17220,7 +17235,10 @@ def _sessions_disk_only_body(
     first = f'"{name}" — stored, {why}'
     if resumable:
         first += "; it can still be resumed by its exact session id"
-    return first + "\n" + _sessions_facts_line(extras, context)
+    text = first + "\n" + _sessions_facts_line(extras, context)
+    if is_own:
+        text += "\n" + _OWN_SESSION_SENTENCE
+    return text
 
 
 def _sessions_info_body(
@@ -17267,7 +17285,7 @@ def _sessions_info_body(
         parts.append(str(row["model_label"]))
     text = ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
     if is_own:
-        text += "\nThis is YOUR session — the one you are running in. It is not a duplicate."
+        text += "\n" + _OWN_SESSION_SENTENCE
     return text
 
 
@@ -17373,6 +17391,13 @@ async def _sessions_info(
     if not target.session_id:
         return _error(tool_call_id, "sessions", target.error)
     stored = target.record is None
+    # The caller's own id, computed BEFORE the branches below: a hidden-origin
+    # session (``agent-shell``) never reaches the row-backed path — it is
+    # excluded from every listing scan — so the disk-only body is the ONLY place
+    # it can be told ``info`` is describing itself (QA round 1, Q1). The mesh
+    # path returned above, so a peer's row — which can share an id, ids are
+    # minted per device — never claims to be us.
+    is_own = bool(context and context.session_id and target.session_id == context.session_id)
     row = await _session_row_for_id(
         target.session_id,
         include_stored=stored,
@@ -17401,7 +17426,9 @@ async def _sessions_info(
                     "listed": False,
                     **extras,
                 }
-                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras, context)
+                text = await asyncio.to_thread(
+                    _sessions_disk_only_body, facts, extras, context, is_own
+                )
                 text, spill = spill_truncate(text, "sessions", context)
                 if spill:
                     details.update(spill)
@@ -17422,10 +17449,6 @@ async def _sessions_info(
         )
     extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
     details: dict[str, Any] = {"op": "info", **row, **extras}
-    # Local path only: the caller's own id, compared against the resolved row.
-    # ``_sessions_info_mesh`` returns before this point, so a peer's row — which
-    # can share an id, ids are minted per device — never claims to be us.
-    is_own = bool(context and context.session_id and target.session_id == context.session_id)
     text = _sessions_info_body(row, extras, context, is_own=is_own)
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
