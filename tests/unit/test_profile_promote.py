@@ -621,3 +621,24 @@ def test_a_double_rollback_failure_reports_BOTH_remainders(stacks, monkeypatch) 
     names = {row["name"] for row in caught.value.remaining}
     assert names == {"alpha", "beta"}, caught.value.remaining
     assert "alpha" in str(caught.value) and "beta" in str(caught.value)
+
+
+def test_a_member_collision_advises_the_TEAM_verb(stacks) -> None:
+    """A colliding member must not be answered with `/agent promote`.
+
+    That advice replaces the member alone and still leaves the team unpromoted,
+    so following it reproduces the same refusal (QA round 2, Q-M1).
+    """
+
+    _session_role(stacks["agents"], "helper")
+    _team(stacks["teams"], "pod", manager="manager", members=["helper"])
+    stacks["global_agents"].create_agent(_fields(name="helper", tags=["role"]))
+
+    with pytest.raises(ValueError) as caught:
+        stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+
+    text = str(caught.value)
+    assert "/team promote pod replace" in text
+    assert "/agent promote" not in text
+    assert stacks["global_teams"].get_team_by_name("pod") is None
+    assert stacks["global_agents"].get_agent_by_name("helper") is not None

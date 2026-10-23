@@ -320,7 +320,6 @@ def _dispatcher_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
 def _owner_slash(kind: str, session: Any, args: str) -> Any:
     """Run one line through the RUNTIME OWNER's dispatcher, not the app's."""
     import asyncio
-
     from typing import cast
 
     from local_operator.session.frontend_state import SlashResult

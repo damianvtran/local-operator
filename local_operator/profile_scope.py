@@ -1004,13 +1004,21 @@ class ScopedTeamRegistry:
             # composite's own planner answers the collision/shadow/readability
             # questions, so a member is judged by exactly the rule a direct
             # promote of it would be — one rule, one sentence.
-            agent_plans = [agents._promote_plan(row.name, row.name, replace) for row in member_rows]
+            # A MEMBER that collides is answered with THIS team's verb: the
+            # generic sentence advises promoting the colliding row directly,
+            # which replaces the member and still leaves the team unpromoted
+            # (QA round 2, Q-M1).
+            agent_plans = []
+            for row in member_rows:
+                if _account_agent_key(agents.global_registry, row.name) is not None and not replace:
+                    raise ValueError(promote_member_collision(source.name, "agent", row.name))
+                agent_plans.append(agents._promote_plan(row.name, row.name, replace))
             team_plans: list[tuple[Any, str, Any | None]] = []
             for nested in nested_teams:
                 member_target = validate_team_name(str(nested.name))
                 member_existing = self.global_registry.get_team_by_name(member_target)
                 if member_existing is not None and not replace:
-                    raise ValueError(promote_collision("team", member_target))
+                    raise ValueError(promote_member_collision(source.name, "team", member_target))
                 member_conflict = _account_team_keys(
                     self.global_registry,
                     member_target,
@@ -1364,6 +1372,27 @@ def promote_already_available(kind: str, name: str) -> str:
     return (
         f"{name!r} is already in your account, so every conversation can use it. "
         "There is nothing to promote."
+    )
+
+
+def promote_member_collision(team: str, kind: str, name: str) -> str:
+    """The refusal for a member of a team promotion that already exists.
+
+    The generic :func:`promote_collision` sentence tells the user how to promote
+    the colliding row directly. During a TEAM promotion that advice is wrong: it
+    replaces the member and still leaves the team unpromoted, so following it
+    reproduces the same refusal on the next attempt (QA round 2, Q-M1). The
+    remedy here is the team's own verb, which replaces the team and its
+    colliding members in one confirmed call.
+    """
+
+    article = "an" if kind == "agent" else "a"
+    return (
+        f"promoting team {team!r} needs its {kind} {name!r}, and your account already "
+        f"has {article} {kind} named {name!r}, so copying would overwrite it; nothing "
+        f"was promoted. Confirm with `/team promote {team} replace` — that replaces "
+        "the team and its colliding members together — or promote it under another "
+        "name."
     )
 
 

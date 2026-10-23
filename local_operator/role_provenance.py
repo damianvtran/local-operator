@@ -208,20 +208,21 @@ def append_promotions(config_dir: str | Path, records: Iterable[Mapping[str, Any
         # The keep-count leaves room for this batch, so one append cannot push
         # the file past MAX_PROVENANCE_ROWS even when the batch is the bound
         # itself (``MAX_PROMOTION_ROWS``).
-        if (
-            target.exists()
-            and target.stat().st_size + len(lines.encode("utf-8")) > MAX_PROVENANCE_BYTES
-        ):
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        if len(existing.encode("utf-8")) + len(lines.encode("utf-8")) > MAX_PROVENANCE_BYTES:
             keep = max(MAX_PROVENANCE_ROWS - len(prepared), 0)
             kept = read_promotions(root)[-keep:] if keep else []
-            _atomic_write(
-                target,
-                "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in kept),
+            existing = "".join(
+                json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in kept
             )
-        with open(target, "a", encoding="utf-8") as handle:
-            handle.write(lines)
-            handle.flush()
-            os.fsync(handle.fileno())
+        # ONE atomic publication of old+new. A raw append was durable only up to
+        # its own write: an EIO after the bytes reached the file, or a failure in
+        # the fsync below it, left a row for a promotion whose caller then rolled
+        # the definitions back — the index naming an id that no longer exists
+        # (review round 2). ``_atomic_write`` publishes via a temp file and one
+        # ``os.replace``, so a failure leaves the PREVIOUS index intact and the
+        # caller's rollback is consistent with it.
+        _atomic_write(target, existing + lines)
     return [record["id"] for record in prepared]
 
 

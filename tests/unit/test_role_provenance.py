@@ -154,3 +154,27 @@ def test_a_failed_rotation_records_nothing(tmp_path: Path, monkeypatch) -> None:
         append_promotions(tmp_path, [_record(name="new")])
 
     assert [row["name"] for row in read_promotions(tmp_path)] == ["old"]
+
+
+def test_a_failed_append_records_nothing(tmp_path: Path, monkeypatch) -> None:
+    """The batch is published atomically, so a failed write leaves no row.
+
+    A raw append was durable up to its own write: an EIO after the bytes landed
+    left an index row for a promotion whose caller then rolled the definitions
+    back, so the index named an id that no longer existed (review round 2). The
+    write now goes through ``_atomic_write`` (temp file + one ``os.replace``),
+    so a failure leaves the PREVIOUS index intact.
+    """
+
+    append_promotions(tmp_path, [_record(name="old")])
+    before = provenance_path(tmp_path).read_text(encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("EIO on append")
+
+    monkeypatch.setattr(role_provenance, "_atomic_write", boom)
+    with pytest.raises(OSError, match="EIO on append"):
+        append_promotions(tmp_path, [_record(name="new")])
+
+    assert provenance_path(tmp_path).read_text(encoding="utf-8") == before
+    assert [row["name"] for row in read_promotions(tmp_path)] == ["old"]

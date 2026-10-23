@@ -21756,7 +21756,10 @@ class OperatorApp(App[None]):
         )
         self._system_notice(
             str(getattr(result, "text", "") or ""),
-            notice_kind(str(getattr(result, "style", "") or "info")),
+            # ``notice_kind`` answers a tier NAME from the shared module, which
+            # cannot import this app's ``NoticeKind`` alias (it is below both
+            # hosts), so the narrowing cast lives at the one call site.
+            cast(NoticeKind, notice_kind(str(getattr(result, "style", "") or "info"))),
         )
 
     def _cmd_agent(
