@@ -68,7 +68,13 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
-from local_operator.harness.types import AgentTool, Content, TextContent, ToolContext, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    Content,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
