@@ -1,0 +1,46 @@
+name: Native memory connection diagnostic 6911
+on:
+  push:
+    branches: [diag/memory-connection-boundary-6911]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12.15'
+      - name: Exact source and minimal dependencies
+        id: setup
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -B -c 'import sys; assert sys.version_info[:3] == (3,12,15)'
+          python -m pip install --disable-pip-version-check --no-deps pydantic==2.14.1 pydantic-core==2.50.1 annotated-types==0.8.0 typing-extensions==4.16.0 typing-inspection==0.4.4
+      - name: Three serial bounded diagnostic cases
+        if: ${{ success() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          export PYTHONDONTWRITEBYTECODE=1
+          python -B scripts/run_bounded.py --timeout 60 --grace 5 --memory-mb 512 -- python -B scripts/diagnostics/memory_native_6911/controller.py --source-root "$GITHUB_WORKSPACE" --head "$GITHUB_SHA" --temp-root "$RUNNER_TEMP" --out "$RUNNER_TEMP/native-memory-6911" --image-os "${ImageOS:-UNKNOWN}" --image-version "${ImageVersion:-UNKNOWN}"
+      - name: Bounded diagnostic receipts only
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-memory-6911-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-memory-6911/*.json
+            ${{ runner.temp }}/native-memory-6911/*-fatal.txt
+          if-no-files-found: warn
+          retention-days: 3
