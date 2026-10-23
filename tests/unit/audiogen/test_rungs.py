@@ -554,8 +554,13 @@ async def test_the_capacity_window_is_a_fraction_of_the_batch_budget(monkeypatch
     assert window == 65.0
     assert caught.value.details["attempts"] == 4
     assert "Audio platform at capacity: 4 attempts over 65 s." in str(caught.value)
-    assert audio_tool.SOUND_BATCH_TIMEOUT_S == 225.0, "the batch bound is unchanged"
-    assert window < audio_tool.SOUND_BATCH_TIMEOUT_S / 3
+    # The window is MEASURED from the injected clock, not copied from the
+    # constant tuple: the clock advanced by exactly the ladder's waits, which is
+    # what makes the receipt a duration. This fails if the seam regresses.
+    assert clock["t"] - 1_000.0 == pytest.approx(sum(sleeps)) == pytest.approx(window)
+    # The batch bound is deliberately unchanged; the ladder-vs-budget proof is
+    # a scheduling test at the tool seam (test_audio_tool), not this equality.
+    assert audio_tool.SOUND_BATCH_TIMEOUT_S == 225.0
 
 
 @pytest.mark.asyncio
@@ -604,6 +609,38 @@ async def test_an_admitted_job_that_hits_the_vendor_limit_is_not_retried(monkeyp
     assert caught.value.code == "audio_rate_limited"
     assert submits["count"] == 1, "an admitted job is never automatically resubmitted"
     assert sleeps == [], "the submit backoff belongs to a REFUSED submit only"
+
+
+@pytest.mark.asyncio
+async def test_a_5xx_carrying_the_rate_limited_code_is_not_retried_on_the_hub(monkeypatch):
+    """M1: the STATUS guards the ladder; a body can never widen it.
+
+    A 503 whose body repeats ``audio_rate_limited`` is a request that may have
+    been accepted. Re-POSTing it could double-bill, so only HTTP 429 is the
+    admission bound and every other status fails straight through.
+    """
+    posts: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(503, json={"code": "audio_rate_limited", "error": "upstream"})
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs._submit_with_backoff(
+                client,
+                f"{HUB}/tools/audio/sound-effects",
+                body={"prompt": "click", "duration_s": 0.5},
+                credential="tok",
+            )
+    assert len(posts) == 1, "a 5xx is the upstream's answer, never a refusal to retry"
+    assert sleeps == []
+    assert caught.value.status_code == 503
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +802,42 @@ async def test_elevenlabs_a_400_is_the_answer_and_is_never_retried(monkeypatch):
     assert len(posts) == 1
     assert sleeps == []
     assert caught.value.code == "audio_rejected"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_5xx_carrying_the_rate_limited_code_is_never_retried(monkeypatch):
+    """The BYOK path the ladder was newly pointed at: status first, body never.
+
+    A 503 with ``code: audio_rate_limited`` is the exact request a re-POST could
+    double-bill. It must surface on the first post even though the body repeats
+    the admission code.
+    """
+    posts: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(503, json={"code": "audio_rate_limited", "error": "upstream"})
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    spec = _spec("sound_effect", duration_s=0.5)
+    key = "key"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs.run_elevenlabs(
+                spec,
+                api_key=key,
+                handle=CancelHandle(),
+                emit=None,
+                pause=_fast_pause,
+                client=client,
+            )
+    assert len(posts) == 1
+    assert sleeps == []
+    assert caught.value.status_code == 503
 
 
 # ---------------------------------------------------------------------------
