@@ -569,6 +569,154 @@ def test_answering_a_withdrawn_ask_in_words_is_refused_not_dropped(tmp_path: Pat
     )
 
 
+def test_classifying_a_wrong_key_as_unknown_is_not_the_partial_sentence(tmp_path: Path):
+    """The field case behind §16/SA-D1: ``bill-merge-permission`` sent for the one
+    question ``merge-permission`` was refused as a PARTIAL map, which told the
+    model to send an empty list for a question it had just answered. The refusal
+    names the key it did not recognise and the ids the ask holds, and nothing is
+    written."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue([{**_questions()[0], "id": "merge-permission"}], None)["details"][
+        "ask_id"
+    ]
+    outcome = queue.respond(ask_id, {"bill-merge-permission": ["yes"]})
+    assert outcome["ok"] is False
+    assert "'bill-merge-permission' is not a question on this ask" in outcome["error"]
+    assert "'merge-permission'" in outcome["error"]
+    assert "has no entry" not in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED]
+
+
+def test_withdraw_with_a_wrong_id_names_it_and_writes_nothing(tmp_path: Path):
+    """Acceptance 2 of the slice: the ASKER's own settle shares ``_whole_ask_cells``,
+    so a typo is answered with the same sentence rather than the partial one — and
+    no ``answered`` row is appended for the retry to race."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(
+        ask_id, reason="answered_in_chat", answers={"q0": ["yes"], "qq1": ["no"]}
+    )
+    assert outcome["ok"] is False
+    assert "'qq1' is not a question on this ask" in outcome["error"]
+    assert "has no entry" not in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED]
+
+
+def test_an_unknown_key_beside_every_real_one_is_refused_not_stored(tmp_path: Path):
+    """Acceptance 3 of the slice: a map carrying every real id plus a stray key
+    used to settle the ask and write the stray cell into the log, where nothing
+    can attribute it. It is now refused as a whole, on every door that shares
+    ``_whole_ask_cells`` — ``respond`` here, ``revise`` below — while an empty
+    answer list is still how a deliberate skip is said."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.respond(ask_id, {"q0": ["yes"], "q1": ["no"], "q9": ["stray"]})
+    assert outcome["ok"] is False
+    assert "'q9' is not a question on this ask" in outcome["error"]
+    assert "'q0'" in outcome["error"] and "'q1'" in outcome["error"]
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_OPEN
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert store.EVENT_ANSWERED not in kinds
+
+    assert queue.respond(ask_id, {"q0": ["yes"], "q1": []})["ok"] is True
+    revised = queue.revise(ask_id, {"q0": ["yes"], "q1": [""], "q9": ["stray"]})
+    assert revised["ok"] is False
+    assert "'q9' is not a question on this ask" in revised["error"]
+
+
+def test_the_unknown_key_echo_is_bounded(tmp_path: Path):
+    """Review round 1 NIT 3: the unknown keys come from the CALLER, so the
+    refusal quotes at most 5 of them, each at most 40 characters, and says how
+    many it did not name. The ids the ask holds are echoed whole — the model
+    chose them."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(1), None)["details"]["ask_id"]
+    long_key = "x" * 200
+    unknown = {long_key: ["v"], **{f"k{index}": ["v"] for index in range(6)}}
+    outcome = queue.respond(ask_id, unknown)
+    assert outcome["ok"] is False
+    assert long_key not in outcome["error"]
+    assert f"'{'x' * 40}…'" in outcome["error"]
+    assert "(and 2 more)" in outcome["error"]
+    assert outcome["error"].count("'k") == 4
+
+
+def test_partial_chat_answer_names_the_questions_it_closed_unanswered(tmp_path: Path):
+    """Acceptance 1 of the slice: a 3-question ask settled with the user's words
+    in one cell and empty lists in two folds ``answered`` — the empty cell is how
+    the map says "this message does not cover that question" — the receipt names
+    the 2 questions that closed with it, the response row renders them as
+    ``(not answered)``, and the ask leaves the open set."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(3), None)["details"]["ask_id"]
+    outcome = queue.withdraw(
+        ask_id,
+        reason="answered_in_chat",
+        answers={"q0": ["the audit-log one"], "q1": [], "q2": []},
+    )
+    assert outcome["ok"] is True
+    assert "2 questions closed unanswered; re-ask any you still need." in outcome["text"]
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_ANSWERED
+    assert record["answers"] == {"q0": ["the audit-log one"], "q1": [], "q2": []}
+    text = render.response_text(record)
+    assert "the audit-log one" in text
+    assert text.count("(not answered)") == 2
+    assert ask_id not in [row["ask_id"] for row in queue.open_records()]
+
+
+def test_a_single_closed_question_is_counted_in_the_singular(tmp_path: Path):
+    """The receipt reads as one sentence, not a template: 1 question, not
+    "1 questions" — the count is the fact the model acts on."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(ask_id, reason="answered_in_chat", answers={"q0": ["yes"], "q1": []})
+    assert outcome["ok"] is True
+    assert "1 question closed unanswered" in outcome["text"]
+    assert "questions closed" not in outcome["text"]
+
+
+def test_a_blank_cell_counts_as_closed_unanswered(tmp_path: Path):
+    """Review round 1 m1 / QA Q-1: the count follows the ROW's rule, not the
+    list's length. ``_ask_report`` drops blank text, so ``[" "]`` renders
+    ``(not answered)`` — counting only ``[]`` would tell the model nothing was
+    left behind while the response turn says a question was."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(
+        ask_id, reason="answered_in_chat", answers={"q0": ["large"], "q1": ["  "]}
+    )
+    assert outcome["ok"] is True
+    assert "1 question closed unanswered" in outcome["text"]
+    record = queue.find(ask_id)
+    assert record is not None
+    assert render.response_text(record).count("(not answered)") == 1
+
+
+def test_an_all_empty_chat_map_is_refused_and_points_at_moot(tmp_path: Path):
+    """Review round 1 m2: every cell empty — or blank — is a model asking to
+    record words nobody said, and the empty-list recipe this release teaches
+    every session makes it reachable. Refused rather than rerouted to ``moot``:
+    a moot writes ``withdrawn``, a different fact about who acted, and this
+    model must hear that it recorded nothing. Nothing is appended either way."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    for cells in ({"q0": [], "q1": []}, {"q0": [""], "q1": [" "]}):
+        outcome = queue.withdraw(ask_id, reason="answered_in_chat", answers=cells)
+        assert outcome["ok"] is False
+        assert "reason='moot'" in outcome["error"]
+        assert "nothing was recorded" in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED]
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_OPEN
+
+
 # ---------------------------------------------------------------------------
 # reconcile: which rows are written, and the N8 suppression
 # ---------------------------------------------------------------------------

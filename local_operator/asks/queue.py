@@ -1283,22 +1283,27 @@ class AskQueue:
         """The whole-ask map contract, shared by :meth:`respond` and :meth:`revise`.
 
         Returns ``(cleaned cells, refusal sentence)``, the refusal empty when the
-        map is usable. Both rules are the design's (§2.4, review round 1 QA Q1 and
-        MINOR 6) and every entry point must agree on them — ``respond``,
-        ``revise`` and :meth:`withdraw`'s chat path: the row that lands is
-        terminal, so a surface that forgot a key would lose that question for
-        good, and a SECRET cell may only ever be a KEY NAME: the ``[<key>]`` shape
-        is what makes this hop load-bearing, because a cold CLI or relay route
-        reaches the queue directly and the value must not reach the log through
-        it. Kept in ONE function for the same reason ``refusal_copy`` is one
-        sentence per state: two copies of a contract drift.
+        map is usable. Three rules are the design's (§2.4, §16/SA-D1, review
+        round 1 QA Q1 and MINOR 6) and every entry point must agree on them —
+        ``respond``, ``revise`` and :meth:`withdraw`'s chat path: the row that
+        lands is terminal, so a surface that forgot a key would lose that
+        question for good, a key that is not a question id is refused by name
+        rather than written where no reader can attribute it, and a SECRET cell
+        may only ever be a KEY NAME: the ``[<key>]`` shape is what makes this hop
+        load-bearing, because a cold CLI or relay route reaches the queue
+        directly and the value must not reach the log through it. Kept in ONE
+        function for the same reason ``refusal_copy`` is one sentence per state:
+        two copies of a contract drift.
         """
         cleaned = {str(k): [str(v) for v in (vals or [])] for k, vals in answers.items()}
-        unanswered = [
-            str(q.get("id"))
-            for q in (record.get("questions") or ())
-            if str(q.get("id")) not in cleaned
-        ]
+        ids = [str(q.get("id")) for q in (record.get("questions") or ())]
+        # UNKNOWN KEYS BEFORE MISSING ONES: a typo is both, and the partial
+        # sentence would answer it by telling the model to send an empty list for
+        # a question it just answered under another spelling (field case, #2803).
+        unknown = [key for key in cleaned if key not in ids]
+        if unknown:
+            return None, _unknown_answer_error(unknown, ids)
+        unanswered = [qid for qid in ids if qid not in cleaned]
         if unanswered:
             return None, _partial_answer_error(unanswered)
         return _guard_secret_cells(record, cleaned), ""
@@ -1567,6 +1572,23 @@ class AskQueue:
         if map_refusal:
             return {"ok": False, "error": map_refusal}
         assert cells is not None  # ``_whole_ask_cells`` returns one with no refusal
+        # A CHAT ANSWER WITH NO WORDS IS NOT AN ANSWER (review round 1 m2): every
+        # cell empty or blank is a model asking to record words nobody said, and
+        # the empty-list recipe this release teaches every session makes it
+        # reachable. Refused rather than rerouted to ``moot`` — a moot writes a
+        # ``withdrawn`` row, a different fact about who acted — and nothing is
+        # appended either way.
+        if not any(any(text.strip() for text in values) for values in cells.values()):
+            return {"ok": False, "error": render.WITHDRAW_NO_ANSWER_WORDS}
+        # The questions the message did not answer close with the ask (design
+        # §16/SA-D1), and the receipt says how many: the model is the only party
+        # that can re-ask them. The ROW's own rule decides what "not answered"
+        # means — ``_ask_report`` drops blank text — so a cell of ``[" "]``
+        # counts as closed here too; counting only ``[]`` would tell the model
+        # nothing was left behind while the row renders ``(not answered)``.
+        closed_unanswered = sum(
+            1 for values in cells.values() if not any(text.strip() for text in values)
+        )
         by_map: dict[str, Any] = {"surface": "chat"}
         if message_id:
             by_map["message_id"] = str(message_id)
@@ -1587,7 +1609,7 @@ class AskQueue:
         self._settled(ask_id)
         return {
             "ok": True,
-            "text": render.withdraw_receipt(ask_id, reason),
+            "text": render.withdraw_receipt(ask_id, reason, unanswered=closed_unanswered),
             "details": {"ask_id": ask_id, "reason": reason},
         }
 
@@ -2700,6 +2722,44 @@ def _partial_answer_error(missing: Sequence[str]) -> str:
         f"every question must be answered at once: {listed} has no entry. "
         "Send an empty list for a question the user skipped — a partial answer "
         "would settle the ask and lose the rest."
+    )
+
+
+#: How much of an unknown answer key the refusal echoes (review round 1 NIT 3).
+#: The refusal quotes the key so a typo is obvious, but the map comes from a
+#: caller the queue does not trust — a hostile relay client can put a
+#: megabyte-long key in it, and this sentence is model-facing text that rides a
+#: turn. The ids the ask HOLDS are echoed whole: the model chose them.
+UNKNOWN_KEY_ECHO_MAX = 5
+UNKNOWN_KEY_ECHO_CHARS = 40
+
+
+def _unknown_answer_error(unknown: Sequence[str], valid: Sequence[str]) -> str:
+    """The refusal for an answer map naming a question that is not on the ask.
+
+    NAMES the key it did not recognise and the ids the ask actually has, because
+    the model is the one who mistyped: the field case behind this rule sent
+    ``bill-merge-permission`` for an ask whose only question was
+    ``merge-permission`` and was told it had left a question out. Before it, a map
+    that carried every real id plus one unknown key settled the ask and wrote the
+    stray cell into the log, where nothing can attribute it to a question. Shares
+    :func:`_partial_answer_error`'s contract — the answer is atomic, so the whole
+    map is refused and no cell is dropped. The echo is BOUNDED
+    (:data:`UNKNOWN_KEY_ECHO_MAX`, :data:`UNKNOWN_KEY_ECHO_CHARS`) because the
+    keys come from the caller.
+    """
+    shown = [
+        key if len(key) <= UNKNOWN_KEY_ECHO_CHARS else key[:UNKNOWN_KEY_ECHO_CHARS] + "…"
+        for key in unknown[:UNKNOWN_KEY_ECHO_MAX]
+    ]
+    listed = ", ".join(f"{key!r}" for key in shown)
+    if len(unknown) > len(shown):
+        listed += f" (and {len(unknown) - len(shown)} more)"
+    known = ", ".join(f"{qid!r}" for qid in valid) or "(none)"
+    verb = "is" if len(unknown) == 1 else "are"
+    return (
+        f"{listed} {verb} not a question on this ask — its questions are {known}. "
+        "Use the ids exactly as they were asked."
     )
 
 

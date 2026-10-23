@@ -494,6 +494,12 @@ ANSWERED_IN_CHAT_RECEIPT = (
     "Ask {ask_id} answered from the user's chat message — their words are recorded "
     "as its answer; the response arrives as an ask response turn."
 )
+#: What an ``answered_in_chat`` receipt adds when some cells were EMPTY (design
+#: §16/SA-D1). An empty list is how the map says "this message does not answer
+#: that question", so those questions close UNANSWERED in the same write — and
+#: the model has to hear that, because the ask cannot be settled a second time
+#: and only it can re-ask what it still needs.
+ANSWERED_IN_CHAT_CLOSED_UNANSWERED = " {count} {noun} closed unanswered; re-ask any you still need."
 
 
 #: The reasons `ask_withdraw` refuses BEFORE any state is consulted, and the
@@ -506,6 +512,15 @@ WITHDRAW_MOOT_TAKES_NO_ANSWERS = (
     "reason 'moot' takes no answers — to record the user's words use reason " "'answered_in_chat'."
 )
 
+#: `answered_in_chat` with every cell empty or blank (design §16/SA-D1, review
+#: round 1 m2). Refused rather than rerouted to ``moot``: a moot writes a
+#: ``withdrawn`` row, which says something the user did not say, and a model that
+#: meant to record an answer has to hear that it recorded nothing.
+WITHDRAW_NO_ANSWER_WORDS = (
+    "every answer cell is empty — record the user's words, or use reason='moot' if "
+    "the question no longer needs an answer; nothing was recorded."
+)
+
 #: `answered_in_chat`'s secret refusal (design §12): there is no masked-entry
 #: hop from chat text and there must not be one, so the card remains the only
 #: secret path. Nothing is written, and the sentence says so.
@@ -514,10 +529,20 @@ WITHDRAW_SECRET_REFUSAL = (
 )
 
 
-def withdraw_receipt(ask_id: str, reason: str) -> str:
-    """The receipt a successful ``AskQueue.withdraw`` hands back (design §12)."""
-    template = ANSWERED_IN_CHAT_RECEIPT if reason == "answered_in_chat" else WITHDRAWN_RECEIPT
-    return template.format(ask_id=ask_id)
+def withdraw_receipt(ask_id: str, reason: str, unanswered: int = 0) -> str:
+    """The receipt a successful ``AskQueue.withdraw`` hands back (design §12).
+
+    ``unanswered`` is how many cells the chat answer left empty: those questions
+    closed with the ask, so the receipt names the count rather than claiming the
+    whole ask was answered from the message (§16/SA-D1).
+    """
+    if reason != "answered_in_chat":
+        return WITHDRAWN_RECEIPT.format(ask_id=ask_id)
+    text = ANSWERED_IN_CHAT_RECEIPT.format(ask_id=ask_id)
+    if unanswered > 0:
+        noun = "question" if unanswered == 1 else "questions"
+        text += ANSWERED_IN_CHAT_CLOSED_UNANSWERED.format(count=unanswered, noun=noun)
+    return text
 
 
 def withdraw_refusal(record: Mapping[str, Any] | None, reason: str) -> str:

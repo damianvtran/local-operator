@@ -1570,7 +1570,10 @@ deferral, narrowly. Plan: `ask-dismiss-plan.md` (D1–D6); this PR is the engine
 4. **D3 — the cold door still removes the deadline wake row**, on the grounds in §14's amended
    paragraph. Cost: an idle cold asker no longer wakes at the deadline; if nothing starts it within
    7 d the row lapses unread. Parked sessions keep their wake row, as before.
-5. **D6 — an OPEN ask is dismissible only when no agent work is running.**
+5. **D6 — an OPEN ask is dismissible only when no agent work is running.** **(Superseded by §16
+   SA-D4, 2026-10-23: the `agent_running` refusal is retired, and an idle live runtime holds the
+   dismissal without spawning a turn. The table below is the rule this amendment replaced; it is
+   kept as the record of the D6 decision, not as live design.)**
 
    | owning session | open-ask dismissal | what the agent gets |
    |---|---|---|
@@ -1597,3 +1600,152 @@ deferral, narrowly. Plan: `ask-dismiss-plan.md` (D1–D6); this PR is the engine
 
 **Not in this change.** The TUI `x` chooser, the phone `close…` row and the desktop receipt are
 separate PRs; until they ship no surface offers the new door, so nothing a user can reach changes.
+
+## 16. Amendment (2026-10-23): stale asks — settle what the chat already answered (SA-D1–SA-D7)
+
+**The gap.** The agent-side settle exists (§12) but nothing tells the model WHEN to use it. The
+investigation of 2026-10-22 measured, in one operator window: 40 asks, 16 of them settled only after
+a prompt, asks still open across three or more user messages, and 18 housekeeping messages in a week
+spent tidying them. Five fixes were approved by the operator on 2026-10-23 (R1–R5). This section is
+their design of record and carries everything a reader needs; the operator-local slice plan of
+2026-10-23 is a non-normative reference only (SA-D6 orders the work).
+
+Each decision below states what it commits us to and what would overturn it, in §8's shape.
+
+**A correction before SA-D1.** R4 was scoped as "let the agent settle part of a multi-question ask",
+and the engine already does that: an `answered_in_chat` map carrying an EMPTY LIST for a question the
+message does not cover closes that question with the rest (`AskQueue._whole_ask_cells`; §2.4's
+completeness contract is on the KEYS, and an empty list is the legal "not covered"). Both field cases
+were something else. Aida's `a-42a4` had one question, `merge-permission`, and the refused call sent
+`bill-merge-permission` — a wrong id, reported in the partial sentence, which told the model to send
+an empty list for a question it had just answered. Cherry's `a-b782` could have been settled with
+`{cap_fix: […], charter_gates: [], retire: []}` and nothing said so. R4 therefore shrinks to guidance
+plus two op fixes, both in item 1 below: a receipt that says what an empty cell means, and a refusal
+that names an unknown id. No new event, no fold change, no wire or mobile type change.
+
+**What changes.**
+
+1. **SA-D1 — the settle rule, and partial settles (PR-1).** `prompts_md/system.md`'s queued
+   paragraph gains the rules a model cannot infer: settle every ask the user's messages answered
+   (`answered_in_chat`, their words) or made irrelevant (`moot`: they dropped or handed off the work
+   the question was about, or the model decided it under a timeout) BEFORE ending the turn; when
+   reporting open asks, settle the ones the user's messages answered or made irrelevant in that same
+   turn; **an ask the user has not addressed stays open however old it is, and when unsure the model
+   leaves it open** — age is not a reason to withdraw, and neither is a change in what the user asked
+   for next; an answer, even in the user's own words rather than the options, is `answered_in_chat`,
+   never `moot`; a 24 h timeout only for a decision that stays valid for a day. The `ask` queued
+   description gains one clause ("settle it with `ask_withdraw` the moment it stops mattering");
+   `ask_withdraw`'s description carries the moot cases, the never-moot-an-answer rule, the empty-list
+   recipe and the all-empty refusal; and `AskWithdrawParams.answers` states the ids rule ("spelled
+   exactly as it was asked"). The `answered_in_chat` receipt counts the cells that closed
+   unanswered — "N questions closed unanswered; re-ask any you still need" — on the SAME rule the
+   response row uses, so a cell of `[" "]` counts as closed rather than leaving the receipt claiming
+   an answer the row renders as `(not answered)`; and a map whose every cell is empty or blank is
+   refused in words that name `moot`, because nothing was answered and a reroute to `moot` would
+   write a `withdrawn` row saying something the user did not say. `_whole_ask_cells` refuses a key
+   that is not a question id, by name and with the ids the ask holds, on every door that shares it
+   (`respond`, `revise`, and `withdraw`'s chat path); the echoed key is bounded so a hostile relay
+   client cannot put an unbounded string into model-facing text. An unknown key used to be reported
+   as a partial map at best and, when every real id was also present, written into the log where
+   nothing can attribute it. **Rejected:** a `partially_answered` event or per-question
+   status — the fold, `render.py`, the wire enum and all three surface maps would move for a case the
+   empty-list contract already covers; "answers plus a flag" — the flag carries no fact the empty list
+   does not. **Commits us to:** "settle Q1, keep Q2/Q3 open" is answered-and-re-ask, never one ask
+   left half-open; the stricter unknown-id rule applies to surfaces too, so a client that added a key
+   now reads a refusal instead of having it stored (no shipped surface does — every renderer walks
+   the ask's questions, never the answer map's keys). **Overturned by:** the operator wanting
+   unanswered questions to stay on the same card, or post-release data showing agents still fail to
+   settle multi-question asks after reading the new receipt.
+
+2. **SA-D2 — resumed sessions get their ask queue (PR-2, #2803).** A resume worker (`exec
+   --background --resume`, unsupervised) installs the ask half of `_install_gates` — factored out as
+   `_install_ask_surface()` — with no approval gate, so a resumed turn can settle, and raise, queued
+   asks. `Session.ask_queue()` is unchanged. **Rejected:** splitting the queue from the hook in
+   `session.py` — it changes the meaning of 27 `ask_queue()` call sites, and the dispose/merge pair
+   the TUI's install flows depend on. **Commits us to:** a resumed headless turn can raise new asks,
+   shown on every surface from the index. Fresh `lop exec` and scheduled runs still have no `ask`,
+   and their prompt still renders the queued paragraph without the tool; fixing that needs a third
+   "no ask" state in the `ask_queued`/`ask_inline` pair, which `prompts_api` forbids today — recorded
+   as `deferred — needs a third flag-pair state` in PR-2. **Overturned by:** a resume path that does
+   not go through `exec_session.run_session`, or the operator not wanting resumed turns to raise asks.
+
+3. **SA-D3 — the open-asks reminder (PR-3, R2).** An authoritative `[session-state]` tail section
+   `open_asks` (`<open-asks>` marker), built per provider step from `open_records()`, at most 8 lines,
+   headed "As of the user's message at HH:MM TZ" — the latest admitted user message, held on the
+   Session — and ending "If the user's messages since then answered or mooted one, settle it with
+   `ask_withdraw`." It re-ships once per user message while asks are open, ships `""` once when the
+   last ask settles, and ships nothing at all when no ask is open (the start-context budget must be
+   byte-identical to main in that state). This replaces §12.1's optional-runtime-assist PROPOSAL ("the
+   model-visible receipt appends one line") with a section that re-ships, rather than a message that
+   lives in the transcript. **Rejected:** an ephemeral reminder message like the todo/project
+   reminders — newest-only and expiry rendering rewrite everything after it in the prompt cache every
+   turn; a new persisted custom row type — unknown custom rows paint as a notice on the phone, so all
+   three surfaces and the render allow-list would need a new arm; change-only dedupe — an unchanged
+   reminder from hours earlier is the salience failure measured (18 housekeeping prompts in a week);
+   a receipt line — typed chat messages have no model-visible receipt. **Commits us to:** a new
+   versioned tail marker, a new `build_system_blocks` parameter, one small row per user turn while
+   asks are open, and the "as of" stamp on the Session. **Overturned by:** QA measuring the per-turn
+   rows as material (>1% of a turn's input over 10 turns with 8 open asks), or post-release
+   prompted-withdrawal counts not falling from 16/40 — the second reopens auto-supersede, which is
+   frozen out today.
+
+4. **SA-D4 — the operator can dismiss an OPEN ask while the agent runs (PR-4a, R5; replaces §15
+   D6).** The `agent_running` refusal goes: mid-turn, the dismissed response row rides the existing
+   steering path to the next boundary; on an idle live runtime it is held durably with NO turn.
+   Stopped and cold are unchanged (§15 D2, §14), and relay and bridge asks stay refused for open
+   dismissal. **Rejected:** keeping D6 — it refuses exactly while the operator is chatting, which is
+   the field case; idle → spawn a turn — a paid turn to acknowledge a tidy-up. **Commits us to:** a
+   mid-turn dismissal can cost one extra provider call (any injection keeps the inner loop running);
+   an idle agent learns of a dismissal only at its next turn. **Overturned by:** the operator wanting
+   an idle agent to react immediately (switch idle to a spawned turn), or race tests showing a lost
+   user act.
+
+5. **SA-D5 — the desktop dismisses through the existing answer route (PR-4a engine, PR-5 UI).**
+   `sessions.answer` gains `dismiss` + `reason`, valid only with `ask_id` and no answers/decline/
+   revise, gated by a new `ask_dismiss` capability key — the body is `extra="forbid"`, so the UI must
+   gate on the key or an old backend answers 422. A cold session goes through `dismiss_cold`; only an
+   owner that is present gets the live op. **Rejected:** routing through `bridge.remote.ask_respond` —
+   its bind boots a cold runtime, against §14's "a dismissal boots nothing"; a new route — it
+   duplicates the epoch-free queued-ask door `Answer` already is. **Commits us to:** a capability key
+   and a UI PR gated on it. `mobile/types.py` does not change: `ask_dismiss.reason` is already
+   validated there. **Overturned by:** the desktop daemon having no access to `dismiss_cold`'s config
+   root.
+
+6. **SA-D6 — the slice plan and order.** Six PRs, no version bump in any of them. Wave 1 in
+   parallel: PR-1 (this section's guidance + R4), PR-2 (SA-D2), PR-4a (SA-D4 engine + SA-D5 route).
+   Wave 2: PR-3 (SA-D3, after PR-1 — it shares the wording), PR-4b (TUI and phone doors, after PR-4a)
+   and PR-5 (desktop UI, after PR-4a). PR-1 lands the whole §16 text, so a later PR edits this section
+   only if it deviates from it. **Rejected:** one harness PR — the designer and UX rounds on the
+   surfaces would hold the backend fixes; PR-4a and PR-4b together — same reason; R4 as its own PR —
+   after SA-D1 it is a few lines in files PR-1 already owns. **Commits us to:** PR-3 rebasing on PR-1's
+   wording; a release owner may ship wave 1 before wave 2. **Overturned by:** PR-1 blocked on the
+   context-budget ratchet — then split the guidance out and let PR-3 go first.
+
+7. **SA-D7 — the card's context line is IN scope (manager override, 2026-10-23).** The original
+   decision put R5's "3 messages from you since this was asked (last 19:36)" out of the set as
+   unapproved scope; the operator approved all five after reading R5, and R5's text included it. So
+   PR-4a adds two fields to each open ask's projection/index row — `user_messages_since` (int) and
+   `last_user_message_at` (ms), computed from the same "latest admitted user message" stamp SA-D3
+   keeps (PR-4a introduces it; PR-3 reuses it) — and PR-4b (TUI, phone) and PR-5 (desktop) render one
+   keyed line on open cards when the count is above zero. An old runtime sends no field, so no line
+   appears: the mixed-version rule `ask_dismiss` already follows. **Rejected:** the count on the
+   file's own index only — the card is where the operator decides, and it is the surface that was
+   stale. **Commits us to:** the stamp landing in PR-4a rather than PR-3, so SA-D3's PR rebases onto
+   it. **Overturned by:** the manager or the operator reverting the override.
+
+**The risk this set takes on, and the measurement that would overturn it.** Teaching a settle rule
+can produce FALSE MOOTS: a model that withdraws an approval the operator still meant to give. A
+withdrawal is terminal and hides the card on every surface, so the operator has to re-say the request
+in chat, which is worse than a stale card. The controls are the wording (age is never a reason; a
+change of task order is not a drop; when unsure, leave it open) and the measurement: count
+`withdrawn` events that land within one turn of an "Open asks" delta for a question the operator
+later answers in chat, and re-measure one week after this set ships against the investigation's
+baseline — prompted withdrawals 16 of 40 asks, 18 housekeeping messages a week, asks that stay open
+across three or more user messages. A prompted-withdrawal count that does not fall from 16/40 is what
+overturns SA-D1 and SA-D3 and reopens auto-supersede (frozen out today); a false-moot rate that rises
+while it falls overturns SA-D1's wording, not the mechanism.
+
+**Not in this change.** No new event kind, no `PROTOCOL_VERSION` bump, no fold change — `asks/store.py`
+is untouched by the whole set — and no change to the ask caps or the timeout policy. Nothing here
+settles an ask on the user's behalf: every new door is the operator's own act, and the agent's settle
+stays `ask_withdraw`.
