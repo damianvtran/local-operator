@@ -125,12 +125,14 @@ def test_page_cap_refusal_is_distinct_actionable_and_names_the_store(tmp_path, m
 
     message = str(refused.value)
     assert 1 < writes < 200
-    assert "Memory store is full" in message
-    assert f"reached its {human_bytes(4096 * 32)} cap" in message
-    # Scoped to writes that need a new page: at the cap, writes small enough to
-    # fit the remaining page space still succeed (measured: current grew 0->5).
-    assert "writes that need a new page are refused until space is freed" in message
-    assert "no new fact can be saved" not in message
+    # The fact fill refuses below the page cap (measured: 30 of 32 pages), so
+    # this is the near-cap arm: it must state the headroom, not claim the cap
+    # was reached.
+    assert "Memory store is near its cap" in message
+    assert "needs more pages than the" in message and "remaining under the" in message
+    assert "a smaller write may still succeed" in message
+    assert "has reached its cap" not in message.lower()
+    assert "no new fact can be saved" not in message.lower()
     assert str(store.path) in message
     # Every remedy the operator needs, including the file the VACUUM acts on.
     assert "lop memory status" in message
@@ -166,10 +168,24 @@ def test_full_store_status_says_so_plainly_and_offers_the_way_out(tmp_path, monk
     assert "writes that need a new page are refused until space is freed" in flat
     # The reviewer measured writes succeeding at this state until the intra-page
     # budget is spent: the sentence must not say nothing can be saved.
-    assert "no new fact can be saved" not in flat
+    assert "no new fact can be saved" not in flat.lower()
     assert "Reclaim: `lop memory forget SCOPE/ID --revision REV --yes`." in text
     assert f"Compact: `sqlite3 {store.path} 'VACUUM'`." in text
     assert "Run the Compact command first if the forget is also refused." in text
+
+    # At the cap exactly, the refusal keeps the at-cap wording: a write that
+    # needs a new page is refused until space is freed.
+    with pytest.raises(MemoryError) as refused:
+        for index in range(50):
+            # Distinct bodies: identical facts are deduplicated, not written.
+            store.put(
+                "global",
+                {"title": f"After the full report {index}", "body": f"Needs a page {index}."},
+            )
+    at_cap = str(refused.value)
+    assert "Memory store is full" in at_cap and "has reached its" in at_cap
+    assert "writes that need a new page are refused until space is freed" in at_cap
+    assert "no new fact can be saved" not in at_cap.lower()
 
 
 def test_free_pages_at_the_cap_are_not_reported_full_and_still_write(tmp_path, monkeypatch):
@@ -235,6 +251,54 @@ def test_near_cap_warning_covers_the_90_to_99_percent_state(tmp_path, monkeypatc
     assert "Store FULL" not in text
 
 
+def test_batch_refusal_below_the_cap_states_headroom_and_allows_a_smaller_write(
+    tmp_path, monkeypatch
+):
+    """Round-3 MAJOR: the batch arm must not borrow the at-cap wording.
+
+    28 of 32 pages with an empty freelist: a multi-page batch is refused, but
+    four pages remain, so "has reached its cap" and "writes that need a new page
+    are refused" would both be false — the next small write was measured to
+    succeed.
+    """
+    monkeypatch.setattr(memory, "MAX_DB_BYTES", 4096 * 32)
+    store, identity = make_store(tmp_path)
+    with store.connection() as db:
+        db.commit()
+        fill_meta_to_page_cap(db)
+        db.execute("DELETE FROM meta WHERE key IN ('fill-0','fill-1')")
+        db.commit()
+    raw = sqlite3.connect(store.path)
+    try:
+        raw.execute("VACUUM")
+        raw.commit()
+    finally:
+        raw.close()
+    with store.connection() as db:
+        db.commit()
+        pages = db.execute("PRAGMA page_count").fetchone()[0]
+        cap = db.execute("PRAGMA max_page_count").fetchone()[0]
+        free = db.execute("PRAGMA freelist_count").fetchone()[0]
+    assert (pages, cap, free) == (28, 32, 0)
+
+    with pytest.raises(MemoryError) as refused:
+        with store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for index in range(3):
+                db.execute("INSERT INTO meta VALUES (?,?)", (f"batch-{index}", "x" * 8192))
+            db.commit()
+
+    message = str(refused.value)
+    assert "has reached its cap" not in message.lower()
+    assert f"{human_bytes(4 * 4096)} remaining under" in message
+    assert "a smaller write may still succeed" in message
+    # Status is not FULL, and the claim is true: a small write goes through.
+    usage, _ = status(tmp_path, identity)
+    assert usage["storage_full"] is False
+    item = store.put("global", {"title": "Small after batch", "body": "Fits the headroom."})
+    assert item["status"] == "active"
+
+
 def test_reported_cap_is_the_enforced_page_aligned_cap(tmp_path, monkeypatch):
     """QA Q3: a non-page-aligned override must not read 99.9% beside FULL.
 
@@ -258,7 +322,7 @@ def test_reported_cap_is_the_enforced_page_aligned_cap(tmp_path, monkeypatch):
                 {"title": f"Fill fact {writes}", "body": f"payload {writes} " + "z" * 200},
             )
 
-    assert f"reached its {human_bytes(32 * 4096)} cap" in str(refused.value)
+    assert f"remaining under the {human_bytes(32 * 4096)} cap" in str(refused.value)
     assert human_bytes(unaligned) not in str(refused.value)
     usage = store.inventory()
     assert usage["storage_cap_bytes"] == 32 * 4096
