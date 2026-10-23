@@ -2533,7 +2533,9 @@ def _write_listeners(
 
     ``bind`` is the /proc local-address word, host byte order: the default is
     the wildcard every earlier test assumed, and ``0100007F`` is the loopback
-    bind a restart must never accept as host-reachable.
+    bind a restart must never accept as host-reachable. A 32-hex-digit value is
+    a v6 address and goes into ``tcp6``, which is the table Linux reports a
+    v4-mapped (``::ffff:a.b.c.d``) bind in.
     """
     for pid, inode in inodes_by_pid.items():
         directory = proc / str(pid) / "fd"
@@ -2547,8 +2549,14 @@ def _write_listeners(
     lines = ["  sl  local_address rem_address   st"]
     for inode in inodes_by_pid.values():
         lines.append(f"   0: {bind}:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 {inode}")
-    (net / "tcp").write_text("\n".join(lines) + "\n")
-    (net / "tcp6").write_text("  sl\n")
+    header = "  sl\n"
+    body = "\n".join(lines) + "\n"
+    if len(bind) == 32:
+        (net / "tcp").write_text(header)
+        (net / "tcp6").write_text(body)
+    else:
+        (net / "tcp").write_text(body)
+        (net / "tcp6").write_text(header)
 
 
 def _execute_layout_script(
@@ -5167,6 +5175,20 @@ def test_the_bind_decoder_reads_proc_net_addresses_per_family() -> None:
     assert bind_kind("00000000000000000000000001000000", 6) == "loopback"
     assert bind_kind("0000000000000000FFFF00000A051FAC", 6) == "addressed"
     assert bind_kind("not-hex", 4) == "unknown"
+    # IPv4-MAPPED addresses are classified by the IPv4 address they carry: a
+    # v4 loopback bind the kernel reported in the v6 table must not read as a
+    # public one, which is the same failure one representation away.
+    assert bind_kind("0000000000000000FFFF00000100007F", 6) == "loopback"
+    assert bind_kind("0000000000000000FFFF000000000000", 6) == "wildcard"
+    # The other byte order is advertised, so exercise it: on a big-endian guest
+    # /proc prints the words in network order and nothing is reversed.
+    big: dict[str, Any] = {"sys": SimpleNamespace(byteorder="big")}
+    exec(guest_supervisor.LISTENER_BIND_SOURCE, big)
+    big_kind = big["bind_kind"]
+    assert big_kind("00000000", 4) == "wildcard"
+    assert big_kind("7F000001", 4) == "loopback"
+    assert big_kind("00000000000000000000000000000001", 6) == "loopback"
+    assert big_kind("00000000000000000000FFFF7F000001", 6) == "loopback"
 
 
 def test_a_restart_whose_listener_loopback_alone_can_reach_is_refused(
@@ -5244,3 +5266,40 @@ def test_a_repair_that_only_loopback_can_reach_is_not_a_revival(tmp_path: Path) 
     assert len(_dispatches(calls)) == 1
     assert record["last_outcome"] == "unreachable-listener"
     assert record["intervened"] is True
+
+
+MAPPED_LOOPBACK = "0000000000000000FFFF00000100007F"  # ::ffff:127.0.0.1, LE words
+
+
+def test_a_restart_bound_to_a_v4_mapped_loopback_is_refused(tmp_path: Path) -> None:
+    """The same split, one representation away: ::ffff:127.0.0.1.
+
+    The kernel reports a v4-mapped bind in the v6 table; a decoder that read it
+    as a plain v6 address called it ``addressed`` and blessed a listener only
+    loopback can reach. This is the gate that has to refuse it.
+    """
+    payload, _, _ = _execute_restart_script(
+        tmp_path,
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000, bind=MAPPED_LOOPBACK),
+    )
+    assert payload["post_restart_pids"] == [9100]
+    assert payload["post_restart_bind"] == ["loopback"]
+    record = guest_supervisor.restart_record(json.dumps(payload))
+    assert record["status"] == "unreachable_listener"
+    assert record["fresh"] is True
+
+
+def test_the_watchdog_names_a_v4_mapped_loopback_listener(tmp_path: Path) -> None:
+    record, calls, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["active", "active"],
+        listening=[True, True],
+        answering=[True, True],
+        cycles=2,
+        v6=True,
+        bind_address=MAPPED_LOOPBACK,
+    )
+    assert record["last_observation"] == "loopback-only"
+    assert record["attempts"] == 0 and record["intervened"] is False
+    assert not [call for call in calls if call[0] == "systemctl" and call[1] in {"start", "kill"}]

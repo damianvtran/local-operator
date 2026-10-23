@@ -259,7 +259,24 @@ persist()
 #: primary address, which this decoder cannot know. It is recorded, not
 #: refused, so a healthy server bound to its private address is never
 #: discarded as broken.
+#:
+#: AN IPv4-MAPPED ADDRESS IS DECODED BY ITS EMBEDDED IPv4 ADDRESS.
+#: ``::ffff:127.0.0.1`` is a loopback bind the kernel happens to report in the
+#: v6 table; read as a plain v6 address it would classify ``addressed`` and
+#: bless exactly the split this constant exists to refuse, one representation
+#: away. ``::ffff:0.0.0.0`` is the wildcard for the same reason.
+#:
+#: THIS DECODER, NOT THE SUPERVISOR DROP-IN, IS THE DEFENCE. The drop-in pins
+#: ``OSWORLD_SERVER_HOST`` (see INSTALL_SOURCE) and that pin is best-effort:
+#: an ``EnvironmentFile=`` or a later-sorted drop-in such as ``95-*.conf``
+#: overrides it, and a server version that never reads the name ignores it.
+#: What the host must not do is take such a bind for a working guest.
 LISTENER_BIND_SOURCE = r'''
+def _ipv4_kind(address):
+    if address == b'\x00' * 4:
+        return 'wildcard'
+    return 'loopback' if address[0] == 127 else 'addressed'
+
 def bind_kind(local, family):
     # The bytes are printed in HOST byte order, so the decode depends on the
     # guest's endianness -- x86_64 on every AMI this runs on. ``sys.byteorder``
@@ -278,12 +295,14 @@ def bind_kind(local, family):
         words = [word[::-1] for word in words]
     address = b''.join(words)
     if family == 4:
-        if address == b'\x00' * 4:
-            return 'wildcard'
-        return 'loopback' if address[0] == 127 else 'addressed'
+        return _ipv4_kind(address)
     if address == b'\x00' * 16:
         return 'wildcard'
-    return 'loopback' if address == b'\x00' * 15 + b'\x01' else 'addressed'
+    if address == b'\x00' * 15 + b'\x01':
+        return 'loopback'
+    if address[:12] == b'\x00' * 10 + b'\xff\xff':
+        return _ipv4_kind(address[12:])
+    return 'addressed'
 
 def listener_kinds(port):
     """The bind kinds among LISTEN sockets on ``port``, plus readability.
@@ -1010,6 +1029,13 @@ hook = '+/usr/bin/python3 ' + str(capture) + ' ' + unit
 # answering -- the measured split. Pinning the wildcard here is not an
 # ExecStart rewrite (the argument vector is untouched) and is inert on a
 # server version that never reads the name.
+#
+# THE PIN IS BEST-EFFORT, NOT A GUARANTEE. ``Environment=`` in this drop-in
+# loses to an ``EnvironmentFile=`` in the unit and to any later-sorted drop-in
+# (``95-*.conf`` beats our ``90-*.conf``), and a server that never reads the
+# name ignores it. The guest's bind DECODER (``LISTENER_BIND_SOURCE``) is the
+# real defence: it is what stops a loopback bind from being reported as a
+# working guest however the bind came about.
 content = ('[Unit]\nStartLimitIntervalSec=3600\nStartLimitBurst=3\n'
            '[Service]\nRestart=always\nRestartSec=1\nKillMode=process\n'
            'Environment="OSWORLD_SERVER_HOST=0.0.0.0"\n'
