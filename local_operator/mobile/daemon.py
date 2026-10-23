@@ -1768,7 +1768,11 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
     directory = config_dir() / "sessions" / session_id
-    if not (directory / "transcript.jsonl").is_file() or not is_user_session(directory):
+    from local_operator.session import compression
+
+    # Both forms: judging only the plain name hid every compressed session from
+    # the phone's session list, because its journal is an archive on disk.
+    if not compression.has_transcript(directory) or not is_user_session(directory):
         return None
     return directory
 
@@ -2469,11 +2473,15 @@ def _pin_opening_user_message(projection: SessionProjection, record: SessionReco
     try:
         from local_operator.paths import config_dir
 
-        path = config_dir() / "sessions" / record.session_id / "transcript.jsonl"
-        if not path.exists():
+        from local_operator.session import compression
+
+        path = compression.transcript_for_read(config_dir() / "sessions" / record.session_id)
+        if path is None:
             return
         # Read only the head: the opening user turn is within the first few
         # entries, and a 10 MB transcript should not be replayed per repaint.
+        # ``transcript_for_read`` is what makes this work for a compressed
+        # session too — the materialised copy is byte-identical to the journal.
         import json as _json
 
         with path.open() as fh:
@@ -2864,7 +2872,9 @@ def _history_page(
             if session_id not in ("", ".", "..") and Path(session_id).name == session_id
             else None
         )
-    if directory is None or not (directory / "transcript.jsonl").is_file():
+    from local_operator.session import compression
+
+    if directory is None or not compression.has_transcript(directory):
         return [], False
     try:
         state = _durable_fold_cache().load(directory)
@@ -2920,7 +2930,9 @@ def _attachment_bytes(
     from local_operator.session.transcript import Transcript
 
     directory = config_dir() / "sessions" / record.session_id
-    if not (directory / "transcript.jsonl").exists():
+    from local_operator.session import compression
+
+    if not compression.has_transcript(directory):
         return None
     try:
         transcript = Transcript(directory)
@@ -6437,8 +6449,19 @@ def build_app(daemon: MobileDaemon):
             if directory is None:
                 return None
             try:
-                payload = (directory / "transcript.jsonl").read_bytes()
-            except OSError:
+                # Stream through the codec and keep only the rows that can be
+                # the reference being authorised: a whole-file ``read_bytes`` is
+                # both unbounded and wrong for an archive (compressed bytes are
+                # not JSONL).
+                from local_operator.session import compression
+                from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+                payload = b"\n".join(
+                    line.encode("utf-8", "replace")
+                    for line in compression.iter_lines(directory)
+                    if SUPPLEMENT_CUSTOM_TYPE in line
+                )
+            except (OSError, compression.ArchiveError):
                 return None
             if not _journal_references_digest(payload, digest):
                 return None

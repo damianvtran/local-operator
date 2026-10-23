@@ -79,6 +79,12 @@ from local_operator.session.creation import (
     session_created_at,
 )
 from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
+
+# The read-side resolver for a transcript that may be stored compressed. Imported
+# at module scope because this module's READERS all need it and ``compression`` is
+# stdlib-only by contract (whose own lazy imports keep the harness out of ITS
+# graph), so this adds no cycle and no weight to the CLI path.
+from local_operator.session import compression
 from local_operator.session.runtime.engagement import (  # noqa: F401
     TRANSCRIPT_FILENAME,
     durable_conversation_path,
@@ -1156,6 +1162,20 @@ def _read_around_page(
         return TranscriptPage(page, has_older, False, has_newer, source_signature=verified)
 
 
+def _resolved_transcript_path(directory: str | Path) -> Path | None:
+    """The path a READER may open for ``directory``, or ``None`` when there is none.
+
+    THE read-side resolver for this module: a plain transcript is returned
+    unchanged; an archive is decompressed into the bounded cache (or restored in
+    place when free space is tight) and that path is returned. Callers keep their
+    byte arithmetic — offsets, backward walks, seeks — untouched, because the
+    materialised copy is byte-identical to the journal the archive was made from.
+    ``None`` means the session has neither form, which every caller already maps
+    to its own "empty history" answer.
+    """
+    return compression.transcript_for_read(Path(directory))
+
+
 def read_transcript_page(
     directory: str | Path,
     *,
@@ -1265,9 +1285,12 @@ def read_transcript_page(
       the two readers of the same file no longer disagree about a damaged row.
     """
     validate_page_request(before_id, through_id, around_id, before, after, limit)
-    path = Path(directory) / TRANSCRIPT_FILENAME
-    if not path.exists():
-        raise FileNotFoundError(path)
+    path = _resolved_transcript_path(directory)
+    if path is None:
+        # Same answer the plain-only reader gave for an absent file: the
+        # callers distinguish "no journal" with FileNotFoundError, and a
+        # compressed journal is NOT absent.
+        raise FileNotFoundError(Path(directory) / TRANSCRIPT_FILENAME)
     if around_id is not None:
         return _read_around_page(path, around_id, before=before, after=after, limit=limit)
     # Newest-first, holding at most ``limit + 1`` rows: the extra row is the
@@ -1370,7 +1393,9 @@ def find_row_for_custom_type(
     if encoded != f'"{custom_type}"':
         return None
     needle = b'"custom_type":' + encoded.encode("utf-8")
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    path = _resolved_transcript_path(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -1428,7 +1453,9 @@ def read_custom_entries(
     if max_rows is not None and max_rows <= 0:
         return []
     needle = b'"custom_type":' + encoded.encode("utf-8")
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    path = _resolved_transcript_path(directory)
+    if path is None:
+        return []
     try:
         handle = path.open("rb")
     except OSError:
@@ -1566,8 +1593,8 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     located = find_row_for_custom_type(directory, custom_type)
     if located is not None:
         return located[1]
-    path = Path(directory) / TRANSCRIPT_FILENAME
-    if not path.exists():
+    path = _resolved_transcript_path(directory)
+    if path is None:
         return None
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
@@ -1611,7 +1638,9 @@ def read_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry | 
         # An escaped spelling cannot be searched for by bytes; the walk answers.
         return _walk_entry_by_id(directory, entry_id)
     needle = b'{"id":' + encoded.encode("utf-8")
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    path = _resolved_transcript_path(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -1641,8 +1670,8 @@ def read_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry | 
 def _walk_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry | None:
     """Parse-walk fallback for :func:`read_entry_by_id` (re-serialized rows)."""
 
-    path = Path(directory) / TRANSCRIPT_FILENAME
-    if not path.exists():
+    path = _resolved_transcript_path(directory)
+    if path is None:
         return None
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
@@ -1762,8 +1791,8 @@ def read_replay_suffix(
     :func:`_iter_complete_lines_backward`, shared with the display page reader
     so the two cannot drift on where a row begins.
     """
-    path = Path(directory) / TRANSCRIPT_FILENAME
-    if not path.exists():
+    path = _resolved_transcript_path(directory)
+    if path is None:
         # ``Transcript(directory)`` treats an absent journal as empty history
         # — a session that has not written yet, or whose directory a sweep
         # removed. The attach path relies on that, so the suffix reader
@@ -1922,12 +1951,32 @@ class Transcript:
         # The flag is NOT sticky: the first real append materialises the
         # directory through that same self-healing path, after which this
         # object behaves identically to an eagerly-materialised one.
+        self._writer_lock_held = False
+        if not defer_materialise:
+            self.directory.mkdir(parents=True, exist_ok=True)
+        # THE WRITER LOCK, held for this object's whole lifetime, and taken
+        # BEFORE the first read or create.
+        #
+        # Why the lock comes first: a compressed transcript is the LIVE copy of
+        # the conversation, and the compression pass takes this same lock
+        # non-blocking before it touches a session. A writer that opened the
+        # plain path without it could read an empty directory while an archive
+        # held the whole body, or create a fresh empty file that shadows it.
+        # Holding it is also the statement the compressor tests: this session is
+        # in use, so its transcript is not rewritten under a live writer.
+        #
+        # ``restore_for_write`` is unconditional on an existing directory: it is
+        # a no-op when the plain file is present, and a verified in-place restore
+        # when an archive is. Reading before restoring is the one ordering that
+        # can turn a compressed session into an empty one.
+        if self.directory.is_dir():
+            self._writer_lock_held = compression.acquire_writer(self.directory)
+            compression.restore_for_write(self.directory)
         self.path = self.directory / TRANSCRIPT_FILENAME
         # Claims can precreate the directory; the journal distinguishes a legacy
         # conversation from new work. Keep birth in memory across directory loss.
         self._created_at = session_created_at(self.directory) if self.path.exists() else None
         if not defer_materialise:
-            self.directory.mkdir(parents=True, exist_ok=True)
             self._created_at = ensure_session_created_at(
                 self.directory, self._created_at if self._created_at is not None else time.time()
             )
@@ -1995,6 +2044,31 @@ class Transcript:
                             command_id = _admitted_command_id(entry)
                             if command_id is not None:
                                 self._admitted_command_ids.add(command_id)
+
+    # -- lifetime -----------------------------------------------------------
+
+    def close(self) -> None:
+        """Release this instance's hold on the session's writer lock.
+
+        Idempotent and safe from a finaliser: the released kernel lock is what
+        lets the compression pass treat the session as idle again, so a runtime
+        that left it held would keep the session permanently uncompressed. The
+        call never raises — ``__del__`` can run during interpreter shutdown, and
+        a finaliser that raises turns a clean exit into a traceback — and the
+        in-process refcount in ``compression.release_writer`` makes closing one
+        of two ``Transcript`` objects on the same directory keep the lock for
+        the one that is still open.
+        """
+        if not getattr(self, "_writer_lock_held", False):
+            return
+        self._writer_lock_held = False
+        try:
+            compression.release_writer(self.directory)
+        except Exception:  # noqa: BLE001 — a finaliser must never raise
+            logger.debug("transcript: writer lock release failed", exc_info=True)
+
+    def __del__(self) -> None:
+        self.close()
 
     # -- append -------------------------------------------------------------
 
@@ -3728,6 +3802,14 @@ def read_indexed_raw_rows(
         raise ValueError("positive byte budget required")
     source = (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime"))
     path = directory / "transcript.jsonl"
+    if compression.archive_path(directory) is not None:
+        # An indexed read's spans are byte offsets into the PLAIN journal and its
+        # witness is that journal's inode. A compressed session has neither:
+        # the bytes are the same conversation, but no file exists whose identity
+        # can be re-checked under the read. The honest answer is "unavailable"
+        # (None) — never an invented absence — and answering it here avoids
+        # decompressing an archive only to fail the witness on the cache copy.
+        return None
     rows, missing, remaining, unavailable = [], [], [], []
     used = 0
 
