@@ -223,7 +223,9 @@ async def test_the_message_route_hands_files_to_the_owner(message_api) -> None:
         )
     assert response.status_code == 200, response.text
     assert seen["text"] == "read this"
-    files = seen["kwargs"]["files"]
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs, dict)
+    files = kwargs["files"]
     assert isinstance(files, list)
     assert files[0]["digest"] == digest
     assert files[0]["name"] == "report.pdf"
