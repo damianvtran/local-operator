@@ -242,11 +242,12 @@ class GitHubAdapter:
 
         ``status`` precedence, and the rule behind it: **success requires every
         read check to have concluded ``success``**. ``failure`` outranks
-        ``pending`` (a red check is decisive even while others run), ``pending``
-        outranks the settled non-pass words, and ``unknown`` covers anything
-        this version cannot classify -- including a set it did not read whole
-        (``total_count`` larger than the runs returned). ``none`` is a
-        definitive zero (checks exist but none are configured).
+        ``pending`` (a red check is decisive even while others run); ``pending``
+        outranks ``unknown``, which in turn outranks the settled non-pass words
+        -- ``unknown`` covers anything this version cannot classify, including a
+        set it did not read whole (``total_count`` larger than the runs
+        returned), and a partial read must never be softened into ``skipped``.
+        ``none`` is a definitive zero (checks exist but none are configured).
 
         Counters stay ``None`` when the host did not carry them — never a
         guessed number (the design's "unknown is never a guess" rule).
@@ -267,12 +268,17 @@ class GitHubAdapter:
         base["url"] = raw.get("url")
         runs = raw.get("runs")
         if not isinstance(runs, list) or not runs:
-            if raw.get("fetched"):
+            total = raw.get("total")
+            if raw.get("fetched") and not (isinstance(total, int) and total > 0):
                 # A definitive "no checks ran": red would be wrong and grey
                 # would say "cannot tell", so it gets its own word.
                 base.update(
                     status="none", passed=0, failed=0, skipped=0, neutral=0, pending=0, total=0
                 )
+            elif isinstance(total, int) and total > 0:
+                # Fetched, no runs returned, yet the host says checks exist.
+                # An inconsistent read is "cannot tell", never a settled none.
+                base["total"] = total
             return base
         passed = failed = skipped = neutral = pending = 0
         unknown = False
@@ -296,22 +302,25 @@ class GitHubAdapter:
                 unknown = True
         total = raw.get("total")
         total = total if isinstance(total, int) else len(runs)
-        if total > len(runs):
-            # The check-runs call reads ONE page (100). When ``total_count``
-            # exceeds what arrived, the unread tail may hold the failure that
-            # decides the gate, so a partial read is never a pass.
-            unknown = True
+        # PARTIAL IS ITS OWN FACT, checked before the settled non-pass words: a
+        # page that came back with a skip on it is still an incomplete read,
+        # and letting ``skipped`` claim precedence here would drop the one
+        # signal this guard exists for (review round 1, F1).
+        partial = total > len(runs)
         if failed:
             status = "failure"
         elif pending:
             status = "pending"
+        elif unknown or partial:
+            # The check-runs call reads ONE page (100). When ``total_count``
+            # exceeds what arrived, the unread tail may hold the failure that
+            # decides the gate, so a partial read is never a pass.
+            status = "unknown"
         elif skipped:
             # Settled, but not every check ran. Never ``success``.
             status = "skipped"
         elif neutral:
             status = "neutral"
-        elif unknown:
-            status = "unknown"
         else:
             # Every read check completed with ``success``; nothing else is left.
             status = "success"
