@@ -45,6 +45,7 @@ from local_operator.harness.types import (
     AgentTool,
     AudioContent,
     ChatRequest,
+    DocumentContent,
     ImageContent,
     Message,
     ModelSpec,
@@ -69,6 +70,12 @@ from local_operator.model.speed import (
 )
 from local_operator.providers.account_affinity import set_wire_hint
 from local_operator.providers.context import bind_native_context
+from local_operator.providers.documents import (
+    DocumentForm,
+    document_form,
+    document_native_ok,
+    fallback_document_text,
+)
 from local_operator.providers.failover import ProviderError
 from local_operator.providers.replay import (
     REASONING_ECHO_PLACEHOLDER,
@@ -2175,7 +2182,33 @@ def _echo_reasoning_content(entry: dict[str, Any]) -> bool:
     return True
 
 
-def _message_to_openai(message: Message) -> dict[str, Any]:
+def _document_chat_part(block: DocumentContent, form: DocumentForm | None) -> dict[str, Any]:
+    """One document block as an OpenAI-COMPATIBLE chat content part.
+
+    Two shapes live behind that word, and which one is sent is ``form.wire``'s
+    decision — computed at REQUEST time from the provider id and the wire this
+    client is actually building (contract amendment 6), never from the block's
+    admission label. OpenRouter and OpenAI share ``file``; Mistral spells the
+    same data URL as ``document_url``.
+
+    Ineligible payloads (no form, over a limit, non-PDF) become TEXT — the
+    fallback extraction — never a skipped block: a provider that cannot read
+    the file must still receive what the file says.
+    """
+    if document_native_ok(block, form):
+        data_url = f"data:{block.mime_type};base64,{block.data}"
+        if form is not None and form.wire == "mistral":
+            return {"type": "document_url", "document_url": data_url}
+        return {
+            "type": "file",
+            "file": {"filename": block.filename, "file_data": data_url},
+        }
+    return {"type": "text", "text": fallback_document_text(block)}
+
+
+def _message_to_openai(
+    message: Message, document_form_: DocumentForm | None = None
+) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
         # Same whitespace rule as `_is_empty_assistant`: a whitespace-only
@@ -2226,6 +2259,12 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
                     "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"},
                 }
             )
+        elif isinstance(block, DocumentContent):
+            # A document part is never "plain": even its fallback text must ride
+            # the parts array, because ``plain_only`` would otherwise join the
+            # extraction into one string and lose the per-file framing.
+            plain_only = False
+            parts.append(_document_chat_part(block, document_form_))
         elif isinstance(block, AudioContent):
             plain_only = False
             wire_format = stt_audio.format_for_model_wire(block.mime_type)
@@ -2294,6 +2333,14 @@ def _messages_to_openai_responses(
     scope: str | None = None,
 ) -> list[dict[str, Any]]:
     """Render harness history as Responses input items, including tool turns."""
+    # Request-time document policy: the same provider id reaches Chat OR
+    # Responses depending on credentials/config, so this wire asks for ITS row
+    # (contract amendment 6) rather than reading the admission label.
+    doc_form = (
+        document_form(model.provider, "openai-responses", supports_images=model.supports_images)
+        if model is not None
+        else None
+    )
     items: list[dict[str, Any]] = []
     for message in _without_unrenderable_tool_calls(messages):
         if model is not None:
@@ -2350,6 +2397,17 @@ def _messages_to_openai_responses(
                         "image_url": f"data:{block.mime_type};base64,{block.data}",
                     }
                 )
+            elif isinstance(block, DocumentContent):
+                if document_native_ok(block, doc_form):
+                    content.append(
+                        {
+                            "type": "input_file",
+                            "filename": block.filename,
+                            "file_data": f"data:{block.mime_type};base64,{block.data}",
+                        }
+                    )
+                else:
+                    content.append({"type": "input_text", "text": fallback_document_text(block)})
             elif isinstance(block, AudioContent):
                 # STRUCTURAL REFUSAL, not a silent drop: the Responses API
                 # describes text and image inputs, and audio input is a Chat
@@ -3115,7 +3173,10 @@ class OpenAICompatClient:
     def _replay_chat_message(
         message: Message, model: ModelSpec, endpoint: str, scope: str | None
     ) -> dict[str, Any]:
-        entry = _message_to_openai(message)
+        entry = _message_to_openai(
+            message,
+            document_form(model.provider, "openai-chat", supports_images=model.supports_images),
+        )
         native = replay_items(message, model, endpoint, "openai-chat", scope)
         if native:
             for item in native:
@@ -4355,7 +4416,9 @@ class AnthropicClient:
         return rendered
 
     @staticmethod
-    def _message_blocks(message: Message) -> list[dict[str, Any]]:
+    def _message_blocks(
+        message: Message, document_form_: DocumentForm | None = None
+    ) -> list[dict[str, Any]]:
         """Render one message's content blocks for the Anthropic wire.
 
         An empty or whitespace-only text block is DROPPED, never shipped:
@@ -4391,6 +4454,24 @@ class AnthropicClient:
                         },
                     }
                 )
+            elif isinstance(block, DocumentContent):
+                # Native ``document`` block on the messages API; anything not
+                # eligible (a non-PDF, an over-limit file, a model row that
+                # does not exist) becomes extracted text here, so the model
+                # always has SOMETHING to read (contract §3).
+                if document_native_ok(block, document_form_):
+                    blocks.append(
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": block.data,
+                            },
+                        }
+                    )
+                else:
+                    blocks.append({"type": "text", "text": fallback_document_text(block)})
             elif isinstance(block, AudioContent):
                 # No audio input on this wire — the spec's capability flag for
                 # every Anthropic model stays false, so reaching here means a
@@ -4403,14 +4484,16 @@ class AnthropicClient:
         return blocks
 
     @staticmethod
-    def _tool_result_blocks(message: Message) -> list[dict[str, Any]]:
+    def _tool_result_blocks(
+        message: Message, document_form_: DocumentForm | None = None
+    ) -> list[dict[str, Any]]:
         """Render a tool result's content as Anthropic blocks.
 
         Uses the message's content blocks (never ``message.text``) so
         image-only results survive; an empty result is backfilled because
         Anthropic 400s on empty ``tool_result`` content.
         """
-        blocks = AnthropicClient._message_blocks(message)
+        blocks = AnthropicClient._message_blocks(message, document_form_)
         if not blocks:
             return [{"type": "text", "text": EMPTY_TOOL_RESULT_TEXT}]
         return blocks
@@ -4478,6 +4561,15 @@ class AnthropicClient:
         return "anthropic:messages" if self._base_url == ANTHROPIC_API_URL else None
 
     def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
+        # Request-time document policy for THIS wire (contract amendment 6).
+        # The row is the Anthropic document-input form; a model reached through
+        # this client on another provider id gets no row and therefore the
+        # fallback, which is the table's default.
+        doc_form = document_form(
+            request.model.provider,
+            "anthropic-messages",
+            supports_images=request.model.supports_images,
+        )
         messages: list[dict[str, Any]] = []
         for message in _without_unrenderable_tool_calls(request.messages):
             # Anthropic 400s on an assistant message whose content array is
@@ -4487,7 +4579,7 @@ class AnthropicClient:
             if _is_empty_assistant(message):
                 continue
             if message.role == "assistant" and message.tool_calls:
-                content = self._message_blocks(message)
+                content = self._message_blocks(message, doc_form)
                 content.extend(
                     {
                         "type": "tool_use",
@@ -4504,7 +4596,7 @@ class AnthropicClient:
                     {
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id or "",
-                        "content": self._tool_result_blocks(message),
+                        "content": self._tool_result_blocks(message, doc_form),
                         **({"is_error": True} if message.is_error else {}),
                     }
                 ]
@@ -4517,7 +4609,7 @@ class AnthropicClient:
                 else:
                     messages.append({"role": "user", "content": content})
             else:
-                blocks = self._message_blocks(message)
+                blocks = self._message_blocks(message, doc_form)
                 if not blocks:
                     # Every block was blank, so there is no content left to
                     # send — but the message still OCCUPIES A ROLE, and that is
@@ -4837,6 +4929,13 @@ class GoogleClient:
             await self._http.aclose()
 
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
+        # Request-time document policy: Gemini's row is the only one this wire
+        # may use, and its limits are checked per block (contract amendment 6).
+        doc_form = document_form(
+            request.model.provider,
+            "google-content",
+            supports_images=request.model.supports_images,
+        )
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
@@ -4873,6 +4972,13 @@ class GoogleClient:
                     parts.append(
                         {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
                     )
+                elif isinstance(block, DocumentContent):
+                    if document_native_ok(block, doc_form):
+                        parts.append(
+                            {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
+                        )
+                    else:
+                        parts.append({"text": fallback_document_text(block)})
                 elif isinstance(block, AudioContent):
                     # Mirrors the image branch above, snake_case spelling and
                     # all: the REST API accepts ``inline_data``/``inlineData``

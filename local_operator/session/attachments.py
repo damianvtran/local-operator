@@ -76,6 +76,52 @@ ATTACHMENTS_DIRNAME = "attachments"
 #: transcript reference is a rounding error next to the payload it replaced.
 _DIGEST_CHARS = 32
 
+#: Ceiling for one composer upload. 32 MB matches Anthropic's per-request
+#: limit — the tightest native document limit in the capability table — so a
+#: file the store accepts is never refused for SIZE by a provider that reads
+#: documents natively. A provider with a smaller limit than this is handled
+#: by the delivery policy's per-provider cap, not by a second upload rule.
+MAX_ATTACHMENT_UPLOAD_BYTES = 32 * 1024 * 1024
+
+#: Suffix → MIME for the text-ish types the upload route classifies. CONTENT
+#: decides first (a PDF is a PDF whatever it is called); the suffix is the
+#: fallback for text, where no portable magic number exists. Deliberately a
+#: closed set: everything else is ``application/octet-stream``, because a
+#: guessed text MIME would make a binary file eligible for text extraction.
+_TEXT_MIME_BY_SUFFIX = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".py": "text/x-python",
+    ".log": "text/plain",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".xml": "application/xml",
+}
+
+
+def sniff_document_mime(raw: bytes, name: str | None = None) -> str:
+    """The MIME an uploaded attachment is stored as, decided from the BYTES.
+
+    The client's declared type is never consulted: a browser's ``File.type``
+    comes from the operating system's extension table and is wrong for
+    renamed files, which is exactly the case that matters — a PDF behind a
+    ``.txt`` name must still reach a provider's native document path.
+
+    PDF is the only format with a magic number this store needs to recognise
+    (delivery treats it specially); text has no portable magic, so the
+    SUFFIX is consulted for the closed text set and everything else is
+    opaque. The order is the contract: content first, suffix second.
+    """
+    if raw[:5] == b"%PDF-":
+        return "application/pdf"
+    suffix = Path(str(name or "")).suffix.lower()
+    return _TEXT_MIME_BY_SUFFIX.get(suffix, "application/octet-stream")
+
 
 @dataclass(frozen=True)
 class AttachmentRef:

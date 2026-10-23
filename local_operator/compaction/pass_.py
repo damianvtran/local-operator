@@ -40,6 +40,7 @@ from .marker import (
     marker_details,
     render_compaction_marker,
     split_leading_marker,
+    with_attachment_manifest,
 )
 from .pruning import prune_stale_frames, prune_tool_outputs, shed_frames_to_wire_budget
 from .thresholds import (
@@ -275,6 +276,13 @@ async def run_compaction_pass(
     # ship) so the next pass can lift it back into the ``CustomMessage`` the
     # cut-point walker understands and fold its summary through
     # ``previous_summary``.
+    # The attachments manifest rides BOTH strategies (contract amendment 5):
+    # it is merged here, once, after either branch produced its payload, so a
+    # summary pass and a snapcompact pass cannot disagree about whether files
+    # survive a compaction. ``to_summarize`` carries both live document blocks
+    # and the previous marker's manifest, which ``collect_attachment_manifest``
+    # merges.
+    preserve_data = with_attachment_manifest(preserve_data, to_summarize)
     marker = build_compaction_marker(summary, preserve_data)
     rendered = render_compaction_marker(marker, entry_id=marker.id)
     rebuilt: list[Message] = [rendered, *kept]

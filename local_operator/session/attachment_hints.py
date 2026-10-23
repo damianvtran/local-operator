@@ -115,7 +115,12 @@ import os
 from pathlib import Path
 
 from local_operator.compaction.marker import COMPACTION_MARKER_TYPE
-from local_operator.harness.types import ImageContent, Message, TextContent
+from local_operator.harness.types import (
+    DocumentContent,
+    ImageContent,
+    Message,
+    TextContent,
+)
 from local_operator.session.attachments import AttachmentStore
 from local_operator.tools.confinement import ToolConfinement
 
@@ -148,6 +153,30 @@ _CONFINED_SINGLE_OPEN = (
 _CONFINED_MULTI_OPEN = (
     '[image attachments — entries marked "no workspace file" are inline '
     "pixels only and cannot be read or edited (do not search for them):\n"
+)
+
+#: Document-bearing messages get their own opening: the note now covers files
+#: whose bytes the model may have received natively or as extracted text, so
+#: "image" would be a false description of what follows. A message carrying
+#: BOTH images and documents takes this opening too — one note per turn, the
+#: contract's single trailing block, and the per-row lines say what each entry
+#: is.
+_FILES_SINGLE_OPEN = (
+    "[attached file stored on disk — read or edit the file directly; "
+    "no filesystem search is needed:\n"
+)
+_FILES_MULTI_OPEN = (
+    "[attached files stored on disk — read or edit the files directly; "
+    "no filesystem search is needed:\n"
+)
+_FILES_CONFINED_SINGLE_OPEN = (
+    "[attached file — it is not available as a workspace file (do not search "
+    "for one); the model already has what was delivered below:\n"
+)
+_FILES_CONFINED_MULTI_OPEN = (
+    '[attached files — entries marked "no workspace file" cannot be read or '
+    "edited (do not search for them); the model already has what was "
+    "delivered below:\n"
 )
 
 
@@ -192,19 +221,33 @@ def with_attachment_hints(
             # nobody asked it to edit.
             out.append(message)
             continue
-        rows = [
-            row
-            for block in message.content
-            if isinstance(block, ImageContent)
-            if (row := _block_row(store, block, boundary)) is not None
-        ]
+        rows: list[tuple[str, bool]] = []
+        has_documents = False
+        for block in message.content:
+            if isinstance(block, ImageContent):
+                row = _block_row(store, block, boundary)
+            elif isinstance(block, DocumentContent):
+                has_documents = True
+                row = _document_row(store, block, boundary)
+            else:
+                continue
+            if row is not None:
+                rows.append(row)
         if not rows:
             out.append(message)
             continue
         if all(full for _text, full in rows):
-            opening = _SINGLE_OPEN if len(rows) == 1 else _MULTI_OPEN
+            if has_documents:
+                opening = _FILES_SINGLE_OPEN if len(rows) == 1 else _FILES_MULTI_OPEN
+            else:
+                opening = _SINGLE_OPEN if len(rows) == 1 else _MULTI_OPEN
         else:
-            opening = _CONFINED_SINGLE_OPEN if len(rows) == 1 else _CONFINED_MULTI_OPEN
+            if has_documents:
+                opening = (
+                    _FILES_CONFINED_SINGLE_OPEN if len(rows) == 1 else _FILES_CONFINED_MULTI_OPEN
+                )
+            else:
+                opening = _CONFINED_SINGLE_OPEN if len(rows) == 1 else _CONFINED_MULTI_OPEN
         note = opening + "\n".join(text for text, _full in rows) + "]"
         out.append(_hinted_copy(message, note))
     return out
@@ -228,15 +271,89 @@ def _block_row(
     if ref is None:
         return None
     path = store.path_for(ref.digest)
+    origin = _origin_clause(block.path, boundary)
     if boundary is None or _reachable(boundary, path):
         return (
-            f"- {path} ({block.mime_type}, {ref.bytes} bytes; digest {ref.digest})",
+            f"- {path} ({block.mime_type}, {ref.bytes} bytes; digest {ref.digest}){origin}",
             True,
         )
     return (
-        f"- ({block.mime_type}, {ref.bytes} bytes; digest {ref.digest}; no workspace file)",
+        f"- ({block.mime_type}, {ref.bytes} bytes; digest {ref.digest}; no workspace file)"
+        f"{origin}",
         False,
     )
+
+
+def _document_row(
+    store: AttachmentStore, block: DocumentContent, boundary: ToolConfinement | None
+) -> tuple[str, bool] | None:
+    """The note's line for one document, and whether it advertises a real path.
+
+    Facts the model can always act on come first — filename, MIME, byte count
+    and the DELIVERY PATH this turn actually took (``injection``, stamped at
+    admission) — because a model told "you received a PDF" can reason about
+    it even when no file is reachable. The retained copy (the store blob) is
+    named only when the session's boundary can reach it, exactly the image
+    rule; the ORIGIN path follows the same test, so a confined session is
+    never promised a controller path its tools would refuse.
+
+    ``None`` only when the block carries no bytes at all (an empty placeholder
+    the wire could not resolve): naming a file nobody can open is the false
+    promise this module exists to avoid.
+    """
+    if not block.data and not block.digest:
+        return None
+    digest = block.digest
+    if not digest and block.data:
+        ref = store.locate(block.data, block.mime_type)
+        digest = ref.digest if ref is not None else None
+    retained = ""
+    full = True
+    if digest:
+        path = store.path_for(digest)
+        if boundary is None or _reachable(boundary, path):
+            retained = f", retained at {path}"
+        else:
+            retained = f", retained copy (digest {digest}; no workspace file)"
+            full = False
+    delivery = _delivery_clause(block.injection)
+    origin = _origin_clause(block.path, boundary)
+    size = block.bytes or len(block.data)
+    return (
+        f'- "{block.filename}" ({block.mime_type}, {size} bytes{retained}' f"{origin}; {delivery})",
+        full,
+    )
+
+
+def _delivery_clause(injection: str | None) -> str:
+    """How the turn's bytes reached the model, in words it can act on.
+
+    Historical (``injection`` is stamped at admission), and phrased as a fact
+    about the message rather than a promise about this request: a later
+    ``/model`` switch may deliver the same block differently, which is why the
+    serializer re-decides and this clause does not claim otherwise.
+    """
+    if injection == "native":
+        return "sent as a native document"
+    if injection == "extracted":
+        return "delivered as extracted text"
+    if injection == "reference":
+        return "delivered only as a reference, not its contents"
+    return "attached"
+
+
+def _origin_clause(origin: str | None, boundary: ToolConfinement | None) -> str:
+    """``; original at <path>`` when it is present AND reachable.
+
+    Confinement (contract amendment 8): a path outside the session's world is
+    withheld from the MODEL-VISIBLE note. History may still show it to the
+    user; this function is only ever called on the request render.
+    """
+    if not origin:
+        return ""
+    if boundary is not None and not _reachable(boundary, Path(origin)):
+        return ""
+    return f"; original at {origin}"
 
 
 def _reachable(boundary: ToolConfinement, path: Path) -> bool:
