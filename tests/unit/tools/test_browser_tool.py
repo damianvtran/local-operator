@@ -44,6 +44,11 @@ def _with_surface(surface_id: str = "surface:3") -> ToolContext:
     return ctx
 
 
+async def _async(value):
+    """A coroutine that resolves to ``value`` — for stubbing an async call."""
+    return value
+
+
 class FakeCmux:
     """Stand-in for the ``cmux`` CLI, routed by argv.
 
@@ -1952,3 +1957,360 @@ def test_screenshot_into_an_over_cap_pad_is_refused_before_cmux(monkeypatch, tmp
     assert "4,095-byte ceiling" in result.text
     assert not (pad / "shot.png").exists()
     assert all(call[3] != "screenshot" for call in fake.calls if call[:1] == ["browser"])
+
+
+# --- snapshot discovery: scope, window, search -------------------------------
+#
+# The measured incident (2026-10-23, GitHub's "Create GitHub App" form): a
+# 3,000-line accessibility tree was cut mid-tree by the model-facing character
+# ceiling, every ref below the cut was unobtainable, and `snapshot` had no way
+# to ask for one section. These tests pin the three answers — a subtree, a page,
+# and a search term — and the footer that makes a narrowed tree recoverable.
+
+SNAPSHOT_TREE = "\n".join(
+    ['- RootWebArea "Create App" [e1]', "  - form", '    - textbox "GitHub App name" [e2]']
+    + [f'    - textbox "Setting {index}" [e{index + 3}]' for index in range(200)]
+)
+
+
+def _snapshot_bridge(monkeypatch, result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pin host probes and capture the wire params a snapshot sends."""
+    sent: list[dict[str, Any]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        sent.append({"action": action, "params": dict(params)})
+        return dict(result), None
+
+    _bridge_only(monkeypatch)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: True)
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    return sent
+
+
+def test_snapshot_forwards_the_scope_and_window_to_the_host(monkeypatch) -> None:
+    sent = _snapshot_bridge(monkeypatch, {"snapshot": "- form", "total_lines": 1})
+    tool = builtin.build_browser_tool(_ctx())
+    assert tool is not None
+    result = _run(
+        tool,
+        "t1",
+        {
+            "action": "snapshot",
+            "selector": "form#new_app",
+            "start": 41,
+            "limit": 20,
+            "search": "Active",
+        },
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert sent and sent[-1]["action"] == "snapshot"
+    assert sent[-1]["params"]["selector"] == "form#new_app"
+    assert sent[-1]["params"]["start"] == 41
+    assert sent[-1]["params"]["limit"] == 20
+    assert sent[-1]["params"]["search"] == "Active"
+    assert sent[-1]["params"]["tab"] == "bridge:9:nonce"
+
+
+def test_snapshot_sends_no_window_when_none_was_asked_for(monkeypatch) -> None:
+    """The pre-existing whole-tree call must stay byte-identical on the wire."""
+    sent = _snapshot_bridge(monkeypatch, {"snapshot": "- form", "total_lines": 1})
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "snapshot"}, _secret_ctx(surface_id="bridge:9:nonce"))
+
+    assert not result.is_error, result.text
+    assert "selector" not in sent[-1]["params"]
+    assert "start" not in sent[-1]["params"]
+    assert "limit" not in sent[-1]["params"]
+    assert "search" not in sent[-1]["params"]
+
+
+def test_snapshot_footer_names_the_next_page_a_host_windowed(monkeypatch) -> None:
+    """The host reports the arithmetic; the tool must render it as a next call.
+
+    This is the exact failure the incident repeated: the cut was visible, the
+    recovery was not. `start=51` in the footer is the whole deliverable.
+    """
+    _snapshot_bridge(
+        monkeypatch,
+        {
+            "snapshot": "\n".join(f'- textbox "Field {i}" [e{i}]' for i in range(50)),
+            "total_lines": 431,
+            "matched_lines": 431,
+            "returned_lines": 50,
+            "start": 1,
+            "limit": 50,
+            "scoped": True,
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "selector": "form", "limit": 50},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "lines 1-50 of 431" in result.text
+    assert "start=51" in result.text
+    assert "scoped to 'form'" in result.text
+    assert result.details["total_lines"] == 431
+    assert result.details["scoped"] is True
+
+
+def test_snapshot_footer_is_silent_for_a_complete_unscoped_tree(monkeypatch) -> None:
+    _snapshot_bridge(
+        monkeypatch,
+        {
+            "snapshot": "- RootWebArea",
+            "total_lines": 1,
+            "matched_lines": 1,
+            "returned_lines": 1,
+            "start": 1,
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(tool, "t1", {"action": "snapshot"}, _secret_ctx(surface_id="bridge:9:nonce"))
+
+    assert not result.is_error, result.text
+    assert "snapshot:" not in result.text
+
+
+def test_snapshot_windows_locally_when_the_host_reports_no_numbers(monkeypatch) -> None:
+    """cmux and an older desktop app ignore the params; paging still works.
+
+    The refs are the point: dropping whole text LINES never renumbers a ref, so
+    `e57` seen on page one is still `e57` on page three.
+    """
+    _snapshot_bridge(monkeypatch, {"snapshot": SNAPSHOT_TREE})
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "start": 3, "limit": 2},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    body, _, footer = result.text.partition("\n\n")
+    assert body.splitlines() == [
+        '    - textbox "GitHub App name" [e2]',
+        '    - textbox "Setting 0" [e3]',
+    ]
+    assert "lines 3-4 of 203" in footer
+    assert "start=5" in footer
+
+
+def test_snapshot_search_filters_the_local_window(monkeypatch) -> None:
+    _snapshot_bridge(monkeypatch, {"snapshot": SNAPSHOT_TREE})
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "search": "Active"},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    # The synthetic tree has no "Active": the honest answer is the count, not a
+    # silent empty page that reads like an empty section.
+    assert not result.is_error, result.text
+    assert "(empty snapshot)" in result.text
+    assert "0 of 203 lines matched 'Active'" in result.text
+
+
+def test_snapshot_says_when_the_host_ignored_the_selector(monkeypatch) -> None:
+    """An old host accepts the param and ignores it.
+
+    Without this sentence the agent reads a full page as "the form's subtree" —
+    the most dangerous failure mode of an additive wire field, because the
+    result looks successful.
+    """
+    _snapshot_bridge(monkeypatch, {"snapshot": SNAPSHOT_TREE})
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "selector": "#webhook-section"},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "ignored selector" in result.text
+    assert "update the desktop app" in result.text
+
+
+def test_snapshot_window_is_refused_on_another_action(monkeypatch) -> None:
+    # Pin the host: `build_browser_tool` returns None without one, and the test
+    # then fails with an AttributeError that says nothing about windows.
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "click", "selector": "button", "search": "Active"},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert result.is_error is True
+    assert "'search' only valid for 'snapshot'" in result.text
+
+
+def test_snapshot_window_values_are_refused_when_unusable(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx())
+    for args, expected in (
+        ({"action": "snapshot", "start": 0}, "'start' is 1-based"),
+        ({"action": "snapshot", "limit": 0}, "'limit' must be at least 1 line"),
+        (
+            {"action": "snapshot", "limit": builtin.SNAPSHOT_MAX_LINES + 1},
+            f"at most {builtin.SNAPSHOT_MAX_LINES} lines",
+        ),
+        (
+            {"action": "snapshot", "search": "x" * (builtin.SNAPSHOT_MAX_SEARCH_CHARS + 1)},
+            "name the control, not the page",
+        ),
+    ):
+        result = _run(tool, "t1", args, _secret_ctx(surface_id="bridge:9:nonce"))
+        assert result.is_error is True, (args, result.text)
+        assert expected in result.text, (args, result.text)
+
+
+def test_a_host_reporting_zero_matches_is_not_read_as_every_line_matching(monkeypatch) -> None:
+    """`matched_lines: 0` is a result, not a falsy value to default away.
+
+    The bug this pins: `result.get("matched_lines") or total` turns "the term is
+    not in the tree" into "461 of 461 lines matched", which then renders as a
+    paging footer for a page that does not exist.
+    """
+    _snapshot_bridge(
+        monkeypatch,
+        {
+            "snapshot": "",
+            "total_lines": 461,
+            "matched_lines": 0,
+            "returned_lines": 0,
+            "start": 1,
+            "limit": 0,
+            "search": "Active",
+            "scoped": True,
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "search": "Active"},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "0 of 461 lines matched 'Active'" in result.text
+    assert "start is past the end" not in result.text
+
+
+# --- remediation round 1 -----------------------------------------------------
+#
+# Each of these pins a review finding from round 1, and each fails on the head
+# that was reviewed.
+
+
+def test_cmux_snapshot_windows_the_tree_it_was_handed(monkeypatch) -> None:
+    """R1-1: the degrade-to-local-windowing claim must be true for cmux too.
+
+    cmux has no window flags, so `start`/`limit`/`search` have to be applied to
+    the text the CLI returned. Before this, `start=2` re-returned page one
+    forever and `search` filtered nothing — a claim in the PR that the code did
+    not implement.
+    """
+    fake = FakeCmux()
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(
+        builtin,
+        "_run_cmux",
+        lambda argv, timeout=30.0: _async((0, "\n".join(f"- row {n}" for n in range(1, 6)))),
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "start": 2, "limit": 2},
+        _with_surface("surface:3"),
+    )
+
+    assert not result.is_error, result.text
+    assert "- row 2" in result.text and "- row 3" in result.text
+    assert "- row 1" not in result.text and "- row 4" not in result.text
+    assert "lines 2-3 of 5" in result.text
+    assert "pass start=4" in result.text
+
+    filtered = _run(
+        tool,
+        "t2",
+        {"action": "snapshot", "search": "row 5"},
+        _with_surface("surface:3"),
+    )
+    assert not filtered.is_error, filtered.text
+    assert "- row 5" in filtered.text
+    assert "- row 1" not in filtered.text
+    assert "matching 'row 5'" in filtered.text
+    del fake
+
+
+def test_a_start_past_the_end_never_prints_an_inverted_range(monkeypatch) -> None:
+    """R1-5: `lines 500-499 of 203` was honest in its clause and wrong in its numbers."""
+    _snapshot_bridge(
+        monkeypatch,
+        {
+            "snapshot": "- row",
+            "total_lines": 203,
+            "matched_lines": 203,
+            "returned_lines": 0,
+            "start": 500,
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "start": 500},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "lines 500-499" not in result.text
+    assert "start=500 is past the end of 203 lines" in result.text
+
+
+def test_a_context_cut_page_does_not_name_a_next_start(monkeypatch) -> None:
+    """R1-6: following `start + returned` after a character cut skips whole lines.
+
+    The page has to be BOTH windowed (returned < matched) and over the character
+    ceiling, or the branch this pins is unreachable and the test passes on the
+    defective head (agent review round 2, R2-1).
+    """
+    lines = [f"- textbox \"Field {n} {'.' * 180}\"" for n in range(1, 901)]
+    _snapshot_bridge(
+        monkeypatch,
+        {
+            "snapshot": "\n".join(lines[:50]),
+            "total_lines": len(lines),
+            "matched_lines": len(lines),
+            "returned_lines": 50,
+            "start": 1,
+            "limit": 50,
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "limit": 50},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "cut to fit the context" in result.text
+    assert "pass start=" not in result.text
+    assert "lines 1-50 of 900" in result.text

@@ -8,6 +8,7 @@ interface PushResult { nodeIds: number[] }
 interface DocumentResult { root: { nodeId: number } }
 interface ResolvedNode { object: { objectId: string } }
 interface CallResult { result: { value?: unknown } }
+interface DescribedNode { node: { backendNodeId?: number } }
 
 async function objectIdFor(tabId: number, nodeId: number): Promise<string> {
   const resolved = await cdp<ResolvedNode>(tabId, "DOM.resolveNode", { nodeId });
@@ -58,6 +59,31 @@ export async function nodeIdFor(surface: StoredSurface, selector: unknown): Prom
   const queried = await cdp<QueryResult>(tabId, "DOM.querySelector", { nodeId: document.root.nodeId, selector });
   if (!queried.nodeId) throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`);
   return queried.nodeId;
+}
+
+/* A CSS selector's element, named by the id the ACCESSIBILITY tree uses.
+ *
+ * `snapshot` scoping needs this rather than `nodeIdFor`: the AX tree indexes
+ * nodes by `backendDOMNodeId`, while every other DOM command speaks frontend
+ * node ids that belong to one session's document and change between them.
+ * The describe hop is what translates the queried node into the stable id, and
+ * `depth: 0` keeps it to the element itself. Exported from here (rather than a
+ * second file) so the document-request dance and the typed miss stay in ONE
+ * place; a snapshot that cannot find its scope must fail exactly like a click
+ * that cannot find its target.
+ */
+export async function backendNodeIdForSelector(surface: StoredSurface, selector: string): Promise<number> {
+  const tabId = surface.tabId;
+  if (!selector) throw new BridgeCommandError("element_not_found", "selector is required");
+  const document = await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
+  const queried = await cdp<QueryResult>(tabId, "DOM.querySelector", { nodeId: document.root.nodeId, selector });
+  if (!queried.nodeId) throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`);
+  const described = await cdp<DescribedNode>(tabId, "DOM.describeNode", { nodeId: queried.nodeId, depth: 0 });
+  const backendNodeId = described.node?.backendNodeId;
+  if (backendNodeId === undefined) {
+    throw new BridgeCommandError("element_not_found", `selector ${selector} has no backend node id`);
+  }
+  return backendNodeId;
 }
 
 // The click/type paths drive the resolved node directly rather than computing

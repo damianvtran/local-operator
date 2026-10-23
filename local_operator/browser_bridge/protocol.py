@@ -84,7 +84,10 @@ def proto_supported(
 #: both read `0.1.19`. Nothing shipped under it, so the repair is a renumber —
 #: see `docs/store/release-record.md`, v0.1.20. 0.1.21 is the first tree that
 #: serves the structured read actions (`styles`/`hit_test`/`ancestors`).
-EXPECTED_EXTENSION_VERSION = "0.1.21"
+#: 0.1.22 is the first tree whose `snapshot` takes a CSS scope and a line
+#: window (`selector`/`start`/`limit`/`search`), so an agent can ask for one
+#: section of a real settings form instead of a tree it cannot page.
+EXPECTED_EXTENSION_VERSION = "0.1.22"
 
 #: The first extension version that serves each capability-gated method.
 #:
