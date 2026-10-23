@@ -54,7 +54,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Literal, Sequence
+from typing import Any, Iterable, Iterator, Literal, NamedTuple, Sequence
 
 from pydantic import (
     BaseModel,
@@ -186,10 +186,24 @@ _STALE_AFTER_CACHE: dict[str, tuple[int | None, float]] = {}
 _LOCK_TIMEOUT_S = 10.0
 _LOCK_RETRY_S = 0.01
 
-#: Cap on rows loaded from one store. Past this, the scan stops and warns: a
-#: store with thousands of rows is a runaway writer, and a read path must stay
-#: bounded.
-_MAX_ROWS = 500
+#: Cap on rows loaded into one snapshot. This is a PAGE over a recency
+#: ranking, NOT a visibility boundary: every addressed read (:meth:`get_project`,
+#: :meth:`get_project_by_name`) and every addressed mutation falls through to
+#: the row's own file, so a project past the page is still readable, findable by
+#: name, updatable, linkable and deletable. The page exists because every
+#: mutation re-reads the store under the lock, and a store with thousands of
+#: rows is a runaway writer, not a workload.
+#:
+#: The number, measured on this host: the incident's per-row parse cost is
+#: ~0.12 ms of CPU and ~23 KB resident, and the operator's own 541-row / 10.1 MB
+#: store measured 240 ms of CPU for a COLD load (one 468 KB row skews the
+#: average) against 8.6 ms for a WARM one — the parse cache is what buys that
+#: 28x. A page of 2000 therefore bounds a cold load near half a second and
+#: ~46 MB, and a warm one to tens of milliseconds. The cap ranks by recency, so
+#: the rows a working store is actually using are the ones a page of 2000 holds;
+#: the previous 500 with filename order cut an arbitrary tail out permanently
+#: (the ordinal-502 incident: a valid, active project never loaded).
+_MAX_ROWS = 2000
 
 ProjectStatus = Literal["planning", "active", "qa", "validation", "paused", "done", "archived"]
 EstimateUnit = Literal["points", "days"]
@@ -1683,6 +1697,20 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+class _RowFile(NamedTuple):
+    """One candidate row file and the three stat fields a cache key reads.
+
+    The stat is captured ONCE per load: it is both the recency rank and the
+    parse-cache key, so a page costs one stat per candidate and never a second
+    one per parsed row.
+    """
+
+    path: Path
+    mtime_ns: int
+    size: int
+    inode: int
+
+
 class ProjectRegistry:
     """On-disk registry of projects under ``<config_dir>/projects``."""
 
@@ -1690,6 +1718,20 @@ class ProjectRegistry:
         self.config_dir = Path(config_dir)
         self.projects_dir = self.config_dir / "projects"
         self._projects: dict[str, Project] = {}
+        #: Row files the last load FOUND, the page's denominator. Kept beside
+        #: the snapshot so a surface can say "N of M" without a second scan.
+        self._rows_on_disk = 0
+        #: ``filename -> (st_mtime_ns, st_size, st_ino, Project)`` for the rows
+        #: the last load PARSED — never for rows the page excluded, because the
+        #: cache exists to make the page affordable, and caching the whole store
+        #: would put back the memory a page is meant to bound. Pruned with every
+        #: load, so a deleted row's parsed copy does not outlive its file.
+        #:
+        #: The key is safe because a publish is temp-write + ``os.replace``: a
+        #: replaced row always changes INODE at minimum, so a cached entry can
+        #: never be mistaken for a newer revision. mtime and size cover the other
+        #: writer a store must survive — a hand edit in place.
+        self._row_cache: dict[str, tuple[int, int, int, Project]] = {}
         self._last_refresh_time = 0.0
         self._refresh_interval = refresh_interval
         # The directory mtime the snapshot was taken at. A peer's publish is a
@@ -1717,11 +1759,63 @@ class ProjectRegistry:
         """
         return self._load_error
 
+    def _row_files(self) -> list[_RowFile]:
+        """Every row file in the store, MOST RECENTLY WRITTEN FIRST.
+
+        Recency, not filename, is the order because filename order is unrelated
+        to activity: a cut taken in filename order freezes an arbitrary tail out
+        permanently (the ordinal-502 incident — a valid active project sorted
+        past the cap and never loaded again). A write moves a row's mtime to
+        now, so the next load promotes it back onto the page, and a dormant row
+        is the only thing that ages out.
+
+        The neighbourhood rules are the store's: dot-prefixed entries are the
+        lock and in-flight temp writes, a symlink is never a row (a crafted one
+        must not turn a read into an operation outside the registry root), and
+        only regular ``.json`` files are candidates. Raises ``OSError`` from the
+        listing only; a row that disappears between the listing and its stat is
+        the documented atomic-publish gap and is skipped, not an error.
+        """
+        rows: list[_RowFile] = []
+        for child in self.projects_dir.iterdir():
+            if child.name.startswith("."):
+                continue
+            if child.is_symlink() or not child.is_file():
+                continue
+            if not child.name.endswith(".json"):
+                continue
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
+            rows.append(_RowFile(child, stat.st_mtime_ns, stat.st_size, stat.st_ino))
+        # Descending mtime with a filename tiebreak: the tiebreak only decides
+        # between rows written in the same nanosecond, but it makes the page
+        # deterministic (two identical loads cannot swap a boundary row in and
+        # out of a listing).
+        rows.sort(key=lambda row: (-row.mtime_ns, row.path.name))
+        return rows
+
     def _load(self) -> None:
-        """Replace the snapshot with every valid row currently on disk."""
+        """Replace the snapshot with the store's most recently active rows.
+
+        The page is ranked by ``st_mtime_ns`` (:meth:`_row_files`), never by
+        filename: see that method for why the order is the whole fix.
+
+        Parsing is the expensive half of a load (~0.12 ms of CPU and ~23 KB
+        resident per row here), and every mutation re-loads under the lock, so
+        rows are parsed at most once per revision: the cache above is keyed on
+        the stat triple and survives across loads. Only the page is cached — a
+        row this load excluded is not a row a surface is about to read.
+
+        This is a PAGE over a recency ranking, not a visibility boundary: the
+        addressed reads (:meth:`get_project`, :meth:`get_project_by_name`) and
+        every addressed mutation fall through to the row's own file, so the cap
+        never answers "not found" for a row that is on disk.
+        """
         loaded: dict[str, Project] = {}
         try:
-            children = sorted(self.projects_dir.iterdir(), key=lambda path: path.name)
+            row_files = self._row_files()
         except OSError as exc:
             # A store that has never been written is EMPTY, not unreadable:
             # `projects/` is created on first write, so its absence is the
@@ -1730,30 +1824,22 @@ class ProjectRegistry:
             # surface must not paper over as "nothing stored".
             self._load_error = None if isinstance(exc, FileNotFoundError) else exc
             self._projects = {}
+            self._row_cache = {}
+            self._rows_on_disk = 0
             self._dir_mtime_ns = self._dir_mtime()
             self._last_refresh_time = time.time()
             return
-        rows = 0
-        for child in children:
-            # Dot-prefixed entries are NEVER rows: the lock file and every
-            # in-flight temp write live there, and a half-written temp must
-            # stay invisible.
-            if child.name.startswith("."):
+        page = row_files[:_MAX_ROWS]
+        cache: dict[str, tuple[int, int, int, Project]] = {}
+        for row in page:
+            key = (row.mtime_ns, row.size, row.inode)
+            cached = self._row_cache.get(row.path.name)
+            if cached is not None and cached[:3] == key:
+                project = cached[3]
+                loaded[project.id] = project
+                cache[row.path.name] = cached
                 continue
-            # A crafted symlink must never turn a read or a delete into an
-            # operation outside the registry root.
-            if child.is_symlink() or not child.is_file():
-                continue
-            if not child.name.endswith(".json"):
-                continue
-            rows += 1
-            if rows > _MAX_ROWS:
-                logger.warning(
-                    "projects store at %s has more than %d rows; the rest are not loaded",
-                    self.projects_dir,
-                    _MAX_ROWS,
-                )
-                break
+            child = row.path
             try:
                 with child.open("r", encoding="utf-8") as handle:
                     data = json.load(handle)
@@ -1779,18 +1865,57 @@ class ProjectRegistry:
                         project.status,
                     )
                 loaded[project.id] = project
+                cache[child.name] = (*key, project)
             except FileNotFoundError:
                 # The row was replaced between the scan and this open — the
                 # documented atomic-publish gap, not a corrupt row.
                 continue
             except Exception as exc:  # noqa: BLE001 — one bad file must not hide the rest
                 logger.warning("invalid project row in %s: %s", child.name, exc)
+        hidden = len(row_files) - len(page)
         self._projects = loaded
+        # Replacing (not updating) the cache prunes every row this load did not
+        # parse: a deleted row's parsed copy, and any row the page dropped.
+        self._row_cache = cache
+        self._rows_on_disk = len(row_files)
         self._dir_mtime_ns = self._dir_mtime()
         self._last_refresh_time = time.time()
         # A readable store clears the flag (see ``load_error``). Set LAST so a
         # partial load never reports itself readable mid-scan.
         self._load_error = None
+        if hidden:
+            # Once per load, with the exact counts — and the sentence a reader
+            # needs to stop treating the page as the store: the rows left out
+            # are DORMANT, not gone, and addressing one still resolves it.
+            logger.warning(
+                "projects store at %s holds %d rows; loading the %d most recently "
+                "active and leaving %d dormant rows off the page. Addressed "
+                "lookups (show/update/delete) still resolve every row.",
+                self.projects_dir,
+                len(row_files),
+                len(page),
+                hidden,
+            )
+
+    @property
+    def rows_on_disk(self) -> int:
+        """Row files the last load found — the denominator of the page."""
+        return self._rows_on_disk
+
+    @property
+    def rows_loaded(self) -> int:
+        """Rows the last load put in the snapshot."""
+        return len(self._projects)
+
+    @property
+    def truncated(self) -> bool:
+        """True when the store held more rows than the page loaded.
+
+        A surface that returns a SET (a listing) must say so: the page is a
+        recency page, so "not in the list" cannot honestly stand for "does not
+        exist" (``get_project``/:meth:`get_project_by_name` still resolve it).
+        """
+        return self._rows_on_disk > len(self._projects)
 
     def _dir_mtime(self) -> int | None:
         try:
@@ -1820,16 +1945,106 @@ class ProjectRegistry:
         """
         self._load()
 
+    def _read_row_from_disk(self, project_id: str) -> Project | None:
+        """One row read straight from its file, page or no page.
+
+        Addressed reads are NEVER truncated: a caller that names a row has
+        already decided which row it wants, so the page's job (bound what a
+        listing parses) does not apply. The file rules are the neighbourhood
+        rules ``_load`` applies — no dot names, no symlinks, a regular ``.json``
+        file, and an id that matches the file name — so a crafted id can never
+        read outside the store directory.
+
+        ``None`` means "no such row": unreadable, unparseable, the wrong id, or
+        absent. The caller turns that into its own refusal, which is why a
+        genuinely missing row and an unreadable one read the same here: both
+        mean this registry cannot answer for it.
+        """
+        if not project_id or "/" in project_id or "\\" in project_id:
+            return None
+        if project_id.startswith("."):
+            return None
+        path = self.projects_dir / f"{project_id}.json"
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
+            project = Project.model_validate(data)
+        except Exception as exc:  # noqa: BLE001 — an addressed miss, not a crash
+            logger.warning("could not read project row %s: %s", path.name, exc)
+            return None
+        return project if project.id == project_id else None
+
+    def _find_on_disk_by_name(self, name: str, *, exclude_id: str = "") -> Project | None:
+        """One project by name across EVERY row file, not just the page.
+
+        The snapshot holds the recency page, so a name lookup that only scanned
+        it would answer "no such project" for a dormant row that is on disk and
+        valid — the same false absence the addressed id read fixes, and the one
+        that made a rename able to mint a duplicate name.
+
+        Each row is parsed as RAW JSON and only the name match is validated: a
+        miss costs one ``json.loads`` per row instead of a full model build, and
+        a row that cannot be read as a project never blocks a name (an invalid
+        row is invisible to every reader, so it must not be able to refuse a
+        create either). ``exclude_id`` is the row doing the asking, so a save
+        cannot find itself.
+        """
+        wanted = (name or "").strip().casefold()
+        if not wanted:
+            return None
+        try:
+            row_files = self._row_files()
+        except OSError:
+            return None
+        for row in row_files:
+            if exclude_id and row.path.stem == exclude_id:
+                continue
+            try:
+                data = json.loads(row.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            stored = data.get("name")
+            if not isinstance(stored, str) or stored.strip().casefold() != wanted:
+                continue
+            try:
+                project = Project.model_validate(data)
+            except Exception:  # noqa: BLE001 — an unreadable row is not a conflict
+                continue
+            if project.id == row.path.stem:
+                return project
+        return None
+
     def list_projects(self) -> list[Project]:
-        """Every project, metadata only, sorted by name (case-insensitive)."""
+        """Every project on the page, metadata only, sorted by name (case-insensitive).
+
+        A SET that can be PARTIAL: the page holds the store's most recently
+        active rows, so a caller displaying this must also read
+        :attr:`truncated`/:attr:`rows_on_disk`/:attr:`rows_loaded` and say so.
+        Use :meth:`get_project`/:meth:`get_project_by_name` to address a row
+        that is not here.
+        """
         self._refresh_if_needed()
         return sorted(self._projects.values(), key=lambda project: project.name.casefold())
 
     def get_project(self, project_id: str) -> Project:
-        """One project by id. Raises ``KeyError`` when the id is unknown."""
+        """One project by id. Raises ``KeyError`` when the id is unknown.
+
+        Never truncated: a miss on the page reads ``<id>.json`` directly, so a
+        dormant row past the page still resolves (the ordinal-502 incident).
+        """
         project_id = validate_project_id(project_id)
         self._refresh_if_needed()
         found = self._projects.get(project_id)
+        if found is None:
+            found = self._read_row_from_disk(project_id)
         if found is None:
             raise KeyError(f"Project with id {project_id} not found")
         return found
@@ -1844,9 +2059,71 @@ class ProjectRegistry:
         return None
 
     def get_project_by_name(self, name: str) -> Project | None:
-        """One project by name (case-insensitive), or ``None``."""
+        """One project by name (case-insensitive), or ``None``.
+
+        Never truncated: the page is tried first (one dict walk), then the whole
+        store is scanned — ``op='show'`` printed "no project named …" for a row
+        that was present and valid, which is a false absence, not a miss.
+        """
         self._refresh_if_needed()
-        return self._find_cached_project_by_name(name)
+        found = self._find_cached_project_by_name(name)
+        if found is not None:
+            return found
+        return self._find_on_disk_by_name(name)
+
+    def _resolve_locked(self, project_id: str) -> Project:
+        """The row for ``project_id``: the page first, else its own file.
+
+        ONE copy of the fallback for every addressed mutation. Before it, each
+        of ``update_project``/``refresh_project``/``link_session``/
+        ``unlink_session``/``set_milestone``/``delete_project`` walked the page
+        itself, so a row past the page answered ``KeyError`` for every verb — a
+        receipt that read "does not exist" while the row's file did. Callers
+        hold the store lock and have already run :meth:`_load`.
+
+        The found row is deliberately NOT inserted into the page: an addressed
+        read must not leak a dormant row into a listing. A mutation's save puts
+        the row back through ``_save_project_locked``, which is correct — the
+        write moved its mtime to now, so it belongs on the page.
+        """
+        found = self._projects.get(project_id)
+        if found is not None:
+            return found
+        found = self._read_row_from_disk(project_id)
+        if found is None:
+            raise KeyError(f"Project with id {project_id} not found")
+        return found
+
+    def _raise_if_name_taken(self, name: str) -> None:
+        """Refuse a name another row already uses — page or dormant tail.
+
+        Both uniqueness checks (create, and ``_save_project_locked``'s guard on
+        a rename) go through here so there is one rule: the page cannot prove a
+        name is free, because the row that owns it may be past the page, and a
+        create or rename that only consulted the page would mint two projects
+        with one name.
+        """
+        if self._find_cached_project_by_name(name) is not None:
+            raise ProjectNameConflictError(f"project {name!r} already exists")
+        if self._find_on_disk_by_name(name) is not None:
+            raise ProjectNameConflictError(f"project {name!r} already exists")
+
+    def _name_conflict(self, project: Project) -> Project | None:
+        """Another row using ``project.name``, from the page or from disk.
+
+        The disk half is skipped when this row's own name is UNCHANGED (its
+        cached copy says so, or the row itself is in the page): a save that does
+        not move a name cannot make a duplicate, and the common progress update
+        must not pay a store scan under the lock.
+        """
+        name_key = project.name.casefold()
+        for stored in self._projects.values():
+            if stored.id != project.id and stored.name.casefold() == name_key:
+                return stored
+        current = self._projects.get(project.id)
+        if current is not None and current.name.casefold() == name_key:
+            return None
+        return self._find_on_disk_by_name(project.name, exclude_id=project.id)
 
     def projects_for_session(self, session_id: str) -> list[Project]:
         """Derived reverse lookup: the projects this session is linked to.
@@ -1921,15 +2198,7 @@ class ProjectRegistry:
         # migration's "untouched rows stay 1" rule).
         if project.schema_version != PROJECT_SCHEMA:
             project.schema_version = PROJECT_SCHEMA
-        name_key = project.name.casefold()
-        occupant = next(
-            (
-                stored
-                for stored in self._projects.values()
-                if stored.id != project.id and stored.name.casefold() == name_key
-            ),
-            None,
-        )
+        occupant = self._name_conflict(project)
         if occupant is not None:
             raise ProjectNameConflictError(f"project {project.name!r} already exists")
         target = self.projects_dir / f"{project_id}.json"
@@ -1954,6 +2223,11 @@ class ProjectRegistry:
                 _fsync_dir(self.projects_dir)
             raise
         self._projects[project_id] = project
+        if not existed:
+            # The store grew by one, and the count must not wait for the next
+            # load to say so: a listing composed straight after a create would
+            # otherwise report a whole page while one row was already hidden.
+            self._rows_on_disk += 1
         self._dir_mtime_ns = self._dir_mtime()
         return project
 
@@ -2095,8 +2369,7 @@ class ProjectRegistry:
             # cannot prove uniqueness when another process wrote since our last
             # read.
             self._load()
-            if self._find_cached_project_by_name(name) is not None:
-                raise ProjectNameConflictError(f"project {name!r} already exists")
+            self._raise_if_name_taken(name)
             supplied = fields.model_fields_set
             status = fields.status or "active"
             if status == "done" and not force_done:
@@ -2180,9 +2453,7 @@ class ProjectRegistry:
         now = _utc_now()
         with self._persistence_lock():
             self._load()
-            current = self._projects.get(project_id)
-            if current is None:
-                raise KeyError(f"Project with id {project_id} not found")
+            current = self._resolve_locked(project_id)
             candidate = current.model_copy(deep=True)
             supplied = fields.model_fields_set
             changed = False
@@ -2355,9 +2626,7 @@ class ProjectRegistry:
         project_id = validate_project_id(project_id)
         with self._persistence_lock():
             self._load()
-            current = self._projects.get(project_id)
-            if current is None:
-                raise KeyError(f"Project with id {project_id} not found")
+            current = self._resolve_locked(project_id)
             if not _normalize_progress(current.progress):
                 return ProjectUpdate(current, changed=False, refreshed=False)
             now = _utc_now()
@@ -2398,9 +2667,7 @@ class ProjectRegistry:
         other = "coordination_sessions" if role == "work" else "sessions"
         with self._persistence_lock():
             self._load()
-            current = self._projects.get(project_id)
-            if current is None:
-                raise KeyError(f"Project with id {project_id} not found")
+            current = self._resolve_locked(project_id)
             if session_id in getattr(current, target):
                 return current, False
             linked = session_id in current.sessions or session_id in current.coordination_sessions
@@ -2429,9 +2696,7 @@ class ProjectRegistry:
         session_id = _validate_sessions([session_id])[0]
         with self._persistence_lock():
             self._load()
-            current = self._projects.get(project_id)
-            if current is None:
-                raise KeyError(f"Project with id {project_id} not found")
+            current = self._resolve_locked(project_id)
             if (
                 session_id not in current.sessions
                 and session_id not in current.coordination_sessions
@@ -2457,9 +2722,7 @@ class ProjectRegistry:
         supplied = fields.model_fields_set
         with self._persistence_lock():
             self._load()
-            current = self._projects.get(project_id)
-            if current is None:
-                raise KeyError(f"Project with id {project_id} not found")
+            current = self._resolve_locked(project_id)
             candidate = current.model_copy(deep=True)
             wanted = fields.name.casefold()
             index = next(
@@ -2514,10 +2777,8 @@ class ProjectRegistry:
             # Delete participates in the same ordering as save, so a
             # delete-recreate-stale-save sequence has one unambiguous winner.
             self._load()
-            if project_id not in self._projects:
-                raise KeyError(f"Project with id {project_id} not found")
-            current = self._projects.get(project_id)
-            if current is not None and current.schema_version > PROJECT_SCHEMA:
+            current = self._resolve_locked(project_id)
+            if current.schema_version > PROJECT_SCHEMA:
                 # The GUARD covers removal too, deliberately: a row written by a
                 # newer build holds fields this one cannot render, so deleting it
                 # would destroy data the deleter was never shown. The remedy is
@@ -2534,6 +2795,10 @@ class ProjectRegistry:
             if target.exists():
                 target.unlink()
                 _fsync_dir(self.projects_dir)
+                # The mirror of the create's increment: the denominator shrinks
+                # with the row, so ``truncated`` stays true only while rows are
+                # actually left off the page.
+                self._rows_on_disk = max(0, self._rows_on_disk - 1)
             # The row is gone; reclaim its copied-in files. Best-effort — a
             # leftover directory is a leak, never a reason to fail a delete
             # that already happened (agent review round 1, F1).
