@@ -1343,7 +1343,9 @@ class Answer(Input):
       refuse exactly the case the feature exists for — a cold session whose asks
       are still open. The single-winner rule that replaces the epoch check lives
       on the ask log (the first ``answered`` event wins), so a stale screen
-      cannot settle a question twice.
+      cannot settle a question twice;
+    * ``{ask_id, dismiss, reason?}`` — PUT AN OPEN ASK AWAY (SA-D5), on the same
+      epoch-free door for the same reason.
     """
 
     #: The owner epoch, for the two gate shapes. Defaulted rather than required
@@ -1371,6 +1373,23 @@ class Answer(Input):
     #: runtime has to interpret. Accepted while the answer is undelivered, refused
     #: once the response row exists; the runtime decides, not this schema.
     revise: StrictBool | None = None
+    #: PUT AN ASK AWAY instead of answering it (SA-D5, design §15). A modifier on the
+    #: ``{ask_id}`` body rather than a fourth route: a dismissal is the same
+    #: epoch-free queued-ask door an answer is, addressed by an id that outlives
+    #: any owner, and a separate route would be a second copy of that contract.
+    #:
+    #: Only ``true`` selects the shape — ``false`` is the same statement as
+    #: omitting it, and a body that sets it beside answers/decline/revise is
+    #: malformed rather than ambiguous (you cannot answer and dismiss one ask).
+    #: ``Answer`` is ``extra="forbid"``, so a renderer gates the affordance on
+    #: ``capabilities.features.ask_dismiss``: an older backend 422s this field
+    #: rather than ignoring it, and the renderer's stale-read backstop is that 422.
+    dismiss: StrictBool | None = None
+    #: Why the operator put it away: ``answered_in_chat`` (the conversation
+    #: already answered it) or ``moot`` (no longer needed). Optional; the log
+    #: records ``moot`` when absent. Refused without ``dismiss`` — a no-op field
+    #: is a 422 here rather than a silently dropped intent (§10).
+    reason: Literal["answered_in_chat", "moot"] | None = None
     #: IMAGES attached to the answer, each tagged with the question it answers
     #: (``AnswerImage.question_id``). OMITTED by every client that has none —
     #: ``Answer`` is ``extra="forbid"``, so a client built before this field must
@@ -1392,6 +1411,21 @@ class Answer(Input):
 
     @model_validator(mode="after")
     def one_answer(self):
+        if self.dismiss is True:
+            # THE FOURTH SHAPE (SA-D5): an id and nothing else. Every other field
+            # of this body is a different act, so a body that carries one is
+            # refused here rather than at the owner.
+            if not self.ask_id:
+                raise ValueError("a dismissal needs an ask_id")
+            if self.answers is not None or self.decline is True or self.revise is True:
+                raise ValueError("a dismissal carries no answers, decline or revise")
+            if self.images:
+                raise ValueError("a dismissal carries no images")
+            return self
+        if self.reason is not None:
+            # Same rule as ``images`` above: a field a shape cannot honour is
+            # refused in words, never ignored.
+            raise ValueError("reason applies to a dismissal")
         if self.images:
             # Checked FIRST and for every shape: the gate shapes (approval / ask
             # picker) have no use for images either, and a field a shape cannot
@@ -4421,6 +4455,88 @@ async def decode_images(images: list[Image]):
     return await image_blocks_in_thread([image.model_dump() for image in images])
 
 
+#: The dismissal refusal's LAST RESORT, and not user copy (agent review round 1,
+#: R1-5). Every refusal this door can receive already IS a sentence: the cold door
+#: answers with ``render.dismiss_refusal``'s words and the facade's verdict with
+#: the owner's, so an empty one means a door broke its contract, not that the user
+#: needs telling something new. Keying this string would translate one of FOUR
+#: identical guards (the two ``serving.py`` op refusals and the answer arm just
+#: below keep theirs unkeyed) and would still leave a blank 409 the worse failure.
+#: `test_a_door_that_refuses_without_a_sentence_still_answers_409` pins both
+#: halves: a real door always supplies one, and a broken one still gets a body.
+_DISMISSAL_REFUSED = "the dismissal was refused"
+
+
+def _dismissal_refusal(error: object) -> HTTPException:
+    """The 409 for a refused dismissal, in the ask's own words when there are any.
+
+    ``None`` is normalised away explicitly: ``str(None)`` is ``"None"``, which a
+    bare ``or`` would happily put on the wire.
+    """
+    sentence = "" if error is None else str(error).strip()
+    return HTTPException(409, sentence or _DISMISSAL_REFUSED)
+
+
+async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, body: Answer) -> str:
+    """Put a queued ask away from the desktop — the NO-BOOT door (SA-D5, §14).
+
+    THE ORDER IS THE CONTRACT. The cold door (``asks.dismiss.dismiss_cold``) runs
+    FIRST because it is the only one that can settle an ask nobody is serving
+    without starting something: it writes the ``dismissed`` event, rewrites the
+    derived index and disarms the deadline wake row, and it refuses with
+    ``ask_owner_present`` when a runtime IS serving the session. Dialling the
+    facade first — ``bridge.remote.ask_respond``'s shape — would bind, and a bind
+    on a cold session STARTS a runtime (§14: "a dismissal boots nothing"), which
+    is the one regression this arm exists to prevent.
+
+    So: a live owner gets the live op over the existing client (which is
+    ``AttachedSession.dismiss_ask`` → the ``ask_dismiss`` frame → the owner's
+    queue), and everything else is settled here. Every refusal that is not
+    ``ask_owner_present`` is the ASK'S OWN sentence — the same words the phone and
+    the TUI get from the same function — answered as a 409, never a 503: the
+    owner is fine and the ask is settled, so a reconnect remedy would be a lie.
+
+    A PEER'S CONVERSATION (``bridge.remote_row``) skips the cold door: this device
+    holds no ask log for it (the rows come from the owner's projection), so the
+    local fold could only answer "not in this session's queue". It takes the same
+    live dial every other ask op on that surface takes, which is the viewer's
+    "act warms the owner" model — not a new boot path.
+    """
+    from local_operator.asks.dismiss import dismiss_cold
+
+    ask_id = str(body.ask_id or "")
+    if getattr(bridge, "remote_row", None) is None:
+        outcome = await dismiss_cold(
+            store_root(request),
+            session_id,
+            ask_id,
+            # The word every other desktop ask op records (``ask_respond`` passes
+            # ``by="desktop"``), so an audit line names the surface that tapped.
+            by="desktop",
+            reason=body.reason,
+        )
+        if outcome.get("ok"):
+            return "dismissed"
+        if str(outcome.get("code") or "") != "ask_owner_present":
+            raise _dismissal_refusal(outcome.get("error"))
+    try:
+        # THE FACADE'S VERDICT CONTRACT (``AttachedSession.dismiss_ask``): a dict,
+        # and a refusal is ``{"ok": False, "error": …}`` rather than an exception.
+        # Reading it as a detail string — what ``ask_respond`` one method up
+        # returns — would answer 200 with the refusal buried in an object the
+        # receipt's ``detail: str`` cannot even carry.
+        verdict = await bridge.remote.dismiss_ask(ask_id, by="desktop", reason=body.reason)
+    except (ValueError, RuntimeError, ConnectionError) as error:
+        # Belt for a facade that predates the verdict shape: the same classes
+        # ``_ask_verdict`` swallows, mapped to the refusal they describe rather
+        # than to the 503 the shared ladder would produce.
+        raise _dismissal_refusal(error) from None
+    if not (isinstance(verdict, Mapping) and verdict.get("ok")):
+        refusal = verdict.get("error") if isinstance(verdict, Mapping) else verdict
+        raise _dismissal_refusal(refusal)
+    return "dismissed"
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/answers", response_model=CRUDResponse[AnswerReceipt]
 )
@@ -4463,6 +4579,12 @@ async def answer(session_id: str, body: Answer, request: Request):
             # than this route's generic "no longer pending", because unlike a
             # gate the ask is still there and the user's next move depends on
             # which of those it is.
+            if body.dismiss is True:
+                # PUT IT AWAY (SA-D5). Its own door, because a dismissal must not
+                # bind: see ``_dismiss_queued_ask`` for the order and the §14 cost.
+                return reply(
+                    {"detail": await _dismiss_queued_ask(request, session_id, bridge, body)}
+                )
             try:
                 # ``images`` is passed ONLY when the body carries some, so a
                 # text-only answer calls the facade exactly as it always did —

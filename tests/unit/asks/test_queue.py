@@ -253,21 +253,29 @@ def test_an_expired_ask_says_so_rather_than_being_silently_dropped(tmp_path: Pat
     assert "expired" in outcome["error"]
 
 
-def test_an_open_ask_on_a_running_session_cannot_be_dismissed(tmp_path: Path):
-    """D6 (design §15): the live door refuses an OPEN ask unless the session is
-    stopped, and writes nothing. FakeSession has no ``ask_agent_running``, which
-    the queue reads as running (fail closed)."""
-    queue = _queue(tmp_path, FakeSession())
+def test_an_open_ask_on_a_running_session_is_dismissed(tmp_path: Path):
+    """SA-D4, replacing D6: an OPEN ask is dismissed while agent work runs.
+
+    The queue used to read the session's runtime state and refuse (fail closed),
+    which declined the dismissal exactly while the operator was chatting. There is
+    no probe left: ``FakeSession`` has no ``ask_agent_running``, so this cell would
+    refuse if the queue still asked.
+    """
+    session = FakeSession()
+    assert not hasattr(session, "ask_agent_running"), "the double must not carry the retired probe"
+    queue = _queue(tmp_path, session)
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
-    outcome = queue.dismiss(ask_id)
-    assert outcome == {"ok": False, "error": render.DISMISS_AGENT_RUNNING}
-    assert "reply in chat" in outcome["error"]
-    assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
+    assert queue.dismiss(ask_id, by="phone", reason="moot") == {"ok": True}
+    events = store.read_events(queue.session_dir)
+    assert [e["kind"] for e in events] == [store.EVENT_QUEUED, store.EVENT_DISMISSED]
+    assert events[-1]["by"] == {"surface": "phone"}
+    # The agent is still owed the row, mid-turn or not.
+    assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
+    assert session.batches[0][0].details["status"] == "dismissed"
 
 
 def test_an_open_ask_on_a_stopped_session_is_dismissed_and_owes_a_response(tmp_path: Path):
     session = FakeSession()
-    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
     queue = _queue(tmp_path, session)
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
     assert queue.dismiss(ask_id, by="phone", reason="answered_in_chat")["ok"] is True
@@ -294,9 +302,7 @@ def test_a_timed_out_ask_is_dismissible_on_a_running_session(tmp_path: Path):
 
 
 def test_an_unknown_dismiss_reason_is_refused_and_writes_nothing(tmp_path: Path):
-    session = FakeSession()
-    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
-    queue = _queue(tmp_path, session)
+    queue = _queue(tmp_path, FakeSession())
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
     assert queue.dismiss(ask_id, reason="because") == {
         "ok": False,
@@ -305,14 +311,13 @@ def test_an_unknown_dismiss_reason_is_refused_and_writes_nothing(tmp_path: Path)
     assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
 
 
-def test_a_bridge_request_stays_timed_out_only_even_when_stopped(tmp_path: Path):
-    session = FakeSession()
-    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
-    queue = _queue(tmp_path, session)
+def test_a_bridge_request_stays_timed_out_only(tmp_path: Path):
+    queue = _queue(tmp_path, FakeSession())
     questions = _questions()
     questions[0]["question_id"] = "q-bridge-1"
     ask_id = queue.enqueue(questions, None)["details"]["ask_id"]
     assert queue.dismiss(ask_id) == {"ok": False, "error": render.DISMISS_BRIDGE_OPEN}
+    assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
 
 
 def test_a_repeat_dismissal_says_the_ask_is_already_dismissed(tmp_path: Path):
@@ -1700,6 +1705,36 @@ def test_the_projection_puts_open_asks_first_and_drops_expired(tmp_path: Path):
     assert [row["ask_id"] for row in rows] == [second, first]
     assert rows[0]["status"] == store.STATUS_OPEN
     assert rows[1]["status"] == store.STATUS_ANSWERED
+
+
+def test_the_projection_carries_the_card_context_pair_when_the_session_can_count(
+    tmp_path: Path,
+):
+    """SA-D7: the pair rides the ROW, because the desktop and the phone hold rows.
+
+    A session that cannot answer (``FakeSession``, i.e. every reduced host and
+    every older writer) sends no key at all — absence, never a zero.
+    """
+    plain = _queue(tmp_path / "plain", FakeSession())
+    plain.enqueue(_questions(), None)
+    row = plain.projection()[0]
+    assert "user_messages_since" not in row
+    assert "last_user_message_at" not in row
+
+    session = FakeSession()
+    session.ask_context_line = lambda asked_at: (4, asked_at + 1)  # type: ignore[attr-defined]
+    # A root of its own: the queue refuses a duplicate question in one session,
+    # which would make the second enqueue a refusal rather than a row.
+    queue = _queue(tmp_path / "counted", session)
+    queue.enqueue(_questions(), None)
+    row = queue.projection()[0]
+    assert row["user_messages_since"] == 4
+    assert row["last_user_message_at"] == row["created_at"] + 1
+    # The derived index carries the same row, so the cross-session view agrees.
+    entry = store.read_entry(tmp_path / "counted", "s1")
+    assert entry is not None
+    indexed = next(r for r in entry["asks"] if r["ask_id"] == row["ask_id"])
+    assert indexed["user_messages_since"] == 4
 
 
 def test_the_index_is_written_and_read_back(tmp_path: Path):

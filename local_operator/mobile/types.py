@@ -880,6 +880,15 @@ class PendingAskWire:
     #: they exist so the mirrored card advances to the next question between an
     #: old client's taps. Absent on every ask answered the atomic way.
     draft_question_ids: list[str] | None = None
+    #: THE ASK CARD'S CONTEXT LINE (SA-D7, design §15): operator messages admitted
+    #: since this ask was raised, and the latest one's time (ms). ``None`` when the
+    #: writing runtime could not count them (an older runtime, an ask older than
+    #: its window, a session with no operator message yet), and ``to_json`` drops
+    #: ``None`` — so an uncountable ask's wire row is byte-identical to what every
+    #: build before this field sent. A zero IS sent: it states that the ask is
+    #: newer than every message, and the card draws no line for it either way.
+    user_messages_since: int | None = None
+    last_user_message_at: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}
