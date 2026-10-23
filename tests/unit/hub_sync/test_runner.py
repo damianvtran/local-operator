@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
+from local_operator.hub_sync import runner as runner_mod
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
 from local_operator.hub_sync.identity import LinkPolicy
@@ -1245,3 +1247,113 @@ async def test_a_session_start_is_fire_and_forget_and_never_raises(rig, monkeypa
     # The failed attempt still claims the window: a hub that is down must not
     # turn every subsequent session start into another attempt.
     assert runner.note_session_start() is None
+
+
+# -- the interval delay the loop actually sleeps ------------------------------------------
+
+
+async def _capture_interval_sleep(
+    runner: HubSyncRunner, monkeypatch: pytest.MonkeyPatch
+) -> list[float]:
+    """Drive ``run_forever`` to its interval sleep and report the delays it was handed.
+
+    The loop's observable scheduling contract is the seconds it passes to
+    ``_sleep``. Sleeping a real interval would park the test for a quarter of an
+    hour, so ``_sleep`` is replaced with a recorder: the FIRST call is the
+    startup delay (the rig pins it to 0), and the SECOND -- the interval delay
+    under test -- records the value and stops the runner, so the loop computes
+    no further one and returns.
+
+    Callers assert the EXACT seconds. A range assertion would stay green through
+    the defect these tests exist for: a delay derived from the wrong number of
+    minutes is off by a factor, not by the jitter.
+    """
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> bool:
+        sleeps.append(float(seconds))
+        if len(sleeps) == 1:
+            return False  # the startup delay elapsed: let the first tick run
+        runner.stop()
+        return True
+
+    monkeypatch.setattr(runner, "_sleep", fake_sleep)
+    await asyncio.wait_for(runner.run_forever(), timeout=5.0)
+    assert len(sleeps) == 2, f"expected a startup and one interval sleep, got {sleeps!r}"
+    return sleeps
+
+
+@pytest.mark.asyncio
+async def test_the_interval_sleep_is_the_default_fifteen_minutes(rig, monkeypatch) -> None:
+    """The default 15-minute interval reaches ``_sleep`` as exactly 900 seconds.
+
+    ``random.uniform`` is pinned to its neutral multiplier, 1.0, so the only
+    arithmetic left is ``minutes * 60``: an interval changed to an hour reds at
+    3600, and a minutes/seconds mix-up reds too. The CALL's bounds are asserted
+    as literals as well, so a loop that stopped applying the documented +-10 %
+    jitter (or moved its band) fails here rather than silently sleeping a fixed
+    interval.
+    """
+
+    runner, *_ = rig
+    bounds: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        bounds.append((low, high))
+        return 1.0
+
+    monkeypatch.setattr(runner_mod, "random", SimpleNamespace(uniform=uniform))
+
+    sleeps = await _capture_interval_sleep(runner, monkeypatch)
+
+    assert sleeps == [0.0, 900.0]
+    assert bounds == [(0.9, 1.1)]
+
+
+@pytest.mark.asyncio
+async def test_the_interval_sleep_follows_the_configured_interval(rig, monkeypatch) -> None:
+    """A configured 30 minutes is 1800 seconds: the loop reads the setting, not a default."""
+
+    runner, *_ = rig
+    runner._cm.set_config_value("hub", {"check_interval_min": 30})
+    monkeypatch.setattr(runner_mod, "random", SimpleNamespace(uniform=lambda low, high: 1.0))
+
+    sleeps = await _capture_interval_sleep(runner, monkeypatch)
+
+    assert sleeps == [0.0, 1800.0]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_settings_read_falls_back_to_the_module_default(
+    rig, monkeypatch
+) -> None:
+    """The failure path uses ``DEFAULT_CHECK_INTERVAL_MIN``, not a hardcoded 15.
+
+    The constant is patched to an arbitrary 7 minutes before the failing read,
+    so the exact 420 seconds below can only come from the runner reading the
+    module constant. A hardcoded 15 would produce 900 and fail.
+
+    The first read -- the tick's own -- succeeds, so the runner reaches the
+    delay computation through the loop's normal path; only the second read, the
+    one that computes the interval, raises.
+    """
+
+    runner, *_ = rig
+    real = HubSyncSettings.read_fresh
+    reads: list[str] = []
+
+    def flaky(cm: Any) -> HubSyncSettings:
+        reads.append("read")
+        if len(reads) == 1:
+            return real(cm)
+        raise RuntimeError("config.yml is unreadable")
+
+    monkeypatch.setattr(HubSyncSettings, "read_fresh", staticmethod(flaky))
+    monkeypatch.setattr(runner_mod, "DEFAULT_CHECK_INTERVAL_MIN", 7)
+    monkeypatch.setattr(runner_mod, "random", SimpleNamespace(uniform=lambda low, high: 1.0))
+
+    sleeps = await _capture_interval_sleep(runner, monkeypatch)
+
+    assert len(reads) == 2, "expected the tick's read to succeed and the delay's to fail"
+    assert sleeps == [0.0, 420.0]
