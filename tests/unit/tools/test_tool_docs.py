@@ -246,6 +246,19 @@ _WALK_DEPTH_CAP = 2
 # doc gains the same scope rule and its delete semantics. Both were measured
 # through this test's own printed table on the rebased tree, whose upstream
 # baseline is the #2520 ask raise above (ask 1063, unmoved here).
+# RE-MEASURED 2026-10-23 (stale asks, ``feat/ask-stale-guidance``; design
+# ask-nonblocking §16/SA-D1): ``ask`` 1063 -> 1079 and ``ask_withdraw``
+# 314 -> 418 are the ONLY entries that moved, and both moves ARE the change:
+# the ``ask`` queued tail gains one clause (settle it the moment it stops
+# mattering — the tool the clause names is NOT in this doc's schema, so the
+# property list is unchanged), and ``ask_withdraw``'s doc renders the rewritten
+# description plus the widened ``answers`` field copy (the empty-list recipe,
+# the ids rule). Measured through this test's own printed table on the branch;
+# every other entry is byte-identical. BOTH ledgers move together: the same
+# two descriptions are the +511 chars of ``tool_schemas`` in
+# ``scripts/bench_context_budget.py``'s top-arm raise (32,872 -> 33,233), whose
+# child arm carries neither tool and moves only by the shared ``system.md``
+# paragraph.
 MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S3): 1044 -> 1056. The delta is the one-clause
     # fork exception on the ephemeral bullet ("a fork starts with a copy of
@@ -259,8 +272,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # its wording is the safety-critical part). Trimmed once already; the same
     # printed table measured it.
     "agent": 1119,
-    "ask": 1063,
-    "ask_withdraw": 314,
+    "ask": 1079,
+    "ask_withdraw": 418,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572

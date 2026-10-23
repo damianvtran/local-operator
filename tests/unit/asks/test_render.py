@@ -408,6 +408,22 @@ def test_the_receipts_state_what_happens_next():
     assert "a-7f3" in chat and "response arrives" in chat
 
 
+def test_the_chat_receipt_counts_the_questions_it_closed_unanswered():
+    """§16/SA-D1: an empty cell is a question the message does not cover, so
+    the ask closes it with the rest — and the receipt says how many, singular
+    and plural, because only the model can re-ask them. ``moot`` has no cells,
+    so the count never applies there."""
+    one = render.withdraw_receipt("a-7f3", "answered_in_chat", unanswered=1)
+    assert "1 question closed unanswered; re-ask any you still need." in one
+    two = render.withdraw_receipt("a-7f3", "answered_in_chat", unanswered=2)
+    assert "2 questions closed unanswered; re-ask any you still need." in two
+    moot = render.withdraw_receipt("a-7f3", "moot", unanswered=2)
+    assert "closed unanswered" not in moot
+    assert render.withdraw_receipt("a-7f3", "answered_in_chat") == render.withdraw_receipt(
+        "a-7f3", "answered_in_chat", unanswered=0
+    )
+
+
 def test_the_op_constants_are_the_sentences_the_queue_emits():
     assert render.WITHDRAW_BAD_REASON == "reason must be 'moot' or 'answered_in_chat'."
     assert "no answers" in render.WITHDRAW_MOOT_TAKES_NO_ANSWERS
