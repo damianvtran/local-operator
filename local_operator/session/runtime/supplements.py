@@ -1128,6 +1128,12 @@ class SupplementRunner:
                     if state in ("decided", "done")
                     else []
                 ),
+                # The row's disclosure travels with the list it describes: a live
+                # viewer would otherwise paint the bound's cut as a complete list
+                # until a cold open read the journal.
+                sounds_more=(
+                    int(details.get("sounds_more") or 0) if state in ("decided", "done") else 0
+                ),
                 model=str(details.get("model", "") or ""),
                 model_source=str(details.get("model_source", "") or ""),
                 attempts=[str(item) for item in (details.get("attempts") or [])][

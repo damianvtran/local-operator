@@ -60552,7 +60552,15 @@ class OperatorApp(App[None]):
         except (TypeError, ValueError):
             same_version = False
         if same_version:
-            for key in ("files", "files_more", "more", "components", "images", "sounds"):
+            for key in (
+                "files",
+                "files_more",
+                "more",
+                "components",
+                "images",
+                "sounds",
+                "sounds_more",
+            ):
                 if not merged.get(key) and prev.get(key):
                     merged[key] = prev[key]
         return merged

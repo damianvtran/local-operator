@@ -933,14 +933,24 @@ def _decode_peaks_bounded(raw: bytes) -> list[float] | None:
     legacy attachment repair -- an input cap in the child, a deadline in the parent, and
     no fabricated silence on failure -- so its module entry point is reused rather than
     a second decoder being written here. ``None`` is the honest "no waveform".
+
+    The decode also takes the recovery module's ONE decode slot: a Library grid of path
+    audio assets asks for many waveforms at once, and without the slot each tile would
+    spawn its own interpreter (measured 1.71 s wall each). A caller that cannot get the
+    slot within the same deadline answers its own no-waveform 404 instead.
     """
     from local_operator.audiogen.peaks import PEAK_BARS
     from local_operator.audiogen.recovery import (
         MAX_RECOVERY_BYTES,
         RECOVERY_TIMEOUT_SECONDS,
+        decode_slot,
+        release_decode_slot,
     )
 
     if not raw or len(raw) > MAX_RECOVERY_BYTES:
+        return None
+    if not decode_slot():
+        logger.debug("library: no decoder slot within the deadline; answering no-waveform")
         return None
     try:
         result = subprocess.run(
@@ -954,13 +964,20 @@ def _decode_peaks_bounded(raw: bytes) -> list[float] | None:
     except (OSError, ValueError, subprocess.SubprocessError):
         logger.debug("library: bounded decode unavailable", exc_info=True)
         return None
+    finally:
+        release_decode_slot()
     if not isinstance(payload, list) or len(payload) != PEAK_BARS:
         return None
     peaks: list[float] = []
     for value in payload:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        peaks.append(float(value))
+        number = float(value)
+        # The same 0..1/finite rule the sidecar and cache readers enforce: the child
+        # clamps today, but a decoder is not the place a renderer's contract lives.
+        if not math.isfinite(number) or number < 0.0 or number > 1.0:
+            return None
+        peaks.append(number)
     return peaks
 
 
@@ -987,9 +1004,19 @@ def waveform(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
     config = Path(config_dir)
     asset = _catalog_asset(config, asset_id)
     if asset.digest:
+        # A digest sidecar is AUDIO's sidecar. An image or video digest asset may hold
+        # a stale/foreign peaks file, and the repair path behind ``waveform_payload``
+        # would spend the one decoder slot rejecting it; refuse before either.
+        if asset.kind != "audio":
+            raise ContentUnavailable("content_missing")
         from local_operator.audiogen.recovery import waveform_payload
 
-        payload = waveform_payload(AttachmentStore(config / "attachments"), asset.digest)
+        # The store validates its own sidecar; ``_waveform_shape`` re-imposes the
+        # renderer's contract here, so the route and the path-asset cache serve the
+        # same checked shape.
+        payload = _waveform_shape(
+            waveform_payload(AttachmentStore(config / "attachments"), asset.digest)
+        )
         if payload is None:
             raise ContentUnavailable("content_missing")
         return payload

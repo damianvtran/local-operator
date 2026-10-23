@@ -21,6 +21,7 @@ from ._fixtures import (
     png,
     session,
     user_row,
+    wav,
     write_rows,
 )
 
@@ -294,27 +295,6 @@ async def test_scope_final_narrows_the_route_listing(api) -> None:
 # ---------------------------------------------------------------------------
 
 
-def wav(seconds: float = 0.2, rate: int = 8000) -> bytes:
-    """A tiny real WAV, so miniaudio decodes it (a fake header would 404)."""
-    import io
-    import math
-    import struct
-    import wave
-
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(rate)
-        handle.writeframes(
-            b"".join(
-                struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * n / rate)))
-                for n in range(int(seconds * rate))
-            )
-        )
-    return buffer.getvalue()
-
-
 def audio_rows(
     call_id: str, ts: float, digest: str, name: str = "boom.wav"
 ) -> list[dict[str, Any]]:
@@ -426,6 +406,10 @@ async def test_waveform_reads_the_digest_sidecar_and_computes_a_path_asset_once(
     monkeypatch.setattr(library_service, "_decode_peaks_bounded", original_decode)
 
     # No waveform is a designed 404 -- never a fabricated flat line.
+    # A digest asset that is NOT audio has no waveform either, and the kind check
+    # must refuse it before it can take the one decoder slot.
+    image = await client.get(f"/v1/desktop/library/assets/{_image_id}/waveform")
+    assert image.status_code == 404
     undecodable = by_name["broken.wav"]
     broken_response = await client.get(f"/v1/desktop/library/assets/{undecodable}/waveform")
     assert broken_response.status_code == 404
