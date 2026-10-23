@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, get_args
@@ -20,6 +21,7 @@ import pytest
 
 from local_operator.projects import (
     _ATTACHMENT_KINDS,
+    _MAX_ROWS,
     ATTACHMENTS_MAX,
     MILESTONES_MAX,
     PROJECT_PROGRESS_STALE_S,
@@ -1580,3 +1582,122 @@ def test_the_refreshed_note_shows_only_while_newer_than_the_content() -> None:
     assert refreshed_note(row.model_copy(update={"progress_updated_at": None}), now=now) is None
     bare = row.model_copy(update={"progress_refreshed_by": ""})
     assert refreshed_note(bare, now=now) == f"refreshed 2h ago — no new content since {day}"
+
+
+# -- the page: recency order, the declared tail, and the addressed fallback -----
+
+
+def _seed_paged_store(tmp_path: Path, total: int) -> tuple[ProjectRegistry, Project, Project]:
+    """Write ``total`` valid rows straight to the store; return ``(store, oldest, newest)``.
+
+    Direct file writes, never ``create_project``: each create re-loads the whole
+    store, so seeding 2001 rows through the API is O(n²), and mtimes must be
+    EXPLICIT or the recency ranking would depend on how fast the writes land.
+    ``index`` 0 is the OLDEST stamp — the row a recency page sheds first.
+    """
+    store = ProjectRegistry(tmp_path)
+    rows_dir = tmp_path / "projects"
+    rows_dir.mkdir()
+    base_ns = 1_700_000_000_000_000_000
+    oldest: Project | None = None
+    newest: Project | None = None
+    for index in range(total):
+        project_id = "target" if index == 0 else f"row{index:05d}"
+        name = "dormant-target" if index == 0 else f"row-{index:05d}"
+        project = Project(id=project_id, name=name)
+        path = rows_dir / f"{project_id}.json"
+        path.write_text(json.dumps(project.model_dump(mode="json", by_alias=True)))
+        stamp = base_ns + index
+        os.utime(path, ns=(stamp, stamp))
+        if index == 0:
+            oldest = project
+        newest = project
+    assert oldest is not None and newest is not None
+    return store, oldest, newest
+
+
+def test_a_row_past_the_page_is_readable_updatable_and_findable_by_name(
+    tmp_path: Path,
+) -> None:
+    """The ordinal-502 incident: a valid row past the page must stay usable.
+
+    ``_MAX_ROWS + 1`` rows, the target carrying the oldest mtime, so it is the
+    ONE row the page leaves out — and every addressed verb must still resolve
+    it: by id, by name, and through an update whose result a fresh registry
+    (no shared memory) reads back from disk.
+    """
+    store, target, newest = _seed_paged_store(tmp_path, _MAX_ROWS + 1)
+
+    listed = store.list_projects()
+    ids = {project.id for project in listed}
+    assert len(listed) == _MAX_ROWS
+    assert target.id not in ids, "the oldest row is the one a recency page sheds"
+    assert newest.id in ids, "the newest row is always on the page"
+    assert store.rows_on_disk == _MAX_ROWS + 1
+    assert store.rows_loaded == _MAX_ROWS
+    assert store.truncated
+
+    assert store.get_project(target.id).name == target.name
+    found = store.get_project_by_name(target.name)
+    assert found is not None and found.id == target.id
+
+    store.update_project(target.id, ProjectEdit(progress="resumed from the dormant tail"))
+    fresh = ProjectRegistry(tmp_path)
+    assert fresh.get_project(target.id).progress == "resumed from the dormant tail"
+
+
+def test_a_write_promotes_its_row_onto_the_page(tmp_path: Path) -> None:
+    """Recency is the ranking: a write moves a row to the front of the page."""
+    store, target, _newest = _seed_paged_store(tmp_path, _MAX_ROWS + 1)
+    assert target.id not in {project.id for project in store.list_projects()}
+
+    created = store.create_project(ProjectEdit(name="brand-new"))
+    ids = {project.id for project in store.list_projects()}
+    assert created.id in ids
+    assert target.id not in ids
+    # The just-written row is in the snapshot beside the page (the page plus
+    # rows THIS process wrote, every one of which belongs on the next load).
+    assert store.rows_loaded == _MAX_ROWS + 1
+    assert store.truncated
+
+
+def test_the_page_cache_reuses_an_unchanged_row_and_reparses_an_edited_one(
+    tmp_path: Path,
+) -> None:
+    """The cache is keyed on the stat triple, so a warm load parses nothing.
+
+    Object identity is the observable proof of "not re-parsed": a cache hit
+    returns the SAME ``Project`` instance, and a row whose file moved at all
+    (a hand edit in place, here) must come back as a new one with the new data.
+    """
+    store = ProjectRegistry(tmp_path)
+    created = store.create_project(ProjectEdit(name="cache-me"))
+
+    # One load primes the cache (the create itself only inserted the row into
+    # the snapshot); the load after it must reuse that parse.
+    store.refresh()
+    before = store.get_project(created.id)
+    store.refresh()
+    assert store.get_project(created.id) is before
+
+    path = tmp_path / "projects" / f"{created.id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["description"] = "rewritten in place"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    store.refresh()
+    after = store.get_project(created.id)
+    assert after is not before
+    assert after.description == "rewritten in place"
+
+
+def test_the_disk_name_scan_refuses_a_dormant_duplicate(tmp_path: Path) -> None:
+    """A create and a rename cannot mint a name the dormant tail already owns."""
+    store, target, _newest = _seed_paged_store(tmp_path, _MAX_ROWS + 1)
+
+    with pytest.raises(ProjectNameConflictError):
+        store.create_project(ProjectEdit(name=target.name))
+
+    # A rename onto the dormant name is the same collision, one row at a time.
+    on_page = next(iter(store.list_projects()))
+    with pytest.raises(ProjectNameConflictError):
+        store.update_project(on_page.id, ProjectEdit(name=target.name))

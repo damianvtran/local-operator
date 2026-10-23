@@ -10,12 +10,14 @@ its own body, exactly as ``/settings`` and ``/team chart`` do.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from local_operator.projects import ProjectEdit, ProjectRegistry
+from local_operator.projects import Project, ProjectEdit, ProjectRegistry
 from local_operator.tui.app import PROJECTS_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
@@ -1124,3 +1126,40 @@ async def test_double_click_repeats_enter(tmp_path: Path, monkeypatch: pytest.Mo
         await pilot.pause()
         assert fired, "the double click must repeat `↵`"
         assert view.cursor == 2  # the acting gesture moves the caret
+
+
+def _write_row(config: Path, project_id: str, name: str, *, stamp_ns: int) -> None:
+    """Write one valid row straight to the scratch store with a stated mtime."""
+    (config / "projects").mkdir(parents=True, exist_ok=True)
+    row = Project(id=project_id, name=name)
+    path = config / "projects" / f"{project_id}.json"
+    path.write_text(json.dumps(row.model_dump(mode="json", by_alias=True)))
+    os.utime(path, ns=(stamp_ns, stamp_ns))
+
+
+@pytest.mark.asyncio
+async def test_the_page_declares_rows_the_registry_page_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store past the registry page states the total not shown on the canvas.
+
+    The count must ride the SAME composition the views came from — the app's
+    ``_projects_page_hidden_rows`` reads the registry immediately after the
+    payload's ``list_projects()`` — and it reuses the renderer's existing
+    "+N more not shown" row rather than inventing a second notice.
+    """
+    from local_operator import projects as projects_module
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_row(tmp_path, "aaa-dormant", "dormant-row", stamp_ns=1_700_000_000_000_000_000)
+    _write_row(tmp_path, "zzz-live", "live-row", stamp_ns=1_700_000_001_000_000_000)
+    session = _ProjectSession()
+    session.project_registry = ProjectRegistry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "live-row")
+
+    assert view._last is not None
+    assert "live-row" in view._last.text.plain
+    assert "+1 more not shown" in view._last.text.plain
