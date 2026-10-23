@@ -312,3 +312,150 @@ async def test_a_reply_pairs_thread_and_to_and_the_send_confirms_in_the_outbox(t
     from local_operator.team_bridge.outbox import Outbox
 
     assert Outbox(tmp_path).pending(runtime.key()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["send", "reply"])
+@pytest.mark.parametrize("status", [200, 201])
+async def test_legacy_send_receipt_exposes_only_server_acceptance(tmp_path, op, status) -> None:
+    """Both new acceptance and an idempotent server answer keep the old fields.
+
+    Use the real tool adapter so metadata must survive into ToolResult.details,
+    not just an internal helper. The synthetic response deliberately includes
+    body/provenance fields: the additive receipt must never echo them.
+    """
+    requests: list[httpx.Request] = []
+    text = "synthetic private outgoing body"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _ok(
+            {"message": {"id": "bmsg_9", "body": {"text": text}, "origin": "human"}},
+            status=status,
+        )
+
+    runtime = BridgeRuntime(
+        client=_client(handler),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    context = ToolContext(bridge_runtime=runtime)
+    tool = build_bridge_tool(context)
+    assert tool is not None
+    args = {"op": op, "to": {"account_id": "acc_2"}, "text": text}
+    if op == "reply":
+        args["thread_id"] = "bth_1"
+    result = await tool.execute("synthetic-call", args, None, None, context)
+    assert result.details == {
+        "ok": True,
+        "message_id": "bmsg_9",
+        "state": "sent",
+        "destination_type": "peer_inbox",
+        "receipt_stage": "server_accepted",
+        "conversation_history": False,
+        "execution_confirmed": False,
+    }
+    assert result.is_error is not True
+    assert text not in json.dumps(result.details)
+    assert requests[0].url.path == "/v1/messaging/messages"
+    wire = json.loads(requests[0].content)
+    assert wire["body"]["text"] == text
+    assert wire["to"] == {"account_id": "acc_2"}
+    assert wire.get("thread_id") == ("bth_1" if op == "reply" else None)
+    metadata = set(result.details).difference({"ok", "message_id", "state"})
+    assert not metadata.intersection(wire)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["send", "reply"])
+async def test_legacy_receipt_on_frozen_pending_intent_replay(tmp_path, monkeypatch, op) -> None:
+    """A lost response is not acceptance; replaying the frozen ref can confirm it.
+
+    The test injects the existing pending intent at record_send only on retry.
+    This does NOT claim that a second tool call automatically reuses an intent:
+    ordinary new tool calls still mint new refs. No outbox schema/dispatcher or
+    outgoing-body retention contract is changed by the result metadata.
+    """
+    from local_operator.team_bridge.outbox import Outbox
+
+    requests: list[httpx.Request] = []
+    accepted: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        ref = json.loads(request.content)["client_ref"]
+        accepted.setdefault(ref, "bmsg_9")
+        if len(requests) == 1:
+            raise httpx.ReadError("synthetic lost response", request=request)
+        return _ok({"message": {"id": accepted[ref]}}, status=200)
+
+    runtime = BridgeRuntime(
+        client=_client(handler),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    args = {"op": op, "to": {"endpoint_id": "bep_9"}, "text": "synthetic outgoing"}
+    if op == "reply":
+        args["thread_id"] = "bth_1"
+    failed = await execute_bridge(runtime, args)
+    assert failed["ok"] is False and failed["code"] == "send_unconfirmed"
+    metadata = {
+        "destination_type", "receipt_stage", "conversation_history", "execution_confirmed",
+    }
+    assert not metadata.intersection(failed)
+    outbox = Outbox(tmp_path)
+    pending = outbox.pending(runtime.key())
+    assert len(pending) == 1
+    monkeypatch.setattr(Outbox, "record_send", lambda self, owner_key, **kwargs: pending[0])
+    confirmed = await execute_bridge(runtime, args)
+    assert confirmed == {
+        "ok": True,
+        "message_id": "bmsg_9",
+        "state": "sent",
+        "destination_type": "peer_inbox",
+        "receipt_stage": "server_accepted",
+        "conversation_history": False,
+        "execution_confirmed": False,
+    }
+    assert len(accepted) == 1
+    assert [json.loads(request.content)["client_ref"] for request in requests] == [
+        pending[0].client_ref,
+        pending[0].client_ref,
+    ]
+    assert requests[0].content == requests[1].content
+    assert outbox.pending(runtime.key()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["send", "reply"])
+async def test_refused_legacy_send_has_no_success_receipt(tmp_path, op) -> None:
+    """Definitive refusal remains an error and never acquires success metadata."""
+    from local_operator.team_bridge.outbox import Outbox
+
+    runtime = BridgeRuntime(
+        client=_client(
+            lambda request: httpx.Response(
+                403,
+                json={"error": {"code": "not_permitted", "message": "synthetic refusal"}},
+            )
+        ),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    args = {"op": op, "to": {"account_id": "acc_2"}, "text": "synthetic outgoing"}
+    if op == "reply":
+        args["thread_id"] = "bth_1"
+    result = await execute_bridge(runtime, args)
+    assert result["ok"] is False and result["code"] == "send_unconfirmed"
+    metadata = {
+        "destination_type", "receipt_stage", "conversation_history", "execution_confirmed",
+    }
+    assert not metadata.intersection(result)
+    assert "message_id" not in result and result.get("state") != "sent"
+    assert Outbox(tmp_path).pending(runtime.key()) == []
