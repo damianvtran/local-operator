@@ -69,6 +69,7 @@ def _entry_owners() -> dict[str, str]:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+    from local_operator.session.approval_policy import OVERRIDE_FILENAME
     from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
@@ -103,6 +104,10 @@ def _entry_owners() -> dict[str, str]:
         # must not travel (see sync.EXCLUDED_ENTRIES). Listed here so the
         # round-trip test builds it and proves it does NOT arrive.
         AUTO_TAG_FILENAME: "session.auto_tag",
+        # The conversation's own approval choice: excluded from the copy set on
+        # purpose (a copy starts without it), so it must appear here for the
+        # every-entry-type coverage test.
+        OVERRIDE_FILENAME: "session.approval_policy",
         TURN_JOURNAL_NAME: "session.runtime.registry",
         STOP_MARKER_NAME: "session.runtime.registry",
         SIGNAL_RECEIPT_NAME: "session.runtime.registry",
@@ -355,14 +360,6 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     # The census document lives BESIDE the session directories (a store-level
     # file), never inside one: it is the audit baseline, not conversation
     # content, so a session travelling between devices carries none of it.
-    "local_operator/session/approval_policy.py": (
-        1,
-        "``OVERRIDE_FILENAME`` ('approvals.json'): the conversation's own policy "
-        "sidecar beside its transcript. Deliberately NOT an entry of the copy set "
-        "— a fork must start without the parent's choice, which is why `fork` "
-        "excludes it — and never a session-directory path; it names a FILE inside "
-        "one",
-    ),
     "local_operator/session/census.py": (
         1,
         "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
@@ -2038,3 +2035,26 @@ def test_a_symlink_wearing_a_receipt_name_is_still_refused(tmp_path) -> None:
     os.symlink(outside, directory / "subagent-lane-j1.v1.json")
     assert sync.unlisted_entries(directory) == ["subagent-lane-j1.v1.json"]
     assert sync.family_entries(directory) == []
+
+
+def test_the_approval_sidecar_is_classified_and_never_copied(tmp_path: Path) -> None:
+    """A session that used approvals.json must still be movable.
+
+    The sidecar is a real file at the session root, so leaving it unclassified
+    made `assert_complete` refuse every move of such a session with
+    `unlisted_content` and offer "delete the record" as the remedy. It is
+    classified as NEVER_COPIED instead: the move is allowed and the copy starts
+    without the source conversation's consent.
+    """
+    from local_operator.session.approval_policy import OVERRIDE_FILENAME, write_override
+
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True)
+    (session_dir / sync.TRANSCRIPT_NAME).write_text("")
+    write_override(session_dir, "auto")
+    assert (session_dir / OVERRIDE_FILENAME).is_file()
+
+    assert sync.unlisted_entries(session_dir) == []
+    sync.assert_complete(session_dir)  # no SyncRefused
+    assert OVERRIDE_FILENAME in sync.NEVER_COPIED
+    assert OVERRIDE_FILENAME not in sync.copy_set(tmp_path, "s1")

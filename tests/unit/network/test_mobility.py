@@ -153,6 +153,35 @@ def _move(
 # ---------------------------------------------------------------------------
 
 
+def test_a_move_is_allowed_and_does_not_carry_the_approval_choice(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The approvals sidecar is excluded, not unlisted.
+
+    Round-4 review found a real blocker: `approvals.json` was absent from the
+    sync vocabulary, so moving a conversation that had used the approvals
+    feature refused with `unlisted_content` and told the user to delete their
+    saved choice. The move must succeed and the destination copy must NOT
+    contain the source's choice — a copy is a new conversation, the same rule
+    `fork` applies.
+    """
+    from local_operator.session.approval_policy import OVERRIDE_FILENAME, write_override
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    write_override(source, "auto")
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    destination = server_b.root / "sessions" / SESSION
+    assert destination.is_dir(), result
+    assert not (
+        destination / OVERRIDE_FILENAME
+    ).exists(), "the copy inherited the source conversation's approval choice"
+
+
 def test_a_recall_moves_the_session_and_leaves_a_tombstone(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
