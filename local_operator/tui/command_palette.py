@@ -41,6 +41,7 @@ from typing import Any, Iterable, Sequence
 from rich.markup import escape
 from rich.text import Text
 from textual.command import CommandPalette, DiscoveryHit, Hit, Hits, Provider
+from textual.content import Content
 
 from local_operator.i18n.keys import tui_palette as _p
 from local_operator.i18n.text import tr
@@ -170,6 +171,14 @@ def build_palette_entries(
 
     for row in agent_rows:
         name, label, _facts, summary = row
+        if any(character.isspace() for character in name):
+            # `/agent` takes its name as the first whitespace-delimited token,
+            # so a spaced profile cannot be addressed from ANY typed surface
+            # (the handler's own docstring states the naming contract). A row
+            # here would either attach the wrong profile and send the rest as
+            # a model turn, or need a second, non-slash attach path; the
+            # palette does not invent one.
+            continue
         entries.append(
             PaletteEntry(
                 kind=KIND_AGENT,
@@ -222,6 +231,27 @@ def build_palette_entries(
         )
 
     return entries
+
+
+def highlight_label(matcher: Any, label: str) -> Content:
+    """The label with the matcher's ranges styled, built WITHOUT markup parsing.
+
+    NOT `Matcher.highlight`. That method parses its candidate with
+    `Content.from_markup` (textual 8.2.8, `fuzzy.py:212`), so a session title
+    such as ``fix [/] thing`` raises MarkupError inside the palette's gather
+    worker and ``[WIP]`` loses its brackets — and because the ranges are taken
+    against the markup SOURCE, a parsed tag also mis-aligns every later
+    highlight. Names are user data: `Content(label)` is literal text, and the
+    same ranges are stylized onto it exactly as the framework does.
+    """
+    content = Content(label)
+    score, offsets = matcher.fuzzy_search.match(matcher.query, label)
+    if not score:
+        return content
+    for offset in offsets:
+        if not label[offset].isspace():
+            content = content.stylize(matcher.match_style, offset, offset + 1)
+    return content
 
 
 def rank_entries(entries: Sequence[PaletteEntry], matcher: Any) -> list[tuple[PaletteEntry, float]]:
@@ -325,7 +355,7 @@ class OperatorCommandProvider(Provider):
         for entry, score in rank_entries(self._entries, matcher):
             yield Hit(
                 score,
-                matcher.highlight(entry.label),
+                highlight_label(matcher, entry.label),
                 self._hit_command(entry),
                 text=entry.label,
                 help=entry.help_text,

@@ -21215,9 +21215,14 @@ class OperatorApp(App[None]):
         # ONE leading `=` only, the grammar every other seam runs (agent review
         # round 2, NIT-2): ``lstrip`` stripped all of them, so ``/team ==clear``
         # detached here and reported an unknown name everywhere else.
-        if matched.startswith("="):
+        # The escape is captured BEFORE the strip: a leading `=` means
+        # "literal name, never a verb", so `/team =clear` must reach a team
+        # literally named clear instead of detaching (command-palette round 2,
+        # NIT). Doubling still addresses a name whose own spelling starts `=`.
+        escaped = matched.startswith("=")
+        if escaped:
             matched = matched[1:]
-        if arg and matched.casefold() in ("clear", "none") and not tail.strip():
+        if arg and not escaped and matched.casefold() in ("clear", "none") and not tail.strip():
             text, style = self._team_detach_receipt()
             if style == "warning":
                 self._system_notice(text, style)
@@ -21926,14 +21931,15 @@ class OperatorApp(App[None]):
         name, _, request = arg.partition(" ")
         name = name.strip()
         request = request.strip()
-        # The `=` escape (see the subcommand comment above). The strip runs
-        # BEFORE the clear/none check below, so `/agent =none` DETACHES — it
-        # does not reach a profile literally named `none` (the old comment
-        # claimed otherwise; review round 5, behaviour intended). A name whose
-        # own spelling starts with `=` is reached by DOUBLING the escape
-        # (`/agent ==none` → the profile `=none`), and the bare words
-        # clear/none stay reserved by the detach verb.
-        if name.startswith("="):
+        # The `=` escape (see the subcommand comment above): a leading `=`
+        # means "literal name, never a verb", so it is captured BEFORE the
+        # strip and suppresses the clear/none detach below — `/agent =none`
+        # attaches a profile literally named `none` (command-palette round 2,
+        # NIT). A name whose own spelling starts with `=` is reached by
+        # DOUBLING the escape (`/agent ==none` → the profile `=none`), and the
+        # bare words clear/none stay reserved by the detach verb.
+        literal_name = name.startswith("=")
+        if literal_name:
             name = name[1:]
         # ``clear``/``none`` are the DETACH verb, not a name to look up — the
         # mirror of ``/goal`` with no text clearing the objective. A real agent
@@ -21942,7 +21948,7 @@ class OperatorApp(App[None]):
         # alternative (a name silently un-clearable) is worse. Only the bare
         # verb detaches; ``/agent clear <anything>`` is a mistyped attach and
         # falls through to normal resolution, which reports the unknown name.
-        if name.lower() in ("clear", "none") and not request:
+        if not literal_name and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 # Same silent-skip shape as the team attach above, and the same
@@ -38774,7 +38780,7 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — see docstring
             return []
 
-    def _palette_entries(self, session_rows: Iterable[Any] | None = None) -> list[PaletteEntry]:
+    def _palette_entries(self, *, session_rows: Iterable[Any]) -> list[PaletteEntry]:
         """Every action the ``ctrl+p`` palette offers, in discovery order.
 
         The SINGLE seam that reads live state, called from the provider's
@@ -38805,8 +38811,6 @@ class OperatorApp(App[None]):
             for section in settings_io.SECTIONS
             if bridge_availability.section_visible(section.name, directory)
         ]
-        if session_rows is None:
-            session_rows = self._palette_session_rows()
         return build_palette_entries(
             slash_commands=SLASH_COMMANDS,
             sections=sections,
@@ -38814,6 +38818,37 @@ class OperatorApp(App[None]):
             agent_rows=self._agent_profile_rows(),
             team_names=self._known_team_names(),
         )
+
+    def _leave_full_page_modes(self) -> bool:
+        """Leave every full-page mode, for a palette selection about to paint.
+
+        A full-page mode is not a layer over the transcript: each one sets
+        ``_transcript_view().display = False`` and owns the region plus the
+        composer. A slash command dispatched while one is up paints its
+        receipt (a listing, a picker, a notice) into that hidden surface and
+        leaves the page owning the frame, so the palette leaves the mode FIRST
+        — via the closers a user's Esc reaches, each of which restores the
+        layout, the composer and focus in its own way.
+
+        Every closer is a no-op returning ``False`` when its mode is not up,
+        so the sweep is unconditional and cannot mistake one mode for another.
+        """
+        left = False
+        for close in (
+            self._close_settings_view,
+            self._close_org_chart_view,
+            self._close_import_view,
+            self._close_review_view,
+            self._close_schedule_view,
+            self._close_library_view,
+            self._close_projects_view,
+            self._close_agent_form,
+            self._close_team_form,
+            self._close_subagent_view,
+            self._close_file_viewer,
+        ):
+            left = close() or left
+        return left
 
     async def _run_palette_entry(self, entry: PaletteEntry) -> None:
         """Run a palette selection through the surface that already owns it.
@@ -38835,15 +38870,7 @@ class OperatorApp(App[None]):
             return
         if not entry.slash:
             return
-        # A full-page mode is a REPLACEMENT for the transcript, not a layer
-        # over it: while the settings page is open the transcript is
-        # `display = False`, so a slash command dispatched from here would
-        # paint its receipt (a listing, a picker, a notice) into a surface the
-        # user cannot see and leave the page still owning the frame. Leaving
-        # the mode first is the same route Esc takes, so focus and the boot
-        # layout settle exactly as a user-initiated exit does.
-        if self._settings_view is not None:
-            self._close_settings_view()
+        self._leave_full_page_modes()
         pending = self._run_slash_command(entry.slash)
         if pending is not None:
             await pending
@@ -56305,14 +56332,19 @@ class OperatorApp(App[None]):
         session = self._session
         name, _, request = arg.partition(" ")
         name = name.strip()
-        if name.startswith("="):
+        # A leading `=` means "literal name, never a verb"; capture it before
+        # the strip so the detach below cannot fire on a profile named
+        # clear/none (command-palette round 2, NIT — the same guard the local
+        # `/agent` handler and `_cmd_team` now carry).
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # The DETACH verb, byte-for-byte the grammar ``_cmd_team`` and
         # ``serving.py`` run (issue #2014 added it because a team OWNS the
         # agent slot, so detaching is the only way to free it again). A request
         # after the verb is a mistyped attach and falls through to the lookup.
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             # ONE implementation of the verb for this process (MINOR-1): it also
             # syncs BOTH band segments, which this seam used to skip. The typed
             # ``data`` rides only a SUCCESSFUL detach (agent review round 3,
@@ -56417,10 +56449,11 @@ class OperatorApp(App[None]):
         # starts with ``=``, addressed by doubling it — stays reachable from a
         # follower of THIS app's session (review round 4, R4-1: this builder
         # was the one seam without it).
-        if name.startswith("="):
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")
