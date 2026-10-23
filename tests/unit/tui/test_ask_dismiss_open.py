@@ -450,6 +450,27 @@ async def test_the_second_reason_reports_its_own_receipt(enabled) -> None:
         assert seen == ["Dismissed — answered in chat"], seen
 
 
+async def test_the_lapsed_door_reports_no_reply_sent(enabled) -> None:
+    """Design round 2, D8 = agent review round 2, n1: the one-key door carries no
+    reason, so its receipt must not adopt the queue's `moot` default as something
+    the operator chose — and it must read the same as the phone's line for the
+    same act."""
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        # A LAPSED-ONLY list: one answerable ask would mount its card instead.
+        listing = await _open_list(pilot, app, [_row("a1", status="timed_out")])
+        listing.focus()
+        await _settle(pilot)
+        seen: list[str] = []
+        app._ask_gesture_notice = lambda text: seen.append(text)
+        await pilot.press("x")
+        await _settle(pilot)
+        assert session.dismissed == [("a1", "terminal", None)], session.dismissed
+        assert seen == ["Dismissed — no reply sent"], seen
+
+
 async def test_the_reason_card_closes_when_the_row_stops_being_answerable(enabled) -> None:
     """Agent review m1: an id that stays in the list is not enough — a row that
     settles to `answered` or `timed_out` has left the door the reasons belong to."""

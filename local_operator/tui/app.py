@@ -538,6 +538,7 @@ from local_operator.tui.widgets.toast import (
     _NETWORK_MARKER,
     TOAST_DEFAULT_MS,
     TOAST_FAILURE_MS,
+    TOAST_RECEIPT_MS,
     Toast,
     format_mcp_startup,
 )
@@ -603,13 +604,18 @@ TAG_UNAPPLIED_MARK = "[ ]"
 def dismiss_receipt(reason: str | None) -> str:
     """The one-line receipt for an ACCEPTED dismissal (UX round 1, U2).
 
-    ``reason`` is the operator's own word from the chooser; ``None`` is the
-    lapsed row's one-key door, whose queue default is ``moot`` — so the receipt
-    may name it without claiming the operator chose it.
+    ``reason`` is the operator's own word from the chooser. ``None`` is the
+    lapsed row's one-key door: the queue records its own ``moot`` default there,
+    but that is a RECORD, not something the operator said — so the receipt states
+    the door's own fact ("no reply sent") rather than adopting the default as
+    their reason (design round 2, D8 = agent review round 2, n1), and it is the
+    same sentence the phone shows for the same act.
     """
     if reason == "answered_in_chat":
         return _t_asks(_ask_keys.dismiss_notice_answered_in_chat())
-    return _t_asks(_ask_keys.dismiss_notice_moot())
+    if reason == "moot":
+        return _t_asks(_ask_keys.dismiss_notice_moot())
+    return _t_asks(_ask_keys.dismiss_notice_no_reply())
 
 
 def _tag_header(applied: int, total: int) -> str:
@@ -29341,7 +29347,7 @@ class OperatorApp(App[None]):
         not read yet.
         """
         try:
-            self.query_one(Toast).show(text, duration_ms=TOAST_DEFAULT_MS, yield_to_actionable=True)
+            self.query_one(Toast).show(text, duration_ms=TOAST_RECEIPT_MS, yield_to_actionable=True)
         except Exception:  # noqa: BLE001 — a stripped harness still gets the words
             self._system_notice(text, "info")
 

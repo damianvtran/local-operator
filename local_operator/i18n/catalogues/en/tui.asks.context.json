@@ -58,5 +58,11 @@
     "tone": "plain, explanatory",
     "maxCells": 60,
     "note": "The refusal shown in the all-conversations ask list when a dismissal finds the ask missing from THAT other conversation's log (a swept or reset store). The list's rows belong to other conversations by design, so this sentence must not claim the ask is absent from 'this session' — it is absent from the conversation the row named. It is a TOAST FRAGMENT like the queue's other refusals: lower-case opening, no trailing recovery clause (the row stays on screen and the key can be pressed again, so the surface already shows the way back)."
+  },
+  "tui.asks.dismiss.notice_no_reply": {
+    "role": "ask list toast, dismissal receipt",
+    "tone": "plain, factual",
+    "maxCells": 44,
+    "note": "The one-line acknowledgement shown after the operator dismisses a TIMED-OUT ask with the list's one-key control, which carries no reason. It must state the same fact the phone states for the same act (both surfaces read 'Dismissed — no reply sent' in English): the ask is gone and nothing was sent to the agent. It must NOT name 'no longer needed' or any other reason — the queue records its own default reason for this door, and that is a record, not a word the operator chose. Past tense, no exclamation mark."
   }
 }

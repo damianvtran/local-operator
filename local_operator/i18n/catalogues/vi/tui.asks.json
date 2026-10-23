@@ -8,5 +8,6 @@
   "tui.asks.dismiss.moot_note": "tác nhân sẽ không chờ câu trả lời nữa",
   "tui.asks.dismiss.notice_answered_in_chat": "Đã bỏ qua — đã trả lời trong cuộc trò chuyện",
   "tui.asks.dismiss.notice_moot": "Đã bỏ qua — không còn cần nữa",
+  "tui.asks.dismiss.notice_no_reply": "Đã bỏ qua — không gửi câu trả lời",
   "tui.asks.dismiss.title": "Bỏ qua câu hỏi này"
 }

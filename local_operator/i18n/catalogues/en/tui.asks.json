@@ -8,5 +8,6 @@
   "tui.asks.dismiss.moot_note": "stop waiting on it",
   "tui.asks.dismiss.notice_answered_in_chat": "Dismissed — answered in chat",
   "tui.asks.dismiss.notice_moot": "Dismissed — no longer needed",
+  "tui.asks.dismiss.notice_no_reply": "Dismissed — no reply sent",
   "tui.asks.dismiss.title": "Dismiss this ask"
 }

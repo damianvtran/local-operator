@@ -8,5 +8,6 @@
   "tui.asks.dismiss.moot_note": "агент больше не будет ждать ответа",
   "tui.asks.dismiss.notice_answered_in_chat": "Убрано — ответ дан в чате",
   "tui.asks.dismiss.notice_moot": "Убрано — больше не нужно",
+  "tui.asks.dismiss.notice_no_reply": "Убрано — ответ не отправлен",
   "tui.asks.dismiss.title": "Убрать этот вопрос"
 }

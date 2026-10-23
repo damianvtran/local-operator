@@ -8,5 +8,6 @@
   "tui.asks.dismiss.moot_note": "एजेंट अब जवाब का इंतज़ार नहीं करेगा",
   "tui.asks.dismiss.notice_answered_in_chat": "हटा दिया — बातचीत में जवाब दिया गया",
   "tui.asks.dismiss.notice_moot": "हटा दिया — अब ज़रूरत नहीं",
+  "tui.asks.dismiss.notice_no_reply": "हटा दिया — कोई जवाब नहीं भेजा गया",
   "tui.asks.dismiss.title": "यह सवाल हटाएँ"
 }

@@ -8,5 +8,6 @@
   "tui.asks.dismiss.moot_note": "l’agent n’attendra plus de réponse",
   "tui.asks.dismiss.notice_answered_in_chat": "Ignorée — répondue dans la conversation",
   "tui.asks.dismiss.notice_moot": "Ignorée — plus nécessaire",
+  "tui.asks.dismiss.notice_no_reply": "Ignorée — aucune réponse envoyée",
   "tui.asks.dismiss.title": "Ignorer cette question"
 }
