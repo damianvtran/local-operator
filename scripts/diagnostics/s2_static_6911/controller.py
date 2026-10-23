@@ -175,7 +175,7 @@ def main():
     for label, sha in manifest["sources"].items():
         if hashlib.sha256((ROOT / label).read_bytes()).hexdigest() != sha:
             raise SystemExit("source STOP")
-    if sys.version_info[:2] != (3, 13):
+    if sys.version_info[:2] != (3, 12):
         raise SystemExit("Python family STOP")
     out = Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="s2-static-"))

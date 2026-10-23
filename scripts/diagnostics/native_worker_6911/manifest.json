@@ -11,7 +11,7 @@
     "scripts/diagnostics/native_worker_6911/producer.py": "85ea9c21ea52dee5d87024a2d9d9d620aa7f9b821833c13ffba67d8c80b43393",
     "scripts/diagnostics/native_worker_6911/check_quality.py": "5e28800297f7e7ee95f2e66299c39ecb99a5d9e7f5977e3e3cb2bf7d5746eadc",
     "scripts/diagnostics/native_worker_6911/carrier.py": "144cc6f0493395462b5aa31ee89955e6312143572868e8dfad5e0cb08f19912e",
-    "scripts/diagnostics/native_worker_6911/controller.py": "c39a9e2475ab5b90c88b39a9b89bb5293f72a7edb441c20df3f764bde9404382"
+    "scripts/diagnostics/native_worker_6911/controller.py": "660d87052d232f09a6b655cdf3b5be4da5e0ba953a7d8a1042343e4ab5238e58"
   },
   "loaded_sources": [
     "tests/worker_code_identity.py",
