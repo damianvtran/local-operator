@@ -1607,9 +1607,14 @@ class ConfigManager:
 
                 settings_io._reload_before_write(self)
 
-            # Update each field individually to work with Config class
+            # Update each field individually to work with Config class. The COPY
+            # matters: `_write_config` applies preservation IN PLACE, so a caller's
+            # own mapping must not be the payload — a shallow `dict(DEFAULT_CONFIG
+            # .values["retry"])` would otherwise have the file's chains merged into
+            # the process's defaults (the `_fresh_default_config` incident, one
+            # layer out).
             for key, value in updates.items():
-                self.config.set_value(key, value)
+                self.config.set_value(key, deepcopy(value))
 
             if write:
                 self._write_config(vars(self.config), drop=drop)
@@ -1770,6 +1775,9 @@ class ConfigManager:
         # write must not leave the process believing a value it never saved;
         # restore-by-writing would also clobber another writer's later change.
         candidate = deepcopy(self.config)
-        candidate.set_value(key, value)
+        # The VALUE is copied too: `_write_config` applies preservation in place,
+        # and a caller handing in its own mapping (a default read from
+        # `DEFAULT_CONFIG`, a model's dict) must not have it rewritten.
+        candidate.set_value(key, deepcopy(value))
         self._write_config(vars(candidate), drop=drop)
         self.config = candidate
