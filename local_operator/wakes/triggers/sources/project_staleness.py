@@ -70,10 +70,12 @@ STALE_AFTER_HOURS_KEY = "projects.stale_after_hours"
 #: copy is deliberate (see the module docstring) and pinned by tests.
 _LIVE_STATUSES = frozenset({"planning", "active", "qa", "validation"})
 
-#: Bounds mirroring the store's read path: stop after this many rows (one bad
-#: store is a runaway writer, and a pass must stay bounded) and cap the
-#: annotated session list per row.
-_MAX_ROWS = 500
+#: Bounds mirroring the store's read path: one PAGE of rows ranked by recency
+#: (``projects._MAX_ROWS`` — the mirror is pinned by this source's tests, since
+#: the supervisor cannot import the store), and a cap on the annotated session
+#: list per row. A pass must stay bounded: a store with thousands of rows is a
+#: runaway writer, not a workload.
+_MAX_ROWS = 2000
 _MAX_SESSIONS = 64
 
 #: The two per-session files whose newest mtime is the activity floor.
@@ -128,14 +130,26 @@ def stale_after_s(values: Mapping[str, Any]) -> float:
 
 
 def _read_rows(root: Path) -> list[dict[str, Any]]:
-    """Every readable project row, bounded, in file-name order."""
+    """The store's rows, MOST RECENTLY WRITTEN FIRST, bounded to one page.
+
+    Recency, not filename — the store's own rule, mirrored here because the two
+    readers must agree about which rows are worth reading. Filename order is
+    unrelated to activity, and a cut taken in it froze an arbitrary tail out
+    forever (the store's ordinal-502 incident).
+
+    A RECENCY page is what makes "the rest are not evaluated" harmless for live
+    rows: a project whose work is moving has a recent mtime and is therefore on
+    the page, so only DORMANT rows can fall off — and the warning below states
+    the exact counts rather than leaving the reader to guess.
+    """
     out: list[dict[str, Any]] = []
     try:
-        children = sorted((root / "projects").iterdir(), key=lambda path: path.name)
+        children = list((root / "projects").iterdir())
     except OSError:
         # Absent store (never written) and unreadable store are both "no
         # candidates": harness-only installs pay one stat.
         return out
+    ranked: list[tuple[int, str, Path]] = []
     for child in children:
         # The same neighbourhood rules ProjectRegistry._load applies: dot
         # entries are lock/temp files, symlinks are refused, and only .json
@@ -144,19 +158,33 @@ def _read_rows(root: Path) -> list[dict[str, Any]]:
             continue
         if not child.name.endswith(".json"):
             continue
-        if len(out) >= _MAX_ROWS:
-            logger.warning(
-                "project store at %s has more than %d rows; the rest are not evaluated",
-                root / "projects",
-                _MAX_ROWS,
-            )
-            break
+        try:
+            mtime_ns = child.stat().st_mtime_ns
+        except OSError:
+            continue
+        # Descending mtime, filename as the deterministic tiebreak — the
+        # store's ranking, exactly.
+        ranked.append((-mtime_ns, child.name, child))
+    ranked.sort()
+    page = ranked[:_MAX_ROWS]
+    for _rank, _name, child in page:
         try:
             data = json.loads(child.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         if isinstance(data, dict):
             out.append(data)
+    hidden = len(ranked) - len(page)
+    if hidden:
+        logger.warning(
+            "project store at %s holds %d rows; evaluating the %d most recently "
+            "active and leaving %d dormant rows unevaluated (a write promotes a "
+            "row onto the page, so only dormant rows can fall off)",
+            root / "projects",
+            len(ranked),
+            len(page),
+            hidden,
+        )
     return out
 
 
