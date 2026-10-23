@@ -10091,3 +10091,205 @@ async def test_a_local_row_answers_its_binding_once(draft_api) -> None:
     (row,) = answer.json()["result"]["sessions"]
     assert row["binding"] == {"agent": None, "team": "lopdev"}
     assert "team" not in row and "agent" not in row, sorted(row)
+
+
+# -- the hub check a session start asks for ------------------------------------------------
+
+
+class _StubHubRunner:
+    """The bit of ``app.state.hub_sync`` a create touches: the start trigger.
+
+    A real ``HubSyncRunner`` would need credentials, a store and a network; what
+    this file is about is the ROUTE's contract with it -- one call per created
+    conversation, none for a refusal or a replay, and no dependence on whether
+    the call worked. ``raises`` models the worst case: a trigger that blows up.
+    """
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.calls = 0
+        self.raises = raises
+
+    def note_session_start(self) -> None:
+        self.calls += 1
+        if self.raises:
+            raise RuntimeError("hub unreachable")
+
+
+@pytest_asyncio.fixture
+async def hub_trigger_api(tmp_path: Path, monkeypatch):
+    """``draft_api``'s minimal app, plus a stub hub runner on ``app.state``."""
+
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    app.state.hub_sync = _StubHubRunner()
+    app.include_router(desktop_sessions.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        yield client, tmp_path, app
+    if hasattr(app.state, "desktop_sessions"):
+        await app.state.desktop_sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_a_created_session_asks_the_hub_runner_for_one_check(hub_trigger_api) -> None:
+    """One create is one session start -- and a REPLAY of it is not a second one.
+
+    The replay half is the at-most-once contract leaking into the trigger: the
+    retried request did not open a conversation, it re-answered one that was
+    already open, so asking the hub again would misdescribe what happened (and
+    the runner's own throttle would be the only thing stopping it).
+    """
+
+    client, root, app = hub_trigger_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    body = {"request_id": str(uuid.uuid4()), "cwd": str(root)}
+
+    created = await client.post("/v1/desktop/sessions", json=body)
+    assert created.status_code == 200, created.text
+    assert created.json()["result"]["replayed"] is False
+    assert app.state.hub_sync.calls == 1
+
+    replay = await client.post("/v1/desktop/sessions", json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["result"]["replayed"] is True
+    assert app.state.hub_sync.calls == 1, "a replay did not start a conversation"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_create_never_asks_the_hub_runner(hub_trigger_api) -> None:
+    """A refusal is not a session start: no conversation exists to have opened."""
+
+    client, root, app = hub_trigger_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    refused = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root / "does-not-exist")},
+    )
+    assert refused.status_code == 409, refused.text
+    assert app.state.hub_sync.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_hub_trigger_that_raises_never_fails_the_create(hub_trigger_api) -> None:
+    """The hub is optional; the conversation is not.
+
+    A runner whose trigger raises must cost nothing but the check: the create
+    still answers 200 and the session directory is on disk, so a hub problem can
+    never turn into "your new conversation failed".
+    """
+
+    client, root, app = hub_trigger_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    app.state.hub_sync.raises = True
+
+    created = await client.post(
+        "/v1/desktop/sessions", json={"request_id": str(uuid.uuid4()), "cwd": str(root)}
+    )
+    assert created.status_code == 200, created.text
+    session_id = created.json()["result"]["session_id"]
+    assert (root / "sessions" / session_id).is_dir()
+
+
+@pytest_asyncio.fixture
+async def hub_runner_api(tmp_path: Path, monkeypatch):
+    """The REAL ``HubSyncRunner`` on the app, over the fake hub the runner suite uses.
+
+    The stub above proves the route's side of the contract; this proves the
+    composition -- route, one runner, its throttle, its check and the store --
+    with nothing faked but the hub's HTTP client and the network itself.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.runner import HubSyncRunner
+    from tests.unit.hub_sync.test_service import Hub, _pull_agent
+
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    hub = Hub()
+    monkeypatch.setattr(
+        "local_operator.agents._fetch_hub_profile", lambda _c, h, **_k: hub.agents[h]
+    )
+    agents = AgentRegistry(tmp_path)
+    row = _pull_agent(agents, hub, tmp_path)
+    cm = ConfigManager(tmp_path)
+
+    def build() -> svc.HubSyncContext:
+        return svc.HubSyncContext(
+            config_dir=tmp_path,
+            config_manager=cm,
+            client_for_tenant=lambda _t: hub.client(),
+            credential="ok",
+            agent_registry=agents,
+            resolver=None,
+        )
+
+    runner = HubSyncRunner(config_manager=cm, build_ctx=build, startup_delay=0)
+    app = FastAPI()
+    app.state.config_manager = cm
+    app.state.hub_sync = runner
+    app.include_router(desktop_sessions.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        yield client, tmp_path, runner, row
+    if hasattr(app.state, "desktop_sessions"):
+        await app.state.desktop_sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_two_creates_back_to_back_are_one_real_hub_check(hub_runner_api, monkeypatch) -> None:
+    """The acceptance rule, end to end: a burst of creates costs ONE check.
+
+    Two sessions created in the same tick of the client's loop are one moment.
+    The second create must neither wait for the first check nor start a second
+    one -- and the first check must really have run, which is why this asserts
+    the store row the check writes rather than only counting calls.
+    """
+
+    client, root, runner, row = hub_runner_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync import store as st
+
+    calls: list[str] = []
+    real = svc.check_items
+
+    def counting(ctx: Any, **kw: Any) -> Any:
+        calls.append("check")
+        return real(ctx, **kw)
+
+    monkeypatch.setattr(svc, "check_items", counting)
+
+    first = await client.post(
+        "/v1/desktop/sessions", json={"request_id": str(uuid.uuid4()), "cwd": str(root)}
+    )
+    second = await client.post(
+        "/v1/desktop/sessions", json={"request_id": str(uuid.uuid4()), "cwd": str(root)}
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["result"]["session_id"] != second.json()["result"]["session_id"]
+
+    # The trigger is fire-and-forget, so wait for the ONE check it scheduled.
+    await _until(lambda: bool(calls), why="the session-start check never ran")
+    assert runner._session_check_task is not None
+    await asyncio.wait_for(runner._session_check_task, timeout=30.0)
+
+    assert len(calls) == 1
+    assert st.StatusStore(root).load()["items"][f"agent:{row.id}"]["last_checked_at"]
