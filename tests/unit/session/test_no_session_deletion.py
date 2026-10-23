@@ -974,6 +974,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "sessions/last-compression.json; a session directory is never a destination.",
     ),
     (
+        "local_operator/session/tail_anchor.py::drop_anchor",
+        "<path>.unlink",
+        "Removes only <session>/tail-anchor.v1.json — the sidecar this module owns, "
+        "named by its own ANCHOR_FILENAME constant. A stale anchor can never validate "
+        "once the journal is stored compressed, so leaving it would make the prewarm "
+        "selector call the journal warm forever. Never a session directory.",
+    ),
+    (
         "local_operator/session/compression.py::_unlink_file",
         "os.unlink",
         "Single os.unlink, lstat-guarded to regular files only: the pass's own .tmp, "

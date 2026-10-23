@@ -839,3 +839,346 @@ def test_an_index_without_an_entry_for_the_session_is_left_alone(tmp_path: Path)
         is False
     )
     assert search_index.index_path(config).exists() is False
+
+
+# ---------------------------------------------------------------------------
+# Stage B: every reader survives the archive
+# ---------------------------------------------------------------------------
+#
+# The invariant these tests pin is the one the integration exists for: after a
+# compression pass NOTHING in the product may treat the session as empty,
+# unreadable or gone. Each test builds a plain twin with byte-identical rows and
+# compares the two surfaces, so a reader that silently answers "no rows" for an
+# archive fails against a real expectation rather than against a shape it made
+# up.
+
+
+def _journal(turns: int = 6) -> bytes:
+    """A transcript of REAL rows (ids, timestamps, custom records).
+
+    ``_transcript`` above is shape-enough for the codec tests; the readers below
+    go through ``TranscriptEntry.from_json``, which drops a row without an
+    ``id``/``type``, so the matrix needs the genuine envelope.
+    """
+    rows: list[dict[str, object]] = []
+    for index in range(turns):
+        role = "user" if index % 2 == 0 else "assistant"
+        rows.append(
+            {
+                "id": f"row{index:03d}",
+                "ts": 1700000000.0 + index,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": role,
+                    "content": [{"text": f"retention turn {index}"}],
+                },
+            }
+        )
+    rows.append(
+        {
+            "id": "todo001",
+            "ts": 1700000100.0,
+            "type": "custom",
+            "payload": {
+                "custom_type": "todo_snapshot",
+                "details": {"items": [{"content": "ship"}]},
+            },
+        }
+    )
+    rows.append(
+        {
+            "id": "name001",
+            "ts": 1700000101.0,
+            "type": "custom",
+            "payload": {
+                "custom_type": "conversation_name",
+                "details": {"text": "Retention work", "user_set": True},
+            },
+        }
+    )
+    # Compact separators, exactly as ``TranscriptEntry.to_json`` writes them: the
+    # byte-needle readers (``find_row_for_custom_type`` and friends) search for
+    # ``"custom_type":"x"`` with no space, so a spaced fixture would exercise the
+    # parse-walk fallback instead of the fast path this matrix is comparing.
+    return b"".join(
+        json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in rows
+    )
+
+
+def _twin_store(tmp_path: Path, name: str = "twin") -> tuple[Path, Path, Path]:
+    """``(config, plain_dir, archived_dir)``: identical journals, one compressed.
+
+    The plain twin is kept FRESH (``age_days=0``) so the pass leaves it alone —
+    a reader comparison against a second archive would prove nothing.
+    """
+    config = _store(tmp_path, name=name)
+    plain = _session(config, "plain001", body=_journal(), age_days=0)
+    archived = _session(config, "arch0001", body=_journal())
+    result = compression.run_compression(config, _policy())
+    assert [row.session for row in result.compressed] == ["arch0001"], result
+    assert compression.archive_path(archived) is not None
+    return config, plain, archived
+
+
+def _rows(page: object) -> list[tuple[str, float, str, dict[str, object]]]:
+    entries = getattr(page, "entries")
+    return [(entry.id, entry.ts, entry.type, dict(entry.payload)) for entry in entries]
+
+
+def test_every_transcript_reader_returns_the_same_rows_from_an_archive(
+    tmp_path: Path,
+) -> None:
+    from local_operator.session import transcript
+
+    _config, plain, archived = _twin_store(tmp_path)
+
+    assert _rows(transcript.read_transcript_page(plain, limit=4)) == _rows(
+        transcript.read_transcript_page(archived, limit=4)
+    )
+    assert _rows(transcript.read_transcript_page(archived, before_id="row004", limit=3)) == _rows(
+        transcript.read_transcript_page(plain, before_id="row004", limit=3)
+    )
+    assert _rows(transcript.read_transcript_page(archived, around_id="row002", limit=3)) == _rows(
+        transcript.read_transcript_page(plain, around_id="row002", limit=3)
+    )
+
+    for custom_type in ("todo_snapshot", "conversation_name"):
+        plain_hit = transcript.find_row_for_custom_type(plain, custom_type)
+        archived_hit = transcript.find_row_for_custom_type(archived, custom_type)
+        assert plain_hit is not None and archived_hit is not None
+        assert plain_hit[1] == archived_hit[1]
+        assert transcript.read_latest_custom_entry(
+            archived, custom_type
+        ) == transcript.read_latest_custom_entry(plain, custom_type)
+        assert transcript.read_custom_entries(
+            archived, custom_type
+        ) == transcript.read_custom_entries(plain, custom_type)
+
+    assert transcript.read_entry_by_id(archived, "row003") == transcript.read_entry_by_id(
+        plain, "row003"
+    )
+    assert transcript.read_latest_custom(archived, "todo_snapshot") == (
+        transcript.read_latest_custom(plain, "todo_snapshot")
+    )
+
+    plain_suffix = transcript.read_replay_suffix(plain, checkpoint_types="todo_snapshot")
+    archived_suffix = transcript.read_replay_suffix(archived, checkpoint_types="todo_snapshot")
+    assert archived_suffix.entries == plain_suffix.entries
+    assert archived_suffix.through_present is plain_suffix.through_present
+    assert archived_suffix.bytes_read > 0
+
+    # The whole-file probe resolves too: an archive whose every row is
+    # bookkeeping must answer for the file it actually holds.
+    resolved = compression.transcript_for_read(archived)
+    assert resolved is not None
+    assert transcript.transcript_is_bookkeeping_only(resolved) is False
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_on_an_archive_restores_appends_and_keeps_every_row(
+    tmp_path: Path,
+) -> None:
+    from local_operator.session.transcript import Transcript
+
+    _config, plain, archived = _twin_store(tmp_path)
+    original = _journal()
+    assert compression.archive_path(archived) is not None
+
+    live = Transcript(archived)
+    try:
+        assert compression.archive_path(archived) is None
+        assert (archived / compression.PLAIN_FILENAME).read_bytes() == original
+        await live.append_custom("note", {"text": "after restore"})
+        reread = Transcript(archived)
+        try:
+            assert [entry.id for entry in reread.entries()][:1] == ["row000"]
+            assert reread.latest_custom("note") == {"text": "after restore"}
+            assert (archived / compression.PLAIN_FILENAME).read_bytes().startswith(original)
+        finally:
+            reread.close()
+    finally:
+        live.close()
+
+    # The lock is released: a fresh instance (and the compressor) may take it.
+    assert compression.acquire_writer(archived) is True
+    compression.release_writer(archived)
+
+
+def test_listing_order_and_previews_are_identical_before_and_after_a_pass(
+    tmp_path: Path,
+) -> None:
+    from local_operator.resume import recent_session_rows, recent_sessions, session_preview
+
+    config = _store(tmp_path, name="listing")
+    one = _session(config, "list0001", body=_journal(), age_days=40)
+    two = _session(config, "list0002", body=_journal(turns=9), age_days=20)
+    (one / "title.json").write_text(json.dumps({"text": "One"}), encoding="utf-8")
+    (two / "title.json").write_text(json.dumps({"text": "Two"}), encoding="utf-8")
+
+    order_before = recent_sessions(config)
+    names_before = [(row.id, row.name) for row in recent_session_rows(config)]
+    previews_before = {sid: session_preview(config / "sessions" / sid) for sid, _ in order_before}
+
+    result = compression.run_compression(config, _policy())
+    assert [row.session for row in result.compressed] == ["list0001"]
+
+    assert recent_sessions(config) == order_before
+    assert [(row.id, row.name) for row in recent_session_rows(config)] == names_before
+    for sid, _mtime in order_before:
+        assert session_preview(config / "sessions" / sid) == previews_before[sid]
+
+
+def test_search_finds_a_compressed_session_and_its_page_reads(tmp_path: Path) -> None:
+    from local_operator.session import transcript
+    from local_operator.session.session_search import search_store
+
+    config = _store(tmp_path, name="search")
+    archived = _session(config, "search01", body=_journal())
+    result = compression.run_compression(config, _policy())
+    assert [row.session for row in result.compressed] == ["search01"]
+
+    matches = search_store(config, "retention turn 3")
+    assert "search01" in [match.row.id for match in matches]
+    page = transcript.read_transcript_page(archived, limit=10)
+    assert "row003" in [entry.id for entry in page.entries]
+
+
+def test_a_source_that_vanishes_after_publish_keeps_the_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1: only a source that is PRESENT AND DIFFERENT may retire its archive."""
+    config = _store(tmp_path, name="vanished")
+    directory = _session(config, "gone0001")
+    original = (directory / compression.PLAIN_FILENAME).read_bytes()
+
+    real = compression._stat_sig
+    calls = {"n": 0}
+
+    def stat_sig(path: Path) -> object:
+        calls["n"] += 1
+        if calls["n"] == 3:  # sig0, pre-publish, post-publish
+            return None  # the plain file VANISHED between publish and unlink
+        return real(path)
+
+    monkeypatch.setattr(compression, "_stat_sig", stat_sig)
+
+    outcome = compression.compress_session(directory, codec=compression.available_codec())
+
+    assert outcome.status == "compressed", outcome.reason
+    archive = compression.archive_path(directory)
+    assert archive is not None, "the archive is the only surviving copy and was removed"
+    assert archive.read_bytes()
+    assert compression.restore_for_write(directory) is True
+    assert (directory / compression.PLAIN_FILENAME).read_bytes() == original
+
+
+def test_a_flipped_byte_in_a_zstd_archive_is_detected(tmp_path: Path) -> None:
+    """R2: zstd frames carry a checksum, so corruption fails at decode like gzip's CRC."""
+    pytest.importorskip("compression.zstd")
+    config = _store(tmp_path, name="corrupt")
+    directory = _session(config, "zstd0001", body=_journal(turns=40))
+    outcome = compression.compress_session(directory, codec="zstd")
+    assert outcome.status == "compressed", outcome.reason
+    archive = compression.archive_path(directory)
+    assert archive is not None and archive.suffix == ".zst"
+
+    data = bytearray(archive.read_bytes())
+    data[len(data) // 2] ^= 0xFF
+    archive.write_bytes(bytes(data))
+
+    with pytest.raises(compression.ArchiveError):
+        compression.read_head(directory, 4096)
+    assert compression.restore_for_write(directory) is False
+    assert compression.archive_path(directory) is not None
+
+
+def test_a_widened_delegated_window_protects_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3: the keep rule must use the CONFIGURED window, not the module constant."""
+    config = _store(tmp_path, name="delegated")
+    child = _session(config, "child001")
+    parent = config / "sessions" / "parent01"
+    parent.mkdir(parents=True)
+    (parent / compression.PLAIN_FILENAME).write_bytes(_journal(turns=2))
+    (parent / "subagent-roster.v1.json").write_text(
+        json.dumps({"records": [{"session_dir": str(child)}]}), encoding="utf-8"
+    )
+    # The parent last moved 100 hours ago: outside the 48 h default, inside a
+    # configured 200 h window.
+    stamp = time.time() - 100 * 3600.0
+    for name in (compression.PLAIN_FILENAME, "subagent-roster.v1.json"):
+        os.utime(parent / name, (stamp, stamp))
+    os.utime(parent, (stamp, stamp))
+
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    default = compression.run_compression(config, _policy())
+    assert [row.session for row in default.compressed] == ["child001"]
+
+    # Restore the child and ask again with the configured window.
+    assert compression.restore_for_write(child) is True
+    os.utime(
+        child / compression.PLAIN_FILENAME,
+        (time.time() - 40 * 86400.0, time.time() - 40 * 86400.0),
+    )
+    widened = compression.run_compression(config, _policy(), delegated_window_hours=200.0)
+    assert [row.session for row in widened.compressed] == []
+    assert any("parent session still active" in row.reason for row in widened.skipped_rows)
+
+
+def test_a_fork_of_a_compressed_parent(tmp_path: Path) -> None:
+    from local_operator import fork as fork_module
+    from local_operator.session.transcript import Transcript
+
+    config, _plain, archived = _twin_store(tmp_path, name="fork")
+    original = _journal()
+    sessions = config / "sessions"
+
+    whole = fork_module.fork_session(config, "arch0001")
+    whole_dir = sessions / whole
+    # Whole-directory fork: the archive is COPIED as-is and the fork restores it
+    # on first open.
+    assert compression.archive_path(whole_dir) is not None
+    assert not (whole_dir / compression.PLAIN_FILENAME).exists()
+    opened = Transcript(whole_dir)
+    try:
+        assert (whole_dir / compression.PLAIN_FILENAME).read_bytes() == original
+    finally:
+        opened.close()
+
+    filtered = fork_module.fork_session(
+        config, "arch0001", exclude_entry_ids=frozenset({"row003"})
+    )
+    filtered_dir = sessions / filtered
+    assert compression.archive_path(filtered_dir) is None
+    body = (filtered_dir / compression.PLAIN_FILENAME).read_bytes()
+    assert "row003" not in [entry.id for entry in Transcript(filtered_dir).entries()]
+    assert "row002" in body.decode()
+    assert b"row002" in body
+
+
+def test_carry_reads_the_decompressed_payload(tmp_path: Path) -> None:
+    from local_operator.network import carry
+
+    _config, plain, archived = _twin_store(tmp_path, name="carry")
+    assert carry.latest_custom_details(archived, "todo_snapshot") == {
+        "items": [{"content": "ship"}]
+    }
+    assert carry.latest_custom_details(archived, "todo_snapshot") == carry.latest_custom_details(
+        plain, "todo_snapshot"
+    )
+
+
+def test_prewarm_and_anchor_skip_an_archived_session(tmp_path: Path) -> None:
+    from local_operator.session import index_prewarm, tail_anchor
+
+    config, _plain, archived = _twin_store(tmp_path, name="prewarm")
+    stale = archived / tail_anchor.ANCHOR_FILENAME
+    stale.write_text("{}", encoding="utf-8")
+
+    assert archived.name not in index_prewarm.sessions_needing_warm(config)
+    assert archived.name not in index_prewarm.sessions_needing_replay(config)
+    assert tail_anchor.build_anchor(archived) is None
+    assert not stale.exists()
