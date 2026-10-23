@@ -22,7 +22,6 @@ defect, so every one asserts the OBSERVABLE answer a user or a caller gets.
 
 from __future__ import annotations
 
-import gzip
 import json
 from pathlib import Path
 from typing import Any
