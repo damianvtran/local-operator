@@ -132,7 +132,9 @@ async def rig(tmp_path, monkeypatch):
         store.close()
 
 
-def request_args(body, query, *, owner="acc_a", tenant="org_other", guarded=True):
+def request_args(body, query, *, owner="acc_a", tenant: str | None = "org_other", guarded=True):
+    # None deliberately omits the target: invalid for guarded requests, but a
+    # supported legacy shape. Keep it distinct from the empty/blank negatives.
     receipt = {"tenant_id": tenant} if tenant is not None else {}
     if guarded:
         receipt["expected_account_id"] = owner
