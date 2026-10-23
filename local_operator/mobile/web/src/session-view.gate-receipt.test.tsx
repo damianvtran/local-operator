@@ -282,27 +282,55 @@ describe("the sheet's effective-mode line (U2)", () => {
 		};
 	}
 
-	it("says a session override and the global it overrides", async () => {
+	it("names the REAL global behind a session override (U4)", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "ask",
+			approval_provenance: "session",
+			approval_global_mode: "ask",
+		});
+		await openSheet();
+		expect(
+			within(screen.getByRole("dialog")).getByText(
+				"Approvals: Ask — session override; global Ask.",
+			),
+		).toBeTruthy();
+	});
+
+	it("drops the global clause when the owner sends no global mode", async () => {
+		/* Half a true sentence beats a whole false one: the sheet must not
+		   negate the session mode into a claim about the machine. */
 		slot.projection!.pending = pendingApproval({
 			approval_mode: "ask",
 			approval_provenance: "session",
 		});
 		await openSheet();
-		expect(
-			within(screen.getByRole("dialog")).getByText(
-				"Approvals: Ask — session override; global Auto.",
-			),
-		).toBeTruthy();
+		const dialog = screen.getByRole("dialog");
+		expect(within(dialog).getByText("Approvals: Ask — session override.")).toBeTruthy();
+		expect(within(dialog).queryByText(/global (Ask|Auto)/)).toBeNull();
 	});
 
-	it("says the global default", async () => {
+	it("says the global default, without the pending card's request clause", async () => {
 		slot.projection!.pending = pendingApproval({
 			approval_mode: "auto",
 			approval_provenance: "global",
 		});
 		await openSheet();
+		const dialog = screen.getByRole("dialog");
+		expect(within(dialog).getByText("Approvals: Auto — global default.")).toBeTruthy();
+		/* The sheet holds no request. "This request still needs your answer"
+		   belongs to the card, and a sheet that said it would name a card that
+		   is not on screen. */
+		expect(within(dialog).queryByText(/This request still needs your answer/)).toBeNull();
+	});
+
+	it("separates a run pin from both saved scopes", async () => {
+		slot.projection!.pending = pendingApproval({
+			approval_mode: "auto",
+			approval_provenance: "pin",
+		});
+		await openSheet();
 		expect(
-			within(screen.getByRole("dialog")).getByText("Approvals: Auto — global default."),
+			within(screen.getByRole("dialog")).getByText("Approvals: Auto — this run."),
 		).toBeTruthy();
 	});
 

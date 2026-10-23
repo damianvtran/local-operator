@@ -10705,6 +10705,7 @@ def _pending_request(state: Any) -> PendingRequest | None:
         # has neither) rebuilds as "not stated" rather than failing the card.
         approval_mode=str(getattr(state, "approval_mode", "") or ""),
         approval_provenance=str(getattr(state, "approval_provenance", "") or ""),
+        approval_global_mode=str(getattr(state, "approval_global_mode", "") or ""),
     )
 
 

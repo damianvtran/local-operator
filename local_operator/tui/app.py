@@ -30530,11 +30530,13 @@ class OperatorApp(App[None]):
         """
         from local_operator.session.approval_policy import resolve_effective
 
-        mode, provenance = resolve_effective(
-            self._explicit_approvals_mode,
-            "auto" if self._approvals_default_auto else "ask",
-        )
-        return ApprovalPolicy(mode=mode, provenance=provenance)
+        global_mode = "auto" if self._approvals_default_auto else "ask"
+        mode, provenance = resolve_effective(self._explicit_approvals_mode, global_mode)
+        # The REAL global rides with the view so the provenance sentence can
+        # name what a session override outranks. Deriving the "other" mode from
+        # the live mode painted "global Auto" over a file that said ask (UX
+        # round 2, U4): the two agree only by accident.
+        return ApprovalPolicy(mode=mode, provenance=provenance, global_mode=global_mode)
 
     def _adopt_approval_override(self, session: Any) -> None:
         """Load THIS conversation's recorded choice when it is adopted.

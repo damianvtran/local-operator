@@ -812,6 +812,15 @@ class ServingSessionHandle(SessionHandle):
         # ``config.yml`` change (:meth:`follow_config`) move it without
         # reconstructing the handle.
         self._auto_approve = auto_approve
+        #: The FILE's ``tool_approval_mode`` as last known, independent of the
+        #: live gate (which an explicit conversation choice may override). The
+        #: pending-gate projection publishes it beside the mode so a viewer can
+        #: say "session Ask; global Auto" truthfully; without it the card can
+        #: only guess the complement of the live mode (UX round 2, U4). Unknown
+        #: for a pinned run with no watcher, which reads as "not stated".
+        self._default_approvals_mode: str = (
+            "" if approval_pinned else ("auto" if auto_approve else "ask")
+        )
         # ``approval_pinned`` marks the value as an explicit FLAG (``lop exec
         # --yolo``), which outranks the config key: a ``tool_approval_mode``
         # edit must not re-arm a gate the operator disabled on the command
@@ -1494,6 +1503,10 @@ class ServingSessionHandle(SessionHandle):
             logger.warning("tool_approval_mode=%r ignored; use ask or auto", mode)
             return
         wanted_auto = mode == "auto"
+        # Record the file's truth BEFORE any keep/equality return: a session
+        # holding its own override still needs the correct global half for its
+        # provenance sentence, and the gate may not move this tick.
+        self._default_approvals_mode = mode
         if wanted_auto == self._auto_approve:
             return
         if self._explicit_approvals_mode is not None:
@@ -6950,13 +6963,18 @@ class ServingSessionHandle(SessionHandle):
                 # explains why this gate is asking while the file says auto.
                 from local_operator.session.approval_policy import resolve_effective
 
+                global_mode = self._configured_approval_mode() or self._default_approvals_mode
                 mode, provenance = resolve_effective(
                     self._explicit_approvals_mode,
-                    "auto" if self._auto_approve else "ask",
+                    global_mode or "ask",
                     pinned_auto=self._auto_approve if self._approval_pinned else None,
                 )
                 payload["approval_mode"] = mode
                 payload["approval_provenance"] = provenance
+                # The default the mode outranks, published separately: a
+                # session-ask card over a global-auto file would otherwise have
+                # to invent "global Ask" (the U4 defect).
+                payload["approval_global_mode"] = global_mode
                 # The card gains the session's name so a DESKTOP banner for it
                 # can be triaged: "Waiting for approval" with three sessions
                 # open names none of them (design round 1, D3). Stamped here
@@ -10078,6 +10096,9 @@ class ServingSessionHandle(SessionHandle):
                     "approval_reason": error.__class__.__name__,
                 },
             )
+        # The file now holds this value; the projection's global half follows
+        # even if this conversation keeps (or loses) its own record below.
+        self._default_approvals_mode = mode
         cleared = self._persist_approval_override(None, had_record=previous_override is not None)
         direct = False
         if self._auto_approve != (mode == "auto"):

@@ -939,6 +939,11 @@ class PendingRequest:
     # version-skew reason as ``recommended``.
     approval_mode: str = ""
     approval_provenance: str = ""
+    #: The machine default the mode outranks (``ask``/``auto``), or ``""`` when
+    #: the publisher cannot state it. Kept separate from ``approval_mode``
+    #: because a session override and the file can hold the same word, and a
+    #: viewer that derives "the other one" is wrong exactly then (U4).
+    approval_global_mode: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

@@ -950,7 +950,7 @@ class ApprovalBlock(TranscriptBlock):
 ALLOW_ASK_CONSEQUENCE = "run this call and ask again next time"
 #: The same consequence once the gate is auto: telling the reader to expect a
 #: prompt that will not come is the stale-copy defect this pair removes.
-ALLOW_AUTO_CONSEQUENCE = "run this call; later calls will not ask"
+ALLOW_AUTO_CONSEQUENCE = "run this call; later calls are auto"
 
 APPROVAL_CHOICES: tuple[tuple[str, str, str], ...] = (
     ("Allow", "y", ALLOW_ASK_CONSEQUENCE),
@@ -1029,6 +1029,11 @@ def approval_question(tool_name: str, description: str) -> "AskQuestion":
 class ApprovalPolicy:
     mode: str = "ask"
     provenance: str = "global"
+    #: The machine default in force, so a session override can name the thing
+    #: it overrides without inventing it. ``""`` = not known (no watcher, an
+    #: embed); the renderer then drops the "global X" clause rather than
+    #: guessing (UX round 2, U4).
+    global_mode: str = ""
     saving: str = ""
     status: str = ""
     detail: str = ""
@@ -1461,23 +1466,29 @@ class ApprovalPrompt(AskPickerScreen):
             # "Auto saved" would be the exact class of false statement this
             # callout exists to remove.
             word = _MODE_WORD.get(policy.mode, "Auto")
-            if width >= 63:
+            # The full sentence is 73 cells; a 63-cell content box clipped its
+            # last words ("...Answer this r"), so the threshold is its own
+            # length. The short form is 32 and fits the 40-cell box exactly.
+            if width >= 73:
                 return (
                     f"{word} saved for this session, with this conversation. "
                     "Answer this request."
                 )
             if width >= 40:
-                return f"{word} saved for this session. Answer this request."
+                return f"{word} saved; answer this request."
             return f"{word}(session) saved"
         if policy.status == "saved-global":
             word = _MODE_WORD.get(policy.mode, "Auto")
-            if width >= 63:
+            # Full form: 74 cells. Short form: 38 ("Global auto saved; answer
+            # this request."), inside the 40-cell box that used to clip at
+            # "...Answer this r".
+            if width >= 74:
                 return (
                     f"{word} set as global default; this session inherits it. "
                     "Answer this request."
                 )
             if width >= 40:
-                return f"{word} saved as global default. Answer this request."
+                return f"Global {word.lower()} saved; answer this request."
             return f"{word}(global) saved"
         if policy.status == "refused":
             mode = _MODE_WORD.get(policy.mode, "Ask")
@@ -1507,11 +1518,15 @@ class ApprovalPrompt(AskPickerScreen):
         # loose, the card is not a stale artefact.
         mode = _MODE_WORD.get(policy.mode, "Ask")
         if policy.provenance == "session":
-            other = "Auto" if policy.mode == "ask" else "Ask"
+            other = _MODE_WORD.get(policy.global_mode, "")
             if width >= 63:
-                return f"Approvals: {mode} — this session overrides global {other}."
+                if other:
+                    return f"Approvals: {mode} — this session overrides global {other}."
+                return f"Approvals: {mode} — this session override."
             if width >= 40:
-                return f"{mode} — session override; global {other}."
+                if other:
+                    return f"{mode} — session override; global {other}."
+                return f"{mode} — session override."
             return self._compact_prefix()
         if policy.provenance == "pin":
             if width >= 63:

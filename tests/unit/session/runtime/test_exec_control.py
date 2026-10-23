@@ -42,6 +42,11 @@ class FakeSession:
     outcome_is_synchronous = True
     runtime_locality: RuntimeLocality = "this-process"
 
+    #: Some cases attach a transcript directory so the handle's sidecar read has
+    #: a real path; declared so the facade tests can set it without pyright's
+    #: attr-defined error (as ``test_serving.FakeSession`` does).
+    transcript: Any
+
     def __init__(self, *, graceful: bool = True) -> None:
         self.session_id = "exec-sess"
         self.model_label = "test/model"

@@ -129,13 +129,19 @@ export function globalDefaultReceipt(receipt: CommandReceipt): string {
  * gate moved from the terminal must not be described by this screen's receipts.
  *
  * THE SCOPE WORDS ARE THE TUI CARD'S, deliberately: the same machine, two
- * surfaces, one vocabulary. A session override states the alternative it
- * overrides ("global Auto"), because that is the fact a reader needs before
- * deciding which handle to press — an override exists BECAUSE it deviates from
- * the other side, which is how `tui/widgets/approval.py`'s `_state_text` derives
- * the same word.
+ * surfaces, one vocabulary. A session override states the mode it overrides
+ * ("global Auto"), because that is the fact a reader needs before deciding
+ * which handle to press.
  *
- * EMPTY MEANS SAY NOTHING. Both fields are absent on a runtime that predates
+ * THE GLOBAL HALF IS READ, NEVER DERIVED. Until UX round 2 (U4) this function
+ * negated the session mode to name the machine default — so a fresh session with
+ * global=ask and its own `ask` override rendered "this session overrides global
+ * Auto": a claim about every other conversation, invented from a mode that says
+ * nothing about them. The runtime now stamps `approval_global_mode` on the same
+ * payload, and when it is absent (an older owner) the clause is DROPPED — half a
+ * true sentence beats a whole false one.
+ *
+ * EMPTY MEANS SAY NOTHING. These fields are absent on a runtime that predates
  * them, and half a statement ("Approvals: Ask.") is still a true one — but a
  * mode with no provenance must not invent a scope, so the fallback names the
  * mode only.
@@ -143,14 +149,23 @@ export function globalDefaultReceipt(receipt: CommandReceipt): string {
 export function approvalPolicyLine(input: {
 	approval_mode?: ApprovalMode | "";
 	approval_provenance?: ApprovalProvenance | "";
+	approval_global_mode?: ApprovalMode | "";
 }): string {
 	const mode =
 		input.approval_mode === "auto" ? "Auto" : input.approval_mode === "ask" ? "Ask" : "";
 	if (!mode) return "";
 	const provenance = input.approval_provenance;
 	if (provenance === "session") {
-		const other = mode === "Ask" ? "Auto" : "Ask";
-		return `Approvals: ${mode} — session override; global ${other}.`;
+		const global =
+			input.approval_global_mode === "auto"
+				? "Auto"
+				: input.approval_global_mode === "ask"
+					? "Ask"
+					: "";
+		/* No global mode, no clause: see the block comment above. */
+		return global
+			? `Approvals: ${mode} — session override; global ${global}.`
+			: `Approvals: ${mode} — session override.`;
 	}
 	if (provenance === "pin") return `Approvals: ${mode} — this run.`;
 	if (provenance === "global") return `Approvals: ${mode} — global default.`;
