@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 import pytest
 
@@ -26,7 +27,7 @@ def _fresh_memo():
     audio_format.reset_caps()
 
 
-def _error(status: int, detail: dict) -> APIError:
+def _error(status: int, detail: dict[str, Any]) -> APIError:
     return APIError("refused", status_code=status, body=json.dumps({"detail": detail}))
 
 

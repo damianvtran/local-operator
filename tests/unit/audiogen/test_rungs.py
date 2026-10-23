@@ -902,7 +902,11 @@ async def test_elevenlabs_drops_to_128_once_when_the_plan_refuses_192(direction)
     assert outcome.assets[0].data == AUDIO_BYTES
     # M2: the fact follows the fallback rather than a constant. Only the
     # voiceover leg states a bitrate; a sound effect legitimately reports none.
-    assert outcome.assets[0].bitrate_kbps == (128 if direction == "voiceover" else None)
+    # ``assets`` is typed as the base MediaAsset, so narrow before reading the
+    # audio-specific fact (pyright would not see it on the base class).
+    asset = outcome.assets[0]
+    assert isinstance(asset, AudioAsset)
+    assert asset.bitrate_kbps == (128 if direction == "voiceover" else None)
 
 
 @pytest.mark.asyncio
