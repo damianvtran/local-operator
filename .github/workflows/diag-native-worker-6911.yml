@@ -1,0 +1,51 @@
+name: Owned generic native Worker diagnostic 6911
+on:
+  push:
+    branches: [diag/native-worker-producer-6911]
+permissions:
+  contents: read
+jobs:
+  pair:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Setup closure or STOP
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -m pip install -e '.[dev]' textual==8.2.8 black==26.1.0 isort==5.13.2 flake8==7.4.1
+      - name: Generic native producer and four shipping-file style checks
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          set +e
+          python -B scripts/run_bounded.py --timeout 220 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.native_worker_6911.controller "$RUNNER_TEMP/native-worker-6911"
+          native_rc=$?
+          python -m black --check tests/unit/test_tui_responsiveness.py tests/unit/test_worker_code_identity.py tests/worker_code_identity.py tests/loop_callback_spans.py >/dev/null 2>&1
+          black_rc=$?
+          python -m isort --check-only tests/unit/test_tui_responsiveness.py tests/unit/test_worker_code_identity.py tests/worker_code_identity.py tests/loop_callback_spans.py >/dev/null 2>&1
+          isort_rc=$?
+          python -m flake8 --jobs 1 tests/unit/test_tui_responsiveness.py tests/unit/test_worker_code_identity.py tests/worker_code_identity.py tests/loop_callback_spans.py >/dev/null 2>&1
+          flake8_rc=$?
+          printf '{"native":%s,"black":%s,"isort":%s,"flake8":%s}\n' "$native_rc" "$black_rc" "$isort_rc" "$flake8_rc" > "$RUNNER_TEMP/native-worker-style.json"
+          test "$native_rc:$black_rc:$isort_rc:$flake8_rc" = "0:0:0:0"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-worker-6911-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-worker-6911/native.json
+            ${{ runner.temp }}/native-worker-style.json
+          if-no-files-found: warn
+          retention-days: 3
