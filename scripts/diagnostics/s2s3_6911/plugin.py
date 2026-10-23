@@ -221,6 +221,13 @@ def pytest_runtest_call(item):
             if settle is not None:
                 span("s2_settle", settle)
             rec("recorder", summary=self.measurement_summary())
+            # LOAD-BEARING for s3-held: the original test returns right after
+            # ``await recorder.stop()``, and the app's own background harvest
+            # starts the refresh worker only ~0.9 s after the last measured pause
+            # (run 39960859806). Awaiting the witness HERE keeps the test's own
+            # loop alive until the worker has entered and the witness has seen its
+            # ticks, without editing the original test. Fail-closed: the witness
+            # raises on its own 6 s entry bound and 2 s / 3-tick window.
             if task is not None:
                 await task
 
