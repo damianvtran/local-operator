@@ -137,10 +137,12 @@ def _read_rows(root: Path) -> list[dict[str, Any]]:
     unrelated to activity, and a cut taken in it froze an arbitrary tail out
     forever (the store's ordinal-502 incident).
 
-    A RECENCY page is what makes "the rest are not evaluated" harmless for live
-    rows: a project whose work is moving has a recent mtime and is therefore on
-    the page, so only DORMANT rows can fall off — and the warning below states
-    the exact counts rather than leaving the reader to guess.
+    What falls off this page is decided by WRITE recency, not by liveness: a
+    row that is quiet — dormant, or live but not reported recently — can be
+    among the oldest and drop off. The bound is therefore "the M most recently
+    WRITTEN rows are evaluated", and the warning below states the exact counts
+    rather than leaving the reader to guess; a write promotes a row back onto
+    the page (m3).
     """
     out: list[dict[str, Any]] = []
     try:
@@ -178,12 +180,13 @@ def _read_rows(root: Path) -> list[dict[str, Any]]:
     if hidden:
         logger.warning(
             "project store at %s holds %d rows; evaluating the %d most recently "
-            "active and leaving %d dormant rows unevaluated (a write promotes a "
-            "row onto the page, so only dormant rows can fall off)",
+            "written and leaving %d quiet row%s unevaluated (a write promotes a "
+            "row back onto the page)",
             root / "projects",
             len(ranked),
             len(page),
             hidden,
+            "" if hidden == 1 else "s",
         )
     return out
 
