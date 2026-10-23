@@ -170,6 +170,11 @@ class TestWidget:
     ) -> None:
         async with app.run_test(size=(100, 30)) as pilot:
             await await_session_boot(app)
+            # A draft in the composer must survive the round trip: the palette
+            # is a transient surface over the screen, not a mode that owns the
+            # text box the user was typing in.
+            await pilot.press(*"draft text")
+            await pilot.pause()
             await pilot.press("ctrl+p")
             await pilot.pause()
             assert palette_is_open(app)
@@ -179,6 +184,7 @@ class TestWidget:
             assert isinstance(
                 app.focused, Editor
             ), "Escape must put the operator back in the composer, not nowhere"
+            assert app.focused.text == "draft text"
 
     @pytest.mark.asyncio
     async def test_typing_filters_to_a_settings_section_and_selecting_opens_it(
