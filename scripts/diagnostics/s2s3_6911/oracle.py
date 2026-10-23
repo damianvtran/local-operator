@@ -29,30 +29,35 @@ def judge(row):
             raise ValueError("probe baseline/trailing capture STOP")
         if controls[0].get("cpu_trip") is not True or controls[0].get("worst_cpu_ms", 0) < 50 or controls[1].get("cpu_trip") is not False or controls[1].get("worst_cpu_ms", 999) >= 50 or row.get("rc") != 0:
             raise ValueError("strict CPU oracle STOP")
+        if controls[1].get("worker_cpu_ms", 0) < 200 or controls[1].get("worker_thread") == controls[1].get("loop_thread"):
+            raise ValueError("matched offload CPU/identity STOP")
         return "qualified clock controls"
     if not data.get("setup_ok") or data.get("call") not in ("pass", "fail"):
         raise ValueError("setup/call missing STOP")
     records = data.get("records", [])
     clean = [r for r in records if r.get("kind") == "cleanup"]
-    if len(clean) != 1 or not clean[0].get("worker_joined") or not clean[0].get("task_settled"):
+    if len(clean) != 1 or not clean[0].get("worker_function_completed") or not clean[0].get("task_settled"):
         raise ValueError("unsettled worker/task STOP")
     summaries = [r for r in records if r.get("kind") == "recorder"]
     if len(summaries) != 1:
         raise ValueError("missing original recorder STOP")
     if mode == "s2-original":
+        callbacks = summaries[0].get("summary", {}).get("callbacks")
+        if not isinstance(callbacks, dict) or "loop_thread_id" not in callbacks or not all("gc" in w.get("callbacks", {}) for key in ("worst_cpu_windows", "worst_wall_windows") for w in callbacks.get(key, [])):
+            raise ValueError("S2 M15/thread GC missing STOP")
         for phase in ("s2_idle", "s2_emit_burst", "s2_settle"):
             if len([r for r in records if r.get("kind") == phase]) != 1:
                 raise ValueError("missing S2 phase STOP")
         if data["call"] == "fail" and not str(data.get("assertion", "")).startswith("event loop "):
             raise ValueError("wrong S2 failure oracle STOP")
     else:
-        harvests = [r for r in records if r.get("kind") == "harvest"]
-        pauses = [r for r in records if r.get("kind") == "pause"]
+        harvests = [r for r in records if r.get("kind") == "harvest" and r.get("manual") and r.get("measured")]
+        pauses = [r for r in records if r.get("kind") == "pause" and r.get("manual") and r.get("measured")]
         if len(harvests) != 3 or len(pauses) != 3:
             raise ValueError("incomplete observed S3 window STOP")
         window = pauses[-1]["end_wall"] - harvests[0]["start_wall"]
         parts = sum(r["wall_ms"] for r in harvests+pauses)/1000
-        if window < parts:
+        if window + 1e-9 < parts:
             raise ValueError("observed-window residual STOP")
         if mode == "s3-split":
             delay = [r for r in records if r.get("kind") == "controlled_async_delay"]
@@ -76,3 +81,111 @@ def final(rows):
     verdicts = [judge(r) for r in rows]
     return dict(diagnostic_complete=True, original_failure=any(r["rc"] != 0 for r in rows),
                 verdicts=verdicts, product_cause="UNKNOWN", source_contract_unchanged=True)
+
+
+def finish_child(child, observe, kill_owned, parse, remove, fault=False):
+    """Injected orchestration: EOF is not exit; final wait cannot be bypassed."""
+    errors = []
+    rc = None
+    try:
+        if not fault:
+            try:
+                rc = child.wait(timeout=1)
+            except TimeoutError:
+                pass
+            except Exception:
+                errors.append("healthy-wait-error")
+    finally:
+        try:
+            if child.poll() is None:
+                kill_owned()
+        except Exception:
+            errors.append("owned-kill-error")
+            try:
+                child.kill()
+            except Exception:
+                errors.append("direct-kill-error")
+        finally:
+            try:
+                rc = child.wait(timeout=2)
+            except Exception:
+                errors.append("final-wait-error")
+    try:
+        if observe():
+            errors.append("owned-unsettled")
+    except Exception:
+        errors.append("observation-error")
+    data = None
+    if type(rc) is int and not errors:
+        try:
+            data = project(parse())
+            remove()
+        except Exception:
+            errors.append("proof-or-cleanup-error")
+    return dict(rc=rc, reaped=type(rc) is int, cleanup_errors=errors, data=data)
+
+
+def restore_all(patches, release, settle_task, complete):
+    """Always attempt every owned cleanup, even partial installation/teardown."""
+    errors = []
+    for label, action in (("release", release), ("ticker", settle_task), ("work-completion", complete)):
+        try:
+            action()
+        except BaseException:
+            errors.append(label)
+    for owner, name, previous in reversed(patches):
+        try:
+            setattr(owner, name, previous)
+        except BaseException:
+            errors.append("restore")
+    return errors
+
+
+def span_record(kind, start, end, thread, **values):
+    return dict(kind=kind, cpu_ms=(end[0]-start[0])*1000,
+                wall_ms=(end[1]-start[1])*1000, start_wall=start[1],
+                end_wall=end[1], thread=thread, **values)
+
+
+def held_record(ticks, requests, thread):
+    return dict(kind="held_witness", loop_ticks=ticks, requests=requests,
+                loop_thread=thread, origin="loop-witness")
+
+
+def project(value):
+    """Structural allowlist only; raw pytest logs NEVER leave the child pipe."""
+    import math
+    import re
+    allowed = {"rc", "signal", "reaped", "timed_out", "cleanup_errors", "identity_ok", "data", "pid", "pgid", "verdict", "mode", "exitstatus", "records", "identity", "call", "assertion", "setup_ok",
+               "controls", "ready", "trailing", "cpu_trip", "worst_cpu_ms", "worker_cpu_ms",
+               "worker_thread", "loop_thread", "kind", "cpu_ms", "wall_ms", "start_wall",
+               "end_wall", "thread", "manual", "measured", "i", "origin", "requests",
+               "loop_ticks", "worker_function_completed", "task_settled", "errors", "summary",
+               "worst_wall_ms", "noise_floor_ms", "wall_cpu_descheduling_ratio", "callbacks",
+               "process_id", "loop_thread_id", "clock", "attribution", "worst_cpu_windows",
+               "worst_wall_windows", "cpu_gap_ms", "wall_gap_ms", "count", "top_cpu", "top_wall",
+               "gc", "name", "detail", "generation", "is_loop", "python", "textual", "sources",
+               "loaded", "path", "sha256", "executable", "executable_sha256", "versions"}
+    def visit(item, depth=0, mapping=False):
+        if depth > 14:
+            raise ValueError("privacy depth")
+        if isinstance(item, dict):
+            if any(not isinstance(k, str) or (not mapping and k not in allowed) for k in item):
+                raise ValueError("privacy unknown fields")
+            return {k: visit(v, depth+1, k in {"sources", "loaded", "versions"}) for k, v in item.items()}
+        if isinstance(item, list):
+            if len(item) > 250:
+                raise ValueError("privacy list bound")
+            return [visit(v, depth+1) for v in item]
+        if item is None or type(item) is bool:
+            return item
+        if type(item) in (int, float) and math.isfinite(item):
+            return item
+        if isinstance(item, str) and len(item) <= 2048:
+            # Timer arming paths are labels, not source text; keep basename/site.
+            return re.sub(r"/(?:[^\s:'\"]+/)+([^/\s:'\"]+)", r"\1", item)
+        raise ValueError("privacy scalar")
+    clean = visit(value)
+    if len(json.dumps(clean).encode()) > 200000:
+        raise ValueError("privacy output bound")
+    return clean

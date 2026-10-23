@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from scripts.diagnostics.s2s3_6911.oracle import MODES, final, judge
+from scripts.diagnostics.s2s3_6911.oracle import MODES, final, judge, finish_child, project
 
 ROOT = Path(__file__).resolve().parents[3]
 HERE = Path(__file__).resolve().parent
@@ -96,45 +96,28 @@ def case(mode, out):
                         if len(data) > 262144:
                             raise RuntimeError("child output bound")
     finally:
-        # Reap is mandatory even when observation/read/selector construction fails.
         if child is not None:
-            try:
+            def kill_owned():
                 for pid, facts in owned(known, pgid).items():
                     fresh = table().get(pid)
                     if fresh and fresh["start"] == facts["start"]:
                         os.kill(pid, signal.SIGKILL)
-            except Exception:
-                row["cleanup_errors"].append("owned-reap-observation-failed")
-                if child.poll() is None:
-                    child.kill()
-            try:
-                row["rc"] = child.wait(timeout=3)
-                row["reaped"] = True
-            except Exception:
-                row["cleanup_errors"].append("direct-wait-failed")
-            try:
-                if owned(known, pgid):
-                    row["cleanup_errors"].append("owned-descendants-unsettled")
-            except Exception:
-                row["cleanup_errors"].append("settlement-unknown")
-        row["signal"] = -row["rc"] if type(row["rc"]) is int and row["rc"] < 0 else None
-        # Keep unknown/unsettled case files; never infer cleanup from a finalizer.
-        if row["reaped"] and not row["cleanup_errors"]:
-            try:
+            def parse():
                 if proof.stat().st_size > 200000:
-                    raise RuntimeError("proof bound")
-                row["data"] = json.loads(proof.read_text())
-                row["identity_ok"] = mode == "synthetic" or row["data"].get("identity") == identity()
-            finally:
-                shutil.rmtree(home)
-        (out / (mode+".json")).write_text(json.dumps(row))
-        # Text output stays bounded and synthetic, not arbitrary environment/DB data.
-        (out / (mode+".log")).write_bytes(data[:262144])
+                    raise ValueError("proof bound")
+                return json.loads(proof.read_text())
+            row.update(finish_child(child, lambda: owned(known, pgid), kill_owned,
+                                    parse, lambda: shutil.rmtree(home),
+                                    fault=row["timed_out"]))
+        row["signal"] = -row["rc"] if type(row["rc"]) is int and row["rc"] < 0 else None
+        row["identity_ok"] = row.get("data", {}).get("identity") == project(identity()) if row.get("data") else False
+        # NO raw pytest output file, forwarding, traceback or arbitrary error text.
+        (out / (mode+".json")).write_text(json.dumps(project(row)))
     row["verdict"] = judge(row)
     return row
 
 
-def identity():
+def identity(require_loaded=False, original_module=None):
     import importlib.metadata
     manifest = json.loads((HERE / "manifest.json").read_text())
     actual = {path: sha(ROOT/path) for path in manifest["sources"]}
@@ -143,7 +126,24 @@ def identity():
     textual = importlib.metadata.version("textual")
     if not manifest.get("textual_pin") or textual != manifest["textual_pin"]:
         raise RuntimeError("Textual exact canonical pin unresolved or changed")
-    return dict(python=list(sys.version_info[:3]), textual=textual, sources=actual)
+    modules = {"tests/unit/test_tui_responsiveness.py": "tests.unit.test_tui_responsiveness",
+               "tests/loop_callback_spans.py": "tests.loop_callback_spans",
+               "scripts/diagnostics/s2s3_6911/plugin.py": "scripts.diagnostics.s2s3_6911.plugin"}
+    loaded = {}
+    for path, name in modules.items():
+        expected = (ROOT/path).resolve()
+        if require_loaded:
+            module = original_module if path == "tests/unit/test_tui_responsiveness.py" and original_module is not None else sys.modules.get(name)
+            if path.endswith("/plugin.py") and module is None:
+                module = sys.modules.get("__main__")
+            observed = Path(module.__file__).resolve() if module is not None else None
+            if observed != expected:
+                raise RuntimeError("actual loaded module path mismatch")
+        loaded[path] = dict(path=path, sha256=sha(expected))
+    return dict(python=list(sys.version_info[:3]), textual=textual, sources=actual,
+                loaded=loaded, executable=str(Path(sys.executable).resolve()),
+                executable_sha256=sha(Path(sys.executable).resolve()),
+                versions={n: importlib.metadata.version(n) for n in ("textual", "pytest", "pytest-asyncio", "pydantic")})
 
 
 def main():
