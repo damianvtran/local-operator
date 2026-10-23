@@ -379,7 +379,30 @@ async def test_a_granted_team_promote_lists_the_members_it_copied(registry) -> N
     context = _promote_context(registry, authorize_durable_write=approve)
     # A conversation role the roster needs, plus the team that names it.
     role = context.agent_registry.create_agent(
-        AgentEditFields(name="helper", tags=["role"]), scope="session"
+        # Every field spelled out: ``AgentEditFields`` is validated in strict mode,
+        # and a partially-spelled construction is a pyright error even though the
+        # rest default to ``None``.
+        AgentEditFields(
+            name="helper",
+            label=None,
+            description=None,
+            tags=["role"],
+            categories=None,
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        ),
+        scope="session",
     )
     context.agent_registry.set_agent_system_prompt(role.id, "Help.\n")
     await call(context, op="create", name="pod", manager="helper", members=["helper"])

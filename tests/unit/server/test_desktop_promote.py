@@ -24,9 +24,35 @@ from local_operator.agents import AgentEditFields
 from local_operator.config import ConfigManager
 from local_operator.server.routes import capabilities, desktop_catalogues
 from local_operator.server.utils.desktop_sessions import DesktopSessions
-from local_operator.teams import TeamEditFields
+from local_operator.teams import TeamEditFields, parse_members
 
 TOKEN = "desktop-promote-token"
+
+
+def _agent_fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out (it is strict-validated)."""
+    base: dict[str, Any] = dict(
+        name=None,
+        label=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
 
 
 @pytest_asyncio.fixture
@@ -60,7 +86,7 @@ async def promote_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 async def _seed_role(bridge: Any, name: str, prompt: str = "Check releases.\n") -> Any:
     registry = bridge.remote.agent_registry
     row = registry.create_agent(
-        AgentEditFields(name=name, tags=["role"], description=f"{name} when needed"),
+        _agent_fields(name=name, tags=["role"], description=f"{name} when needed"),
         scope="session",
     )
     registry.set_agent_system_prompt(row.id, prompt)
@@ -117,7 +143,7 @@ async def test_a_team_promotion_answers_the_team_row_and_names_its_members(promo
             TeamEditFields(
                 name="pod",
                 manager="helper",
-                members=[{"role": "helper", "count": 2}],
+                members=parse_members(["helper:2"]),
                 instructions="Collaborate.",
                 project="Ship S4.",
             ),

@@ -22,13 +22,39 @@ import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.profile_scope import scope_session_registries
-from local_operator.teams import TeamEditFields, TeamRegistry
+from local_operator.teams import TeamEditFields, TeamRegistry, parse_members
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.promote_verb import PromoteRequest, parse_promote
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_projects_view import _boot, _notices
 
 pytestmark = pytest.mark.asyncio
+
+
+def _agent_fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out (it is strict-validated)."""
+    base: dict[str, Any] = dict(
+        name=None,
+        label=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
 
 
 # --- the grammar ---------------------------------------------------------------
@@ -76,7 +102,7 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Operato
 
 
 def _session_role(agents: Any, name: str, prompt: str = "Do it.\n") -> str:
-    row = agents.create_agent(AgentEditFields(name=name, tags=["role"]), scope="session")
+    row = agents.create_agent(_agent_fields(name=name, tags=["role"]), scope="session")
     agents.set_agent_system_prompt(row.id, prompt)
     return row.id
 
@@ -122,7 +148,7 @@ async def test_a_team_rehearsal_names_the_members_it_would_copy(tmp_path, monkey
         TeamEditFields(
             name="pod",
             manager="manager",
-            members=[{"role": "helper"}],
+            members=parse_members(["helper"]),
             instructions="Work together.",
         ),
         scope="session",
@@ -138,7 +164,7 @@ async def test_a_team_rehearsal_names_the_members_it_would_copy(tmp_path, monkey
 async def test_replace_rehearses_the_overwrite_separately(tmp_path, monkeypatch) -> None:
     session, app, global_agents, _global_teams = setup(tmp_path, monkeypatch)
     _session_role(session.agent_registry, "release-check")
-    global_agents.create_agent(AgentEditFields(name="release-check", tags=["role"]))
+    global_agents.create_agent(_agent_fields(name="release-check", tags=["role"]))
     async with app.run_test(size=(80, 30)) as pilot:
         await _boot(pilot, app)
         # The rehearsal is a separate step, and it names the OVERWRITE rather
