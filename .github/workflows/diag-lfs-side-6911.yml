@@ -25,10 +25,11 @@ jobs:
           python -m pip install -e '.[dev]'
       - name: Two original sidebar selectors serially
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
           ulimit -c 0
-          python -B scripts/run_bounded.py --timeout 220 --grace 5 --memory-mb 512 -- python -B scripts/diagnostics/lfs_side_6911/controller.py "$RUNNER_TEMP/lfs-side-6911"
+          python -B scripts/run_bounded.py --timeout 220 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.lfs_side_6911.controller "$RUNNER_TEMP/lfs-side-6911"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
