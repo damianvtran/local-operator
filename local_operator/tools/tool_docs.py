@@ -268,7 +268,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 ),
             ),
             ToolDocOp(op="screenshot", blurb="Capture the page to a file."),
-            ToolDocOp(op="click", blurb="Click a selector or snapshot ref."),
+            ToolDocOp(op="click", blurb="Click a selector, snapshot ref, or a11y locator."),
             ToolDocOp(
                 op="type",
                 blurb="Type text, or a stored secret via 'secret_ref', into a field.",

@@ -1,0 +1,308 @@
+/* Accessibility locators: name an element by what it IS, not by what its id
+ * happens to be.
+ *
+ * THE MEASURED FAILURE. On GitHub's "Create GitHub App" page nothing in the
+ * form has a stable id — the DOM is framework-generated — and nine plausible
+ * CSS guesses (`#hook_active`, `input[name="github_app[hook_active]"]`,
+ * `button[aria-controls="repository-permissions"]`, …) all missed. What was
+ * never in doubt was the element's ACCESSIBLE identity: it is a checkbox named
+ * "Active", a button named "Create GitHub App". Chrome computes those names
+ * from the page's own labels, so they survive a rewrite that changes every id.
+ * This module turns that identity into a locator a caller can type, and matches
+ * it against the tree Chrome reports.
+ *
+ * WHY IT IS HOST-FREE. Both hosts read the same `Accessibility.getFullAXTree`
+ * payload; the parsing and the matching are pure functions over it. Keeping
+ * them in `driver/` is what lets the extension and the desktop app resolve the
+ * same locator to the same node — a second copy of the match rules is how
+ * "role=checkbox[name=Active]" starts meaning two different things.
+ *
+ * THE GRAMMAR, and nothing beyond it:
+ *
+ *   role=<role>                    e.g. role=checkbox
+ *   role=<role>[name=<value>]      e.g. role=checkbox[name="Active"]
+ *   role=<role>[name*=<value>]     substring match on the accessible name
+ *   label=<value>                  a form control whose label/name is <value>
+ *   text=<value>                   an element whose visible text/name is <value>
+ *
+ * A value may be double-quoted, single-quoted, or bare (bare values cannot
+ * contain `]`). Matching is case-insensitive and whitespace-normalised, because
+ * a human reading a form does not distinguish "Active" from "Active ".
+ *
+ * WHAT IT DELIBERATELY CANNOT DO: it never writes to the page. Resolution is a
+ * read of the a11y tree plus the caller's own click; a locator that cannot be
+ * resolved is a typed miss with candidates (see `locatorSuggestions`), never a
+ * guess executed against the page.
+ */
+
+import type { AXNode } from "./ax-compact";
+
+export type Locator =
+  | { kind: "role"; role: string; name: string; substring: boolean }
+  | { kind: "label"; name: string; substring: boolean }
+  | { kind: "text"; name: string; substring: boolean };
+
+/** Roles a `label=` locator may resolve to, most specific first.
+ *
+ * A `<label for>` becomes the control's ACCESSIBLE NAME in Chromium, so
+ * `label="Homepage URL"` and `role=textbox[name="Homepage URL"]` name the same
+ * node. The set is the form controls a label can belong to; `button` is last
+ * because "label" for a button is unusual but legal (`<label>` cannot label a
+ * button, but an agent typing it means the button's visible text).
+ */
+const LABELLABLE = new Set([
+  "checkbox",
+  "radio",
+  "switch",
+  "textbox",
+  "searchbox",
+  "combobox",
+  "listbox",
+  "spinbutton",
+  "slider",
+  "button",
+]);
+
+/** Roles `text=` prefers. A page's visible text is mostly StaticText, which is
+ * not clickable; the interactive set is what "the element that says X" means to
+ * someone trying to click it. If none matches, any named node is allowed. */
+const CLICKABLE = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "tab",
+  "option",
+  "treeitem",
+  "DisclosureTriangle",
+  "checkbox",
+  "radio",
+  "switch",
+]);
+
+function normalise(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** One quoted or bare value, or null when it is not ONE value.
+ *
+ * STRICT ON PURPOSE (agent review round 1, R1-1). Reading a quoted value up to
+ * its first closing quote and ignoring the rest silently DROPPED a caller's
+ * constraint: `role=checkbox[name="Active"][checked]` parsed as "any checkbox
+ * named Active" and `text="Submit" please` as "Submit", so a locator that should
+ * have been refused selected something the caller never asked for. A malformed
+ * locator returns null and falls through to CSS, whose invalid-selector error
+ * names it.
+ *
+ * Backslash escapes are honoured symmetrically with `locatorFor`, which quotes
+ * with JSON.stringify (agent review round 1, R1-2): a name containing a quote
+ * round-trips to the same name instead of to a truncated one.
+ */
+function readValue(raw: string): string | null {
+  const text = raw.trim();
+  if (!text) return null;
+  const quote = text[0];
+  if (quote === '"' || quote === "'") {
+    let value = "";
+    for (let index = 1; index < text.length; index += 1) {
+      const char = text[index] ?? "";
+      if (char === "\\" && index + 1 < text.length) {
+        value += text[index + 1] ?? "";
+        index += 1;
+        continue;
+      }
+      if (char === quote) {
+        // Trailing content is a second value or an unsupported predicate
+        // (`[checked]`): refuse the whole thing rather than drop it.
+        return index === text.length - 1 ? value : null;
+      }
+      value += char;
+    }
+    return null;
+  }
+  // A bare value cannot carry the characters that bound the grammar, and a
+  // leading `*` is the operator, not content: `label=*=Home` was an undocumented
+  // spelling (R1-4) and is now refused rather than read as a name.
+  if (/[\[\]]/.test(text) || text.startsWith("*")) return null;
+  return text;
+}
+
+/** Parse `role=…`, `label=…` or `text=…`; null when the string is CSS.
+ *
+ * The prefix test is what keeps CSS selectors working unchanged: `text=` and
+ * `label=` are not valid CSS selectors on their own, and no CSS selector starts
+ * with `role=` followed by an identifier. The parse is deliberately strict —
+ * a malformed locator returns null and falls through to CSS, where the host's
+ * own "not a valid selector" error names the input — rather than being
+ * half-interpreted into a match the caller did not ask for.
+ */
+export function parseLocator(value: string): Locator | null {
+  const text = value.trim();
+  // `*=` is the substring spelling and is only meaningful for `label`/`text`
+  // (`role` carries it inside `[name*=…]`). Supporting the documented form
+  // explicitly is what stops the undocumented `label=*=Home` from being the
+  // only way to ask (agent review round 1, R1-4).
+  const match = /^(role|label|text)(\*?)=([\s\S]+)$/i.exec(text);
+  if (!match) return null;
+  const kind = (match[1] ?? "").toLowerCase();
+  const prefixSubstring = match[2] === "*";
+  const rest = (match[3] ?? "").trim();
+  if (kind === "role") {
+    // role=<role> optionally followed by [name="…"] or [name*="…"].
+    const roleMatch = /^([A-Za-z][A-Za-z0-9_-]*)\s*(?:\[\s*name(\*?)=\s*([\s\S]+?)\s*\])?$/.exec(rest);
+    if (!roleMatch) return null;
+    const role = roleMatch[1] ?? "";
+    const substring = roleMatch[2] === "*";
+    const rawName = roleMatch[3];
+    const name = rawName === undefined ? "" : readValue(rawName);
+    if (name === null) return null;
+    return { kind: "role", role: role.toLowerCase(), name, substring };
+  }
+  const name = readValue(rest);
+  if (name === null) return null;
+  return { kind: kind === "label" ? "label" : "text", name, substring: prefixSubstring };
+}
+
+export interface LocatorHit {
+  backendNodeId: number;
+  role: string;
+  name: string;
+  /** How many nodes matched; the FIRST is the one returned. */
+  matched: number;
+}
+
+function matches(haystack: string, needle: string, substring: boolean): boolean {
+  const left = normalise(haystack).toLowerCase();
+  const right = normalise(needle).toLowerCase();
+  if (!right) return false;
+  return substring ? left.includes(right) : left === right;
+}
+
+function candidateNodes(nodes: AXNode[]): AXNode[] {
+  // Ignored nodes are excluded from the accessible tree, and a node without a
+  // backend id cannot be clicked — both are non-candidates by construction.
+  return nodes.filter((node) => !node.ignored && node.backendDOMNodeId !== undefined);
+}
+
+/** The first matching node, in tree order, and how many matched.
+ *
+ * TREE ORDER, not "best score": an agent that sees one "Active" checkbox means
+ * the one that is there. If a page has two, the first is the one a person
+ * reading top-to-bottom meets first, and `matched` tells the caller the answer
+ * was ambiguous — silently choosing a "better" one is how a locator clicks a
+ * control the caller never saw.
+ */
+export function resolveLocator(nodes: AXNode[], locator: Locator): LocatorHit | null {
+  const pool = candidateNodes(nodes);
+  const hits: LocatorHit[] = [];
+  const consider = (role: string, name: string): boolean => {
+    if (locator.kind === "role") {
+      if (role.toLowerCase() !== locator.role) return false;
+      if (locator.name && !matches(name, locator.name, locator.substring)) return false;
+      return true;
+    }
+    return matches(name, locator.name, locator.substring);
+  };
+  const collect = (accept: (role: string) => boolean): void => {
+    for (const node of pool) {
+      const role = String(node.role?.value ?? "");
+      const name = normalise(node.name?.value);
+      if (!accept(role)) continue;
+      if (!consider(role, name)) continue;
+      hits.push({ backendNodeId: node.backendDOMNodeId as number, role, name, matched: 0 });
+    }
+  };
+  if (locator.kind === "role") {
+    collect(() => true);
+  } else if (locator.kind === "label") {
+    // A label names a form control; "the first thing whose name matches" would
+    // let a heading that repeats the text win.
+    collect((role) => LABELLABLE.has(role));
+    if (!hits.length) collect((role) => CLICKABLE.has(role));
+  } else {
+    // MEASURED on the real fixture: the page's <h1> "Create GitHub App" comes
+    // before the submit button of the same name in tree order. "text=" means
+    // "the thing that says this AND can be clicked"; the heading is only a
+    // fallback for a page where nothing clickable carries the words.
+    collect((role) => CLICKABLE.has(role));
+    if (!hits.length) collect(() => true);
+  }
+  const first = hits[0];
+  if (!first) return null;
+  return { ...first, matched: hits.length };
+}
+
+/** Up to `limit` human-readable candidates for a miss, best first.
+ *
+ * WHY THIS EXISTS. In the measured incident each wrong guess cost a full tool
+ * call and returned "element not found", so the agent learned nothing and
+ * guessed again — nine times. A miss that also says "did you mean e57 radio
+ * 'Only on this account'?" turns the same failure into one correction.
+ *
+ * The score is deliberately simple and explainable: an exact name match beats a
+ * substring, which beats a shared word, which beats a shared role. It is a
+ * HEURISTIC over names an agent can see, never a match the tool would act on —
+ * the caller has to name the result again, so a bad suggestion costs one wrong
+ * line in the message, not a wrong click.
+ */
+export function locatorSuggestions(
+  nodes: AXNode[],
+  query: string,
+  limit = 5,
+): Array<{ role: string; name: string; locator: string }> {
+  const wanted = normalise(query).toLowerCase();
+  const parsed = parseLocator(query);
+  const term = parsed ? parsed.name.toLowerCase() : wanted;
+  const words = term.split(/[^a-z0-9]+/).filter((word) => word.length > 1);
+  const wantedRole = parsed && parsed.kind === "role" ? parsed.role : "";
+  const scored: Array<{ score: number; role: string; name: string }> = [];
+  for (const node of candidateNodes(nodes)) {
+    const role = String(node.role?.value ?? "");
+    const name = normalise(node.name?.value);
+    if (!name) continue;
+    const lowerName = name.toLowerCase();
+    let score = 0;
+    if (term && lowerName === term) score += 100;
+    else if (term && lowerName.includes(term)) score += 60;
+    for (const word of words) if (lowerName.includes(word)) score += 8;
+    if (wantedRole && role.toLowerCase() === wantedRole) score += 25;
+    if (CLICKABLE.has(role)) score += 4;
+    if (!score) continue;
+    scored.push({ score, role, name });
+  }
+  scored.sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+  const seen = new Set<string>();
+  const out: Array<{ role: string; name: string; locator: string }> = [];
+  for (const entry of scored) {
+    const key = `${entry.role}\u0000${entry.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ role: entry.role, name: entry.name, locator: locatorFor(entry.role, entry.name) });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** The canonical spelling of a suggestion, safe to paste back as `selector`.
+ *
+ * The quote is chosen from the name (agent review round 1, R1-2): JSON.stringify
+ * always uses `"`, so a name containing a quote produced a locator that parsed to
+ * a TRUNCATED name — a suggestion that cannot be used, which is worse than none.
+ * A name holding both quote characters still round-trips, through the escapes
+ * `readValue` honours.
+ */
+export function locatorFor(role: string, name: string): string {
+  // A single-quoted value still unescapes `\X` (readValue treats the backslash
+  // as an escape under both quote styles), so it must escape its own
+  // backslashes — otherwise `C:\\path "quoted"` came back as `C:path "quoted"`
+  // (agent review round 2 residual).
+  const quoted = name.includes('"') && !name.includes("'")
+    ? `'${name.replace(/\\/g, "\\\\")}'`
+    : JSON.stringify(name);
+  return role && /^[A-Za-z][A-Za-z0-9_-]*$/.test(role)
+    ? `role=${role}[name=${quoted}]`
+    : `text=${quoted}`;
+}

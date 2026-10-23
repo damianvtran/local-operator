@@ -87,7 +87,10 @@ def proto_supported(
 #: 0.1.22 is the first tree whose `snapshot` takes a CSS scope and a line
 #: window (`selector`/`start`/`limit`/`search`), so an agent can ask for one
 #: section of a real settings form instead of a tree it cannot page.
-EXPECTED_EXTENSION_VERSION = "0.1.22"
+#: 0.1.23 is the first tree whose `click`/`type` resolve accessibility
+#: locators (`role=`, `label=`, `text=`) against the a11y tree, so a target
+#: can be named by what it IS rather than by a framework-generated id.
+EXPECTED_EXTENSION_VERSION = "0.1.23"
 
 #: The first extension version that serves each capability-gated method.
 #:
