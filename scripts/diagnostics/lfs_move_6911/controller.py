@@ -28,7 +28,7 @@ def validate_row(row, mode, token, outcome):
             raise ValueError('MOVE vacuous original path STOP')
     elif mode != 'baseline' or row['move_calls'] != 1 or not row['first_unreachable'] or not row['first_assertion']:
         raise ValueError('MOVE unexpected original failure STOP')
-    if mode == 'fresh' and (not all(row[k] for k in ('dial_attempted','dial_ok','new_generation','selected_new','selected_alive','request_seen','reply_seen','call_pass')) or row['selected_closing']):
+    if mode == 'fresh' and (not all(row[k] for k in ('dial_attempted','dial_ok','new_generation','selected_new','correlated','selected_alive','request_seen','reply_seen','call_pass')) or row['selected_closing']):
         raise ValueError('MOVE fresh actual selected transport STOP')
 
 
@@ -42,7 +42,7 @@ def qualify_rows(rows, reports):
     for i, row in enumerate(rows):
         validate_row(row, ('baseline', 'fresh')[i], i+1, reports[3*i+1]['outcome'])
     baseline, fresh = rows
-    if not all(fresh[k] for k in ('dial_attempted', 'dial_ok', 'new_generation', 'selected_new', 'selected_alive', 'request_seen', 'reply_seen', 'call_pass')) or fresh['selected_closing']:
+    if not all(fresh[k] for k in ('dial_attempted', 'dial_ok', 'new_generation', 'selected_new', 'correlated', 'selected_alive', 'request_seen', 'reply_seen', 'call_pass')) or fresh['selected_closing']:
         raise ValueError('MOVE fresh selected transport STOP')
     if baseline['call_pass']:
         return 'INCONCLUSIVE_NOT_EXONERATED'
@@ -55,7 +55,7 @@ def qualify_rows(rows, reports):
 def qualify(proof, expected):
     if set(proof) != {'rows', 'reports', 'exitstatus'}:
         raise ValueError('MOVE protocol keys')
-    allowed = {'reply_seen', 'request_seen', 'first_assertion', 'first_ok', 'move_calls', 'call_pass', 'first_unreachable', 'dial_ok', 'restored', 'identity', 'pair_calls', 'selected_alive', 'token', 'dial_attempted', 'selected_closing', 'mode', 'new_generation', 'selected_new'}
+    allowed = {'reply_seen', 'request_seen', 'first_assertion', 'first_ok', 'move_calls', 'call_pass', 'first_unreachable', 'dial_ok', 'correlated', 'restored', 'identity', 'pair_calls', 'selected_alive', 'token', 'dial_attempted', 'selected_closing', 'mode', 'new_generation', 'selected_new'}
     for row in proof['rows']:
         if set(row) != allowed:
             raise ValueError('MOVE row schema STOP')
@@ -108,7 +108,7 @@ def main():
         proof = json.loads(path.read_text())
         result["verdict"] = qualify(proof, expected)
         # Strict structural projection, not wholesale plugin output forwarding.
-        result["rows"] = [{k:r[k] for k in ('mode', 'token', 'pair_calls', 'move_calls', 'dial_attempted', 'dial_ok', 'new_generation', 'selected_new', 'selected_alive', 'selected_closing', 'request_seen', 'reply_seen', 'first_ok', 'first_unreachable', 'call_pass', 'restored', 'first_assertion', 'identity')} for r in proof['rows']]
+        result["rows"] = [{k:r[k] for k in ('mode', 'token', 'pair_calls', 'move_calls', 'dial_attempted', 'dial_ok', 'new_generation', 'selected_new', 'correlated', 'selected_alive', 'selected_closing', 'request_seen', 'reply_seen', 'first_ok', 'first_unreachable', 'call_pass', 'restored', 'first_assertion', 'identity')} for r in proof['rows']]
         shutil.rmtree(work)
     try:
         child = subprocess.Popen([sys.executable,"-B","-m","pytest",NODE,
