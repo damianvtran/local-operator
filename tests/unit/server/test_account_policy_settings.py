@@ -54,7 +54,17 @@ async def test_canonical_save_read_restart_reset_and_legacy(api):
             RetrySettings.from_settings(fresh.get_config().values).account_selection_policy
             == policy
         )
-    manager.set_config_value("retry", {"usageAwareAccountPick": True})
+    # A LEGACY configuration: the canonical key must be absent for the alias to
+    # resolve. The write now merges into the file (PR #2819), so the removal is
+    # DECLARED rather than implied by replacing the whole `retry` subtree.
+    manager.set_config_value(
+        "retry",
+        {"usageAwareAccountPick": True},
+        drop={
+            ("retry", "accountSelectionPolicy"): "seeding a legacy config",
+            ("retry", "account_selection_policy"): "seeding a legacy config",
+        },
+    )
     assert (await rows(client))[KEY]["value"] == "headroom"
     assert (
         effective_account_selection_policy(ConfigManager(manager.config_dir).get_config().values)

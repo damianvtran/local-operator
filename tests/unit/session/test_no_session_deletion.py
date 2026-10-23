@@ -93,6 +93,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears the failed sibling mkstemp regular file; never a session path.",
     ),
+    # -- startup key inventory: a config-root sidecar ------------------------
+    # ``_write_key_inventory`` publishes ``<config>/.config-keys.json`` (the
+    # per-launch record of setting paths the shrink report compares against) by
+    # renaming a sibling mkstemp REGULAR FILE over it, and clears that same temp
+    # file when the write fails. Every path is a module constant on the CONFIG
+    # ROOT: no session id and no caller input can reach it, and the file records
+    # setting names, never conversation content.
+    (
+        "local_operator/config_migrations.py::_write_key_inventory",
+        "os.replace",
+        "Atomic swap of a sibling mkstemp FILE onto <config>/.config-keys.json; never a directory",
+    ),
+    (
+        "local_operator/config_migrations.py::_write_key_inventory",
+        "os.unlink",
+        "Removes only the failed write's own mkstemp temp FILE beside the inventory sidecar",
+    ),
     (
         "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
         "os.replace",
