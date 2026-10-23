@@ -51,20 +51,64 @@ def check_sources(root, manifest):
             raise ValueError('source binding STOP')
 
 
+def nested_tool_observer(child):
+    """Nested ownership is a birth-bound observed subtree, NEVER inherited PG.
+
+    The outer controller owns the PG. Borrowing that boundary here includes
+    our own ancestors; successful formatter reaping must not kill its parent.
+    Unknown/reused identities latch failure even if later observations settle.
+    """
+    known={}
+    failed=False
+    try:
+        initial=table().get(child.pid)
+        if initial is None or type(initial['start']) is not str or not initial['start']:
+            raise ValueError('birth unknown')
+        known[child.pid]=initial['start']
+    except Exception:failed=True
+    def observe():
+        nonlocal failed
+        try:
+            if failed:raise ValueError('ownership unknown')
+            rows=table()
+            if any(pid in rows and rows[pid]['start']!=birth for pid,birth in known.items()):
+                raise ValueError('identity reused')
+            changed=True
+            while changed:
+                changed=False
+                for pid,row in rows.items():
+                    parent=row['ppid']
+                    if pid not in known and parent in known and parent in rows and rows[parent]['start']==known[parent]:
+                        known[pid]=row['start']
+                        changed=True
+            return {pid:rows[pid] for pid,birth in known.items() if pid in rows and rows[pid]['start']==birth}
+        except Exception:
+            failed=True
+            raise
+    def kill_owned():
+        nonlocal failed
+        try:
+            for pid,row in observe().items():
+                fresh=table().get(pid)
+                if fresh is None:continue
+                if fresh['start']!=row['start']:raise ValueError('kill identity reused')
+                os.kill(pid,9)
+        except Exception:
+            failed=True
+            raise
+    return observe,kill_owned
+
+
 def tool(command,cwd,deadline):
     status=dict(reason='LAUNCH_FAILURE',rc=None,launched=False,timeout=False,cap=False,reaped=False,settled=False,monitor_failed=False,completed=False)
-    known,pgid={},os.getpgrp()
-    def observe():return owned(known,pgid)
-    def kill():
-        for pid,facts in observe().items():
-            fresh=table().get(pid)
-            if fresh and fresh['start']==facts['start']:os.kill(pid,9)
     try:child=subprocess.Popen(command,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
         env={'PATH':os.environ['PATH'],'HOME':str(cwd),'TMPDIR':str(cwd),'BLACK_CACHE_DIR':str(cwd/'cache'),'PYTHONDONTWRITEBYTECODE':'1'})
     except Exception:return status
     status['launched']=True
+    observe,kill=nested_tool_observer(child)
     completed=False
     try:
+        observe()
         size=0
         with selectors.DefaultSelector() as selector:
             selector.register(child.stdout,selectors.EVENT_READ)
