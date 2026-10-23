@@ -165,19 +165,27 @@ test("start/limit/search window the rendered tree and report the numbers", async
   }
 });
 
-test("a scoped snapshot never reports refs for the elided part of the page", async () => {
+test("a scoped snapshot renders only the scope but mints refs for the whole page", async () => {
+  // Agent review round 1, R1-1. This test used to assert the opposite — that a
+  // scoped snapshot withheld refs for the elided part — and that is precisely
+  // how a remembered `e1` came to name a different node: ref names restarted
+  // inside the scope at the same epoch, so the next `click(e1)` hit whatever the
+  // scope had put first. The contract now: the RENDERED text is the scope, the
+  // REF TABLE is the whole tree, so a name means one node for the epoch.
   const { loaded, written, close } = await loadWith();
   try {
-    await loaded.snapshot({ tab: SURFACE, selector: "form", limit: 1 });
+    const scoped = await loaded.snapshot({ tab: SURFACE, selector: "form", limit: 1 });
     const refsWrite = written.find((value) => value.refs);
-    // One line was returned; the ref map still names the WHOLE scoped tree, so
-    // paging to start=2 and clicking is possible — the refs are not limited to
-    // the page the caller is looking at.
     const refs = Object.values(refsWrite.refs[SURFACE]);
-    assert.ok(refs.length > 1);
-    // ...and it names nothing OUTSIDE the scope: an unscoped snapshot would
-    // have minted e3 for the Delete button below the form.
-    assert.ok(!refs.some((ref) => ref.backendNodeId === 900), "a scoped snapshot must not ref the elided page");
+    assert.ok(refs.length > 1, "the ref table covers the whole tree");
+    // The Delete button below the form keeps its name even though the scope
+    // does not render it: clicking a remembered ref lands on the same element.
+    assert.ok(
+      refs.some((ref) => ref.backendNodeId === 900),
+      "a ref minted before the scope must keep naming its node",
+    );
+    assert.ok(scoped.returned_lines < scoped.total_lines, "the text really was scoped");
+    assert.ok(!scoped.snapshot.includes("Delete app"), "the elided part is not rendered");
   } finally {
     await close();
   }

@@ -99,15 +99,55 @@ test("a scope the tree does not contain reports scoped:false and renders nothing
   }
 });
 
-test("a collapsed disclosure is marked, and contributes no children", async () => {
+test("a collapsed disclosure is marked, and the walk continues past it", async () => {
   const { loaded, close } = await load("src/driver/ax-compact.ts");
   try {
     const rendered = loaded.compactAX(formTree(1), 1).snapshot;
-    const summary = rendered.split("\n").find((line) => line.includes("DisclosureTriangle"));
+    const lines = rendered.split("\n");
+    const summaryIndex = lines.findIndex((line) => line.includes("DisclosureTriangle"));
+    const summary = lines[summaryIndex];
     assert.ok(summary.includes("[collapsed]"), summary);
-    // The measured failure: a closed <details> contributes its summary and
-    // nothing inside it. The marker is what tells an agent to open it.
-    assert.ok(!rendered.includes("Webhook URL"));
+    // The marker is what tells an agent to open it (measured failure: a closed
+    // <details> contributes its summary and NOTHING inside it, so the checkbox
+    // that unblocks the form was absent from the tree entirely).
+    //
+    // A collapsed panel's absence is CHROMIUM's fact, not a pruning rule this
+    // driver applies — inventing one would also drop the summary's own text.
+    // What this driver owes the caller is that the walk survives it, so the
+    // assertion that carries weight is the field AFTER the disclosure.
+    assert.equal(
+      lines.slice(summaryIndex + 1).some((line) => line.includes("Setting 0")),
+      true,
+      rendered,
+    );
+    assert.ok(summary.includes("[e"), "the summary is clickable: it must carry a ref");
+  } finally {
+    await close();
+  }
+});
+
+test("a scoped snapshot never re-points a ref minted without a scope", async () => {
+  // Agent review round 1, R1-1. Refs used to be minted only for emitted lines,
+  // so `e1` inside a scope named a different node than `e1` of the same page's
+  // unscoped snapshot — at the SAME epoch, which the click path treats as
+  // still valid. That is a wrong-target click with no error.
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    const epoch = 7;
+    const all = loaded.compactAX(formTree(4), epoch);
+    const scoped = loaded.compactAX(formTree(4), epoch, { rootBackendNodeId: 1000 });
+    assert.equal(scoped.scoped, true);
+    // The scoped tree is a SUBSET: every ref it mints names the same node the
+    // unscoped call minted for it.
+    for (const [ref, node] of Object.entries(scoped.refs)) {
+      assert.deepEqual(all.refs[ref], node, `ref ${ref} changed meaning`);
+    }
+    // And the aliasing case specifically: the "Setting 0" textbox inside the
+    // scope must NOT be e1 just because it is first inside the scope.
+    const setting0 = Object.entries(all.refs).find(([, node]) => node.backendNodeId === 1000);
+    assert.ok(setting0, "the scope node has a ref in the unscoped tree");
+    assert.equal(scoped.refs[setting0[0]].backendNodeId, 1000);
+    assert.notEqual(setting0[0], "e1");
   } finally {
     await close();
   }
@@ -187,6 +227,27 @@ test("state markers accept Chromium's string and boolean spellings", async () =>
     assert.ok(rendered.includes('"String check" [e1] [checked]'), rendered);
     assert.ok(rendered.includes('"Boolean check" [e2] [checked]'), rendered);
     assert.ok(rendered.includes('"Closed" [collapsed]'), rendered);
+  } finally {
+    await close();
+  }
+});
+
+test("state markers accumulate instead of hiding one another", async () => {
+  // Review round 1, R1-8: a checked AND disabled control printed only
+  // [checked], which reads as clickable, and a tri-state "mixed" printed
+  // nothing at all.
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    const nodes = [
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "" }, childIds: ["2", "3"] },
+      { nodeId: "2", backendDOMNodeId: 1, role: { value: "checkbox" }, name: { value: "Both" },
+        properties: [{ name: "checked", value: { value: "true" } }, { name: "disabled", value: { value: true } }], childIds: [] },
+      { nodeId: "3", backendDOMNodeId: 2, role: { value: "checkbox" }, name: { value: "Tri" },
+        properties: [{ name: "checked", value: { value: "mixed" } }], childIds: [] },
+    ];
+    const rendered = loaded.compactAX(nodes, 1).snapshot;
+    assert.ok(rendered.includes('"Both" [e1] [checked] [disabled]'), rendered);
+    assert.ok(rendered.includes('"Tri" [e2] [mixed]'), rendered);
   } finally {
     await close();
   }
