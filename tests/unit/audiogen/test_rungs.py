@@ -867,6 +867,8 @@ async def test_elevenlabs_5xx_carrying_the_rate_limited_code_is_never_retried(mo
     assert len(posts) == 1
     assert sleeps == []
     assert caught.value.status_code == 503
+
+
 async def _run_byok(spec: AudioJobSpec, *, api_key: str, handler):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         return await audio_rungs.run_elevenlabs(
@@ -1020,9 +1022,9 @@ async def test_elevenlabs_does_not_retry_a_refusal_of_another_parameter(status, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [401, 429, 500])
-async def test_elevenlabs_never_retries_an_auth_rate_or_server_refusal(status):
-    """Even a body naming output_format must not earn a retry on these statuses."""
+@pytest.mark.parametrize("status", [401, 500])
+async def test_elevenlabs_never_retries_an_auth_or_server_refusal(status):
+    """Even a body naming output_format must not earn a FORMAT retry here."""
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1034,6 +1036,34 @@ async def test_elevenlabs_never_retries_an_auth_rate_or_server_refusal(status):
 
     assert _formats(seen) == ["mp3_44100_192"]
     assert caught.value.status_code == status
+
+
+@pytest.mark.asyncio
+async def test_a_429_never_turns_into_a_format_downgrade(monkeypatch):
+    """A rate limit is the shared ADMISSION ladder's business, not the format's.
+
+    The BYOK transport now re-POSTs a 429 on the same ladder the hub uses (a
+    refusal that produced no audio), so more than one request is expected —
+    what must never happen is one of them asking for 128, or the format
+    helper treating a rate limit as a plan gate.
+    """
+    seen: list[httpx.Request] = []
+
+    async def pause(seconds):  # noqa: ARG001 - the ladder's seam
+        return None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(429, json=_ELEVENLABS_PLAN_REFUSAL)
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: low)
+
+    with pytest.raises(APIError) as caught:
+        await _run_byok(_spec("voiceover", batch_submission=True), api_key="k", handler=handler)
+
+    assert set(_formats(seen)) == {"mp3_44100_192"}
+    assert caught.value.status_code == 429
 
 
 @pytest.mark.asyncio
