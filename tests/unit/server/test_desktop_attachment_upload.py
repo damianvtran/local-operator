@@ -133,3 +133,123 @@ async def test_a_file_over_the_cap_is_refused(upload_api, monkeypatch: pytest.Mo
     response = await _upload(client, b"x" * 17, name="big.txt")
     assert response.status_code == 413, response.text
     assert response.json()["detail"]["code"] == "attachment_too_large"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: the door's carriage hop (m2) and ack classification (m1)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def message_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The real ``/messages`` door over a pool whose remote records the call."""
+    from types import SimpleNamespace
+
+    from local_operator.config import ConfigManager
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(desktop_sessions.router)
+    sid = await pool.create(str(tmp_path))
+
+    seen: dict[str, object] = {}
+
+    class Recorder(SimpleNamespace):
+        def __getattr__(self, name: str):
+            if name.startswith("_"):
+                raise AttributeError(name)
+
+            async def inert(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            return inert
+
+        async def admit_prompt(self, text: str, **kwargs: object):
+            seen["text"] = text
+            seen["kwargs"] = kwargs
+            return "prompt admitted", False
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://localhost",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        ) as client:
+            yield client, pool, sid, seen, Recorder
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_message_route_hands_files_to_the_owner(message_api) -> None:
+    """m2: the one new line at the HTTP door had no test.
+
+    The reproduction is a composer send; this drives ``POST /messages`` with
+    ``files`` through the real route and asserts the owner's ``admit_prompt``
+    receives them — the hop that, if dropped, is invisible to every unit test
+    of the layers below it.
+    """
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    client, pool, sid, seen, Recorder = message_api
+    digest = "a" * 32
+    async with pool.session(sid) as bridge:
+        bridge.remote = cast(
+            Any,
+            Recorder(
+                is_cold=False,
+                frontend_state=SimpleNamespace(epoch="epoch-1"),
+            ),
+        )
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/messages",
+            json={
+                "request_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "text": "read this",
+                "mode": "prompt",
+                "files": [{"digest": digest, "name": "report.pdf", "bytes": 1234}],
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert seen["text"] == "read this"
+    files = seen["kwargs"]["files"]
+    assert isinstance(files, list)
+    assert files[0]["digest"] == digest
+    assert files[0]["name"] == "report.pdf"
+
+
+def test_the_ack_classifies_the_new_refusals() -> None:
+    """m1: the published admission outcome named none of the new refusals."""
+    from local_operator.server.routes.desktop_sessions import _admission_failure_detail
+    from local_operator.session.errors import (
+        AttachmentMissing,
+        DocumentCarriageUnsupported,
+        RemoteDocumentUnsupported,
+    )
+
+    missing = _admission_failure_detail(AttachmentMissing(filename="report.pdf"))
+    assert "report.pdf" in missing
+    assert "could not be found" in missing
+
+    carriage = _admission_failure_detail(DocumentCarriageUnsupported())
+    assert "attachment" in carriage.lower() and "document" in carriage.lower()
+
+    remote = _admission_failure_detail(RemoteDocumentUnsupported())
+    assert "document" in remote.lower()
+
+    # The name is bounded and stripped: a control-laden 500-char name cannot
+    # become an unbounded frame field.
+    hostile = _admission_failure_detail(AttachmentMissing(filename="\x00" + "x" * 500))
+    assert "\x00" not in hostile
+    assert len(hostile) < 200

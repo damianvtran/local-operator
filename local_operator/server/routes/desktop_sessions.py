@@ -330,15 +330,34 @@ def _admission_failure_detail(error: BaseException) -> str:
     distinction a caller acts on. Everything else gets the generic sentence.
     """
     from local_operator.session.errors import (
+        AttachmentMissing,
         AttachmentUnavailable,
         AudioInputUnsupported,
+        DocumentCarriageUnsupported,
         ProfileRegistryUnavailable,
+        RemoteDocumentUnsupported,
         RuntimeRetiring,
     )
 
+    if isinstance(error, AttachmentMissing):
+        # The FILE NAME is client-supplied, so it is bounded and stripped
+        # here rather than quoted through the category's sentence: the frame
+        # may be replayed to later viewers, and this method's rule is that no
+        # owner-supplied text crosses. The HTTP 409 carries the full sentence
+        # to the composer that can act on it.
+        name = "".join(character for character in error.filename if character.isprintable())[:120]
+        subject = name or "an attached file"
+        return f"failed; {subject} could not be found in the attachment store"
     if isinstance(
         error,
-        (AttachmentUnavailable, AudioInputUnsupported, ProfileRegistryUnavailable, RuntimeRetiring),
+        (
+            AttachmentUnavailable,
+            AudioInputUnsupported,
+            DocumentCarriageUnsupported,
+            ProfileRegistryUnavailable,
+            RemoteDocumentUnsupported,
+            RuntimeRetiring,
+        ),
     ):
         # Safe by construction: these carry no owner-supplied text.
         return f"failed; {error}"

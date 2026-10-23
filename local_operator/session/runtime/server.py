@@ -330,6 +330,13 @@ def document_blocks(
     )
     from local_operator.session.errors import AttachmentMissing
 
+    if len(files) > 8:
+        # The HTTP door refuses a ninth file at the schema (422); the socket
+        # exists for clients that do not share that model, so the bound is
+        # enforced here too rather than letting a buggy frame put arbitrarily
+        # many 32 MB references through the synchronous admission prelude
+        # (agent review round 1, n2).
+        raise ValueError("at most 8 document attachments are allowed per message")
     provider = str(getattr(model, "provider", "") or "")
     supports_responses = bool(getattr(model, "supports_responses_api", False))
     supports_images = bool(getattr(model, "supports_images", True))
@@ -337,12 +344,16 @@ def document_blocks(
         provider,
         admission_wire(provider, supports_responses_api=supports_responses),
         supports_images=supports_images,
+        context_window=getattr(model, "context_window", None),
     )
     store = AttachmentStore()
     out: list[DocumentContent] = []
     for item in files:
         if not isinstance(item, dict):
-            continue
+            # A malformed frame is REFUSED, not skipped: this is the reference
+            # path for a file the composer showed, and dropping the entry would
+            # send the text of a message whose chip the user watched leave.
+            raise ValueError("a document reference must be an object")
         digest = str(item.get("digest") or "")
         filename = str(item.get("name") or "") or (digest or "the attached file")
         resolved = store.get_bytes(digest) if digest else None

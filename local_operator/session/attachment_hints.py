@@ -111,6 +111,7 @@ model never having to search.
 
 from __future__ import annotations
 
+import base64
 import os
 from pathlib import Path
 
@@ -316,9 +317,22 @@ def _document_row(
         else:
             retained = f", retained copy (digest {digest}; no workspace file)"
             full = False
+    elif boundary is not None:
+        # A confined session with NO resolvable copy: nothing it could open is
+        # named, so the permissive "read or edit the file directly" opening
+        # would be a promise it cannot keep (agent review round 1, n3).
+        full = False
     delivery = _delivery_clause(block.injection)
     origin = _origin_clause(block.path, boundary)
-    size = block.bytes or len(block.data)
+    size = block.bytes
+    if not size and block.data:
+        # ``bytes`` is unset on a hand-built or legacy block; the base64 payload
+        # is ~33% longer than the file, so reporting its length as a byte count
+        # overstates the size (agent review round 1, n1).
+        try:
+            size = len(base64.b64decode(block.data, validate=False))
+        except (ValueError, TypeError):
+            size = len(block.data)
     return (
         f'- "{block.filename}" ({block.mime_type}, {size} bytes{retained}' f"{origin}; {delivery})",
         full,

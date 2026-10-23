@@ -76,11 +76,14 @@ ATTACHMENTS_DIRNAME = "attachments"
 #: transcript reference is a rounding error next to the payload it replaced.
 _DIGEST_CHARS = 32
 
-#: Ceiling for one composer upload. 32 MB matches Anthropic's per-request
-#: limit — the tightest native document limit in the capability table — so a
-#: file the store accepts is never refused for SIZE by a provider that reads
-#: documents natively. A provider with a smaller limit than this is handled
-#: by the delivery policy's per-provider cap, not by a second upload rule.
+#: Ceiling for one composer upload, in DECODED bytes. 32 MB matches
+#: Anthropic's per-request limit — the tightest native document limit in the
+#: capability table — but that is a STORAGE bound, not native eligibility:
+#: base64 inflates 4/3, so a file at this ceiling encodes to ~44 MB and does
+#: NOT fit Anthropic's 32 MB request as a native part. The delivery policy
+#: (``providers/documents.py``) compares the encoded size and the per-request
+#: total, and extracts instead; this cap only bounds what one upload may
+#: store and how much the upload body may carry.
 MAX_ATTACHMENT_UPLOAD_BYTES = 32 * 1024 * 1024
 
 #: Suffix → MIME for the text-ish types the upload route classifies. CONTENT
