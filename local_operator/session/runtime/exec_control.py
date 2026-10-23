@@ -164,6 +164,7 @@ async def start_exec_control(
     cwd: str,
     yolo: bool = False,
     supervised: bool = True,
+    resumed: bool = False,
     supervisor_fd: int | None = None,
 ) -> ExecControl:
     """Publish a record and serve the control socket for ``session``.
@@ -225,6 +226,14 @@ async def start_exec_control(
     Imports are function-local by contract, not by habit: ``serving`` pulls the
     composition root and ``server`` pulls asyncio, and this package sits on the
     CLI startup path (see the module header and :mod:`.serving`).
+
+    ``resumed`` is set by the runner from ``--resume``: the run opened an
+    EXISTING conversation, so it inherits that conversation's outstanding work.
+    An unsupervised one gets the ask surface WITHOUT the approval gates
+    (``install_ask_surface``): its open asks, their deadline wakes and their
+    owed response rows belong to the conversation, while a parked approval card
+    has nobody to answer it here — which is also why ``sessions`` withholds
+    ``--control`` from a resume worker.
     """
     import asyncio
 
@@ -324,6 +333,7 @@ async def start_exec_control(
         auto_approve=auto_approve,
         approval_pinned=yolo,
         install_gates=supervised,
+        install_ask_surface=not supervised and resumed,
         # Declared so the §6 registration's store-existence check and the
         # registration itself share this run's root (MINOR-3).
         config_dir=config_directory,

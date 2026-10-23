@@ -282,6 +282,62 @@ DEFAULT_UNATTENDED_GATE_TIMEOUT_H = 24
 #: Kept as a module-level name here because it is part of this module's
 #: published surface — the tests and the mobile bridge import it from here.
 GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
+
+#: What an ask reports when the host that owns this run has NOBODY to put the
+#: question in front of. Model-facing English, like every tool refusal.
+#:
+#: It exists for the arm where a resume worker's ask surface is present but the
+#: queued engine is not (`LOP_ASK_NONBLOCKING=0`, the operator's kill switch):
+#: the `ask` tool is gated on the HOOK, so a hook is what makes the tool exist,
+#: and on that arm `execute_ask` awaits it instead of enqueueing. Returning
+#: ``None`` there would report "the user closed the question without answering"
+#: — a picker nobody was ever shown — so the one honest answer is to refuse.
+#:
+#: Shaped after :class:`~local_operator.harness.approval.ApprovalUnavailableError`,
+#: which is the same defect one subsystem over: a gate that cannot ask anyone
+#: must not render as a decision somebody made.
+ASK_UNAVAILABLE_NOTICE = (
+    "No one can be asked on this run: it is a resumed conversation running "
+    "headless, so it has no interactive ask surface ({reason}). Nothing was "
+    "shown to the operator and nothing was chosen — decide yourself, or say "
+    "what you need and carry on."
+)
+
+
+#: The ask gate's shape: a coroutine FUNCTION, not the wider ``AskUserFn``
+#: (``Awaitable``) spelling. ``handle._ask_gate`` is what tests and the parked-gate
+#: timeout schedule directly, and ``asyncio.create_task`` accepts a coroutine and
+#: not an arbitrary awaitable — widening the annotation here would push that
+#: distinction out to every caller.
+_AskGateFn = Callable[[list[Any]], Coroutine[Any, Any, dict[str, list[str]] | None]]
+
+
+class AskUnavailableError(RuntimeError):
+    """A host with no ask surface was asked a question it cannot present.
+
+    Raised only by :func:`_unanswerable_ask`, the handler a resume worker
+    installs so its queued-ask surface exists. A host that CAN present a
+    question never raises this; it returns the answer or ``None``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(ASK_UNAVAILABLE_NOTICE.format(reason=reason))
+
+
+async def _unanswerable_ask(questions: list[Any]) -> dict[str, list[str]] | None:
+    """The queued-only surface's handler: refuse in words if it is ever awaited.
+
+    Under the queued engine this closure is never called at all — `execute_ask`
+    only awaits ``ask_user`` on the BLOCKING arm (``builtin.py``'s queued door
+    returns at once with a receipt) — so its presence is a capability flag, not
+    a behaviour. It is awaited only if the queued engine is switched off under a
+    worker that still has no human: then nothing can present the questions, and
+    a raise is the only answer that does not invent a user.
+    """
+    raise AskUnavailableError("the queued-ask engine is off for this process")
+
+
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
@@ -753,6 +809,7 @@ class ServingSessionHandle(SessionHandle):
         auto_approve: bool = False,
         approval_pinned: bool = False,
         install_gates: bool = True,
+        install_ask_surface: bool = False,
         config_dir: Path | None = None,
         mcp_publication_gate: PublicationGate | None = None,
     ) -> None:
@@ -1154,6 +1211,12 @@ class ServingSessionHandle(SessionHandle):
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
+        elif install_ask_surface:
+            # A RESUMED, UNSUPERVISED run (#2803): the conversation owes its ask
+            # queue, but no approval gate — nothing can answer a parked card
+            # here, which is why `lop sessions` withholds `--control` from a
+            # resume worker. See `_install_ask_surface` for what this half is.
+            self._install_ask_surface()
         # THE ACCESS CLAIM IS PUBLISHED AT SESSION OPEN, before this host serves
         # a single frame, so a desktop session is never read with no claim at
         # all (the band's sentence is unrenderable then) — the same fact the
@@ -1304,9 +1367,35 @@ class ServingSessionHandle(SessionHandle):
         # lets tests (and any future direct caller) exercise the exact closure
         # the harness will await, rather than a re-implementation of it.
         self._approval_gate = approval_gate
-        self._ask_gate = ask_gate
         self._session.set_approval_handler(approval_gate)
-        self._session.set_ask_handler(ask_gate)
+        self._install_ask_surface(ask_gate)
+
+    def _install_ask_surface(self, handler: "_AskGateFn | None" = None) -> None:
+        """Install the queued-ask surface — the ask half of ``_install_gates``.
+
+        FACTORED OUT so a run that must NOT install approval gates can still own
+        an ask queue (#2803): a resumed conversation's open asks and its deadline
+        wakes belong to the conversation, and without this hook the queue is
+        never built (``Session.ask_queue`` returns ``None`` without a handler),
+        so `ask`/`ask_withdraw` never reach the model and every owed response
+        row waits for some later turn that may never come.
+
+        ``handler`` is the host's real ask gate when the approval gates exist
+        (:meth:`_install_gates` passes its closure in). Absent it, the surface is
+        QUEUED-ONLY: the handler is :func:`_unanswerable_ask`, which can refuse
+        but never present, because the only run that reaches this arm has nobody
+        at a keyboard. The queued arm of `execute_ask` never awaits it; its
+        presence is what makes the tools exist.
+
+        The reach probe and the state sink ride along for the reason they were
+        installed with the gate in the first place: the receipt may name where an
+        ask is showing, and the phone projection is repainted by the host. A
+        resume worker publishes a discovery record like every other exec run, so
+        both answers are real there — a client may be attached.
+        """
+        gate: _AskGateFn = handler if handler is not None else _unanswerable_ask
+        self._ask_gate = gate
+        self._session.set_ask_handler(gate)
         # The queued-ask RECEIPT may name where the ask is showing, and only this
         # handle can answer that: a Session cannot see the attach table. The probe
         # is the SAME predicate the parked-gate timeout uses -- ``_attached_surfaces``

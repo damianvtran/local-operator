@@ -418,6 +418,65 @@ async def test_an_unsupervised_run_without_the_key_still_denies(isolated_config:
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_unsupervised_run_installs_the_ask_surface(
+    isolated_config: Path,
+) -> None:
+    """#2803: a resume worker owns its conversation's ask queue, and nothing else.
+
+    ``sessions resume`` / ``exec --background --resume`` opens an EXISTING
+    conversation. Its open asks, deadline wakes and owed response rows are that
+    conversation's work, and without the ask hook ``Session.ask_queue`` answers
+    ``None`` — so no queue is built, ``ask``/``ask_withdraw`` never reach the
+    model, and an overdue deadline is delivered to whichever turn happens to
+    come next (SA-D2).
+
+    The approval half stays absent on purpose: a parked approval card has no
+    one to answer it in a resume worker, which is why ``sessions`` withholds
+    ``--control`` from one.
+    """
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=False, resumed=True)
+    try:
+        assert session._ask_handler is not None
+        assert getattr(session, "_approval_handler", None) is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_unsupervised_run_installs_no_ask_surface(
+    isolated_config: Path,
+) -> None:
+    """The control for the cell above: no ``--resume``, no ask surface (SA-D2)."""
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=False)
+    try:
+        assert getattr(session, "_ask_handler", None) is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_supervised_run_keeps_the_real_ask_gate(
+    isolated_config: Path,
+) -> None:
+    """``--control`` still owns the presentation half: the gate, not the stub.
+
+    A supervised run has a supervisor able to answer, so the resumed flag must
+    not take the queued-only arm from it.
+    """
+    from local_operator.session.runtime.serving import _unanswerable_ask
+
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=True, resumed=True)
+    try:
+        assert session._ask_handler is control.handle._ask_gate
+        assert session._ask_handler is not _unanswerable_ask
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
 async def test_an_unsupervised_yolo_run_reports_yolo(isolated_config: Path) -> None:
     """The positive control for the cell above: the flag still shows."""
     from local_operator.session.frontend_state import SlashResult

@@ -27042,8 +27042,18 @@ class Session:
             # ask is still unanswered, so a fire for an ask that was settled in
             # the meantime is a no-op (the patience watermark rule, with no
             # cross-process row deletion needed).
-            if self._ask_queue is not None:
-                await self._ask_queue.reconcile()
+            #
+            # ``ask_queue()``, NOT the ``_ask_queue`` attribute: the attribute is
+            # that accessor's CACHE. It happens to be warm by the time a fire can
+            # arrive — installing the hook assembles the tool context, and that
+            # read builds the queue — so this is not a behaviour change today, it
+            # removes a hidden dependency on that side effect for the one ask path
+            # that did not go through the accessor. The accessor answers the same
+            # question without the dependency: ``None`` while the engine is off or
+            # no hook is installed, and a built queue when both are present.
+            queue = self.ask_queue()
+            if queue is not None:
+                await queue.reconcile()
             return
 
         if is_patience_row(due.schedule):
