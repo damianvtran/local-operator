@@ -1333,8 +1333,9 @@ async def _post_audio(
     must not fail an item on its first submission. The retry set is deliberately
     only the admission refusal: timeouts, transport errors and 5xx are NOT
     retried, because those may have been accepted and a re-POST could bill
-    twice. A vendor that sends ``audio_rate_limited`` as a 4xx code retries
-    too, via the same classifier.
+    twice. Only HTTP 429 is the admission bound: a 4xx or 5xx that reuses the
+    ``audio_rate_limited`` code is not retried either — the status is the guard,
+    not the body.
     """
 
     async def _once() -> tuple[bytes, str]:
