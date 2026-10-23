@@ -231,6 +231,13 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.command_palette import (
+    OperatorCommandPalette,
+    OperatorCommandProvider,
+    PaletteEntry,
+    build_palette_entries,
+    palette_is_open,
+)
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
@@ -4676,6 +4683,15 @@ class OperatorApp(App[None]):
 
     TITLE = "Local Operator"
     CSS_PATH = "local_operator.tcss"
+
+    #: Textual's palette gathers providers from here. The framework's system
+    #: actions are NOT dropped — ``OperatorCommandProvider`` delegates to
+    #: ``SystemCommandsProvider`` and yields its rows first — but registering
+    #: one provider instead of several is what makes the discovery order
+    #: deterministic: ``App.COMMANDS`` is a set and each provider's discovery
+    #: hits all score 0, so their relative order would otherwise follow
+    #: per-process set iteration. See ``local_operator/tui/command_palette.py``.
+    COMMANDS = {OperatorCommandProvider}
 
     #: How long a second click still counts as part of the same chain.
     #:
@@ -38720,7 +38736,92 @@ class OperatorApp(App[None]):
         """
         self._open_settings_view()
 
-    def _open_settings_view(self) -> None:
+    def action_command_palette(self) -> None:
+        """Open the app's command palette (``ctrl+p``).
+
+        Overrides Textual's action of the same name for one reason: the
+        framework pushes a bare ``CommandPalette``, whose placeholder and
+        no-match line are hardcoded English. ``OperatorCommandPalette`` is the
+        same screen with those two strings resolved through this app's
+        catalogue; every other behaviour (keys, list, selection, dismissal) is
+        inherited unchanged.
+
+        The binding itself is Textual's ``COMMAND_PALETTE_BINDING`` (``ctrl+p``
+        on 8.2.8), injected at runtime — see ``docs/design/keymap.md`` §E.4
+        clause 5 for why an app binding cannot claim that key.
+        """
+        if self.use_command_palette and not palette_is_open(self):
+            self.push_screen(OperatorCommandPalette(id="--command-palette"))
+
+    def _palette_entries(self) -> list[PaletteEntry]:
+        """Every action the ``ctrl+p`` palette offers, in discovery order.
+
+        The SINGLE seam that reads live state, called from the provider's
+        ``startup`` task (off the input path). It derives from the surfaces
+        that already own each vocabulary rather than carrying a table of its
+        own: ``SLASH_COMMANDS`` for commands, ``settings_io.SECTIONS`` for
+        settings, the session store for conversations, and the live session's
+        registries for agent and team names. Nothing is duplicated, so a
+        palette row cannot outlive the command or section it names.
+
+        Two bounded choices, both so the palette cannot lie:
+
+        * a settings section the page itself hides (the dynamically gated
+          agent-messages section) is not offered — ``bridge_availability``
+          owns that visibility and the settings page reads it live, so the
+          palette asks the same question;
+        * sessions come from the same uncapped scan ``/resume`` uses, but only
+          the twelve most recent are DISCOVERY rows; a query reaches the rest
+          (see ``build_palette_entries``).
+        """
+        from local_operator import settings_io
+        from local_operator.paths import config_dir
+        from local_operator.resume import recent_session_rows
+        from local_operator.team_bridge import availability as bridge_availability
+
+        directory = config_dir()
+        sections = [
+            section
+            for section in settings_io.SECTIONS
+            if bridge_availability.section_visible(section.name, directory)
+        ]
+        try:
+            session_rows = recent_session_rows(directory, limit=None)
+        except Exception:  # noqa: BLE001 — a palette that cannot list history still opens
+            session_rows = ()
+        return build_palette_entries(
+            slash_commands=SLASH_COMMANDS,
+            sections=sections,
+            session_rows=session_rows,
+            agent_rows=self._agent_profile_rows(),
+            team_names=self._known_team_names(),
+        )
+
+    async def _run_palette_entry(self, entry: PaletteEntry) -> None:
+        """Run a palette selection through the surface that already owns it.
+
+        A settings row opens the SAME page ``/settings`` opens, landing on the
+        chosen section. Every other row is handed to ``_run_slash_command`` as
+        the line a user would have typed — one dispatcher, so a palette entry
+        and its typed spelling cannot diverge in validation, receipts or
+        refusal copy.
+
+        ``_run_slash_command`` returns an awaitable only for the branches that
+        must complete inline (the cold-bind path); awaiting a ``None`` would be
+        a type error, and scheduling the awaitable itself would be the same
+        second hop that method's docstring exists to avoid. So it is awaited
+        only when one is returned.
+        """
+        if entry.section:
+            self._open_settings_view(section=entry.section)
+            return
+        if not entry.slash:
+            return
+        pending = self._run_slash_command(entry.slash)
+        if pending is not None:
+            await pending
+
+    def _open_settings_view(self, *, section: str | None = None) -> None:
         """Enter the full-page settings mode.
 
         A MODE of this screen, cloned from :meth:`_open_org_chart_view`: the
@@ -38733,11 +38834,17 @@ class OperatorApp(App[None]):
         The read-only content (teams, agents, provider state) is resolved HERE
         and handed to the widget, so a repaint costs no registry or credential
         I/O — the same split the org chart makes with its resolved tree.
+
+        ``section`` is the palette's landing request: a ``settings_io.SECTIONS``
+        name the page scrolls to and puts the cursor on. ``None`` is the typed
+        ``/settings`` route and keeps the page's own remembered position.
         """
         self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._settings_view is not None:
+            if section is not None:
+                self._settings_view.focus_section(section)
             return
         from local_operator.config import ConfigManager
         from local_operator.paths import config_dir
@@ -38745,7 +38852,7 @@ class OperatorApp(App[None]):
         # Captured before anything is blurred: this is where Esc puts the user
         # back, almost always the composer.
         self._settings_focus_restore = self.focused
-        view = SettingsView(ConfigManager(config_dir()))
+        view = SettingsView(ConfigManager(config_dir()), section=section)
         self._settings_view = view
         self._transcript_view().display = False
         self.screen.mount(view, before=self.query_one("#input-dock"))

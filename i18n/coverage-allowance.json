@@ -16627,6 +16627,38 @@
         "wire.remote_compute.unreachable",
         "wire.remote_compute.unreadable_envelope"
       ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.palette",
+      "reason": "New namespace for the ctrl+p command palette; it needs the translator + independent auditor wave before a locale may carry it (an unaudited carried namespace would un-ship the locale). English source falls back for these keys until then.",
+      "owner": "i18n translator lane (tui.palette slice)",
+      "payoff": "2026-11-15",
+      "missing": [
+        "tui.palette.kind_agent",
+        "tui.palette.kind_command",
+        "tui.palette.kind_session",
+        "tui.palette.kind_setting",
+        "tui.palette.kind_team",
+        "tui.palette.no_matches",
+        "tui.palette.placeholder"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.palette",
+      "reason": "New namespace for the ctrl+p command palette; it needs the translator + independent auditor wave before a locale may carry it (an unaudited carried namespace would un-ship the locale). English source falls back for these keys until then.",
+      "owner": "i18n translator lane (tui.palette slice)",
+      "payoff": "2026-11-15",
+      "missing": [
+        "tui.palette.kind_agent",
+        "tui.palette.kind_command",
+        "tui.palette.kind_session",
+        "tui.palette.kind_setting",
+        "tui.palette.kind_team",
+        "tui.palette.no_matches",
+        "tui.palette.placeholder"
+      ]
     }
   ]
 }
