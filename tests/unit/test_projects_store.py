@@ -1804,3 +1804,27 @@ def test_a_padded_name_resolves_the_same_way_on_both_lookups(tmp_path: Path) -> 
     paged, target, _newest = _seed_paged_store(tmp_path / "paged", _MAX_ROWS + 1)
     found = paged.get_project_by_name(f"  {target.name}  ")
     assert found is not None and found.id == target.id
+
+
+def test_an_addressed_update_of_a_row_past_the_page_moves_the_counts_with_it(
+    tmp_path: Path,
+) -> None:
+    """M2: a save admits the row into the snapshot, so the counts must follow.
+
+    The addressed update of the oldest row adds no FILE but does add a row to
+    this process's snapshot. Before this, the listing painted that row while
+    ``loaded`` stayed at the page size and the note still claimed a row was
+    hidden — a page that counted its own row as unlisted.
+    """
+    store, target, _newest = _seed_paged_store(tmp_path, _MAX_ROWS + 1)
+    store.refresh()
+    assert store.page_counts.beyond_page == 1
+
+    store.update_project(target.id, ProjectEdit(progress="promoted by the update"))
+
+    counts = store.page_counts
+    assert counts.on_disk == _MAX_ROWS + 1
+    assert counts.page == _MAX_ROWS + 1
+    assert counts.loaded == _MAX_ROWS + 1
+    assert counts.beyond_page == 0
+    assert len(store.list_projects()) == _MAX_ROWS + 1

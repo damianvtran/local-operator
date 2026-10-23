@@ -451,7 +451,9 @@ def project_page_truncation_text(registry: Any) -> str:
     overview), so the two receipts cannot disagree; the TUI page states the same
     fact through its own renderer's existing overflow row. The count is the PAGE
     CUT (``PageCounts.beyond_page``), never ``on_disk - loaded``: an unreadable
-    row is not hidden-by-page, and the sentence promises the row is addressable.
+    row is not hidden-by-page (QA Q1) — while a torn FILE hiding in the unparsed
+    tail is counted as not listed, so the sentence promises only what the store
+    can read.
     """
     counts = getattr(registry, "page_counts", None)
     if counts is None:
@@ -462,8 +464,8 @@ def project_page_truncation_text(registry: Any) -> str:
     noun = "row is" if hidden == 1 else "rows are"
     return (
         f"showing the {counts.loaded} most recently active of {counts.total_rows} stored "
-        f"projects — {hidden} {noun} not listed; /project show <name> still "
-        "finds any project."
+        f"projects — {hidden} {noun} not listed; /project show <name> resolves "
+        "any project the store can read."
     )
 
 

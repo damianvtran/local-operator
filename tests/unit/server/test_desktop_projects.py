@@ -22,7 +22,12 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.projects import DESCRIPTION_MAX, PROJECT_ROW_CAP, PROJECT_SCHEMA
+from local_operator.projects import (
+    DESCRIPTION_MAX,
+    PROJECT_ROW_CAP,
+    PROJECT_SCHEMA,
+    ProjectRegistry,
+)
 from local_operator.server.routes import capabilities, desktop_projects
 
 pytestmark = pytest.mark.asyncio
@@ -830,9 +835,7 @@ def _write_paged_row(root: Path, project_id: str, name: str, *, stamp_ns: int) -
     os.utime(path, ns=(stamp_ns, stamp_ns))
 
 
-async def test_a_paged_store_is_declared_and_every_row_stays_addressable(
-    api, monkeypatch
-) -> None:
+async def test_a_paged_store_is_declared_and_every_row_stays_addressable(api, monkeypatch) -> None:
     """M1: listing/search/timeline declare the page; ``show`` resolves past it.
 
     The desktop client is told the set is partial (``total_rows`` / ``loaded_rows``
@@ -875,3 +878,45 @@ async def test_a_paged_store_is_declared_and_every_row_stays_addressable(
     timeline = (await client.get("/v1/desktop/projects/timeline")).json()["result"]
     assert [row["id"] for row in timeline["projects"]] == ["zzz-live"]
     assert (timeline["total_rows"], timeline["loaded_rows"], timeline["truncated"]) == (2, 1, True)
+
+
+async def test_a_page_fuzzy_hit_does_not_hide_an_exact_name_past_the_page(api, monkeypatch) -> None:
+    """M3: searching "hiring" must not return only "hiring-2026".
+
+    A page fuzzy hit used to suppress the disk-backed exact-name arm entirely, so
+    the row the user actually named stayed invisible precisely when the page
+    held a near neighbour.
+    """
+    from local_operator import projects as projects_module
+
+    client, root = api
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    _write_paged_row(root, "aaa-dormant", "hiring", stamp_ns=1_700_000_000_000_000_000)
+    _write_paged_row(root, "zzz-live", "hiring-2026", stamp_ns=1_700_000_001_000_000_000)
+
+    searched = (await client.get("/v1/desktop/projects/search", params={"q": "hiring"})).json()[
+        "result"
+    ]
+
+    assert [row["id"] for row in searched["projects"]][0] == "aaa-dormant"
+    assert {row["id"] for row in searched["projects"]} == {"aaa-dormant", "zzz-live"}
+    assert searched["truncated"] is True
+
+
+async def test_a_whole_store_search_does_not_scan_the_disk_for_a_miss(api, monkeypatch) -> None:
+    """M4: on a whole store the by-name scan can never add a hit, so skip it."""
+    client, _root = api
+    await client.post("/v1/desktop/projects", json={"name": "alpha"})
+    calls: list[str] = []
+    original = ProjectRegistry.get_project_by_name
+
+    def probe(self: ProjectRegistry, name: str) -> Any:
+        calls.append(name)
+        return original(self, name)
+
+    monkeypatch.setattr(ProjectRegistry, "get_project_by_name", probe)
+    missed = await client.get("/v1/desktop/projects/search", params={"q": "nothing-here"})
+
+    assert missed.json()["result"]["count"] == 0
+    assert missed.json()["result"]["truncated"] is False
+    assert calls == []

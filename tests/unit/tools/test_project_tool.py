@@ -926,7 +926,7 @@ async def test_the_listing_declares_the_rows_the_page_left_out(
     assert "dormant-row" not in body
     assert "showing the 1 most recently active of 2 stored projects" in body
     assert "1 row is not listed here" in body
-    assert "op='show' name='<name>' still finds any project" in body
+    assert "op='show' name='<name>' resolves any project the store can read" in body
 
 
 @pytest.mark.asyncio

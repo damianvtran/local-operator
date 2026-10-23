@@ -472,7 +472,7 @@ def _page_note(registry: ProjectRegistry) -> str:
     return (
         f"showing the {counts.loaded} most recently active of {counts.total_rows} stored "
         f"projects — {hidden} {noun} not listed here; op='show' name='<name>' "
-        "still finds any project."
+        "resolves any project the store can read."
     )
 
 
