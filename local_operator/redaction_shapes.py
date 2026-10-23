@@ -1969,6 +1969,52 @@ def _is_identifier_shaped_name(value: str) -> bool:
     return bool(set(value.split("-")) & _K8S_QUALIFIER_SEGMENTS)
 
 
+#: The longest hyphen-joined identifier this pass will release under a WEAK name.
+#: 63 is the DNS-1123 label ceiling; the readable-phrase class stops at 32, which
+#: is where an ordinary prose phrase ends and a long multi-segment identifier
+#: (``mda-internal-contribution-delivery``) begins. The cap is stated rather than
+#: derived so a future widening has one number to argue against.
+_LONG_IDENTIFIER_MAX_CHARS = 63
+
+
+def _is_long_readable_identifier(value: str) -> bool:
+    """Whether ``value`` is a long DNS-1123 identifier, not a passphrase.
+
+    WHY THIS EXISTS, and why it is gated on the NAME's strength. The
+    readable-hyphen-phrase class releases a phrase up to
+    :data:`_WORD_SHAPED_MAX_LEN` (32) characters under a weak name such as
+    ``key:``. A project key or object name can be longer than that —
+    ``mda-internal-contribution-delivery`` is 34 — and the operator reported it
+    masked as a credential (LOH-28, and the earlier key-names report). The
+    release is deliberately narrow:
+
+    * at least three hyphen-joined segments, every segment alphabetic (a digit
+      is the cheapest evidence of an opaque token, so a digit keeps the mask);
+    * no vendor prefix and no UUID, the same exclusions the identifier
+      predicate makes, so ``glpat-<name>`` and an opaque UUID still mask;
+    * only under a WEAK name. ``key:`` is ambiguous; ``SECRET_KEY=``,
+      ``DB_PASSWORD=`` and ``token:`` remain credential positions, and a
+      passphrase there is still masked by the strong arm.
+
+    ACCEPTED RESIDUAL: a genuinely long hyphenated passphrase typed after the
+    bare word ``key:`` is released. The alternative — deleting a project key the
+    agent needs, and registering it so every later occurrence disappears — is
+    the incident this class exists for; strong names and every value-evidence
+    rule (DSN, bearer, PEM, vendor) still mask.
+    """
+    if len(value) > _LONG_IDENTIFIER_MAX_CHARS:
+        return False
+    if value.count("-") < 2:
+        return False
+    if not _is_dns_name(value):
+        return False
+    if _VENDOR_PATTERN.search(value) is not None:
+        return False
+    if _UUID_SHAPED.fullmatch(value) is not None:
+        return False
+    return all(part.isalpha() for part in value.split("-"))
+
+
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
 
@@ -1994,6 +2040,11 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     if _is_code_keyword_value(value):
         return True
     if _is_identifier_shaped_name(value):
+        return True
+    # A long multi-segment identifier under a WEAK name is a NAME, not a
+    # passphrase. See :func:`_is_long_readable_identifier` for the boundary and
+    # the accepted residual; strong names keep their mask.
+    if not strong and _is_long_readable_identifier(value):
         return True
     if any(char in value for char in _EXPRESSION_CHARS):
         return True
@@ -2576,6 +2627,22 @@ def _is_a_name_in_the_store_grammar(token: str) -> bool:
     return "_" in token and _ENV_NAME_SHAPED.fullmatch(token) is not None
 
 
+def _is_reference_name(value: str) -> bool:
+    """Whether a flag/assignment argument is a NAME-shaped reference.
+
+    The release for ``--secret`` must not become a release for every lowercase
+    word: a single lowercase argument is indistinguishable from a password typed
+    into the wrong flag. A reference has NAME STRUCTURE — the
+    store's caps/underscore grammar, or a dotted/hyphenated DNS-1123 identifier
+    (``wire.slash.credential``, ``mda-internal-contribution-delivery``). A bare
+    lowercase word is left to the mask; that is the same residual
+    :func:`_is_a_name_in_the_store_grammar` already states for one-word entries.
+    """
+    if _is_a_name_in_the_store_grammar(value):
+        return True
+    return _is_dns_name(value) and ("." in value or "-" in value)
+
+
 def _value_is_a_reference_to_a_credential(value: str) -> bool:
     """Whether a flag's argument is the NAME of a stored credential, not one.
 
@@ -2735,6 +2802,15 @@ def _flag_value_guard(match: Match[str]) -> bool:
     if any(char in value for char in _EXPRESSION_CHARS):
         return False
     if _value_is_a_reference_to_a_credential(value):
+        return False
+    # ``--secret`` is the ONE flag whose argument is a store ENTRY NAME rather
+    # than a credential value (``secrets/cli.py``'s ``NAME[=VAR]`` metavar). Its
+    # argument may therefore be any DNS-1123 name — including a dotted catalogue
+    # key such as ``wire.slash.credential`` — and masking it makes the documented
+    # lookup impossible. ``--password``/``--token``/``--api-key`` keep masking
+    # their argument: those flags bind a VALUE, and a name-shaped value there is
+    # a passphrase typed into the command.
+    if _is_store_entry_flag(match.group(_FLAG_GROUP)) and _is_reference_name(value):
         return False
     return True
 
@@ -2940,10 +3016,15 @@ def _assignment_value_guard(match: Match[str]) -> bool:
     # VALUE-shaped argument on this rule's own path, which is why a token after
     # ``--token=`` still masks and still carries the flag rule's label. See
     # :func:`_value_is_a_reference_to_a_credential` for the failure that motivated it.
-    if _CLI_CREDENTIAL_FLAG_NAME.match(name) and _value_is_a_reference_to_a_credential(
-        match.group(4)
-    ):
-        return False
+    if _CLI_CREDENTIAL_FLAG_NAME.match(name):
+        # The ``=`` spelling of ``--secret`` binds a store ENTRY NAME, so the
+        # same DNS-1123 release the space spelling gets in
+        # :func:`_flag_value_guard` applies here. Kept on the store-entry flag
+        # only: ``--token=`` still binds a value and still masks.
+        if _is_store_entry_flag(name) and _is_reference_name(match.group(4)):
+            return False
+        if _value_is_a_reference_to_a_credential(match.group(4)):
+            return False
     # The VALUE is read the way the NAME is: the rendering's line breaks are line
     # breaks for the judgement too, so what is judged is the run before the first
     # of them while the mask covers the whole run (see

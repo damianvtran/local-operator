@@ -3742,8 +3742,12 @@ they produce.
 
 Full agent-facing guidance is `guide://credentials` (packaged at
 `local_operator/guides/credentials/GUIDE.md`); the design is
-`docs/design/secret-store.md`. This section is what someone CHANGING this code
-needs to know.
+`docs/design/secret-store.md`. **The redaction policy — what the guard treats as
+a secret, what it must never mask, and the sanctioned read path for public
+copy — is `docs/security/redaction-policy.md` (owner: @damianvtran).** Read it
+before changing a shape rule or adding a masking surface; a rule change without
+a policy change is not a policy change. This section is what someone CHANGING
+this code needs to know.
 
 **Four things are called credentials and they must stay distinct.** Provider API
 keys (now rows in the encrypted store under the reserved provider namespace, read
