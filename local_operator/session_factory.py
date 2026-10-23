@@ -3789,6 +3789,13 @@ def _make_system_blocks_provider(
         interactive = goal_state.interactivity() if goal_state is not None else None
         can_ask = goal_state.can_ask() if goal_state is not None else None
         channel = None if can_ask is None else (CHANNEL_ASK if can_ask else CHANNEL_NONE)
+        # The open-asks reminder (design §16/SA-D3), rendered by the session off
+        # its own live queue. Read HERE, per provider step, because that is the
+        # only cadence at which an ask raised or settled mid-turn can reach the
+        # next request; ``""`` renders no section at all, so a host that never
+        # asks anything keeps the exact start-context bytes it had before this
+        # existed.
+        open_asks = goal_state.open_asks() if goal_state is not None else ""
         key = (
             knowledge_block,
             date_str,
@@ -3801,6 +3808,7 @@ def _make_system_blocks_provider(
             model_label,
             interactive,
             channel,
+            open_asks,
             tuple((tool.name, tool.description) for tool in tools),
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
@@ -3831,6 +3839,7 @@ def _make_system_blocks_provider(
             # tri-state note above and ``GoalState.interactivity``.
             interactive=interactive,
             channel=channel,
+            open_asks=open_asks,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )

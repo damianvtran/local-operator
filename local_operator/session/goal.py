@@ -519,6 +519,18 @@ class GoalState:
     #: stated" and resolves from tool membership. Never a copied flag: the hook is
     #: installed AND uninstalled mid-session by ``set_ask_handler``.
     ask_probe: "Callable[[], bool] | None" = None
+    #: Live probe answering "what does the open-asks reminder say RIGHT NOW" —
+    #: the rendered section body, or ``""`` when nothing is open. Published on
+    #: this holder by ``Session.__init__`` for the same seam reason as the two
+    #: probes above: the prompt closure is built before the facade exists, and
+    #: the ask queue it describes is created lazily on first use.
+    #:
+    #: A PROBE, not a snapshot, because this section is meant to be one small row
+    #: per USER MESSAGE: the render is stable within a turn (the "as of" stamp
+    #: moves only when a message is admitted), so the state-delta machinery ships
+    #: it once per message rather than once per provider step. ``None`` — a holder
+    #: no facade built, such as a delegated child's — renders no section at all.
+    open_asks_probe: "Callable[[], str] | None" = None
 
     # --- the judged-goal record (see the dataclasses above) -------------------
     #: "" (none) | "active" | "done". `done` coexists with a non-empty `text`
@@ -631,6 +643,23 @@ class GoalState:
             return bool(probe())
         except Exception:  # noqa: BLE001 — an unreadable probe states nothing
             return None
+
+    def open_asks(self) -> str:
+        """The open-asks reminder's body, or ``""`` when there is nothing to say.
+
+        ``""`` for every host that installed no probe — a delegated child, a
+        benchmark, a bare test — and for a probe that raised: a prompt section is
+        never worth failing a turn over, and the safe reading of an unreadable
+        queue is "no asks", which adds nothing to the prompt rather than claiming
+        a state nobody measured.
+        """
+        probe = self.open_asks_probe
+        if probe is None:
+            return ""
+        try:
+            return str(probe() or "")
+        except Exception:  # noqa: BLE001 — an unreadable probe states nothing
+            return ""
 
     def set(self, text: str) -> str:
         """Store a trimmed, length-capped goal and return what was stored."""
