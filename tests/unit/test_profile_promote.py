@@ -642,3 +642,200 @@ def test_a_member_collision_advises_the_TEAM_verb(stacks) -> None:
     assert "/agent promote" not in text
     assert stacks["global_teams"].get_team_by_name("pod") is None
     assert stacks["global_agents"].get_agent_by_name("helper") is not None
+
+
+def test_a_member_collision_offers_no_rename_that_cannot_work(stacks) -> None:
+    """`as` renames the TEAM, so it cannot clear a colliding MEMBER.
+
+    `/team promote pod as pod2` reaches this identical refusal — the member keeps
+    its name, which is the key every roster references — so the sentence must not
+    offer the rename as a second remedy (post-merge review of LOH-9 S4, MINOR-1).
+    """
+
+    _session_role(stacks["agents"], "helper")
+    _team(stacks["teams"], "pod", manager="helper", members=[])
+    stacks["global_agents"].create_agent(_fields(name="helper", tags=["role"]))
+
+    with pytest.raises(ValueError) as plain:
+        stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+    with pytest.raises(ValueError) as renamed:
+        stacks["teams"].promote(
+            "pod", as_name="pod2", authorized_by=ORIGIN, agents=stacks["agents"]
+        )
+
+    text = str(plain.value)
+    assert "needs its agent 'helper'" in text
+    assert "/team promote pod replace" in text
+    assert "another name" not in text
+    # The alternate name changes nothing: same sentence, still nothing written.
+    assert str(renamed.value) == text
+    assert stacks["global_teams"].get_team_by_name("pod") is None
+    assert stacks["global_teams"].get_team_by_name("pod2") is None
+
+
+def test_a_nested_team_collision_advises_the_TEAM_verb(stacks) -> None:
+    """A colliding nested TEAM is a member too, so it gets the outer verb.
+
+    `/team promote inner replace` replaces the inner team and still leaves `pod`
+    unpromoted, reproducing this refusal — the agent-member branch was covered,
+    this sibling was not (post-merge review of LOH-9 S4, MINOR-3).
+    """
+
+    _team(stacks["teams"], "inner", manager="manager", members=[])
+    _team(stacks["teams"], "pod", manager="manager", members=["team:inner"])
+    stacks["global_teams"].create_team(TeamEditFields(name="inner", manager="manager"))
+
+    with pytest.raises(ValueError) as caught:
+        stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+
+    text = str(caught.value)
+    assert "needs its team 'inner'" in text
+    assert "/team promote pod replace" in text
+    assert "/team promote inner replace" not in text
+    # The base sentence still offered the rename that cannot work; this line is
+    # what makes the test red there rather than a pure regression pin (agent
+    # review round 1, MINOR-1).
+    assert "another name" not in text
+    assert stacks["global_teams"].get_team_by_name("pod") is None
+
+
+def test_a_nested_alias_collision_names_the_alias_and_a_working_remedy(stacks) -> None:
+    """An alias another account row owns is not a team the account has by name.
+
+    The generic sentence would claim an account team named 'inner' exists and
+    advise `/team promote inner replace`; the account holds `other`, whose ALIAS
+    is 'shared', and replacing 'inner' clears nothing (post-merge review of
+    LOH-9 S4, MINOR-2). The remedy the sentence names is exercised here.
+    """
+
+    inner = _team(stacks["teams"], "inner", manager="manager", members=[], aliases=["shared"])
+    _team(stacks["teams"], "pod", manager="manager", members=["team:inner"])
+    stacks["global_teams"].create_team(
+        TeamEditFields(name="other", manager="manager", aliases=["shared"])
+    )
+
+    with pytest.raises(ValueError) as caught:
+        stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+
+    text = str(caught.value)
+    assert "'shared'" in text and "'other'" in text
+    assert "named 'inner'" not in text
+    assert "/team promote inner replace" not in text
+    # The outer replace is not the remedy either: it targets the inner NAME.
+    with pytest.raises(ValueError) as replaced:
+        stacks["teams"].promote("pod", replace=True, authorized_by=ORIGIN, agents=stacks["agents"])
+    assert str(replaced.value) == text
+
+    # The named remedy — drop the alias on the conversation's team — works.
+    stacks["teams"].update_team(inner.id, TeamEditFields(aliases=[]))
+    result = stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+    assert "pod" in [row["name"] for row in result.created]
+
+
+def test_a_replace_never_renames_the_team_that_owns_the_nested_name_as_an_alias(stacks) -> None:
+    """A name resolved only through another row's ALIAS must not be replaced.
+
+    `replace` promises to overwrite the row the user named; here the inner name
+    reaches `other` only through its alias, and the nested branch used to rename
+    that row to `inner`, destroying the key its own users know. The top-level
+    path refuses the same rename; this branch now refuses it too (agent review
+    remediation, BLOCKER).
+    """
+
+    _team(stacks["teams"], "inner", manager="manager", members=[])
+    _team(stacks["teams"], "pod", manager="manager", members=["team:inner"])
+    owner = stacks["global_teams"].create_team(
+        TeamEditFields(name="other", manager="manager", aliases=["inner"])
+    )
+
+    with pytest.raises(ValueError) as caught:
+        stacks["teams"].promote("pod", replace=True, authorized_by=ORIGIN, agents=stacks["agents"])
+
+    text = str(caught.value)
+    assert "'inner'" in text and "'other'" in text
+    assert "as an alias" in text
+    # One "so" per sentence: the detail clause and the outcome clause used to
+    # double it (agent review round 1, NIT-1).
+    assert "one key; nothing was promoted" in text
+    assert "/team edit other" in text
+    # The row the user never named keeps BOTH its identity and its name.
+    kept = stacks["global_teams"].get_team_by_name("other")
+    assert kept is not None and kept.id == owner.id
+    assert kept.name == "other"
+    assert kept.aliases == ["inner"]
+    assert all(team.name != "inner" for team in stacks["global_teams"].list_teams())
+    assert stacks["global_teams"].get_team_by_name("pod") is None
+
+
+def test_a_target_that_is_only_another_teams_alias_names_the_alias(stacks) -> None:
+    """A target the account holds only as an ALIAS is not a team of that name.
+
+    The generic sentence claimed a team named 'inner' existed and advised
+    `/team promote inner replace`, which refuses identically because replace
+    targets that NAME. The refusal now names the alias and its owner, and the
+    alias edit that actually works (top-level sibling of MINOR-2).
+    """
+
+    _team(stacks["teams"], "inner", manager="manager", members=[])
+    owner = stacks["global_teams"].create_team(
+        TeamEditFields(name="other", manager="manager", aliases=["inner"])
+    )
+
+    with pytest.raises(ValueError) as caught:
+        stacks["teams"].promote("inner", authorized_by=ORIGIN, agents=stacks["agents"])
+
+    text = str(caught.value)
+    assert "no team named 'inner'" in text
+    assert "'other'" in text and "alias" in text
+    assert "/team edit other" in text
+
+    # A confirmed replace is not the remedy, and changes nothing either.
+    with pytest.raises(ValueError) as replaced:
+        stacks["teams"].promote(
+            "inner", replace=True, authorized_by=ORIGIN, agents=stacks["agents"]
+        )
+    assert str(replaced.value) == text
+    kept = stacks["global_teams"].get_team_by_name("other")
+    assert kept is not None and kept.id == owner.id
+    assert kept.name == "other" and kept.aliases == ["inner"]
+
+    # The named remedy works: drop the alias on the owner, then promote.
+    stacks["global_teams"].update_team(owner.id, TeamEditFields(aliases=[]))
+    result = stacks["teams"].promote("inner", authorized_by=ORIGIN, agents=stacks["agents"])
+    assert "inner" in [row["name"] for row in result.created]
+
+
+def test_a_source_alias_collision_names_the_alias_and_a_working_remedy(stacks) -> None:
+    """An alias the COPY carries is not a team of the target's name.
+
+    `/team promote pod` and `/team promote pod as pod2` both refused with "your
+    account already has a team named 'pod'"/'pod2' — rows that do not exist —
+    and the alias travels with the copy, so neither `as` nor `replace` clears
+    it (agent review round 1, MINOR-2).
+    """
+
+    pod = _team(stacks["teams"], "pod", manager="manager", members=[], aliases=["shared"])
+    stacks["global_teams"].create_team(
+        TeamEditFields(name="other", manager="manager", aliases=["shared"])
+    )
+
+    with pytest.raises(ValueError) as plain:
+        stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+    text = str(plain.value)
+    assert "alias 'shared'" in text
+    assert "'other'" in text
+    assert "named 'pod'" not in text
+    assert "/team edit pod" in text and "/team edit other" in text
+
+    for label, kwargs in (
+        ("as_name", {"as_name": "pod2"}),
+        ("replace", {"replace": True}),
+    ):
+        with pytest.raises(ValueError) as again:
+            stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"], **kwargs)
+        assert str(again.value) == text, label
+
+    # The named remedy works: drop the alias on the conversation's team.
+    stacks["teams"].update_team(pod.id, TeamEditFields(aliases=[]))
+    result = stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
+    assert "pod" in [row["name"] for row in result.created]
