@@ -2286,7 +2286,7 @@ def test_aida_first_contact_offers_a_previewed_harness_import() -> None:
     """First-run is the agent path: she may offer migration, but never imports
     without an explicit preview and selection."""
     flat = " ".join(seed("aida").instructions.split())
-    assert load_seed_version("aida") == "1.5.5"
+    assert load_seed_version("aida") == "1.5.6"
     assert "harness_import" in flat
     assert "list, preview, require explicit selection" in flat
     assert "read-only on the other harness" in flat
