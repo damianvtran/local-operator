@@ -23,11 +23,13 @@ import { useEffect, useRef, useState } from "react";
 import {
 	getLibraryAsset,
 	libraryBytesUrl,
+	libraryWaveformUrl,
 	linkLibraryChat,
 	sendCommand,
 	startSession,
 } from "../api";
 import { MetadataSheet } from "../components/library/metadata-sheet";
+import { SoundPlayer, useWaveformPeaks } from "../components/sound-player";
 import { Button } from "../components/ui/button";
 import { Markdown } from "../components/markdown";
 import { columnCap } from "../lib/column";
@@ -76,6 +78,9 @@ function Preview({ asset }: { asset: LibraryAsset }) {
 		["text", "markdown", "code", "html"].includes(asset.kind) ? asset : null,
 		asset.kind === "html" ? HTML_PREVIEW_LIMIT : TEXT_PREVIEW_LIMIT,
 	);
+	/* The waveform is fetched only for an audio asset and only once the screen
+	   mounted it (the screen IS the near-viewport gate: one asset, one view). */
+	const peaks = useWaveformPeaks(libraryWaveformUrl(asset.id), asset.kind === "audio");
 
 	if (!asset.exists) {
 		return (
@@ -109,12 +114,16 @@ function Preview({ asset }: { asset: LibraryAsset }) {
 	}
 
 	if (asset.kind === "audio") {
+		/* THE shared mobile player, full variant: the asset screen is where the
+		   sound gets the whole column. The old native `<audio controls>` is gone
+		   — one player per platform, not a browser widget beside it. */
 		return (
-			<audio
-				controls
-				preload="metadata"
+			<SoundPlayer
+				variant="full"
 				src={libraryBytesUrl(asset.id)}
-				className="w-full"
+				peaks={peaks}
+				label={asset.name}
+				durationHint={asset.duration_s ?? 0}
 			/>
 		);
 	}
