@@ -17,8 +17,8 @@
   "helper": "BYTE6dd canonicalPAIR",
   "source_deliverable_not_runtime_payload": true,
   "sources": {
-    "scripts/diagnostics/format_snapshot_6911/worker.py": "c2c201bd90246aafc60bde95bc67617d4534b8ef9ab99d033d642d16056cc5d9",
-    "scripts/diagnostics/format_snapshot_6911/controller.py": "b0850edfabc22694f40ded9192a380f2d83ae7f657cfe4c67aa790222ac892df",
+    "scripts/diagnostics/format_snapshot_6911/worker.py": "c31abfd9bde087e031365bee659e2cdbb2f8f40adf4dc809cd02a83e5b3535b1",
+    "scripts/diagnostics/format_snapshot_6911/controller.py": "babb8543539d071e666f06096fcb1125429591871654c3081f06ccda287a551a",
     "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e"
   }
 }
