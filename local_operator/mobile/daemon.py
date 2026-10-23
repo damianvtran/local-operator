@@ -1768,7 +1768,11 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
     directory = config_dir() / "sessions" / session_id
-    if not (directory / "transcript.jsonl").is_file() or not is_user_session(directory):
+    from local_operator.session import compression
+
+    # Both forms: judging only the plain name hid every compressed session from
+    # the phone's session list, because its journal is an archive on disk.
+    if not compression.has_transcript(directory) or not is_user_session(directory):
         return None
     return directory
 
@@ -1843,6 +1847,7 @@ def _durable_projection(
         _compact_multiline,
     )
     from local_operator.resume import stored_session_title
+    from local_operator.session import compression
     from local_operator.session.attention import AttentionStore
     from local_operator.tools.builtin import todo_snapshot
 
@@ -1851,6 +1856,19 @@ def _durable_projection(
         return None
     try:
         state = _durable_fold_cache().load(directory)
+    except compression.ArchiveError as exc:
+        # KEPT BEST EFFORT, BUT NO LONGER SILENT (review round 3, m-3). A transcript
+        # this build cannot decode answers no projection — the daemon must not take a
+        # 500 for one damaged archive — and the WARNING names the session and the
+        # archive+codec the typed error carries, so the blank frame has a trace. The
+        # history route reports the same condition to the surface as ``unavailable``;
+        # see ``_history_page``.
+        logger.warning(
+            "mobile: no projection for %s, its transcript could not be decoded: %s",
+            session_id,
+            exc,
+        )
+        return None
     except FileNotFoundError:
         return None
     except Exception as exc:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
@@ -2468,12 +2486,15 @@ def _pin_opening_user_message(projection: SessionProjection, record: SessionReco
         return
     try:
         from local_operator.paths import config_dir
+        from local_operator.session import compression
 
-        path = config_dir() / "sessions" / record.session_id / "transcript.jsonl"
-        if not path.exists():
+        path = compression.transcript_for_read(config_dir() / "sessions" / record.session_id)
+        if path is None:
             return
         # Read only the head: the opening user turn is within the first few
         # entries, and a 10 MB transcript should not be replayed per repaint.
+        # ``transcript_for_read`` is what makes this work for a compressed
+        # session too — the materialised copy is byte-identical to the journal.
         import json as _json
 
         with path.open() as fh:
@@ -2815,11 +2836,51 @@ def _journal_page(
     return rows if rows is not None else ([], False)
 
 
+class _UnavailablePage(list[Any]):
+    """An EMPTY history page that remembers WHY it is empty (review round 3, m-3).
+
+    The handler is best effort by contract — a phone that raises is worse than one
+    that says "unavailable" — but a compressed transcript this build cannot decode
+    used to arrive as a plain ``[]``, and an empty page reads as the TOP of the
+    conversation: the reader believes it has seen the whole thing. This type is still
+    a list (so every existing caller's ``if not entries`` keeps working) that carries
+    the typed reason the route puts on the wire as ``unavailable``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self.unavailable = reason
+
+
+def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
+    """The wire body for one history page, with the honest emptiness beside it.
+
+    ``unavailable`` is ADDITIVE and present only when the page is empty for a
+    REASON: an app build that ignores the key renders the old empty state, and one
+    that reads it can say "history unavailable" instead of "that was the top".
+    """
+    body: dict[str, Any] = {
+        "entries": [_transcript_entry_json(row) for row in page],
+        "has_more": has_more,
+    }
+    reason = getattr(page, "unavailable", "")
+    if reason:
+        body["unavailable"] = reason
+    return body
+
+
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
     """Return the page of folded entries immediately OLDER than ``before``
     (chronological within the page) plus whether more history exists beyond it.
+
+    THE EMPTINESS IS SPELLED WHEN IT IS A FAILURE (review round 3, m-3). A page
+    that could not be read is an :class:`_UnavailablePage` — empty, like an honest
+    end of history, but carrying the typed :class:`compression.ArchiveError`
+    message, which the route serves as ``unavailable``. The error is caught HERE,
+    before the blanket handler, and logged at WARNING with its own sentence (which
+    names the archive and codec) rather than as an unexplained fold failure.
 
     Reads through the daemon's incremental fold cache (:mod:`.durable`), so a
     page costs one fold per session per daemon lifetime plus the appended
@@ -2864,10 +2925,20 @@ def _history_page(
             if session_id not in ("", ".", "..") and Path(session_id).name == session_id
             else None
         )
-    if directory is None or not (directory / "transcript.jsonl").is_file():
+    from local_operator.session import compression
+
+    if directory is None or not compression.has_transcript(directory):
         return [], False
     try:
         state = _durable_fold_cache().load(directory)
+    except compression.ArchiveError as exc:
+        # NOT AN EMPTY CONVERSATION: the transcript exists, it just could not be
+        # decoded by this build (a truncated archive, or one written by a runtime
+        # with a codec this one does not have).
+        logger.warning(
+            "mobile: history for %s is unavailable rather than empty: %s", session_id, exc
+        )
+        return _UnavailablePage(str(exc)), False
     except FileNotFoundError:
         return [], False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
@@ -2920,10 +2991,16 @@ def _attachment_bytes(
     from local_operator.session.transcript import Transcript
 
     directory = config_dir() / "sessions" / record.session_id
-    if not (directory / "transcript.jsonl").exists():
+    from local_operator.session import compression
+
+    if not compression.has_transcript(directory):
         return None
     try:
-        transcript = Transcript(directory)
+        # READ-ONLY: this fetch folds history and serves one row. A writer
+        # Transcript would restore the archive into a plain file for good, so
+        # viewing one image on the phone would re-inflate the whole transcript
+        # on the serving device (review m2).
+        transcript = Transcript(directory, read_only=True)
         history = transcript.build_llm_history()
     except Exception:  # noqa: BLE001 — an odd transcript serves no image, not a 500
         logger.exception("image fetch: history fold failed for %s", record.session_id)
@@ -6138,9 +6215,7 @@ def build_app(daemon: MobileDaemon):
         page, has_more = await asyncio.to_thread(
             _history_page, child_session_id, before, limit, durable_only=False
         )
-        return JSONResponse(
-            {"entries": [_transcript_entry_json(entry) for entry in page], "has_more": has_more}
-        )
+        return JSONResponse(_history_response(page, has_more))
 
     async def api_session_history(request: Request) -> Response:
         """Older transcript entries for lazy loading.
@@ -6172,12 +6247,7 @@ def build_app(daemon: MobileDaemon):
         page, has_more = await asyncio.to_thread(
             _history_page, session_id, before, limit, durable_only=entry is None
         )
-        return JSONResponse(
-            {
-                "entries": [_transcript_entry_json(e) for e in page],
-                "has_more": has_more,
-            }
-        )
+        return JSONResponse(_history_response(page, has_more))
 
     async def api_session_checkpoints(request: Request) -> Response:
         """The checkpoint manifest for one conversation: the rail's ticks.
@@ -6642,9 +6712,25 @@ def build_app(daemon: MobileDaemon):
             directory = _durable_user_session_dir(session_id)
             if directory is None:
                 return None
+            # Imported BEFORE the try it is caught in: the except clause names
+            # ``compression.ArchiveError``, so an import failure inside the block
+            # would make the handler itself raise ``NameError`` (pyright's
+            # ``reportPossiblyUnboundVariable`` caught exactly that).
+            from local_operator.session import compression
+
             try:
-                payload = (directory / "transcript.jsonl").read_bytes()
-            except OSError:
+                # Stream through the codec and keep only the rows that can be
+                # the reference being authorised: a whole-file ``read_bytes`` is
+                # both unbounded and wrong for an archive (compressed bytes are
+                # not JSONL).
+                from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+                payload = b"\n".join(
+                    line.encode("utf-8", "replace")
+                    for line in compression.iter_lines(directory)
+                    if SUPPLEMENT_CUSTOM_TYPE in line
+                )
+            except (OSError, compression.ArchiveError):
                 return None
             if not _journal_references_digest(payload, digest):
                 return None

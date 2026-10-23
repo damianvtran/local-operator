@@ -80,10 +80,15 @@ remedy instead of failing later.
   idempotent (200, `vendor_stopped:true`); a completed/failed job refuses with
   **409 `audio_already_completed`**. Nothing claims a guaranteed stop.
 - Admission bound (HTTP 429, code `audio_rate_limited`, no `Retry-After`): a
-  SUBMIT refusal happens before a job row exists, so it is retried with
-  bounded backoff (2, 4, 8 s; four attempts) and surfaced as
-  `reason_class="transient"` with `error_type="audio_rate_limited"` and the
-  server's sentence. An ADMITTED job that hits a vendor rate limit settles
+  SUBMIT refusal happens before a job row exists, so it is retried with a
+  bounded ladder of four attempts at 0/10/30/65 s (batch waits jitter
+  1.0-1.15x, so 65-74.75 s) — sized to outlast the server's 45 s hold on a
+  running vendor call — and surfaced as `reason_class="transient"` with
+  `error_type="audio_rate_limited"` and the receipt `Audio platform at
+  capacity: N attempts over M s.` Only HTTP 429 is retried: a 5xx or any
+  other status fails straight through regardless of the body's code, because a
+  re-POST may bill twice. The same ladder serves the BYOK vendor POST. An
+  ADMITTED job that hits a vendor rate limit settles
   `COMPLETED` + `error_type:"audio_rate_limited"` with zero cost — never
   retried automatically; a resubmit is the caller's decision.
 

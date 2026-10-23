@@ -1874,6 +1874,22 @@ RETITLE_MIN_GAP_S = 30.0
 #: the rendered app (see ``local_operator.logger.file_logging``).
 logger = logging.getLogger("local_operator.tui.app")
 
+
+def _has_transcript(directory: "Path") -> bool:
+    """Whether a session holds a transcript in ANY physical form (plain or archive).
+
+    The three TUI probes that used to stat ``transcript.jsonl`` ask one of two
+    questions — "can this cold facade paint something" and "is there a session
+    to resume" — and both are answered the same way: a compressed session has a
+    transcript, it just is not the plain name. Imported lazily for the reason the
+    comment above the session imports states: this module's import graph is
+    pinned, and a helper does not need to widen it.
+    """
+    from local_operator.session import compression
+
+    return compression.has_transcript(directory)
+
+
 #: How long the second Ctrl+C counts as a DOUBLE press. Short on purpose: this
 #: is a deliberate double-tap, not a mode. Long enough and a user interrupting
 #: two turns in a row would quit the app by accident, which is the one outcome a
@@ -18821,7 +18837,7 @@ class OperatorApp(App[None]):
                     if (
                         record is not None
                         and frontend_attach_refusal(record) is None
-                        and (config_root / "sessions" / concrete / "transcript.jsonl").is_file()
+                        and _has_transcript(config_root / "sessions" / concrete)
                     ):
                         # PAINT FIRST, ATTACH BEHIND. A blocking `connect` held
                         # the screen for the owner's whole canonical sync —
@@ -26448,10 +26464,12 @@ class OperatorApp(App[None]):
         if not session_id:
             return ""
         from local_operator.paths import config_dir
-        from local_operator.resume import TRANSCRIPT_NAME
 
-        transcript = config_dir() / "sessions" / session_id / TRANSCRIPT_NAME
-        return session_id if transcript.is_file() else ""
+        # ANY physical form: a compressed session is still resumable (its
+        # runtime restores the plain file before reading), so the exit block and
+        # the Ctrl+C ladder must still name the way back into it.
+        session_dir = config_dir() / "sessions" / session_id
+        return session_id if _has_transcript(session_dir) else ""
 
     def resume_hint(self) -> str:
         """``lop --resume <id>`` for this session, or "" when there is none.
@@ -59471,9 +59489,10 @@ class OperatorApp(App[None]):
         directory = self._session_directory(source)
         if directory is None:
             return set()
-        from local_operator.resume import TRANSCRIPT_NAME
-
-        if not (directory / TRANSCRIPT_NAME).is_file():
+        # An archive still holds the admitted-command rows; ``has_transcript``
+        # keeps this settle check from answering "nothing admitted" (and leaving
+        # the handover marker up) for every compressed session.
+        if not _has_transcript(directory):
             return set()
         try:
             from local_operator.session.transcript import Transcript

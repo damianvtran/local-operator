@@ -1877,7 +1877,11 @@ class AttachedSession:
         state = await self._synthesise_cold_state(cwd)
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
-        if (config_dir / "sessions" / session_id / "transcript.jsonl").exists():
+        # ``has_transcript``: a compressed session has a history to paint, and
+        # the plain name would open it as an empty conversation.
+        from local_operator.session import compression as _compression
+
+        if _compression.has_transcript(config_dir / "sessions" / session_id):
             # ``want_checkpoint`` extracts the durable status row during the
             # SAME threaded parse the history comes from, so the restore below
             # costs no second read of a file that is 103 MB at the top end.
