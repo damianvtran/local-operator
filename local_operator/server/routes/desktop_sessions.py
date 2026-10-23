@@ -2687,6 +2687,41 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     )
 
 
+def _note_hub_session_start(request: Request) -> None:
+    """A conversation just began: let the hub runner check, without waiting for it.
+
+    WHY HERE AND NOWHERE ELSE. The runner's timer already keeps the sidebar
+    current, but a session start is the moment the operator is about to look at
+    it, and it is a natural, already-happening event -- so it is worth asking the
+    hub once. It is NOT a per-message trigger: a check costs a network pass over
+    every linked item, and a conversation sends dozens of messages for every one
+    opening.
+
+    NOTHING ABOUT A CREATE MAY DEPEND ON THIS. The runner schedules the work and
+    returns (``HubSyncRunner.note_session_start``), the work never raises, and
+    the lookup itself is a ``getattr`` because a bare router in a test has no
+    ``hub_sync`` on ``app.state`` at all. A hub that is down, a runner that was
+    never started, or a scheduling error costs nothing but this call: the create
+    has already succeeded and its response is built either way. That is why the
+    trigger sits AFTER the receipt settled, on the success path only -- a refused
+    create did not start a conversation, and a receipt replay is a retry of one
+    that already did (the runner would throttle it, but firing it at all would
+    misrepresent what the route just did).
+
+    The throttle (two minutes, one check in flight) lives in the runner, not
+    here: it belongs to the check, so every caller inherits it and there is one
+    place to reason about.
+    """
+
+    runner = getattr(request.app.state, "hub_sync", None)
+    if runner is None:
+        return
+    try:
+        runner.note_session_start()
+    except Exception:  # noqa: BLE001 - auto-update never costs a conversation
+        logger.debug("hub check for a session start could not be scheduled", exc_info=True)
+
+
 @router.post("/v1/desktop/sessions", response_model=CRUDResponse[CreatedSession])
 async def create_session(body: CreateSession, request: Request):
     """Create a new conversation, optionally born on a chosen model and effort.
@@ -3027,6 +3062,12 @@ async def create_session(body: CreateSession, request: Request):
                     error=str(result.get("message") or "that device refused")
                 ).envelope(code=code),
             )
+        # A replayed receipt is a retry of a create that already ran: no new
+        # conversation began, so it is not a session start. Anything else that
+        # reached this line created one (locally or on a peer) and gets the
+        # fire-and-forget check.
+        if not result.get("replayed"):
+            _note_hub_session_start(request)
         return reply(result)
 
 
