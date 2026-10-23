@@ -14,6 +14,8 @@ Two layers, tested for different reasons:
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -84,11 +86,56 @@ class TestCatalogue:
             if e.kind == KIND_AGENT
         ]
         assert entries[0].label == "Coder (custom label)"
-        assert entries[0].slash == "/agent coder"
+        # `/agent`'s literal-name escape: a profile named `new`, `edit` or
+        # `class` would otherwise hit the subcommand namespace.
+        assert entries[0].slash == "/agent =coder"
+
+    def test_agent_registry_key_matches_even_when_the_label_differs(self) -> None:
+        """`enrichment` reaches a profile drawn as "Enrichment (label)".
+
+        The registry key is what a user types to reach the profile, so it must
+        match; the label is display-only (agent review round 1, m1 / QA Q-1).
+        """
+        entries = [
+            e
+            for e in _catalogue(
+                agent_rows=[("enrichment", "Enrichment (capitalised label)", "", "enriches")]
+            )
+            if e.kind == KIND_AGENT
+        ]
+        assert rank_entries(entries, Matcher("enrichment"))
+        assert rank_entries(entries, Matcher("qa-tester")) == []
+
+    def test_reserved_agent_and_team_names_are_escaped(self) -> None:
+        """`chart`, `new` and `edit` are valid names, not subcommands.
+
+        `/agent new` and `/team chart` are the authoring/chart verbs; the
+        palette's rows must address the NAME, so every agent/team route carries
+        the one-character literal escape.
+        """
+        entries = _catalogue(
+            agent_rows=[
+                ("chart", "chart", "", ""),
+                ("new", "new", "", ""),
+                ("coder", "coder", "", ""),
+            ],
+            team_names=["chart", "new", "edit", "lopdev"],
+        )
+        agent_routes = [e.slash for e in entries if e.kind == KIND_AGENT]
+        team_routes = [e.slash for e in entries if e.kind == KIND_TEAM]
+        assert agent_routes == ["/agent =chart", "/agent =new", "/agent =coder"]
+        assert team_routes == ["/team =chart", "/team =new", "/team =edit", "/team =lopdev"]
+
+    def test_team_names_dedupe_on_the_picker_s_casefold(self) -> None:
+        """One row per name, compared exactly as `_team_choices` compares."""
+        entries = [
+            e for e in _catalogue(team_names=["LopDev", " lopdev ", "other"]) if e.kind == KIND_TEAM
+        ]
+        assert [e.slash for e in entries] == ["/team =LopDev", "/team =other"]
 
     def test_team_rows_route_through_the_team_command(self) -> None:
         entries = [e for e in _catalogue(team_names=["lopdev"]) if e.kind == KIND_TEAM]
-        assert entries[0].slash == "/team lopdev"
+        assert entries[0].slash == "/team =lopdev"
 
     def test_duplicate_labels_remain_distinct_rows(self) -> None:
         """Two conversations can open with the same words; both must be reachable.
@@ -153,8 +200,8 @@ class TestBuildSeam:
         monkeypatch.setattr(app, "_agent_profile_rows", lambda: [("coder", "Coder", "", "d")])
         monkeypatch.setattr(app, "_known_team_names", lambda: ["lopdev"])
         entries = app._palette_entries()
-        assert any(e.slash == "/agent coder" for e in entries)
-        assert any(e.slash == "/team lopdev" for e in entries)
+        assert any(e.slash == "/agent =coder" for e in entries)
+        assert any(e.slash == "/team =lopdev" for e in entries)
         assert any(e.slash == "/help" for e in entries)
         assert any(e.section == "model" for e in entries)
 
@@ -222,6 +269,145 @@ class TestWidget:
             await pilot.press("enter")
             await pilot.pause()
             assert calls == ["/help"]
+
+    @pytest.mark.asyncio
+    async def test_bracketed_names_are_literal_text_not_markup(
+        self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Session titles are user data; `[WIP]` must not vanish or raise.
+
+        A bare string reaches the framework's `Content.from_markup`, where
+        `fix [/] thing` raises MarkupError inside the gather worker and `[WIP]`
+        renders as a style tag. The discovery hits carry `Text` for exactly
+        this.
+        """
+        monkeypatch.setattr(
+            app,
+            "_palette_entries",
+            lambda session_rows=None: [
+                PaletteEntry(
+                    kind=KIND_SESSION,
+                    label="fix [/] thing",
+                    slash="/resume aaaa1111",
+                ),
+                PaletteEntry(
+                    kind=KIND_SESSION,
+                    label="[WIP] topic",
+                    slash="/resume bbbb2222",
+                ),
+            ],
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            labels = [
+                str(option.prompt).split("\n", 1)[0]
+                for option in app.screen.query_one(CommandList).options
+            ]
+            assert "fix [/] thing" in labels, labels
+            assert "[WIP] topic" in labels, labels
+            await pilot.press(*"fix")
+            await pilot.pause()
+            assert palette_is_open(app), "a bracketed name must not kill the gather worker"
+
+    @pytest.mark.asyncio
+    async def test_the_session_scan_runs_off_the_event_loop(
+        self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The uncapped store scan is seconds cold; it must not freeze the frame."""
+        main_thread = threading.get_ident()
+        seen: list[int] = []
+
+        def _rows() -> list[Any]:
+            seen.append(threading.get_ident())
+            return []
+
+        monkeypatch.setattr(app, "_palette_session_rows", _rows)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            assert seen, "the palette must scan the session store to list conversations"
+            assert (
+                seen[0] != main_thread
+            ), "recent_session_rows ran on the event loop; the provider must offload it"
+
+    @pytest.mark.asyncio
+    async def test_a_slow_session_scan_does_not_hold_the_palette_shut(
+        self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The palette is usable while the store scan is still running.
+
+        This is the failure the thread offload exists to prevent: the scan is
+        uncapped and cold it costs seconds, so a synchronous call would leave
+        `ctrl+p` painting nothing until the walk finished.
+        """
+        started = threading.Event()
+        release = threading.Event()
+
+        def _rows() -> list[Any]:
+            started.set()
+            release.wait(5.0)
+            return []
+
+        monkeypatch.setattr(app, "_palette_session_rows", _rows)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            await pilot.press("ctrl+p")
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert started.is_set(), "the provider never started its scan"
+            assert palette_is_open(app), "the frame is blocked on the session scan"
+            release.set()
+            await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_a_reserved_agent_name_is_dispatched_literally(self, app: OperatorApp) -> None:
+        """`/agent =chart` attaches a profile named chart and sends no prompt."""
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            session = app._session
+            assert isinstance(session, FakeSession)
+            await app._run_palette_entry(
+                PaletteEntry(
+                    kind=KIND_AGENT,
+                    label="chart",
+                    slash="/agent =chart",
+                )
+            )
+            await pilot.pause()
+            assert session.prompts == [], "attaching an agent must not send a model turn"
+
+    @pytest.mark.asyncio
+    async def test_a_slash_hit_leaves_the_settings_page_before_dispatching(
+        self, app: OperatorApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A receipt painted into a hidden transcript is not a result.
+
+        The settings page hides the transcript (`display = False`), so a slash
+        command dispatched over it would report into a surface nobody can see
+        while the page keeps the frame. The palette must leave the mode first —
+        the same route Esc takes.
+        """
+        calls: list[str] = []
+        monkeypatch.setattr(app, "_run_slash_command", lambda text: calls.append(text))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            app._open_settings_view()
+            await pilot.pause()
+            assert app._settings_view is not None
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            await pilot.press(*"/help")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert calls == ["/help"]
+            assert app._settings_view is None, "the settings page must not stay over the receipt"
+            assert app._transcript_view().display is True
 
     @pytest.mark.asyncio
     async def test_discovery_keeps_the_framework_actions_then_the_app_catalogue(
