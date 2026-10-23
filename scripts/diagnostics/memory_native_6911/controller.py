@@ -21,7 +21,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from checker import MODES, check_all, check_case, negative_controls
+from checker import MODES, check_all, check_case, negative_controls, own_process, settled_for_cleanup
 
 PINNED = {"local_operator/memory.py": "a11dbc59357fb103a79c38086fa68e18bcced685",
           "local_operator/memory_capture.py": "86f5072abf06e8ec4d6d4acd8d10982d68782b3c"}
@@ -37,7 +37,10 @@ def sha(path):
 
 
 def identity(root, head):
-    result = {"head": head}
+    result = {"head": head, "runtime": {
+        "executable": str(Path(sys.executable).resolve()),
+        "executable_sha256": sha(sys.executable),
+    }}
     for rel, expected in PINNED.items():
         data = (root / rel).read_bytes()
         blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
@@ -75,10 +78,10 @@ def proc(pid):
 
 def files(paths):
     rows = []
-    for path in paths:
+    for store_key, path in paths.items():
         for suffix in ("", "-wal", "-shm"):
             item = Path(str(path) + suffix)
-            row = {"basename": item.name, "exists": False}
+            row = {"store_key": store_key, "basename": item.name, "exists": False}
             try:
                 stat = item.lstat()
                 row.update(exists=True, device=stat.st_dev, inode=stat.st_ino,
@@ -94,6 +97,10 @@ def child(args):
     root = Path(args.source_root).resolve()
     work = Path(args.work)
     source = identity(root, args.head)
+    if (source["runtime"]["executable"] != args.expected_exe or
+            source["runtime"]["executable_sha256"] != args.expected_exe_hash or
+            sys.version_info[:3] != (3, 12, 15)):
+        raise ValueError("unexpected child executable or Python target")
     lock = threading.Lock()
     count = size = 0
 
@@ -118,15 +125,16 @@ def child(args):
              pgid=os.getpgrp(), executable=str(Path(sys.executable).resolve()),
              executable_sha256=sha(sys.executable), python=sys.version,
              platform=platform.platform(), arch=platform.machine(), dependencies=versions,
+             python_info=list(sys.version_info[:3]),
              ImageOS=args.image_os, ImageVersion=args.image_version,
              image_equivalence="UNKNOWN: family pinned, exact image version may differ",
              statvfs_bavail=stat.f_bavail, statvfs_frsize=stat.f_frsize,
-             telemetry=proc(os.getpid()), core_limit=0)
+             telemetry=proc(os.getpid()), core_limit=resource.getrlimit(resource.RLIMIT_CORE)[0])
         sys.path.insert(0, str(root))
         from local_operator.memory import MemoryIdentity, MemoryStore
         import local_operator.memory as memory
         import local_operator.memory_capture as capture
-        loaded = {"head": args.head}
+        loaded = {"head": args.head, "runtime": source["runtime"]}
         for rel, module in (("local_operator/memory.py", memory),
                             ("local_operator/memory_capture.py", capture)):
             path = Path(module.__file__).resolve()
@@ -151,7 +159,7 @@ def child(args):
         metadata_db = sqlite3.connect(":memory:")
         try:
             options = [r[0] for r in metadata_db.execute("PRAGMA compile_options")]
-            if len(options) > 128:
+            if not options or len(options) > 128:
                 raise ValueError("compile options bound")
         finally:
             metadata_db.close()
@@ -169,7 +177,8 @@ def child(args):
                                              else "shared"),
                               identity=MemoryIdentity(session_id="native-probe"),
                               session_dir=None, origin="d_probe") for i in range(workers)]
-        paths = sorted(set(store.path for store in stores))
+        paths = {(f"slot-{i}" if args.mode == "separate-db" else "shared"): store.path
+                 for i, store in enumerate(stores)}
         emit("before_workers", loaded_source=loaded, telemetry=proc(os.getpid()),
              synthetic_files=files(paths))
 
@@ -212,69 +221,79 @@ def control(args):
     root = Path(args.source_root).resolve()
     expected = identity(root, args.head)
     rows = []
-    tmp = None
+    tmp = tempfile.mkdtemp(prefix="native-6911-", dir=args.temp_root)
+    active = None
     try:
-        with tempfile.TemporaryDirectory(prefix="native-6911-", dir=args.temp_root) as tmp:
-            for mode in MODES:
-                work = Path(tmp) / mode
-                work.mkdir()
-                env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "LD_LIBRARY_PATH")
-                       if k in os.environ}
-                env.update(HOME=str(work), XDG_CONFIG_HOME=str(work / "config"),
-                           XDG_CACHE_HOME=str(work / "cache"),
-                           LOCAL_OPERATOR_CONFIG_DIR=str(work / "config"),
-                           PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
-                command = [sys.executable, "-B", str(Path(__file__).resolve()),
-                           "--child", "--mode", mode, "--work", str(work),
-                           "--source-root", str(root), "--head", args.head,
-                           "--image-os", args.image_os, "--image-version", args.image_version]
-                # No start_new_session: child MUST inherit bounded wrapper's PGID.
-                with open(work / "stdout", "wb") as stdout, open(work / "stderr", "wb") as stderr:
-                    process = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr)
-                    row = dict(mode=mode, child_pid=process.pid, child_pgid=os.getpgid(process.pid),
-                               controller_pid=os.getpid(), controller_pgid=os.getpgrp(),
-                               timed_out=False, reaped=False, events=[],
-                               native_fault_address="UNKNOWN", bus_subcode="UNKNOWN",
-                               child_wait_code="UNKNOWN: Popen.wait does not expose waitid code")
+        for mode in MODES:
+            work = Path(tmp) / mode
+            work.mkdir()
+            env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "LD_LIBRARY_PATH")
+                   if k in os.environ}
+            env.update(HOME=str(work), XDG_CONFIG_HOME=str(work / "config"),
+                       XDG_CACHE_HOME=str(work / "cache"),
+                       LOCAL_OPERATOR_CONFIG_DIR=str(work / "config"),
+                       PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
+            command = [sys.executable, "-B", str(Path(__file__).resolve()),
+                       "--child", "--mode", mode, "--work", str(work),
+                       "--source-root", str(root), "--head", args.head,
+                       "--image-os", args.image_os, "--image-version", args.image_version,
+                       "--expected-exe", expected["runtime"]["executable"],
+                       "--expected-exe-hash", expected["runtime"]["executable_sha256"]]
+            # No start_new_session: child MUST inherit bounded wrapper's PGID.
+            with open(work / "stdout", "wb") as stdout, open(work / "stderr", "wb") as stderr:
+                # Assignment is inside the lifetime try: any subsequent failure
+                # leaves active non-None, preventing deletion of a live DB root.
+                active = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr)
+                def bounded_wait(seconds):
                     try:
-                        try:
-                            process.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            row["timed_out"] = True
-                            row["final_live_snapshot"] = proc(process.pid)
-                    finally:
-                        if process.poll() is None:
-                            process.kill()
-                        process.wait(timeout=5)
-                        row.update(rc=process.returncode, reaped=True)
-                with (work / "stdout").open("rb") as stream:
-                    data = stream.read(131073)
-                if len(data) > 131072:
-                    raise ValueError("child output overflow")
-                try:
-                    row["events"] = [json.loads(line) for line in data.splitlines()]
-                except (ValueError, UnicodeError) as exc:
-                    row["receipt_parse_error"] = type(exc).__name__
-                with (work / "stderr").open("rb") as stream:
-                    error = stream.read(4096)
-                try:
-                    row["exception_summary"] = json.loads(error) if error else None
-                except (ValueError, UnicodeError):
-                    row["exception_summary"] = "UNKNOWN: non-protocol stderr (not uploaded)"
-                row["signal"] = -row["rc"] if row["rc"] < 0 else None
-                fatal = work / "fatal.raw"
-                row["dump_bytes"] = fatal.stat().st_size if fatal.exists() else None
-                if fatal.exists():
-                    with fatal.open("rb") as stream:
-                        (out / f"{mode}-fatal.txt").write_bytes(stream.read(32768))
-                row["stderr_bytes"] = (work / "stderr").stat().st_size
-                rows.append(row)
-                (out / "receipts.json").write_text(json.dumps(rows, indent=2))
-                check_case(row, expected)  # A setup/fault/missing receipt stops later cases.
-            result = check_all(rows, expected)
+                        return active.wait(timeout=seconds)
+                    except subprocess.TimeoutExpired as exc:
+                        raise TimeoutError("child wait bound") from exc
+                row = own_process(active, os.getpgid, bounded_wait, proc)
+                row.update(mode=mode, controller_pid=os.getpid(), controller_pgid=os.getpgrp(),
+                           events=[], native_fault_address="UNKNOWN", bus_subcode="UNKNOWN",
+                           child_wait_code="UNKNOWN: Popen.wait does not expose waitid code")
+                if settled_for_cleanup(row):
+                    active = None
+                else:
+                    rows.append(row)
+                    (out / "receipts.json").write_text(json.dumps(rows, indent=2))
+                    raise RuntimeError("child unsettled; synthetic root retained")
+            with (work / "stdout").open("rb") as stream:
+                data = stream.read(131073)
+            if len(data) > 131072:
+                raise ValueError("child output overflow")
+            try:
+                row["events"] = [json.loads(line) for line in data.splitlines()]
+            except (ValueError, UnicodeError) as exc:
+                row["receipt_parse_error"] = type(exc).__name__
+            with (work / "stderr").open("rb") as stream:
+                error = stream.read(4096)
+            try:
+                row["exception_summary"] = json.loads(error) if error else None
+            except (ValueError, UnicodeError):
+                row["exception_summary"] = "UNKNOWN: non-protocol stderr (not uploaded)"
+            row["signal"] = -row["rc"] if isinstance(row["rc"], int) and row["rc"] < 0 else None
+            fatal = work / "fatal.raw"
+            row["dump_bytes"] = fatal.stat().st_size if fatal.exists() else None
+            if fatal.exists():
+                with fatal.open("rb") as stream:
+                    (out / f"{mode}-fatal.txt").write_bytes(stream.read(32768))
+            row["stderr_bytes"] = (work / "stderr").stat().st_size
+            rows.append(row)
+            (out / "receipts.json").write_text(json.dumps(rows, indent=2))
+            check_case(row, expected)  # A setup/fault/missing receipt stops later cases.
+        result = check_all(rows, expected)
     finally:
+        all_settled = active is None and all(settled_for_cleanup(row) for row in rows)
+        if all_settled:
+            # No TemporaryDirectory finalizer: failed final wait must retain DBs
+            # until the outer wrapper physically terminates the inherited group.
+            import shutil
+            shutil.rmtree(tmp)
         (out / "cleanup.json").write_text(json.dumps({
-            "synthetic_root_removed": tmp is not None and not Path(tmp).exists(),
+            "all_children_settled": all_settled,
+            "synthetic_root_removed": not Path(tmp).exists(),
             "reaped_cases": [r["mode"] for r in rows if r.get("reaped")],
             "no_success_inferred_from_cleanup": True,
         }))
@@ -290,6 +309,8 @@ def main():
     parser.add_argument("--temp-root")
     parser.add_argument("--image-os", default="UNKNOWN")
     parser.add_argument("--image-version", default="UNKNOWN")
+    parser.add_argument("--expected-exe")
+    parser.add_argument("--expected-exe-hash")
     parser.add_argument("--child", action="store_true")
     parser.add_argument("--mode", choices=MODES)
     parser.add_argument("--work")
