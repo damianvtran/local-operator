@@ -380,6 +380,13 @@ def record_config_key_inventory(config_dir: Path, removed: "Sequence[Sequence[st
             if keys:
                 _write_key_inventory(inventory_path, keys)
         return
+    # Flattened to DOTTED strings, which is the inventory's own format
+    # (``keys: ["retry.maxRetries", …]``). A nested drop can therefore also subtract
+    # a literal dotted row of the same spelling: ``("keymap", "quick_send")`` and a
+    # top-level ``keymap.quick_send`` are one string here. Documented format
+    # limitation, not a live defect — no writer declares a nested drop whose
+    # flattened form collides with a flat-dotted key it is not retiring, and
+    # disambiguating would change the documented `keys` shape.
     declared = [".".join(str(part) for part in path) for path in removed]
     remaining = [
         key
