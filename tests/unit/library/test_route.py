@@ -291,3 +291,56 @@ async def test_scope_final_narrows_the_route_listing(api) -> None:
     refused = await client.get("/v1/desktop/library/assets", params={"scope": "nope"})
     assert refused.status_code == 422
     assert refused.json()["detail"]["code"] == "library_bad_filter"
+
+
+async def test_a_corrupt_index_recovers_and_answers_a_building_page(api, monkeypatch) -> None:
+    """ "Derived" must mean "rebuildable at runtime", not only in a docstring."""
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    client, root = api
+    seed(root)
+    original = LibraryStore.query_page
+
+    def once(self, *args, **kwargs):
+        if not getattr(self, "_raised", False):
+            self._raised = True
+            raise IndexUnavailable("file is not a database")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(LibraryStore, "query_page", once)
+    response = await client.get("/v1/desktop/library/assets")
+    assert response.status_code == 200, response.text
+    page = response.json()["result"]
+    assert page["state"] == "building" and page["rows"] == []
+
+
+async def test_a_corrupt_index_that_cannot_recover_is_a_503(api, monkeypatch) -> None:
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    client, root = api
+    seed(root)
+
+    def boom(self, *args, **kwargs):
+        raise IndexUnavailable("file is not a database")
+
+    monkeypatch.setattr(LibraryStore, "query_page", boom)
+    monkeypatch.setattr(LibraryStore, "asset", boom)
+    monkeypatch.setattr(LibraryStore, "recover_derived", lambda self: False)
+
+    listed = await client.get("/v1/desktop/library/assets")
+    assert listed.status_code == 503, listed.text
+    assert listed.json()["detail"]["code"] == "library_metadata_unavailable"
+
+    detail = await client.get("/v1/desktop/library/assets/la_0123456789abcdef")
+    assert detail.status_code == 503, detail.text
+
+
+async def test_an_unknown_tag_id_is_not_a_name_grammar_error(api) -> None:
+    """An id the caller copied is a missing resource, not a malformed name."""
+    client, root = api
+    text_id, _image_id, _digest = seed(root)
+    response = await client.put(
+        f"/v1/desktop/library/assets/{text_id}/tags", json={"tags": ["deadbeef01"]}
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["code"] == "library_tag_unknown"

@@ -116,11 +116,15 @@ dependencies = [
     # ReadDirectoryChangesW (Windows) each need their own binding, and a
     # hand-rolled ctypes FSEvents shim was measured NOT delivering events on the
     # macOS host this ships to while watchdog 6.0.0 did — so this is a real
-    # dependency, not a convenience. It ships a compiled extension on macOS
-    # (``_watchdog_fsevents``) and falls back to ctypes/inotify on Linux; the
-    # wheels exist for every platform this ships to, and it declares no
-    # mandatory dependency (its only extra, ``watchmedo``, wants PyYAML, which
-    # is already in this list).
+    # dependency, not a convenience.
+    #
+    # INSTALL CAVEAT, measured on 2026-10-22: watchdog 6.0.0 publishes macOS
+    # wheels for cp39-cp313 only, so CPython 3.14 (the operator's runtime) builds
+    # the sdist and its ``_watchdog_fsevents`` C extension. That build works
+    # here (2.5 s with the Xcode toolchain) but a compiler-less 3.14 host cannot
+    # install it. ``indexer.py`` therefore treats the observer as optional: if
+    # the extension cannot import, it falls back to the timed reconcile, so the
+    # cost of a failed watch is a slower refresh, never a broken install path.
     "watchdog>=6.0.0",
 ]
 requires-python = ">=3.12"

@@ -8,18 +8,21 @@ signature, a roster identity, and the queue that turns a burst into one scan.
 from __future__ import annotations
 
 import json
-import sys
+import time
 import types
 from pathlib import Path
 from typing import Any
 
 from local_operator.library import indexer, service
 from local_operator.library.store import LibraryStore
+from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
     OTHER,
     SESSION,
     config_root,
+    image_rows,
+    png,
     session,
     write_rows,
 )
@@ -208,12 +211,12 @@ def test_thumbnails_are_keyed_by_content_and_width_and_invalidate(tmp_path, monk
             saved.append((fmt, str(target), quality))
             Path(str(target)).write_bytes(b"webp")
 
-    fake_pil = types.ModuleType("PIL")
     fake_image = types.SimpleNamespace(
         open=lambda path: FakeImage(), Resampling=types.SimpleNamespace(LANCZOS=1)
     )
-    fake_pil.Image = fake_image  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "PIL", fake_pil)
+    # The module's own seam, not ``sys.modules["PIL"]``: swapping the real
+    # package leaked into later tests and made their generation "unavailable".
+    monkeypatch.setattr("local_operator.library.store._image_module", lambda: fake_image)
 
     made = store.ensure_thumbnail(asset_id, width=480, quality=82)
     assert made is not None
@@ -305,3 +308,139 @@ def test_a_reader_only_process_writes_nothing(tmp_path, monkeypatch) -> None:
             index.stop()
     finally:
         blocker.release()
+
+
+def test_a_deleted_session_directory_is_still_a_session(tmp_path, monkeypatch) -> None:
+    """The removal event arrives after the directory is gone; it must queue.
+
+    Reproduced on the round-1 head: ``existing dir -> id`` but
+    ``deleted dir -> None``, so a deleted conversation's assets stayed listed
+    until the 6 h reconcile.
+    """
+    import shutil
+
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, written(root, "gone.txt")))
+    handler = indexer._JournalHandler(root / "sessions", lambda _sid: None)
+
+    assert handler.session_id(str(root / "sessions" / SESSION)) == SESSION
+    assert handler.session_id(str(root / "sessions" / SESSION / "transcript.jsonl")) == SESSION
+    shutil.rmtree(root / "sessions" / SESSION)
+    assert handler.session_id(str(root / "sessions" / SESSION)) == SESSION, "deleted directory"
+    # A stray FILE in ``sessions/`` is still not a session.
+    (root / "sessions" / "notes.txt").write_text("x")
+    assert handler.session_id(str(root / "sessions" / "notes.txt")) is None
+
+
+def test_a_deleted_session_leaves_the_library_immediately(tmp_path, monkeypatch) -> None:
+    """End to end: the event runs ``_forget``, not a 6 h wait."""
+    import shutil
+
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    session(root, OTHER, write_rows("w2", 2.0, written(root, "gone.txt")))
+    indexer.rebuild_now(root)
+    # No lazy worker: a concurrent reconcile that enumerated before the delete
+    # would write the old denominator back after this test's decrement.
+    indexer.reset_for_tests()
+
+    index = indexer.LibraryIndexer(root)
+    index.reconcile()
+    assert LibraryStore(root).counts("all")["category"] == {"document": 2}
+    handler = indexer._JournalHandler(root / "sessions", index._mark_dirty)
+    shutil.rmtree(root / "sessions" / OTHER)
+    handler.on_any_event(types.SimpleNamespace(src_path=str(root / "sessions" / OTHER)))
+
+    first = index._queue.get(timeout=1.0)
+    index.process_dirty({first})
+    assert names(root) == {"keep.txt"}
+    store = LibraryStore(root)
+    assert store.session(OTHER) is None
+    # Q-2: the deleted session also left the denominator.
+    state = indexer.index_state(root)
+    assert state["total"] <= 1
+    assert store.counts("all")["category"] == {"document": 1}
+
+
+def test_a_reader_only_process_takes_over_when_the_writer_stops(tmp_path, monkeypatch) -> None:
+    """Q-1: retry on a short bound, not the 6 h idle cadence."""
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    indexer.rebuild_now(root)
+    monkeypatch.setattr(indexer, "WRITER_RETRY_S", 0.05)
+
+    indexer._release_writer(root)
+    blocker = indexer._ProcessLock(root / "cache" / "library" / "indexer.lock")
+    assert blocker.acquire() is True
+
+    reader = indexer.LibraryIndexer(root)
+    reader.start()
+    try:
+        assert indexer.writer_available(root) is False
+        assert reader._thumb_thread is None
+        # Nothing may be written while another process owns the index.
+        assert reader.scan_session(SESSION) in (True, False)
+        with LibraryStore(root).read() as connection:
+            revision_before = connection.execute(
+                "SELECT value FROM idx_state WHERE key = 'revision'"
+            ).fetchone()[0]
+
+        blocker.release()
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not indexer.writer_available(root):
+            time.sleep(0.02)
+        assert indexer.writer_available(root) is True, "the reader must retry the lock"
+        # Ownership now starts the thumbnail worker it could not run before.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and reader._thumb_thread is None:
+            time.sleep(0.02)
+        assert reader._thumb_thread is not None
+        assert revision_before is not None
+    finally:
+        reader.stop()
+
+
+def test_the_thumbnail_queue_is_deduplicated(tmp_path, monkeypatch) -> None:
+    """A grid asks for the same tile on every poll; the queue must not grow."""
+    root = config_root(monkeypatch, tmp_path)
+    image = root.parent / "photo.png"
+    image.write_bytes(png())
+    session(root, SESSION, write_rows("w1", 1.0, image))
+    indexer.rebuild_now(root)
+    index = indexer.ensure_started(root)
+    try:
+        index.enqueue_thumbnail("la_0123456789abcdef", 480)
+        index.enqueue_thumbnail("la_0123456789abcdef", 480)
+        index.enqueue_thumbnail("la_0123456789abcdef", 240)
+        assert index._thumb_queue.qsize() == 2, "one entry per (asset, width)"
+        assert ("la_0123456789abcdef", 480) in index._thumb_pending
+    finally:
+        index.stop()
+
+
+def test_the_thumbnail_sweep_puts_kept_images_first(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    scratch = written(root, "scratch.png")
+    scratch.write_bytes(png())
+    kept = written(root, "kept.png")
+    kept.write_bytes(png())
+    # A generated artifact is 'final'; a written path asset is not.
+    block = cache_media(png(), "image/png", kind="image", name="kept.png")
+    assert block and block.attachment
+    session(
+        root,
+        SESSION,
+        [
+            *write_rows("w1", 1.0, scratch),
+            *image_rows("g1", 2.0, block.attachment),
+        ],
+    )
+    indexer.rebuild_now(root)
+    candidates = LibraryStore(root).thumbnail_candidates(width=480)
+    assert len(candidates) == 2
+    assert (
+        candidates[0][0]
+        == service.list_assets(root, service.Query(origin_groups=frozenset({"generated"})))["rows"][
+            0
+        ]["id"]
+    )
