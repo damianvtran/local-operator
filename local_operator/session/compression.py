@@ -894,13 +894,22 @@ def _materialise(directory: Path, archive: Path, codec: str) -> Path | None:
     return plain
 
 
-def transcript_for_read(directory: Path) -> Path | None:
+def transcript_for_read(directory: Path, *, read_only: bool = False) -> Path | None:
     """A real file path holding this session's transcript, or ``None``.
 
     THE resolver for callers that need a seekable file — page readers, forks,
     anything that reopens by offset. Plain file when it exists; otherwise the
     archive is materialised into the bounded cache and that path is returned.
     ``None`` only when the session has neither form.
+
+    ``read_only`` REFUSES THE IN-PLACE RESTORE. The last-resort fallback below
+    (``restore_for_write``) publishes the plain file back into the session
+    directory for good, and it does so WITHOUT the writer lock — which is right
+    for a caller that screens "this conversation is about to be written", and
+    wrong for a pure reader: a phone opening one image would re-inflate the
+    transcript the pass just compressed, on exactly the low-disk device the
+    cache exists for. A read-only caller gets the cache copy or the typed
+    error.
 
     Raises :class:`ArchiveError` when an archive exists but cannot be decoded
     (including the cross-version zstd case). A caller that only needs "does this
@@ -929,6 +938,11 @@ def transcript_for_read(directory: Path) -> Path | None:
     materialised = _materialise(directory, archive, codec)
     if materialised is not None:
         return materialised
+    if read_only:
+        # Decoding works (the reader above opened it); the COPY could not be
+        # made. Naming space rather than damage keeps a full disk from
+        # masquerading as a broken archive in a support triage.
+        raise ArchiveCorrupt(f"{archive.name}: not enough space to make a temporary plain copy")
     if restore_for_write(directory):
         return plain
     raise ArchiveCorrupt(f"{archive.name}: could not be decoded into a readable copy")
@@ -1440,8 +1454,8 @@ def _after_archive(directory: Path, archive: Path, codec: str) -> None:
         pass
 
 
-def _listing_payload(directory: Path) -> dict[str, str]:
-    """The two listing fields the sidecar carries, from the PLAIN tail.
+def _listing_payload(directory: Path) -> dict[str, Any]:
+    """The listing fields the sidecar carries, from the PLAIN tail.
 
     Called while the session is still plain (a seek of at most
     :data:`PREVIEW_TAIL_BYTES`), so the cost is the same bounded read a listing
@@ -1464,12 +1478,21 @@ def _listing_payload(directory: Path) -> dict[str, str]:
     return listing_preview_from_tail(window, truncated=truncated)
 
 
-def _write_preview_sidecar(directory: Path, listing: dict[str, str]) -> None:
-    """Write ``preview.json`` atomically. Advisory: a failure costs a slow row."""
+def _write_preview_sidecar(directory: Path, listing: dict[str, Any]) -> None:
+    """Write ``preview.json`` atomically. Advisory: a failure costs a slow row.
+
+    ``max_chars`` is stored beside the text because it is the CEILING the text
+    was cut at: a reader asking for more has to know it cannot be served from
+    here and read the tail instead (``resume._from_listing_sidecar``). A
+    ``0`` — the field missing from a degraded payload — reads as "cap unknown",
+    which also falls back. Neither case is current; both are cheap insurance
+    against a future caller whose ``max_chars`` is larger than today's 200.
+    """
     payload = {
         "schema": PREVIEW_SIDECAR_SCHEMA,
         "preview": listing.get("preview", ""),
         "failure": listing.get("failure", ""),
+        "max_chars": listing.get("max_chars", 0),
         "at": time.time(),
     }
     if _write_json_atomic(directory / PREVIEW_SIDECAR_NAME, payload):
@@ -1738,6 +1761,31 @@ def _compress_session_locked(directory: Path, codec: str, started: float) -> Out
         _unlink_file(archive)
         return done("failed", "cannot quarantine the source")
     quarantined = _stat_sig(quarantine)
+    if quarantined is None:
+        # THE QUARANTINE VANISHED UNDER US. A reader on a low-disk device can do
+        # it: ``restore_for_write`` renames the parked file straight back to the
+        # plain name and never takes this pass's lock. Nothing here can prove
+        # the parked inode is the one that was verified, so which way to go is
+        # decided by what SURVIVED:
+        if _stat_sig(source) is not None:
+            # The restore published the plain file, which is authoritative and
+            # supersedes the archive this pass made from the same bytes (it
+            # normally removed it already). Report a skip rather than success
+            # with no archive on disk, and leave the search index alone: there
+            # is no archived copy to key.
+            _unlink_file(archive)
+            _fsync_dir(directory)
+            return done("skipped", "the transcript was restored while it was being compressed")
+        # No plain file either: something else removed the quarantine, and the
+        # archive published above is the ONLY copy of the conversation. It is a
+        # verified decode of the bytes stat'ed before the rename, so keep it and
+        # finish the pass — withdrawing it here would lose the transcript, which
+        # is the failure this whole protocol exists to prevent.
+        logger.error(
+            "transcript compression: %s lost its quarantine with no plain "
+            "transcript; keeping the archive as the surviving copy",
+            directory.name,
+        )
     if quarantined is not None and quarantined != sig0:
         # An append landed after the publish — the documented writer that timed
         # out on the lock. Put the plain file back (the appended rows are in

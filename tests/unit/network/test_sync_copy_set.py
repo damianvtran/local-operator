@@ -316,9 +316,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``COMPRESSION_LOG_NAME`` ('.compression-log.jsonl') and "
         "``LAST_COMPRESSION_NAME`` ('last-compression.json') are the pass's ledger and "
         "its last-run record, both written at the ``sessions/`` ROOT, not inside a "
-        "session directory, so neither is a copy-set entry. The module's third "
-        "path-shaped name, ``LOCK_NAME``, IS a session entry and is classified in "
-        "``sync.EXCLUDED_ENTRIES`` with the reason it must not travel",
+        "session directory, so neither is a copy-set entry. The module's other two "
+        "path-shaped names ARE session entries and are classified in "
+        "``sync.EXCLUDED_ENTRIES``: ``LOCK_NAME`` (the per-device writer lock) and "
+        "``PREVIEW_SIDECAR_NAME`` ('preview.json', the listing cache derived from "
+        "the archive's tail, which the destination rewrites)",
     ),
     "local_operator/team_bridge/connector/lock.py": (
         1,

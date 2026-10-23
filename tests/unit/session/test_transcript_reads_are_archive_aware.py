@@ -21,13 +21,19 @@ byte probes; the repair is ``compression.has_transcript`` for existence and
 ``iter_lines`` for bytes. A literal in a USER-FACING MESSAGE is not a probe and
 is not flagged (no method call on it).
 
-WHAT IS NOT. Writes and creates (``open("wb")``, ``mkdir``), a path handed to
+WHAT IS NOT. ``mkdir``, ``write_bytes``, ``write_text`` and a path handed to
 another module that resolves it itself, and ``compression.py`` itself, which
 DEFINES the name. Those keep the plain name on purpose; every other surviving
 site is in :data:`_ALLOWED` with the one line that says why a compressed
 session is not what it holds. The list is keyed ``path::function`` and the
 reason is checked by a human, which is the point — a silent surface is how the
 twenty probes stage C fixed came to exist.
+
+A CREATION OPEN IS FLAGGED. ``open("wb")``/``.open("w")`` is reported like any
+other probe and excused on the allow-list, not exempted here: the mode is an
+argument among others, a guard that reads them is the brittleness this one
+exists to avoid, and "this open only creates" is exactly the kind of claim a
+human should have to make in writing (``fork.py::fork_session`` does).
 """
 
 from __future__ import annotations

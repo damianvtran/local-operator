@@ -308,3 +308,76 @@ def test_the_pass_recovers_a_quarantine_before_skipping_the_session(tmp_path: Pa
     # The recovery happened BEFORE the eligibility decision, so this session went
     # on to be compressed normally rather than skipped as "already compressed".
     assert result.compressed or "already compressed" not in result.skipped_by_reason
+
+
+# ---------------------------------------------------------------------------
+# Round 2 m2 — a quarantine that vanishes under the pass
+# ---------------------------------------------------------------------------
+
+
+def test_a_restore_inside_the_quarantine_window_skips_the_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE REPRO (review m2): ``restore_for_write`` while the plain file is parked.
+
+    A reader on a low-disk device restores the transcript from the archive
+    inside the window. The quarantine is then gone, so the pass can no longer
+    prove the archived bytes are the source's — and it used to report
+    ``compressed`` with no archive on disk, after re-keying the search index for
+    a file that was not there. "Cannot prove unchanged" is a skip.
+    """
+    directory = _session(_store(tmp_path), "race09")
+    real_publish = compression._publish
+    restores: list[bool] = []
+
+    def publishing_with_a_restore(tmp: Path, destination: Path) -> None:
+        real_publish(tmp, destination)
+        if Path(destination).name == compression.QUARANTINE_NAME:
+            restores.append(compression.restore_for_write(directory))
+
+    indexed: list[str] = []
+    monkeypatch.setattr(compression, "_publish", publishing_with_a_restore)
+    monkeypatch.setattr(compression, "_after_archive", lambda *args: indexed.append(str(args[1])))
+
+    outcome = compression.compress_session(directory)
+
+    assert restores == [True], restores
+    assert outcome.status == "skipped", outcome
+    assert "restored" in outcome.reason, outcome
+    # No archive, no listing sidecar, and no search-index entry for a file that
+    # no longer exists.
+    assert compression.archive_path(directory) is None
+    assert not (directory / compression.PREVIEW_SIDECAR_NAME).exists()
+    assert indexed == []
+    # The conversation is intact: a restore is a rename, not a rewrite.
+    plain = directory / compression.PLAIN_FILENAME
+    ids = [json.loads(line)["id"] for line in plain.read_bytes().splitlines()]
+    assert ids == [row["id"] for row in _rows()]
+
+
+def test_a_deleted_quarantine_with_no_plain_file_keeps_the_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other vanish: nothing survives but the archive, so it must stay.
+
+    The branch above withdraws the archive because the restore put the plain
+    file back. A quarantine removed by something else leaves NO copy, and the
+    archive is the verified one — withdrawing it would delete the conversation.
+    """
+    directory = _session(_store(tmp_path), "race10")
+    real_publish = compression._publish
+
+    def publishing_then_dropping_the_quarantine(tmp: Path, destination: Path) -> None:
+        real_publish(tmp, destination)
+        if Path(destination).name == compression.QUARANTINE_NAME:
+            os.unlink(destination)
+
+    monkeypatch.setattr(compression, "_publish", publishing_then_dropping_the_quarantine)
+
+    outcome = compression.compress_session(directory)
+
+    assert outcome.status == "compressed", outcome
+    archive = compression.archive_path(directory)
+    assert archive is not None and archive.is_file()
+    rows = list(compression.iter_lines(directory))
+    assert [json.loads(line)["id"] for line in rows] == [row["id"] for row in _rows()]
