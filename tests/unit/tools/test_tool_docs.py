@@ -397,7 +397,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
     "send": 779,
     # Spawn's tags field/description deliberately adds 21 reference tokens.
-    "sessions": 819,
+    # RE-MEASURED 2026-10-23 (session self-identity): the description gains one
+    # sentence pointing at the listing's `(this session)` marker, so the doc
+    # moves 819 -> 840. That sentence is the ONLY thing that moved; every other
+    # count above is byte-identical, re-measured through this test's own
+    # printed table rather than pasted.
+    "sessions": 840,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the

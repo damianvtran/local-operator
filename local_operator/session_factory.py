@@ -1184,8 +1184,11 @@ def _env_details(cwd: str | None = None, session_id: str = "") -> str:
     every rename — both reprice the cached prompt for something the model does
     not need to act on. The id is stable; the name is not.
 
-    Empty ``session_id`` renders the original three lines, which is what the
-    benchmark/preflight callers (no session directory) get."""
+    Empty ``session_id`` renders the original three-line shape, which is what a
+    caller with no transcript directory to name gets. The benchmark harness is
+    NOT such a caller: ``scripts/bench_context_budget.py`` hand-builds its own
+    env text rather than calling here, which is why the ratchet does not price
+    the extra line."""
     import platform
 
     text = (
@@ -3670,11 +3673,18 @@ def _make_system_blocks_provider(
 
     ``session_id`` is captured ONCE, like the two strings above and for the
     same reason: it rides the env block, so re-reading it per turn could not
-    produce a different answer anyway. A FORK does not pass its own id here:
-    it loads the parent's frozen ``system_prefix`` byte-for-byte (so the
-    parent's provider cache still hits), and the fork's own id reaches it as
-    an ordinary ``[session-state]`` environment delta instead. Forcing it into
-    the inherited prefix is exactly the rebuild this split exists to avoid.
+    produce a different answer anyway.
+
+    A FORK passes its own id here like any other session — ``_prepare`` has no
+    fork branch. What differs is the INHERITED prefix: a fork loads the
+    parent's frozen ``system_prefix`` byte-for-byte (``session/session.py``),
+    so the wire block keeps the PARENT's ``Session ID`` line (and the parent's
+    provider cache still hits), while the fork's own id reaches the same
+    request as a ``[session-state] ## Environment`` delta. That residual is
+    deliberate and pinned by ``test_a_fork_keeps_the_parent_id_in_its_prefix``:
+    until the next prefix epoch the authoritative block names the parent while
+    ``sessions`` marks the fork's own row, and the state record is the newer
+    authority — it is in context before the first model call.
     """
 
     environment = _env_details(cwd, session_id)

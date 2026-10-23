@@ -675,6 +675,36 @@ async def test_info_says_plainly_when_the_target_is_the_callers_own_session(root
 
 
 @pytest.mark.asyncio
+async def test_info_says_plainly_its_your_own_hidden_session(root: Path) -> None:
+    """QA round 1, Q1: the disk-only arm carries the self sentence too.
+
+    An ``agent-shell`` session is dropped from every listing scan at any limit,
+    so ``info`` composes its answer from disk and never reaches the row-backed
+    body where the sentence landed first. That is the shape an exec-shell agent
+    runs as — and it is the one caller with no other surface identifying it.
+    """
+    directory = _session(root, REQUESTER_ID, "hidden own session")
+    mark_session_origin(directory, ORIGIN_AGENT_SHELL)
+    own = await execute_sessions(
+        "t", {"op": "info", "session": REQUESTER_ID}, None, None, _context(root)
+    )
+    assert not own.is_error, own.text
+    assert "origin: agent-shell" in own.text, own.text
+    assert (
+        "This is YOUR session — the one you are running in. It is not a duplicate." in own.text
+    ), own.text
+
+    other_id = "feedface0002"
+    other_dir = _session(root, other_id, "hidden, not mine")
+    mark_session_origin(other_dir, ORIGIN_AGENT_SHELL)
+    other = await execute_sessions(
+        "t", {"op": "info", "session": other_id}, None, None, _context(root)
+    )
+    assert not other.is_error, other.text
+    assert "This is YOUR session" not in other.text, other.text
+
+
+@pytest.mark.asyncio
 async def test_info_describes_a_stored_hidden_session_from_disk(root: Path) -> None:
     """QA round 1, Q1: an ``agent-shell`` session is excluded from every
     listing scan at ANY limit, so ``info`` must compose from disk (marker

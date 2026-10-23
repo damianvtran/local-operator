@@ -3197,6 +3197,66 @@ async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
 
 
 @pytest.mark.asyncio
+async def test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own(
+    tmp_config_dir: Path,
+) -> None:
+    """R1-3: pin BOTH halves of the fork residual, so it stays deliberate.
+
+    ``_prepare`` has no fork branch — a fork passes its own id like any session.
+    What suppresses it is the INHERITED frozen prefix: the fork loads the
+    parent's ``system_prefix`` byte-for-byte (so the parent's provider cache
+    still hits), the wire block therefore keeps the PARENT's ``Session ID``
+    line, and the fork id reaches the same request as a ``[session-state] ##
+    Environment`` delta. Two identity surfaces disagreeing is the class this PR
+    exists to fix; this records the bound — the state record is the newer
+    authority and is in context before the first model call — and that the
+    delta is written once, not per turn.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.fork import fork_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        # FREEZE the parent's prefix in its own transcript — that is the entry
+        # the clone carries and the fork inherits.
+        await parent._prepare_system_blocks()
+        parent_id = parent._transcript.directory.name
+    finally:
+        await parent.dispose()
+
+    fork_id = await asyncio.to_thread(fork_session, Path(tmp_config_dir), parent_id)
+    fork = await create_session(
+        _args(hosting="test", model="test", yolo=True, resume=fork_id),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(fork, Session)
+    try:
+        assert fork._transcript.directory.name == fork_id
+        first = await fork._prepare_system_blocks()
+        assert f"Session ID: {parent_id}" in first[2], first[2]
+        assert f"Session ID: {fork_id}" not in first[2], first[2]
+
+        second = await fork._prepare_system_blocks()
+        assert second[2] == first[2]
+
+        rows = [row for row in _session_state_rows(fork) if fork_id in str(row.payload)]
+        assert len(rows) == 1, [str(row.payload) for row in rows]
+        changed = (rows[0].payload.get("details") or {}).get("blocks") or {}
+        # Section index 2 IS the environment block — the fork's own id, delivered
+        # as the delta rather than as a prefix rebuild.
+        assert list(changed) == ["2"], changed
+    finally:
+        await fork.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_childs_env_block_carries_its_own_session_id(tmp_config_dir: Path) -> None:
     """The child shape is a session too, and it holds the ``sessions`` tool.
 
