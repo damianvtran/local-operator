@@ -1,0 +1,193 @@
+/* `compactAX` scoping and `windowSnapshot` paging: the discovery half of the
+ * snapshot contract.
+ *
+ * WHY THESE ARE DRIVER TESTS AND NOT COMMAND TESTS. The command tests prove the
+ * host hands the driver a resolved scope; these prove what the driver does with
+ * it, against synthetic trees with the shapes real pages produce — ignored
+ * wrappers, a collapsed `<details>` whose children are absent, hundreds of
+ * sibling fields, and a landmark that must keep its children's refs.
+ *
+ * The invariant the paging tests exist for: a ref's NAME is a property of the
+ * tree, not of the page the caller is looking at. `e57` in the footer of page
+ * one must click the same element as `e57` on page three, or an agent that
+ * pages a form and then clicks is clicking blind.
+ */
+
+import assert from "node:assert/strict";
+import test from "node:test";
+import { build } from "esbuild";
+import { pathToFileURL } from "node:url";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function load(entry) {
+  const dir = await mkdtemp(join(tmpdir(), "lop-ax-window-"));
+  const outfile = join(dir, "module.mjs");
+  await build({ entryPoints: [entry], bundle: true, platform: "node", format: "esm", outfile });
+  const loaded = await import(pathToFileURL(outfile));
+  return { loaded, close: () => rm(dir, { recursive: true, force: true }) };
+}
+
+/** One synthetic tree shaped like a settings form: an ignored document wrapper,
+ *  a real <form>, a collapsed <details> (summary only — its panel contributes
+ *  NOTHING, which is what Chromium does), and many sibling fields. */
+function formTree(fields = 200) {
+  const nodes = [
+    { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "Create App" }, childIds: ["2"] },
+    { nodeId: "2", ignored: true, childIds: ["3"] },
+    { nodeId: "3", backendDOMNodeId: 300, role: { value: "form" }, name: { value: "" }, childIds: ["4", "6"] },
+    { nodeId: "4", backendDOMNodeId: 401, role: { value: "textbox" }, name: { value: "GitHub App name" }, childIds: [] },
+    {
+      nodeId: "6",
+      backendDOMNodeId: 402,
+      role: { value: "DisclosureTriangle" },
+      name: { value: "Webhook" },
+      properties: [{ name: "expanded", value: { value: false } }, { name: "focusable", value: { value: true } }],
+      childIds: ["7"],
+    },
+    { nodeId: "7", role: { value: "StaticText" }, name: { value: "Webhook" }, childIds: [] },
+  ];
+  let id = 10;
+  for (let index = 0; index < fields; index += 1) {
+    nodes.push({
+      nodeId: `f${index}`,
+      backendDOMNodeId: 1000 + index,
+      role: { value: "textbox" },
+      name: { value: `Setting ${index}` },
+      childIds: [],
+    });
+    nodes[2].childIds.push(`f${index}`);
+  }
+  void id;
+  return nodes;
+}
+
+test("a scoped snapshot renders only the subtree, rebased to depth zero", async () => {
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    const all = loaded.compactAX(formTree(3), 5);
+    assert.ok(all.snapshot.includes("RootWebArea"), "the unscoped call still renders the page");
+    assert.equal(all.scoped, false);
+    assert.equal(all.totalLines, all.snapshot.split("\n").length);
+
+    const scoped = loaded.compactAX(formTree(3), 5, { rootBackendNodeId: 300 });
+    assert.equal(scoped.scoped, true);
+    assert.ok(!scoped.snapshot.includes("RootWebArea"), "nothing above the scope survives");
+    assert.ok(scoped.snapshot.startsWith("- form"));
+    assert.ok(scoped.snapshot.includes('textbox "GitHub App name" [e1]'), "refs restart inside the scope");
+    assert.ok(scoped.snapshot.includes("Setting 2"));
+    // Depth is rebased: the form is the root, its children are one level in.
+    assert.ok(scoped.snapshot.includes('\n  - textbox "GitHub App name"'));
+  } finally {
+    await close();
+  }
+});
+
+test("a scope the tree does not contain reports scoped:false and renders nothing", async () => {
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    // 999 is a real DOM element with no accessible node (display:none,
+    // aria-hidden): the host must answer a typed miss, never an empty tree
+    // that reads like an empty section.
+    const result = loaded.compactAX(formTree(3), 1, { rootBackendNodeId: 999 });
+    assert.equal(result.scoped, false);
+    assert.equal(result.snapshot, "");
+    assert.deepEqual(result.refs, {});
+  } finally {
+    await close();
+  }
+});
+
+test("a collapsed disclosure is marked, and contributes no children", async () => {
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    const rendered = loaded.compactAX(formTree(1), 1).snapshot;
+    const summary = rendered.split("\n").find((line) => line.includes("DisclosureTriangle"));
+    assert.ok(summary.includes("[collapsed]"), summary);
+    // The measured failure: a closed <details> contributes its summary and
+    // nothing inside it. The marker is what tells an agent to open it.
+    assert.ok(!rendered.includes("Webhook URL"));
+  } finally {
+    await close();
+  }
+});
+
+test("windowing drops whole lines and preserves every ref name", async () => {
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    const out = loaded.compactAX(formTree(120), 1);
+    const first = loaded.windowSnapshot(out.snapshot, { start: 1, limit: 10 });
+    const third = loaded.windowSnapshot(out.snapshot, { start: 21, limit: 10 });
+    assert.equal(first.totalLines, out.totalLines);
+    assert.equal(first.returnedLines, 10);
+    assert.equal(third.start, 21);
+    assert.equal(third.returnedLines, 10);
+    // The same element carries the same ref on both pages.
+    const refOf = (text, name) => text.split("\n").find((line) => line.includes(name)).match(/\[(e\d+)\]/)[1];
+    const shared = loaded.windowSnapshot(out.snapshot, { start: 0, limit: 0 });
+    assert.equal(refOf(shared.text, "Setting 0"), refOf(first.text, "Setting 0"));
+    assert.equal(refOf(shared.text, "Setting 20"), refOf(third.text, "Setting 20"));
+    assert.notEqual(refOf(first.text, "Setting 0"), refOf(third.text, "Setting 20"));
+  } finally {
+    await close();
+  }
+});
+
+test("search matches role and accessible name, case-insensitively", async () => {
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    const out = loaded.compactAX(formTree(5), 1);
+    const byName = loaded.windowSnapshot(out.snapshot, { search: "setting 3" });
+    assert.equal(byName.matchedLines, 1);
+    assert.ok(byName.text.includes("Setting 3"));
+
+    const byRole = loaded.windowSnapshot(out.snapshot, { search: "disclosure" });
+    assert.equal(byRole.matchedLines, 1);
+    assert.ok(byRole.text.includes("Webhook"));
+
+    // Blank means "no filter", never "match nothing": a caller that sends ""
+    // means the whole tree, and zero lines would read as an empty section.
+    const blank = loaded.windowSnapshot(out.snapshot, { search: "   " });
+    assert.equal(blank.matchedLines, blank.totalLines);
+  } finally {
+    await close();
+  }
+});
+
+test("a start past the end returns an empty page, not a wrapped one", async () => {
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    const out = loaded.compactAX(formTree(2), 1);
+    const page = loaded.windowSnapshot(out.snapshot, { start: 9999, limit: 10 });
+    assert.equal(page.text, "");
+    assert.equal(page.returnedLines, 0);
+    assert.equal(page.start, 9999);
+  } finally {
+    await close();
+  }
+});
+
+test("state markers accept Chromium's string and boolean spellings", async () => {
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    // Measured on a real page: `expanded` is a boolean, `checked` is the string
+    // "true". A compare against `true` alone printed [collapsed] and silently
+    // dropped [checked] — on a form whose dangerous default is a ticked box.
+    const nodes = [
+      { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "" }, childIds: ["2", "3", "4"] },
+      { nodeId: "2", backendDOMNodeId: 1, role: { value: "checkbox" }, name: { value: "String check" },
+        properties: [{ name: "checked", value: { value: "true" } }], childIds: [] },
+      { nodeId: "3", backendDOMNodeId: 2, role: { value: "checkbox" }, name: { value: "Boolean check" },
+        properties: [{ name: "checked", value: { value: true } }], childIds: [] },
+      { nodeId: "4", backendDOMNodeId: 3, role: { value: "DisclosureTriangle" }, name: { value: "Closed" },
+        properties: [{ name: "expanded", value: { value: "false" } }], childIds: [] },
+    ];
+    const rendered = loaded.compactAX(nodes, 1).snapshot;
+    assert.ok(rendered.includes('"String check" [e1] [checked]'), rendered);
+    assert.ok(rendered.includes('"Boolean check" [e2] [checked]'), rendered);
+    assert.ok(rendered.includes('"Closed" [collapsed]'), rendered);
+  } finally {
+    await close();
+  }
+});
