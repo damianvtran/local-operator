@@ -441,3 +441,26 @@ def test_library_waveform_refusals(audio_assets: dict[str, Any]) -> None:
     silent = client.get(f"/api/library/assets/{audio_assets['silent'].id}/waveform")
     assert silent.status_code == 404
     assert silent.json()["code"] == "content_missing"
+
+
+def test_library_waveform_unavailable_is_typed_503(
+    audio_assets: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable derived index is the 503 every sibling payload maps.
+
+    Convergence review: after #2793 ``_catalog_asset`` reads the SQLite catalog
+    and can raise ``LibraryUnavailable``; this branch-only payload must map it
+    like ``thumb_ref`` does instead of letting it escape as a 500.
+    ``corrupt=False`` keeps the test on the transient branch — no recovery
+    rebuild is triggered.
+    """
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    def boom(self: object, *args: object, **kwargs: object) -> Any:
+        raise IndexUnavailable("database is busy", corrupt=False)
+
+    monkeypatch.setattr(LibraryStore, "asset", boom)
+    busy = _client().get(f"/api/library/assets/{audio_assets['ready'].id}/waveform")
+    assert busy.status_code == 503
+    assert busy.json()["code"] == "library_store_busy"
+    assert busy.headers["cache-control"] == "no-store"
