@@ -7506,6 +7506,57 @@ async def test_without_the_key_the_headless_gate_still_asks(
         await session.dispose()
 
 
+@pytest.mark.asyncio
+async def test_a_resumed_conversations_approval_choice_reaches_the_headless_gate(
+    tmp_config_dir: Path, monkeypatch
+) -> None:
+    """The CONVERSATION outranks the config for the plain headless gate (2026-10-23).
+
+    A ``--resume`` reopens a conversation whose human had typed ``/approvals
+    auto``; the file says ``ask``. The gate that decides this run's write/exec
+    calls must read the conversation's own record, or the resumed run denies
+    calls its owner had already chosen to allow — the mirror of the incident
+    the config read above exists for. A FRESH run has no such file, which is
+    why the same expression keeps the config default for new conversations.
+    """
+    import local_operator.session_factory as sf
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session.approval_policy import write_override
+
+    session_id = "7c1d2e3f4a5b"
+    directory = tmp_config_dir / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text(
+        json.dumps({"id": "e1", "type": "user", "content": "hello"}) + "\n", encoding="utf-8"
+    )
+    write_override(directory, "auto")
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n"
+        "values:\n"
+        "  hosting: test\n"
+        "  model_name: test\n"
+        "  tool_approval_mode: ask\n"
+    )
+    seen: list[bool] = []
+    real = sf._make_request_approval
+
+    def spy(auto: bool):
+        seen.append(auto)
+        return real(auto)
+
+    monkeypatch.setattr(sf, "_make_request_approval", spy)
+    session = await create_session(
+        _args(hosting="test", model="test", resume=session_id),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert seen == [True], "the resumed conversation's recorded auto must reach the gate"
+    finally:
+        await session.dispose()
+
+
 # --- The configuration run's shape is applied by the FACTORY, not by a caller ---
 #
 # The helper's own behaviour is pinned in
