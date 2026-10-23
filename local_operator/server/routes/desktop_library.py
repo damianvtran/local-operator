@@ -26,7 +26,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Path as PathParam
 from fastapi import Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.library import index as library_index
@@ -505,6 +505,38 @@ async def library_thumbnail(
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "private, max-age=86400",
         },
+    )
+
+
+@router.get("/v1/desktop/library/assets/{asset_id}/waveform")
+async def library_waveform(asset_id: AssetID, request: Request):
+    """``{version, bars, peaks}`` for the grid's in-place player. 404 = no waveform.
+
+    Same gates as ``/content`` and ``/thumbnail`` -- the bearer (router dependency), the
+    asset-id shape (path regex), ``nosniff`` -- plus ``no-store``: the payload is derived
+    per request and the grid keeps it in memory, so a cached copy buys nothing and goes
+    stale after an edit. The decode itself runs in a worker thread and, for a path asset,
+    in a bounded child process (``service.waveform``); nothing decodes on the event loop.
+
+    A missing waveform is a designed 404, never a fabricated flat line: a surface draws
+    its no-waveform state, exactly as a non-image degrades to a placeholder above.
+    """
+    try:
+        payload = await asyncio.to_thread(service.waveform, _config_dir(request), asset_id)
+    except service.LibraryUnavailable:
+        # The index cannot answer yet -- the same 503 the thumbnail route gives; a
+        # waveform lookup must not read as a broken backend.
+        raise _unavailable() from None
+    except service.AssetNotFound:
+        raise _asset_not_found() from None
+    except service.ContentUnavailable:
+        raise HTTPException(
+            404,
+            _wd.library_content_missing().envelope(code="library_content_missing"),
+        ) from None
+    return JSONResponse(
+        payload,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
     )
 
 

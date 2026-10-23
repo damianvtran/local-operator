@@ -60466,7 +60466,11 @@ class OperatorApp(App[None]):
             )
             if block is not None:
                 self._supplement_blocks[anchor] = block
-        shows_block = disposition != "block" or bool(merged.get("files"))
+        # A done row with IMAGES only: the block itself would be invisible (HTML is
+        # skipped by contract), so only the images mount. Sounds keep the block
+        # VISIBLE -- each paints its own text row -- so a turn that generated audio
+        # and no files must not have its rows removed here.
+        shows_block = disposition != "block" or bool(merged.get("files") or merged.get("sounds"))
         if not shows_block:
             # A done row with images only: the block itself would be invisible
             # (HTML is skipped by contract), so only the images mount — under
@@ -60528,7 +60532,15 @@ class OperatorApp(App[None]):
         except (TypeError, ValueError):
             same_version = False
         if same_version:
-            for key in ("files", "files_more", "more", "components", "images"):
+            for key in (
+                "files",
+                "files_more",
+                "more",
+                "components",
+                "images",
+                "sounds",
+                "sounds_more",
+            ):
                 if not merged.get(key) and prev.get(key):
                     merged[key] = prev[key]
         return merged
