@@ -2943,6 +2943,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/; never sessions/",
     ),
+    (
+        "local_operator/library/service.py::waveform",
+        "os.replace",
+        "tmp FILE -> a peaks cache FILE under <config>/cache/library/peaks/; never sessions/",
+    ),
     # The Library VIEW's flagged calls are heap/Textual operations, not
     # filesystem ones: the viewport cursor is an in-memory integer, the
     # metadata row's ``remove`` is a list.remove, and closing the view removes
