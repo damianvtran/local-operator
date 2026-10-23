@@ -887,6 +887,10 @@ _PREFERRED_EXT: Final = {
     "video/quicktime": ".mov",
     "audio/mpeg": ".mp3",
     "audio/wav": ".wav",
+    # Ogg is the one type where ``mimetypes`` tie-breaks to ``.oga``; the namer
+    # pins ``.ogg``, so the destination must agree or the Library label and the
+    # materialised file diverge for the same asset.
+    "audio/ogg": ".ogg",
 }
 
 

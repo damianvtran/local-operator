@@ -725,6 +725,29 @@ def test_sanitise_name_unit() -> None:
     assert f("..", "d" * 32, "image/png") == "artifact-dddddddd.png"
     assert f("na\x00me.png", "d" * 32, "image/png") == "na_me.png"
     assert f(".hidden.png", "d" * 32, "image/png") == "hidden.png"
+    # Ogg is the one type ``mimetypes`` spells ``.oga``; the namer and the
+    # destination must not disagree about the same asset's suffix.
+    assert f("x.ogg", "d" * 32, "audio/ogg") == "x.ogg"
+
+
+def test_the_namer_and_the_destination_agree_on_every_media_extension() -> None:
+    """The Library label and the materialised file keep the SAME name."""
+    from local_operator.artifacts.naming import media_filename
+
+    for content_type in (
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/ogg",
+        "audio/flac",
+        "video/mp4",
+        "video/webm",
+        "video/quicktime",
+    ):
+        name = media_filename("x", content_type)
+        assert service.sanitise_name(name, "d" * 32, content_type) == name, content_type
 
 
 def test_materialise_keeps_the_unicode_library_name(world: World) -> None:
