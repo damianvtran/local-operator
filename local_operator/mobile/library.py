@@ -364,6 +364,28 @@ def thumb_ref(config_dir: str | Path, asset_id: str, width: int) -> library_serv
         raise LibraryRouteError(404, error.code) from error
 
 
+def waveform_payload(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
+    """One audio asset's ``{version, bars, peaks}``, through the ONE service reader.
+
+    The phone family's error mapping, exactly as ``thumb_ref`` states it: an
+    unreadable derived index is the typed 503 every sibling payload maps
+    (``library_store_busy`` — after #2793 ``_catalog_asset`` reads the SQLite
+    catalog and raises it), an id the catalog does not know is a 404, and an
+    asset whose peaks cannot be produced (no sidecar, a deleted path, a codec
+    that refuses the bytes) is the service's own ``ContentUnavailable`` code at
+    404. The relay never decodes audio itself: ``library.service.waveform`` owns
+    both the digest sidecar and the bounded, cached path-backed decode.
+    """
+    try:
+        return library_service.waveform(config_dir, asset_id)
+    except library_service.LibraryUnavailable as error:
+        raise _unavailable(error) from error
+    except library_service.AssetNotFound as error:
+        raise LibraryRouteError(404, "library_asset_not_found") from error
+    except library_service.ContentUnavailable as error:
+        raise LibraryRouteError(404, error.code) from error
+
+
 __all__ = [
     "DEFAULT_LIMIT",
     "LibraryRouteError",
@@ -386,4 +408,5 @@ __all__ = [
     "set_tags_payload",
     "tags_payload",
     "thumb_ref",
+    "waveform_payload",
 ]
