@@ -71,7 +71,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from local_operator.config_writer import serialized_config_path_write
 
@@ -349,6 +349,47 @@ def _write_key_inventory(path: Path, keys: "list[str]") -> None:
                 pass
 
 
+def record_config_key_inventory(config_dir: Path, removed: "Sequence[Sequence[str]]") -> None:
+    """Drop the paths a DECLARED write retired from the startup inventory.
+
+    Called by ``ConfigManager._write_config`` after a write whose ``drop`` actually
+    removed something, because a removal this build performed is not the "writer
+    outside this build" the shrink report exists to name — and a report that never
+    re-baselines would repeat on every launch, advising a restore that would undo
+    the user's own choice.
+
+    SUBTRACTS, deliberately, rather than rewriting the sidecar to the file's current
+    leaf set. A full re-baseline would also adopt anything ELSE the file has lost
+    since the last launch, and the inventory is the only record of that loss — a
+    daemon launch's migration write would erase it before the operator ever saw the
+    report, which is the very failure the daemon rule below exists to prevent.
+    Removing only the declared paths (and everything recorded beneath them) leaves
+    every unexplained gap in place.
+
+    No inventory yet: record the file as it stands, which is the baseline the next
+    launch would have written anyway. Best-effort like the rest of this module.
+    """
+    from local_operator.config import _leaf_paths, read_config_values
+
+    inventory_path = config_dir / _KEY_INVENTORY_NAME
+    previous = _read_key_inventory(inventory_path)
+    if previous is None:
+        values = read_config_values(config_dir)
+        if isinstance(values, Mapping):
+            keys = sorted(".".join(path) for path in _leaf_paths(values))
+            if keys:
+                _write_key_inventory(inventory_path, keys)
+        return
+    declared = [".".join(str(part) for part in path) for path in removed]
+    remaining = [
+        key
+        for key in previous
+        if not any(key == path or key.startswith(path + ".") for path in declared)
+    ]
+    if remaining != previous:
+        _write_key_inventory(inventory_path, remaining)
+
+
 def report_config_key_shrink(
     config_dir: Path, *, surface: str = "cli", record: bool = True
 ) -> "list[str]":
@@ -422,15 +463,23 @@ def report_config_key_shrink(
     if missing:
         message = (
             f"{config_file} lost {len(missing)} setting(s) since the last launch: "
-            f"{', '.join(missing)}; a writer outside this build removed them — "
-            "restore from a config.yml.bak-* backup if you did not."
+            f"{', '.join(missing)}; a writer outside this build removed them — if "
+            "you did not, an earlier update backed the file up beside itself: "
+            "restore from the newest config.yml.pre-cleanup-migration.* or "
+            "config.yml.bak-* and it will be read again."
         )
+        # ONE channel per surface (review round 1, n3). The CLI configures logging
+        # so its handler already writes WARNING to stderr; printing as well showed
+        # every operator the same paragraph twice. The TUI owns the terminal, so it
+        # gets the plain line and only a DEBUG record; the daemon gets neither.
         if surface == "daemon":
             logger.debug("%s", message)
             return missing
-        logger.warning("%s", message)
-        if surface in ("tui", "cli"):
+        if surface == "tui":
+            logger.debug("%s", message)
             print(message, file=sys.stderr)
+            return missing
+        logger.warning("%s", message)
         return missing
     if record and current and current_set != set(previous):
         # Additions (the cleanup migration's own keys, a new release's defaults)

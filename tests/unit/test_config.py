@@ -1641,8 +1641,11 @@ def test_the_startup_report_names_the_settings_an_external_write_removed(
     with caplog.at_level(logging.WARNING):
         run_startup_migrations(tmp_path, surface="cli")
 
-    err = capsys.readouterr().err
-    assert "lost" in err
+    # ONE channel: the CLI's logging handler owns stderr (review round 1, n3), so
+    # this surface writes no plain line of its own and the WARNING carries the names.
+    assert capsys.readouterr().err == ""
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("lost" in message for message in warned), warned
     for named in (
         "language",
         "keymap.quick_send",
@@ -1650,9 +1653,7 @@ def test_the_startup_report_names_the_settings_an_external_write_removed(
         "subagents.models.hi",
         "retry.fallbackChains.default",
     ):
-        assert named in err, named
-    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("lost" in message for message in warned)
+        assert any(named in message for message in warned), named
     # It must NOT re-baseline over the loss, or the next launch would be silent.
     assert json.loads(inventory.read_text(encoding="utf-8")) == recorded
 
@@ -1673,7 +1674,7 @@ def test_the_startup_report_names_the_settings_an_external_write_removed(
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         run_startup_migrations(tmp_path, surface="cli")
-    assert "language" in capsys.readouterr().err
+    assert any("language" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
 
 
 def test_the_key_inventory_is_not_rewritten_when_nothing_changed(tmp_path: Path) -> None:
@@ -1788,3 +1789,271 @@ def test_the_migration_retires_only_its_own_keys(tmp_path: Path) -> None:
     assert after["language"] == "de"
     assert after["retry"]["fallbackChains"]["default"][0] == "openai/gpt-5"
     assert after["subagents"]["models"]["hi"] == "openai/gpt-5"
+
+
+# ---------------------------------------------------------------------------
+# A declaration retires a SUBTREE, not one exact path
+# ---------------------------------------------------------------------------
+
+
+def test_a_declared_subtree_removal_is_not_carried_back_leaf_by_leaf() -> None:
+    """The direct rule, without a manager: a declared parent covers its children.
+
+    Every product deletion removes a key from a mapping it then writes whole, so
+    the declaration names the removed ENTRY while the copy-through walks the
+    LEAVES under it. Matching the exact path only meant the leaf was copied back
+    and the emptied parent was recreated around it — a removal that reported
+    success and removed nothing (review round 1, B1/Q6).
+    """
+    from local_operator.config import _carry_through_unmodelled
+
+    payload: dict[str, Any] = {}
+    preserved: list[tuple[str, ...]] = []
+    _carry_through_unmodelled(
+        payload,
+        {"keymap": {"quick_send": "ctrl+j"}},
+        drops={("keymap", "quick_send"): "reset by /settings"},
+        prefix=(),
+        preserved=preserved,
+    )
+    assert payload == {}, "a fully retired subtree must not be recreated as {}"
+    assert preserved == []
+
+    # The shape the PREFIX rule exists for: the declaration names a level the
+    # copy-through only reaches after recursing, and the disk parent is missing
+    # from the payload entirely. Exact-leaf matching would copy `models.hi` back
+    # and rebuild `subagents` around it.
+    payload = {}
+    _carry_through_unmodelled(
+        payload,
+        {"subagents": {"models": {"hi": "openai/gpt-5"}}},
+        drops={("subagents", "models"): "no tiers configured"},
+        prefix=(),
+        preserved=preserved,
+    )
+    assert payload == {}, payload
+
+    # The same rule leaves an UNDECLARED sibling alone inside the same parent.
+    payload = {}
+    _carry_through_unmodelled(
+        payload,
+        {"keymap": {"quick_send": "ctrl+j", "palette": "ctrl+p"}},
+        drops={("keymap", "quick_send"): "reset by /settings"},
+        prefix=(),
+        preserved=preserved,
+    )
+    assert payload == {"keymap": {"palette": "ctrl+p"}}, payload
+
+
+def test_reset_to_defaults_removes_mapping_typed_user_keys(tmp_path: Path) -> None:
+    """Q6: a whole-config reset must reset MAPPING-typed keys too.
+
+    ``keymap``, ``team_bridge`` and ``tui`` are top-level user mappings the shipped
+    defaults do not contain, and ``subagents.models.*`` lives under a modelled key
+    whose default is ``{}``. The reset declared those paths dropped, but the
+    copy-through matched only exact leaves, so it recreated every one of them —
+    the reset reported success and kept the operator's settings.
+    """
+    path = _write_incident_config(tmp_path)
+    manager = ConfigManager(tmp_path)
+
+    manager.reset_to_defaults()
+
+    stored = _disk_values(path)
+    for key in ("keymap", "team_bridge", "tui", "language"):
+        assert key not in stored, f"{key} survived the reset: {stored.get(key)!r}"
+    assert stored["subagents"] == DEFAULT_CONFIG.values["subagents"]
+    assert stored["retry"] == DEFAULT_CONFIG.values["retry"]
+
+
+def test_a_declared_prefix_silences_the_never_read_refusal(tmp_path: Path) -> None:
+    """The refusal's filter takes the same sub-tree rule as the copy-through.
+
+    A declared prefix has to cover the leaves beneath it here too, or a caller that
+    correctly declares a retirement is still told the write "would change" the very
+    paths it just retired.
+    """
+    path = tmp_path / "config.yml"
+    manager = ConfigManager(tmp_path)  # constructed while config.yml did not exist
+    payload = deepcopy(vars(manager.config))  # the shipped defaults it holds
+    assert not path.exists()
+
+    disk = deepcopy(DEFAULT_CONFIG.values)
+    disk["language"] = "de"
+    disk["subagents"] = {"models": {"hi": "openai/gpt-5"}}
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "version": "0.1.0",
+                "metadata": {"created_at": "x", "last_modified": "x", "description": "d"},
+                "values": disk,
+            }
+        )
+    )
+
+    with pytest.raises(ConfigWriteRefused):
+        manager._write_config(payload)
+
+    manager._write_config(
+        payload,
+        drop={
+            ("language",): "reset by /settings",
+            ("subagents", "models"): "reset by /settings",
+        },
+    )
+
+    stored = _disk_values(path)
+    assert "language" not in stored
+    assert stored["subagents"] == {}
+
+
+def test_a_declared_reset_is_not_reported_as_an_outside_loss(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M2: this build's own removals must not be reported as an outsider's work.
+
+    The shrink report deliberately does not re-baseline when it finds a loss (or a
+    single outside write would be reported once and then forgotten). A DECLARED
+    removal therefore has to move the inventory itself, at write time: otherwise a
+    ``/settings`` reset is announced as "a writer outside this build removed them",
+    with advice to restore a backup that would undo the user's own choice — on
+    every ``lop`` verb, forever.
+    """
+    from local_operator import settings_io
+    from local_operator.config_migrations import (
+        report_config_key_shrink,
+        run_startup_migrations,
+    )
+
+    path = _write_incident_config(tmp_path)
+    for _ in range(3):
+        run_startup_migrations(tmp_path, surface="cli")  # settle the baseline
+    inventory = tmp_path / ".config-keys.json"
+    before = json.loads(inventory.read_text(encoding="utf-8"))
+    assert "model_name" in before["keys"]
+
+    settings_io.reset_setting(
+        ConfigManager(tmp_path), settings_io.BY_KEY["model_name"], notify=False
+    )
+    assert "model_name" not in _disk_values(path)
+
+    for _ in range(3):
+        assert report_config_key_shrink(tmp_path, surface="cli") == []
+    assert capsys.readouterr().err == ""
+
+    # ...and the same for a whole-config reset, whose drop set is every user leaf.
+    ConfigManager(tmp_path).reset_to_defaults()
+    assert "language" not in _disk_values(path)
+    for _ in range(3):
+        assert report_config_key_shrink(tmp_path, surface="cli") == []
+    assert capsys.readouterr().err == ""
+
+
+def test_the_cli_prints_the_shrink_notice_exactly_once(tmp_path: Path) -> None:
+    """n3 on the real command path: one paragraph, one line, one channel.
+
+    The unit-level surface assertions cannot see the CLI's logging handler, and
+    that handler is exactly what made the notice appear twice (`logger.warning`
+    plus an explicit `print`). Driven through `python -m local_operator.cli` in an
+    isolated HOME, the way the operator runs it.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parents[2]
+    iso = tmp_path / "iso"
+    config_dir = iso / ".local-operator"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yml").write_text(
+        yaml.safe_dump(
+            {
+                "version": "0.1.0",
+                "metadata": {"created_at": "x", "last_modified": "x", "description": "d"},
+                "values": {"language": "de", "model_name": "openai/gpt-5"},
+            }
+        )
+    )
+    env = {
+        "HOME": str(iso),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(config_dir),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "TERM": "xterm-256color",
+        "PYTHONPATH": str(repo),
+    }
+
+    def launch() -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            [sys.executable, "-m", "local_operator.cli", "config", "list"],
+            cwd=str(iso),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    assert launch().returncode == 0  # the baseline launch, silent
+    (config_dir / "config.yml").write_bytes(_INCIDENT_EXTERNAL_WRITE)
+
+    second = launch()
+    assert second.returncode == 0, second.stderr
+    lost_lines = [line for line in second.stderr.splitlines() if "lost" in line]
+    assert len(lost_lines) == 1, second.stderr
+    assert "language" in lost_lines[0]
+    assert "config.yml.pre-cleanup-migration" in lost_lines[0]
+
+
+def test_an_empty_mapping_is_not_a_leaf_in_either_reader() -> None:
+    """n1's pin: the two leaf readers must agree about ``{}``.
+
+    `_leaf_paths` feeds the inventory, `_leaf_values` feeds the never-read refusal
+    and the mapping-value replacement rule. If one called an empty mapping a leaf
+    and the other did not, `x: {}` would be simultaneously unretirable and
+    "differing", and a third caller copying whichever it read first would spread
+    the disagreement.
+    """
+    from local_operator.config import _differing_paths, _leaf_paths, _leaf_values
+
+    assert _leaf_paths({"x": {}, "y": {"z": 1}}) == [("y", "z")]
+    assert _leaf_values({"x": {}, "y": {"z": 1}}) == {("y", "z"): 1}
+    # An empty mapping on one side only is not a difference: it holds no setting.
+    assert _differing_paths({"x": {}}, {}) == []
+    assert _differing_paths({}, {"x": {}}) == []
+
+
+def test_a_declared_removal_does_not_swallow_an_unexplained_loss(tmp_path: Path) -> None:
+    """M2's subtraction, and why it is a subtraction rather than a re-baseline.
+
+    The inventory is the ONLY record of a loss that happened while no launch was
+    running. A declared removal has to amend it — but rewriting it to the file's
+    current leaf set would adopt everything else the file has lost since the last
+    launch, so the next startup would report nothing and the operator would never
+    learn their settings went. Here an outside writer removes ``language``, a
+    ``/settings`` reset then removes ``model_name``, and the next launch must still
+    name ``language``.
+    """
+    from local_operator import settings_io
+    from local_operator.config_migrations import (
+        report_config_key_shrink,
+        run_startup_migrations,
+    )
+
+    path = _write_incident_config(tmp_path)
+    for _ in range(3):
+        run_startup_migrations(tmp_path, surface="cli")  # settle the baseline
+
+    # An outside writer drops `language`; no launch runs, so only the inventory
+    # remembers it.
+    values = _disk_values(path)
+    values.pop("language")
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["values"] = values
+    path.write_text(yaml.safe_dump(document))
+
+    # This build then performs a DECLARED removal of its own.
+    settings_io.reset_setting(
+        ConfigManager(tmp_path), settings_io.BY_KEY["model_name"], notify=False
+    )
+
+    missing = report_config_key_shrink(tmp_path, surface="cli")
+    assert missing == ["language"], missing

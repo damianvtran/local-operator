@@ -6405,7 +6405,10 @@ def _store(
             stored = _leaf_values(value)
             for leaf in _leaf_values(previous):
                 if leaf not in stored:
-                    merged_drop[(*path, *leaf)] = "replaced by /settings"
+                    # `setdefault`: a caller that already declared this leaf (the
+                    # cascade page's deleted chain) has a more specific reason, and
+                    # the generic one must not overwrite it in the audit line.
+                    merged_drop.setdefault((*path, *leaf), "replaced by /settings")
     if len(path) == 1:
         manager.set_config_value(top, value, drop=merged_drop)
         return
