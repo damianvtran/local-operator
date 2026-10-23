@@ -319,6 +319,8 @@ async def patch_library_asset(asset_id: AssetID, body: LibraryAssetPatch, reques
             actor="user",
             source="user",
         )
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except TagRefused as error:
@@ -342,6 +344,8 @@ async def put_library_asset_tags(asset_id: AssetID, body: LibraryTagsWrite, requ
             body.primary,
             actor="user",
         )
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except TagRefused as error:
@@ -525,6 +529,8 @@ async def put_library_chat(asset_id: AssetID, body: LibraryChatWrite, request: R
     try:
         await asyncio.to_thread(service.set_chat_link, config, asset_id, session_id)
         chat = await asyncio.to_thread(service.chat_link, config, asset_id)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except MetadataUnavailable as error:

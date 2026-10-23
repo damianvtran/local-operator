@@ -7,6 +7,7 @@ a fixture that assembled rows the writer would never produce.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -567,7 +568,8 @@ def test_recovery_drops_only_the_derived_tables(tmp_path, monkeypatch) -> None:
     frame = query(root)
     assert next(r for r in frame["rows"] if r["id"] == row["id"])["name"] == "Kept"
     assert frame["tags"] and frame["tags"][0]["name"] == "kept-by-tag"
-    assert MetadataStore(root).asset(row["id"])["name"] == "Kept"
+    stored = MetadataStore(root).asset(row["id"])
+    assert stored is not None and stored["name"] == "Kept"
 
 
 def test_an_aggregate_does_not_depend_on_scan_order(tmp_path, monkeypatch) -> None:
@@ -631,3 +633,79 @@ def test_an_aggregate_does_not_depend_on_scan_order(tmp_path, monkeypatch) -> No
     # The 2.0 session is still the LAST in time, so it still names the asset.
     assert after.derived_name == "shared.txt"
     assert after.kind == before.kind
+
+
+def test_recovery_rebuilds_a_malformed_derived_table(tmp_path, monkeypatch) -> None:
+    """The case recovery exists for: a table that makes ``_ensure_schema`` fail.
+
+    Reproduced on the round-1 head as a permanent 503 — ``recover_derived``
+    opened through ``_connect``, whose schema step hit the same malformed table
+    it was trying to drop.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    store = LibraryStore(root)
+    with store.write() as connection:
+        connection.execute("DROP TABLE idx_assets")
+        connection.execute("CREATE TABLE idx_assets(oops TEXT)")
+        connection.execute("DROP TABLE idx_occurrences")
+        connection.execute("CREATE TABLE idx_occurrences(oops TEXT)")
+    LibraryStore._ready_paths.discard(store._key)
+
+    assert store.recover_derived() is True
+    frame = query(root)
+    assert frame["total"] == 0
+    indexer.rebuild_now(root)
+    assert query(root)["total"] == 4
+
+
+def test_an_empty_config_lists_as_ready(tmp_path, monkeypatch) -> None:
+    """An empty journal directory is a finished empty index, not a build."""
+    root = config_root(monkeypatch, tmp_path)
+    store = LibraryStore(root)
+    store.ensure_schema()
+    assert store.listing_state()[0] == "ready"
+
+    # A session that exists but has not been indexed yet IS a build.
+    session(root, SESSION, write_rows("w1", 1.0, root.parent / "a.txt"))
+    assert store.listing_state()[0] == "building"
+
+
+def test_concurrent_readers_survive_repeated_recovery(tmp_path, monkeypatch) -> None:
+    """Six readers against 25 rebuilds: every call answers or raises 503-typed."""
+    import threading
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    failures: list[BaseException] = []
+    answered: list[int] = []
+    stop = threading.Event()
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                service.list_assets(root, service.Query(scope="final"))
+                answered.append(1)
+            except service.LibraryUnavailable:
+                answered.append(1)
+            except BaseException as error:  # noqa: BLE001 - the point of the test
+                failures.append(error)
+
+    def recoverer() -> None:
+        for _ in range(25):
+            try:
+                LibraryStore(root).recover_derived()
+            except BaseException as error:  # noqa: BLE001
+                failures.append(error)
+            time.sleep(0.002)
+
+    readers = [threading.Thread(target=reader) for _ in range(6)]
+    for thread in readers:
+        thread.start()
+    recoverer()
+    stop.set()
+    for thread in readers:
+        thread.join(10)
+
+    assert not failures, failures[:1]
+    assert answered, "the readers must have answered requests"

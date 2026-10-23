@@ -17,15 +17,7 @@ from local_operator.library import indexer, service
 from local_operator.library.store import LibraryStore
 from local_operator.session.attachments import cache_media
 
-from ._fixtures import (
-    OTHER,
-    SESSION,
-    config_root,
-    image_rows,
-    png,
-    session,
-    write_rows,
-)
+from ._fixtures import OTHER, SESSION, config_root, image_rows, png, session, write_rows
 
 CHILD = "0123456789ab"
 SECOND = "222222222222"
@@ -356,9 +348,11 @@ def test_a_deleted_session_leaves_the_library_immediately(tmp_path, monkeypatch)
     assert names(root) == {"keep.txt"}
     store = LibraryStore(root)
     assert store.session(OTHER) is None
-    # Q-2: the deleted session also left the denominator.
+    # Q-2: the deleted session also left the denominator, on the spot — the old
+    # check ran after ``forget_session`` deleted the row it looked for, so this
+    # only ever passed because a lazy worker reconciled behind the test.
     state = indexer.index_state(root)
-    assert state["total"] <= 1
+    assert state["total"] == 1
     assert store.counts("all")["category"] == {"document": 1}
 
 
@@ -378,12 +372,20 @@ def test_a_reader_only_process_takes_over_when_the_writer_stops(tmp_path, monkey
     try:
         assert indexer.writer_available(root) is False
         assert reader._thumb_thread is None
-        # Nothing may be written while another process owns the index.
-        assert reader.scan_session(SESSION) in (True, False)
+        # Nothing may be written while another process owns the index: a scan
+        # attempt must leave the revision and the database file untouched.
         with LibraryStore(root).read() as connection:
             revision_before = connection.execute(
                 "SELECT value FROM idx_state WHERE key = 'revision'"
             ).fetchone()[0]
+        mtime_before = (root / "library" / "library.sqlite3").stat().st_mtime_ns
+        reader.scan_session(SESSION)
+        with LibraryStore(root).read() as connection:
+            revision_after = connection.execute(
+                "SELECT value FROM idx_state WHERE key = 'revision'"
+            ).fetchone()[0]
+        assert revision_after == revision_before
+        assert (root / "library" / "library.sqlite3").stat().st_mtime_ns == mtime_before
 
         blocker.release()
         deadline = time.monotonic() + 3.0
@@ -444,3 +446,64 @@ def test_the_thumbnail_sweep_puts_kept_images_first(tmp_path, monkeypatch) -> No
             0
         ]["id"]
     )
+
+
+def test_an_unknown_session_id_does_not_move_the_revision(tmp_path, monkeypatch) -> None:
+    """A top-level file under ``sessions/`` maps to an id the index never knew.
+
+    Deleting one must not bump the listing revision: that would reset a
+    paginating client's cursor for a cleanup-log rotation.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    indexer.rebuild_now(root)
+    indexer.reset_for_tests()
+    index = indexer.LibraryIndexer(root)
+    index.reconcile()
+    before = indexer.index_state(root)["revision"]
+
+    index._forget("last_cleanup.json")
+
+    after = indexer.index_state(root)
+    assert after["revision"] == before
+    assert after["total"] == 1
+
+
+def test_recovery_wakes_a_parked_worker(tmp_path, monkeypatch) -> None:
+    """A rebuilt index must refill now, not on the next 6 h tick.
+
+    The worker parks on ``queue.get`` with the idle cadence; recovery resets
+    ``backfill_done`` from the request thread, so without an explicit wake the
+    page would answer "building" with no rows until that timeout expired.
+    """
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    indexer.rebuild_now(root)
+    indexer.reset_for_tests()
+    indexer.ensure_started(root)
+
+    original = LibraryStore.query_page
+    calls = {"n": 0}
+
+    def flaky(self, *args, **kwargs):
+        # Twice: the list retries once before it commits to recovery.
+        if calls["n"] < 2:
+            calls["n"] += 1
+            raise IndexUnavailable("database disk image is malformed")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(LibraryStore, "query_page", flaky)
+    assert service.list_assets(root, service.Query())["state"] == "building"
+
+    # Recovery already happened inside that call; the WAKE must make the worker
+    # reconcile rather than wait out its timer.
+    deadline = time.monotonic() + 5.0
+    rows: list[dict[str, object]] = []
+    while time.monotonic() < deadline:
+        rows = service.list_assets(root, service.Query())["rows"]
+        if rows:
+            break
+        time.sleep(0.05)
+    assert rows, "the worker must rebuild immediately after recovery"

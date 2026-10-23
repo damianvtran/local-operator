@@ -346,6 +346,15 @@ class _JournalHandler:
         return candidate
 
 
+#: Queue sentinel that asks the worker to reconcile NOW. Recovery resets
+#: ``backfill_done`` after the worker may already be parked on its 6 h idle
+#: timeout, and a rebuilt index that only starts refilling on the next timer tick
+#: leaves the Library empty for hours. It is a string so the queue stays
+#: ``Queue[str]``, and ``_run`` answers it before ``process_dirty`` so the
+#: sentinel can never be mistaken for a session id.
+_WAKE: Final = "\x00library-wake"
+
+
 class LibraryIndexer:
     """One background worker per config root. Use :func:`ensure_started`."""
 
@@ -474,6 +483,14 @@ class LibraryIndexer:
                     except Exception:  # noqa: BLE001 - keep the worker alive
                         logger.warning("library: periodic reconcile failed", exc_info=True)
                     continue
+                if first == _WAKE:
+                    # A recovery or an explicit kick wants the backfill to start
+                    # now rather than on the next 6 h tick.
+                    try:
+                        self.reconcile()
+                    except Exception:  # noqa: BLE001 - keep the worker alive
+                        logger.warning("library: wake reconcile failed", exc_info=True)
+                    continue
                 if self._stop.is_set() or not first:
                     continue
                 batch = self.coalesce(first)
@@ -483,6 +500,10 @@ class LibraryIndexer:
                     logger.warning("library: session batch failed", exc_info=True)
         finally:
             self._stop_observer()
+
+    def wake(self) -> None:
+        """Ask a parked worker to reconcile immediately. Never blocks."""
+        self._queue.put(_WAKE)
 
     def _idle_timeout(self) -> float:
         """How long to wait before a reconcile. Never a spin, never a short poll."""
@@ -588,18 +609,24 @@ class LibraryIndexer:
         delete left ``scan`` reporting 2/2 with one session gone — a progress
         readout that never completes until the next reconcile.
         """
+        # The existence check must come BEFORE ``forget_session``: that call
+        # deletes the checkpoint row, so the old "did it exist?" query inside the
+        # same transaction always answered no and the counter never moved.
+        existed = self.store.session(session_id) is not None
         with self.store.write() as connection:
             affected = self.store.forget_session(connection, session_id)
-            row = connection.execute(
-                "SELECT 1 FROM idx_sessions WHERE session_id = ?", (session_id,)
-            ).fetchone()
-            connection.execute("DELETE FROM idx_sessions WHERE session_id = ?", (session_id,))
-            if row is not None:
+            if existed:
+                connection.execute("DELETE FROM idx_sessions WHERE session_id = ?", (session_id,))
                 connection.execute(
                     "UPDATE idx_state SET value = CAST(MAX(CAST(value AS INTEGER) - 1, 0) AS TEXT) "
                     "WHERE key = ?",
                     (STATE_SESSIONS_TOTAL,),
                 )
+            if not existed and not affected:
+                # A top-level file under ``sessions/`` (``last_cleanup.json``)
+                # maps to an id this index never knew. Nothing changed, so the
+                # listing revision must not move and reset a paging cursor.
+                return
             self.store.recompute_assets(connection, affected)
             self.store.bump_revision(connection)
 

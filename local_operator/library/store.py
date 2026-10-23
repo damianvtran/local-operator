@@ -536,8 +536,9 @@ class LibraryStore:
                 connection.execute("PRAGMA synchronous=NORMAL")
             except sqlite3.DatabaseError as error:
                 raise IndexUnavailable(str(error)) from error
-            if not self._ensure_schema(connection):
-                raise IndexUnavailable("future index schema version")
+            # ``_ensure_schema`` answers True or raises; a False return would be
+            # a silent "serve an empty index" that no caller can distinguish.
+            self._ensure_schema(connection)
             yield connection
         finally:
             try:
@@ -547,8 +548,19 @@ class LibraryStore:
 
     @contextmanager
     def read(self) -> Iterator[sqlite3.Connection]:
+        """One read, with a torn page translated into ``IndexUnavailable``.
+
+        A corrupted b-tree raises ``sqlite3.DatabaseError`` from whichever
+        statement touches it — ``database disk image is malformed`` out of an
+        occurrence lookup, for instance. Translated HERE so every read path is
+        covered once, and the service's one-shot recovery can act on it instead
+        of a bare 500 reaching the route.
+        """
         with self._connect() as connection:
-            yield connection
+            try:
+                yield connection
+            except sqlite3.DatabaseError as error:
+                raise IndexUnavailable(str(error)) from error
 
     @contextmanager
     def write(self) -> Iterator[sqlite3.Connection]:
@@ -557,8 +569,10 @@ class LibraryStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 yield connection
-            except BaseException:
+            except BaseException as error:
                 connection.rollback()
+                if isinstance(error, sqlite3.DatabaseError):
+                    raise IndexUnavailable(str(error)) from error
                 raise
             connection.commit()
 
@@ -619,49 +633,81 @@ class LibraryStore:
                 raise IndexUnavailable(str(error)) from error
 
     @staticmethod
-    def _drop_derived(connection: sqlite3.Connection) -> None:
-        """Drop every derived table and trigger, leaving metadata untouched.
+    def _drop_derived_statements() -> list[str]:
+        """``DROP`` for every derived trigger and table, metadata untouched.
 
         Triggers first: three of them hang off ``assets``/``asset_tags``/``tags``
         and would reference a table that no longer exists.
         """
-        for trigger in _DERIVED_TRIGGERS:
-            connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-        for table in _DERIVED_TABLES:
-            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        return [f"DROP TRIGGER IF EXISTS {trigger}" for trigger in _DERIVED_TRIGGERS] + [
+            f"DROP TABLE IF EXISTS {table}" for table in _DERIVED_TABLES
+        ]
+
+    @classmethod
+    def _drop_derived(cls, connection: sqlite3.Connection) -> None:
+        for statement in cls._drop_derived_statements():
+            connection.execute(statement)
         connection.commit()
 
     def recover_derived(self) -> bool:
         """Discard the derived index and recreate an empty one. Never raises.
 
-        The module's contract is that everything under ``idx_*`` costs one
-        rebuild, never an error — but a corrupt or unreadable DERIVED database
-        (a full disk mid-write, a torn file) used to surface as
-        ``IndexUnavailable`` out of every read, and as a bare 500 on the route.
-        This is the rebuild path: drop, recreate, reset the counters so the
-        indexer backfills, and report whether it worked. AUTHORITATIVE tables
-        are never touched, so names, tags and favourites survive a corrupt index.
+        It must not go through :meth:`_connect`: that runs ``_ensure_schema``,
+        whose ``CREATE ... IF NOT EXISTS`` over a MALFORMED ``idx_*`` table fails
+        with the very ``IndexUnavailable`` this method exists to clear — the
+        recovery then answered 503 forever (QA Q-3). So this opens a raw
+        connection and runs DROP + CREATE + the counter reset as ONE script
+        inside one ``BEGIN IMMEDIATE``: a failure halfway rolls back and the next
+        attempt starts from the same state.
+
+        AUTHORITATIVE tables are never touched, so names, tags and favourites
+        survive a corrupt index.
         """
         try:
-            # The cached readiness would short-circuit the DDL below.
+            # The cached readiness would short-circuit the schema work.
             self._ready_paths.discard(self._key)
-            with self._connect() as connection:
-                self._drop_derived(connection)
-                connection.executescript(_schema_sql())
-                for key, value in (
-                    (STATE_SCHEMA, str(SCHEMA_VERSION)),
-                    (STATE_REVISION, "0"),
-                    (STATE_BACKFILL_DONE, "0"),
-                    (STATE_SESSIONS_TOTAL, "0"),
-                    (STATE_SESSIONS_SCANNED, "0"),
-                ):
-                    connection.execute(
-                        "INSERT INTO idx_state(key, value) VALUES(?, ?) "
-                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (key, value),
-                    )
-                connection.commit()
+            # The derived triggers attach to these; they are authoritative and
+            # ``MetadataStore`` owns them.
+            if not MetadataStore(self.config_dir).ensure_schema():
+                return False
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(self.path, timeout=5.0)
+            try:
+                connection.execute("PRAGMA busy_timeout=5000")
+                script = "\n".join(
+                    [
+                        "BEGIN IMMEDIATE;",
+                        # Statements carry no trailing ";" of their own, and the
+                        # schema block below starts with one: without it the
+                        # script reads "DROP ... CREATE ..." and SQLite refuses.
+                        *[f"{statement};" for statement in self._drop_derived_statements()],
+                        # ``_schema_sql`` is ONE script string, not a list of
+                        # statements: unpacking it would feed SQLite its letters.
+                        _schema_sql(),
+                        "INSERT INTO idx_state(key, value) VALUES('{}', '{}') "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value;".format(
+                            STATE_SCHEMA, SCHEMA_VERSION
+                        ),
+                        *[
+                            "INSERT INTO idx_state(key, value) VALUES('{0}', '{1}') "
+                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value;".format(
+                                key, value
+                            )
+                            for key, value in (
+                                (STATE_REVISION, "0"),
+                                (STATE_BACKFILL_DONE, "0"),
+                                (STATE_SESSIONS_TOTAL, "0"),
+                                (STATE_SESSIONS_SCANNED, "0"),
+                            )
+                        ],
+                        "COMMIT;",
+                    ]
+                )
+                connection.executescript(script)
+            finally:
+                connection.close()
             self._ready_paths.add(self._key)
+            logger.info("library: derived index rebuilt after an unreadable file")
             return True
         except Exception:  # noqa: BLE001 - a failed recovery is a 503, not a crash
             logger.warning("library: derived index recovery failed", exc_info=True)
@@ -717,11 +763,20 @@ class LibraryStore:
             state = self._state(connection)
             scanned = self._count_sessions(connection, complete=True)
             total = self._int_state(state, STATE_SESSIONS_TOTAL)
-        return (
-            "ready" if state.get(STATE_BACKFILL_DONE, "0") == "1" else "building",
-            scanned,
-            total,
-        )
+        if state.get(STATE_BACKFILL_DONE, "0") == "1" or self._sessions_dir_empty():
+            # An EMPTY journal directory is a finished empty index, not a build
+            # in progress: a fresh install must open on "ready" with an empty
+            # Library, not on a scanning spinner that never ends.
+            return ("ready", scanned, total)
+        return ("building", scanned, total)
+
+    def _sessions_dir_empty(self) -> bool:
+        """One ``scandir`` probe; it answers on the first entry of a real store."""
+        try:
+            with os.scandir(self.config_dir / "sessions") as entries:
+                return next(entries, None) is None
+        except OSError:
+            return True
 
     @staticmethod
     def _state(connection: sqlite3.Connection) -> dict[str, str]:

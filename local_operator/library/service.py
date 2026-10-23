@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import stat
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -396,6 +397,19 @@ def _scoped_tags(
     return [{**tag, "count": used[tag["id"]]} for tag in tags if tag["id"] in used]
 
 
+#: How long a failed recovery suppresses the next attempt. A persistently
+#: unreadable file (a bad sector, a full disk) would otherwise run DROP/CREATE
+#: on every request, and the recovery itself is the hammer.
+RECOVERY_COOLDOWN_S: Final = 5.0
+#: One bounded wait before the list retries an index it could not read. Long
+#: enough for a concurrent writer's DDL to commit, short enough not to stall a
+#: request that is about to be answered from a rebuilt index anyway.
+INDEX_RETRY_S: Final = 0.05
+
+_RECOVERY_ATTEMPTS: dict[str, float] = {}
+_RECOVERY_LOCK = threading.Lock()
+
+
 def _recover_index(config: Path) -> bool:
     """One rebuild attempt after a corrupt derived index. Never raises.
 
@@ -403,11 +417,25 @@ def _recover_index(config: Path) -> bool:
     true at runtime instead of only in the module docstring. Metadata is
     untouched, so names and tags survive. ``ensure_started`` then backfills,
     because recovery resets ``backfill_done``.
+
+    A failed attempt suppresses the next one for :data:`RECOVERY_COOLDOWN_S`:
+    the caller turns that into the typed 503, which is the honest answer while
+    the file is unreadable, and the cooldown is what stops every request from
+    re-running the DDL.
     """
+    key = str(Path(config).resolve())
+    now = time.monotonic()
+    with _RECOVERY_LOCK:
+        last = _RECOVERY_ATTEMPTS.get(key)
+        if last is not None and now - last < RECOVERY_COOLDOWN_S:
+            return False
+        _RECOVERY_ATTEMPTS[key] = now
     try:
         if not LibraryStore(config).recover_derived():
             return False
-        ensure_started(config)
+        # Wake it: the worker may be parked on the 6 h idle timeout, and a
+        # rebuilt index would otherwise stay empty until that tick.
+        ensure_started(config).wake()
         return True
     except Exception:  # noqa: BLE001 - a failed recovery is a typed refusal
         logger.warning("library: index recovery failed", exc_info=True)
@@ -436,16 +464,26 @@ def list_assets(
     # the index has to be able to start from a read. Idempotent and cheap.
     ensure_started(config)
     store = LibraryStore(config)
-    try:
+
+    def attempt() -> dict[str, Any]:
         return _list(config, store, query, display=display, home=home)
+
+    try:
+        return attempt()
     except library_store.IndexUnavailable:
-        # A corrupt/torn derived file is rebuildable by contract. Try once, then
-        # answer an empty BUILDING page: the indexer repopulates it and the next
-        # poll shows rows. A second failure is a 503, never a 500.
-        logger.warning("library: derived index unreadable; rebuilding", exc_info=True)
-        if not _recover_index(config):
-            raise LibraryUnavailable(str(config)) from None
-        return empty_listing("building")
+        # A torn page or a table a concurrent recovery is dropping is transient:
+        # one bounded wait, then one retry, before declaring the index unreadable.
+        time.sleep(INDEX_RETRY_S)
+        try:
+            return attempt()
+        except library_store.IndexUnavailable:
+            # Still unreadable: the derived file is rebuildable by contract. One
+            # recovery, then an empty BUILDING page the indexer repopulates; a
+            # failed recovery is a 503, never a 500.
+            logger.warning("library: derived index unreadable; rebuilding", exc_info=True)
+            if not _recover_index(config):
+                raise LibraryUnavailable(str(config)) from None
+            return empty_listing("building")
 
 
 def _list(
