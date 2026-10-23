@@ -19990,6 +19990,15 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
 #: the lane was skipped — a silent wrong action rather than a refusal.
 OWNERSHIP_BROWSER_ACTIONS = frozenset({"recover", "retain", "release"})
 
+#: The three accessibility-locator prefixes `click`/`type` accept in `selector`.
+#:
+#: Recognised here so the tool can (a) refuse one where only CSS makes sense
+#: and (b) explain a cryptic host failure when an OLD host treats `role=…` as
+#: CSS. The grammar itself is matched host-side (`driver/ax-locator.ts`): this
+#: is a recogniser, not a second parser, because two parsers is how
+#: `role=checkbox[name="Active"]` starts meaning two things.
+_LOCATOR_PREFIX_RE = re.compile(r"^(role|label|text)(\*?)=", re.IGNORECASE)
+
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
 #: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
 #: wire rather than returning an empty scroll.
@@ -20138,9 +20147,11 @@ class BrowserParams(BaseModel):
     path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
-        description="CSS selector or a snapshot ref (e5): the click/type "
-        "target, the read scope (default: body), the scroll element, or the "
-        "download/upload control.",
+        description="CSS selector, a snapshot ref (e5), or an accessibility "
+        'locator for the click/type target: role=checkbox[name="Active"], '
+        'label="Homepage URL", text="Create GitHub App" — resolved '
+        "against the page's a11y tree, so it survives framework ids. Also the "
+        "read/snapshot scope, the scroll element, or the download/upload control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -20796,6 +20807,90 @@ def _snapshot_footer(
     return f"[snapshot: {'; '.join(notes)}]" if notes else ""
 
 
+def _locator_kind(selector: str) -> str:
+    """``"role"``/``"label"``/``"text"`` for a locator, else "".
+
+    ``label*=``/``text*=`` are the documented substring spellings and are
+    recognised as locators here too: the recogniser's job is "is this a locator,
+    so the action rules apply", and a spelling it cannot see would bypass the
+    refusal for non-target actions (agent review round 1, R1-4).
+    """
+    match = _LOCATOR_PREFIX_RE.match(selector.strip())
+    return match.group(1).lower() if match else ""
+
+
+def _locator_shape_problem(selector: str) -> str:
+    """A malformed locator, or "" when it has the shape the hosts parse.
+
+    Deliberately a SHAPE check (balanced quotes and brackets), not a second
+    parser: it exists so a caller's typo — `role=checkbox[name="Active` — is not
+    reported as "this host predates accessibility locators" (agent review round
+    1, R1-3). Anything it accepts is still validated by the host.
+    """
+    kind = _locator_kind(selector)
+    if not kind:
+        return ""
+    rest = selector.strip().split("=", 1)[1] if "=" in selector else ""
+    # Scan QUOTE-AWARE: a delimiter inside a quoted value is content, not
+    # structure — `text="Array [1]"` is a well-formed locator (agent review
+    # round 2 residual).
+    quote = ""
+    depth = 0
+    closed_at = -1
+    for index, char in enumerate(rest):
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in ('"', "'"):
+            quote = char
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                return f"the {kind}= locator has an unbalanced [ ]"
+            if depth == 0:
+                closed_at = index
+    if quote:
+        return f"the {kind}= locator has an unterminated {quote} quote"
+    if depth != 0:
+        return f"the {kind}= locator has an unbalanced [ ]"
+    if closed_at >= 0 and rest[closed_at + 1 :].strip():
+        return f"the {kind}= locator has trailing content after its [ ]"
+    return ""
+
+
+def _validate_locator_target(action: str, params: BrowserParams) -> str:
+    """Locators belong to the actions that RESOLVE a target: click and type.
+
+    `snapshot`'s selector scopes the tree walk, which is a DOM query — a locator
+    there would be passed to `DOM.querySelector` and fail as invalid CSS. `read`
+    takes page text, where an accessible name is the wrong handle entirely.
+    Refused with copy rather than silently treated as CSS, the same house rule
+    `tab`/`backend`/`secret_ref` follow.
+    """
+    kind = _locator_kind(params.selector)
+    if not kind:
+        return ""
+    if action in ("click", "type", "upload"):
+        # `upload` resolves its input through the same ref/CSS/locator path in
+        # both hosts, so `label="Choose file"` names a file input there too
+        # (agent review round 1, R1-5).
+        return ""
+    if action == "snapshot":
+        return (
+            f"snapshot takes a CSS selector for its scope, not a {kind}= locator: "
+            "scope the section with CSS, then use search= (or a locator on the click) "
+            "to find the control inside it"
+        )
+    return (
+        f"{kind}= locators resolve a click/type TARGET; '{action}' takes a CSS "
+        "selector (or a snapshot ref)"
+    )
+
+
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
     """Refuse an unusable argument, or "" when the call may proceed.
 
@@ -20816,6 +20911,9 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     window = _validate_window_fields(action, params)
     if window:
         return window
+    locator = _validate_locator_target(action, params)
+    if locator:
+        return locator
     if action != "type" and params.secret_ref.strip():
         # Refused rather than silently ignored, the same house rule `tab` and
         # `backend` follow: a caller that passed a ref to an action which never
@@ -22458,11 +22556,29 @@ async def _bridge_call(
     try:
         return await selected.call(action, params), None
     except BridgeError as exc:
-        problem = _error(
-            tool_call_id,
-            "browser",
-            format_error(exc, action=action, surface=surface, host=host),
-        )
+        message = format_error(exc, action=action, surface=surface, host=host)
+        kind = _locator_kind(str(params.get("selector") or ""))
+        if kind and exc.code.value == "internal":
+            # A `role=…` selector that reaches CSS is either a MALFORMED locator
+            # on a current host or a well-formed one on a host that predates
+            # locators. Saying the second alone sent a caller with a typo to
+            # update their app (agent review round 1, R1-3): name the malformed
+            # case first when the shape says so, and never assert one cause.
+            malformed = _locator_shape_problem(str(params.get("selector") or ""))
+            if malformed:
+                message += (
+                    f"\n{malformed}. A locator is role=<role>[name=…], label=… or "
+                    "text=…; fix the quotes/brackets and retry."
+                )
+            else:
+                message += (
+                    f"\nThe {kind}= locator was treated as CSS. Either this browser host "
+                    "predates accessibility locators, or the locator is malformed. If the "
+                    "host is current, check the locator; otherwise update the desktop app "
+                    "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
+                    "them) / a CSS selector instead."
+                )
+        problem = _error(tool_call_id, "browser", message)
         # Carry the TYPED wire code so callers can branch on it (dead-pin
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
@@ -24307,6 +24423,29 @@ def _unique_name(directory: Path, name: str) -> str:
     return candidate
 
 
+def _target_phrase(selector: str, result: dict[str, Any]) -> str:
+    """What was clicked, in the terms the caller used AND what the host found.
+
+    A locator answer that reads back only as `role=checkbox[name="Active"]`
+    cannot be checked by the caller; one that reads as
+    `role=checkbox "Active" (2 matched, first used)` says exactly which element
+    the click landed on and whether the name was ambiguous. A ref or a CSS
+    selector keeps its historical copy byte for byte — existing tests pin it,
+    and an unchanged message is not worth churning.
+    """
+    resolved = result.get("resolved")
+    if not isinstance(resolved, dict) or resolved.get("by") != "locator":
+        return selector
+    role = str(resolved.get("role") or "")
+    name = str(resolved.get("name") or "")
+    matched = int(resolved.get("matched") or 1)
+    shown_name = json.dumps(name, ensure_ascii=False)
+    phrase = f"{role} {shown_name}" if role else shown_name
+    if matched > 1:
+        phrase += f" ({matched} matched, first used)"
+    return f"{selector} → {phrase}"
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -24507,7 +24646,8 @@ async def _bridge_action(
         return _text(
             tool_call_id,
             "browser",
-            f"Clicked {params.selector.strip()}{navigation}. Page: {_page_line(title, href)}",
+            f"Clicked {_target_phrase(params.selector.strip(), result)}{navigation}. "
+            f"Page: {_page_line(title, href)}",
             details=details,
         )
     if action == "type":
