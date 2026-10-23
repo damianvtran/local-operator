@@ -10,8 +10,8 @@
     "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
     "scripts/diagnostics/native_worker_6911/producer.py": "85ea9c21ea52dee5d87024a2d9d9d620aa7f9b821833c13ffba67d8c80b43393",
     "scripts/diagnostics/native_worker_6911/check_quality.py": "5e28800297f7e7ee95f2e66299c39ecb99a5d9e7f5977e3e3cb2bf7d5746eadc",
-    "scripts/diagnostics/native_worker_6911/carrier.py": "97502c5aad168973666a18ad9c327443e790c47484e8f0d76c1cb8c1a9de84bc",
-    "scripts/diagnostics/native_worker_6911/controller.py": "a9083c81d1855816de26e05cfeffa7e70698944e2c601b0b88bef3f1c055532a"
+    "scripts/diagnostics/native_worker_6911/carrier.py": "144cc6f0493395462b5aa31ee89955e6312143572868e8dfad5e0cb08f19912e",
+    "scripts/diagnostics/native_worker_6911/controller.py": "5c4d7938d05ef8d9738622b6a0f3de97583313a7267f2a78c4844e9ee8669eb6"
   },
   "loaded_sources": [
     "tests/worker_code_identity.py",
@@ -26,5 +26,6 @@
     "textual/timer.py"
   ],
   "textual_version": "8.2.8",
-  "historical_equivalence": "NONE; GenericApp control only"
+  "historical_equivalence": "NONE; GenericApp control only",
+  "code_integrity": "exact native structural CodeType equality in child + separate trusted co_filename/source SHA; NOT marshal bytes"
 }

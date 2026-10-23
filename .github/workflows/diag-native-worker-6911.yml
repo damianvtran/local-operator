@@ -32,14 +32,16 @@ jobs:
           set +e
           python -B scripts/run_bounded.py --timeout 220 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.native_worker_6911.controller "$RUNNER_TEMP/native-worker-6911"
           native_rc=$?
-          python -B scripts/run_bounded.py --timeout 20 --grace 5 --memory-mb 256 -- python -B -m scripts.diagnostics.native_worker_6911.controller --style black >/dev/null 2>&1
+          python -B scripts/run_bounded.py --timeout 20 --grace 5 --memory-mb 256 -- python -B -m scripts.diagnostics.native_worker_6911.controller --style black "$RUNNER_TEMP/native-worker-style-black.json" >/dev/null 2>&1
           black_rc=$?
-          python -B scripts/run_bounded.py --timeout 20 --grace 5 --memory-mb 256 -- python -B -m scripts.diagnostics.native_worker_6911.controller --style isort >/dev/null 2>&1
+          python -B scripts/run_bounded.py --timeout 20 --grace 5 --memory-mb 256 -- python -B -m scripts.diagnostics.native_worker_6911.controller --style isort "$RUNNER_TEMP/native-worker-style-isort.json" >/dev/null 2>&1
           isort_rc=$?
-          python -B scripts/run_bounded.py --timeout 20 --grace 5 --memory-mb 256 -- python -B -m scripts.diagnostics.native_worker_6911.controller --style flake8 >/dev/null 2>&1
+          python -B scripts/run_bounded.py --timeout 20 --grace 5 --memory-mb 256 -- python -B -m scripts.diagnostics.native_worker_6911.controller --style flake8 "$RUNNER_TEMP/native-worker-style-flake8.json" >/dev/null 2>&1
           flake8_rc=$?
           printf '{"native":%s,"black":%s,"isort":%s,"flake8":%s}\n' "$native_rc" "$black_rc" "$isort_rc" "$flake8_rc" > "$RUNNER_TEMP/native-worker-style.json"
-          test "$native_rc:$black_rc:$isort_rc:$flake8_rc" = "0:0:0:0"
+          python -B -c 'import json,os,pathlib; r=pathlib.Path(os.environ["RUNNER_TEMP"]); p=r/"native-worker-style.json"; v=json.loads(p.read_text()); v["inner"]={k:json.loads((r/("native-worker-style-"+k+".json")).read_text()) if (r/("native-worker-style-"+k+".json")).exists() else {"inner_rc":None,"reason":"MISSING_METADATA"} for k in ("black","isort","flake8")}; p.write_text(json.dumps(v)); assert all(x.get("reason")=="PASS" for x in v["inner"].values())'
+          metadata_rc=$?
+          test "$native_rc:$black_rc:$isort_rc:$flake8_rc:$metadata_rc" = "0:0:0:0:0"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

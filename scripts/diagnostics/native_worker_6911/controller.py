@@ -20,10 +20,10 @@ HERE = Path(__file__).resolve().parent
 
 
 def qualify(proof, expected):
-    if set(proof) != {'identity','native_sources','compiled_producer','loaded','data','executor_settled','threads_settled'}:
+    if set(proof) != {'identity','native_sources','producer_source_sha256','compiled_equal','loaded','data','executor_settled','threads_settled'}:
         raise ValueError('native proof schema STOP')
     validate_identity(proof['identity'], expected['identity'])
-    if proof['native_sources'] != expected['native_sources'] or proof['compiled_producer'] != expected['compiled_producer'] or proof['loaded'] != expected['identity']['sources']:
+    if proof['native_sources'] != expected['native_sources'] or (proof['compiled_equal'] is not True or proof['producer_source_sha256'] != expected['producer_source_sha256']) or proof['loaded'] != expected['identity']['sources']:
         raise ValueError('native identity STOP')
     if proof['executor_settled'] is not True or proof['threads_settled'] is not True:
         raise ValueError('native settlement STOP')
@@ -81,9 +81,12 @@ def partial_proof(proof):
     out = {'stage':'UNKNOWN','rows':[], 'reports':[]}
     if type(proof) is not dict:
         return out
-    stages = {'SOURCE','NATIVE_IMPORT','IDENTITY','PRODUCER','EXECUTOR','COMPLETE'}
+    stages = {'SOURCE','IMPORT_PRODUCER','IMPORT_HELPERS','IMPORT_TEXTUAL','REPO_PATHS','NATIVE_PATHS','COMPILED_COMPARE','IDENTITY','PRODUCER','EXECUTOR','COMPLETE'}
     if type(proof.get('stage')) is str and proof['stage'] in stages:
         out['stage'] = proof['stage']
+    if type(proof.get('observed')) is dict:
+        out['observed'] = {k:v for k,v in proof['observed'].items()
+            if k in ('producer_imported','helpers_imported','textual_imported','repo_paths','native_paths','compiled_equal') and type(v) is bool}
     rows, reports = proof.get('rows'), proof.get('reports')
     if type(rows) is list:
         out['row_count_capped'] = min(len(rows), 3)
@@ -160,38 +163,71 @@ def build_env(work, expected):
     return env
 
 
-def style_main(tool):
-    if tool not in ('black','isort','flake8'):
-        raise SystemExit(2)
-    files = ['tests/unit/test_tui_responsiveness.py','tests/unit/test_worker_code_identity.py',
-             'tests/worker_code_identity.py','tests/loop_callback_spans.py']
-    options = {'black':['--check'], 'isort':['--check-only'], 'flake8':['--jobs','1']}[tool]
+STYLE_FILES = ('tests/unit/test_tui_responsiveness.py','tests/unit/test_worker_code_identity.py',
+               'tests/worker_code_identity.py','tests/loop_callback_spans.py')
+
+
+def style_summary(tool, inner_rc, launched, timeout, overcap, settled, output):
+    files = []
+    if type(output) is bytes and len(output) <= 262144:
+        for line in output.decode('utf-8', errors='replace').splitlines():
+            path = None
+            if tool == 'black' and line.startswith('would reformat '):
+                path = line[len('would reformat '):]
+            if tool == 'isort' and line.startswith('ERROR: ') and line.endswith(' Imports are incorrectly sorted and/or formatted.'):
+                path = line[7:-len(' Imports are incorrectly sorted and/or formatted.')]
+            if path is not None:
+                path = path.removeprefix(str(ROOT)+'/')
+                if path in STYLE_FILES and path not in files: files.append(path)
+    safe = launched and not timeout and not overcap and settled.get('reaped') is True and settled.get('owned_settled') is True and not settled.get('errors')
+    reason = 'PASS' if safe and inner_rc == 0 else 'TOOL_FAILURE'
+    if safe and inner_rc == 1 and files and tool in ('black','isort'): reason = 'FORMAT_REQUIRED'
+    if not launched: reason = 'LAUNCH_FAILED'
+    elif timeout: reason = 'TIMEOUT'
+    elif overcap: reason = 'OUTPUT_CAP'
+    elif not safe: reason = 'UNSETTLED'
+    return dict(inner_rc=inner_rc, launched=launched, timeout=timeout, output_cap=overcap,
+        reaped=settled.get('reaped') is True, owned_settled=settled.get('owned_settled') is True,
+        reason=reason, files=files if reason == 'FORMAT_REQUIRED' else [])
+
+
+def style_main(tool, destination):
+    if tool not in ('black','isort','flake8'): raise SystemExit(2)
+    options = {'black':['--check'],'isort':['--check-only'],'flake8':['--jobs','1']}[tool]
     known, pgid = {}, os.getpgrp()
     def observe(): return owned(known, pgid)
     def kill_owned():
         for pid, facts in observe().items():
             fresh = table().get(pid)
             if fresh and fresh['start'] == facts['start']: os.kill(pid, 9)
-    child = subprocess.Popen([sys.executable,'-B','-m',tool]+options+files,
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    okay = False
+    child, settled, output = None, {}, bytearray()
+    timed, capped = False, False
     try:
-        deadline, total = time.monotonic()+20, 0
-        with selectors.DefaultSelector() as selector:
-            selector.register(child.stdout, selectors.EVENT_READ)
-            while selector.get_map():
-                if time.monotonic() >= deadline: raise ValueError('style time STOP')
-                observe()
-                for key, _ in selector.select(0.05):
-                    chunk = os.read(key.fileobj.fileno(),16384)
-                    if not chunk: selector.unregister(key.fileobj)
-                    total += len(chunk)
-                    if total > 262144: raise ValueError('style output STOP')
-        okay = True
-    finally:
-        settled = finish_owned(child, observe, kill_owned, lambda: None)
-    rc = settled['rc'] if okay and not settled['errors'] else 1
-    raise SystemExit(rc if rc is not None and rc >= 0 else 1)
+        child = subprocess.Popen([sys.executable,'-B','-m',tool]+options+list(STYLE_FILES),
+            cwd=ROOT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic()+20
+            with selectors.DefaultSelector() as selector:
+                selector.register(child.stdout,selectors.EVENT_READ)
+                while selector.get_map():
+                    if time.monotonic() >= deadline:
+                        timed=True
+                        raise ValueError('style bound STOP')
+                    observe()
+                    for key,_ in selector.select(0.05):
+                        chunk=os.read(key.fileobj.fileno(),16384)
+                        if not chunk: selector.unregister(key.fileobj)
+                        if len(output)+len(chunk)>262144:
+                            capped=True
+                            raise ValueError('style output STOP')
+                        output.extend(chunk)
+        finally:
+            settled=finish_owned(child,observe,kill_owned,lambda:None)
+    except Exception:
+        pass  # Fixed metadata below remains failure; never export exception text.
+    summary=style_summary(tool,settled.get('rc'),child is not None,timed,capped,settled,bytes(output))
+    Path(destination).write_text(json.dumps(summary)+'\n')
+    raise SystemExit(0 if summary['reason']=='PASS' else 1)
 
 
 def main():
@@ -207,10 +243,10 @@ def main():
     expected = dict(python=list(sys.version_info[:3]),
         executable_sha256=hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest(),
         ppid=os.getpid(), pgid=pgid, sources={p:manifest["sources"][p] for p in manifest["loaded_sources"]})
-    from scripts.diagnostics.native_worker_6911.carrier import native_sources, compiled_hash
+    from scripts.diagnostics.native_worker_6911.carrier import native_sources
     from tests.worker_code_identity import source_allowlist
     expected = dict(identity=expected, sources=manifest['sources'], native_sources=native_sources(),
-        compiled_producer=compiled_hash(), labels=list(source_allowlist(ROOT,
+        producer_source_sha256=manifest['sources']['scripts/diagnostics/native_worker_6911/producer.py'], labels=list(source_allowlist(ROOT,
         ('scripts/diagnostics/native_worker_6911/producer.py',)).values()))
     env = build_env(work, expected)
     result, lifecycle = dict(qualified=False), {}
@@ -251,7 +287,7 @@ def main():
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3 and sys.argv[1] == '--style':
-        style_main(sys.argv[2])
+    if len(sys.argv) == 4 and sys.argv[1] == '--style':
+        style_main(sys.argv[2],sys.argv[3])
     else:
         main()
