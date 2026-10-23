@@ -381,8 +381,11 @@ def report_config_key_shrink(config_dir: Path, *, surface: str = "cli") -> "list
       there would make the loss permanent before the operator ever saw it — the
       next human launch must still be able to report it.
 
-    ``config.yml`` is never touched here. Returns the missing paths, so a caller
-    (and the tests) can assert on what was reported without parsing the message.
+    ``config.yml`` is never touched here, and neither is a config write lock: two
+    launches racing re-baseline atomically and the later one wins, which is the
+    same answer either would have reached a moment apart. Returns the missing
+    paths, so a caller (and the tests) can assert on what was reported without
+    parsing the message.
     """
     from local_operator.config import _dotted, _leaf_paths, read_config_values
 
