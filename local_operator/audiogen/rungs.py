@@ -87,6 +87,10 @@ from local_operator.audiogen.pricing import sound_effect_estimate, voiceover_est
 from local_operator.clients._http import APIError
 from local_operator.imagegen.media import download_asset
 from local_operator.stt.errors import api_error_from_httpx_response
+from local_operator.tts.output_format import PREFERRED_OUTPUT_FORMAT
+from local_operator.tts.output_format import (
+    post_with_format_fallback as _post_at_best_format,
+)
 
 __all__ = [
     "AudioCancelReceipt",
@@ -230,10 +234,15 @@ OPENAI_AUDIO_BASE_URL = "https://api.openai.com/v1"
 #: contract's MP3-only rule; no WAV).
 BYOK_MEDIA_TYPE = "audio/mpeg"
 
-#: ElevenLabs' ``output_format`` for a voiceover — the vendored map's fixed
-#: value (``mp3_44100_128``), restated here because the URL pairing happens in
-#: THIS module and the map's constant lives behind the adapters' params.
-ELEVENLABS_OUTPUT_FORMAT = "mp3_44100_128"
+#: ElevenLabs' ``output_format`` the harness asks for. This is a CODE constant
+#: rather than the vendored map's ``fixed.elevenlabs.output_format``: the map is
+#: a byte-for-byte copy of ``agent-server``'s canonical artifact (see
+#: ``voicing_map/README.md``) and cannot take a local edit, so the harness's own
+#: preference lives here and in ``tts.output_format``, which owns the plan-aware
+#: one-shot fallback to 128. The map's value stays the vendor's universal format
+#: (128) until the same change lands upstream; nothing in this module reads it as
+#: a preference any more.
+ELEVENLABS_OUTPUT_FORMAT = PREFERRED_OUTPUT_FORMAT
 
 
 def progress_details(
@@ -1088,8 +1097,13 @@ def _byok_voiceover_attempt(provider: str, model: str, spec: AudioJobSpec) -> An
 
 def _elevenlabs_fixed() -> dict[str, Any]:
     """The vendored map's ``fixed.elevenlabs`` block — the one source for the
-    platform constants (similarity_boost, use_speaker_boost, output_format)
-    the TTS daemon's own BYO leg reads from the same file.
+    platform constants (similarity_boost, use_speaker_boost) the TTS daemon's
+    own BYO leg reads from the same file.
+
+    ``output_format`` is deliberately NOT read from here: it is a preference
+    owned by :mod:`local_operator.tts.output_format`, because the map is a
+    vendored artifact that cannot be edited locally (``voicing_map/README.md``)
+    and still pins the vendor's universal 128.
     """
     from local_operator.tts import adapters as tts_adapters
 
@@ -1144,9 +1158,7 @@ async def run_elevenlabs(
                 payload["language_code"] = params.language_code
             payload["voice_settings"] = voice_settings
             url = f"{base}/v1/text-to-speech/{params.voice_id}"
-            request_params: dict[str, str] = {
-                "output_format": str(fixed.get("output_format") or ELEVENLABS_OUTPUT_FORMAT)
-            }
+            request_params: dict[str, str] = {"output_format": ELEVENLABS_OUTPUT_FORMAT}
             model = params.model_id or model
         else:
             if spec.duration_s is None:  # pragma: no cover - the tool validates first
@@ -1163,8 +1175,10 @@ async def run_elevenlabs(
             if spec.loop:
                 payload["loop"] = True
             url = f"{base}/v1/sound-generation"
-            request_params = {}
-
+            # The vendor's default is mp3_44100_128; asking explicitly is what
+            # keeps the effect from taking a default that changes under us, and
+            # the fallback helper drops it to 128 for a plan that refuses 192.
+            request_params = {"output_format": ELEVENLABS_OUTPUT_FORMAT}
         emit_progress(
             emit,
             f"Generating via ElevenLabs ({model})…",
@@ -1175,16 +1189,22 @@ async def run_elevenlabs(
                 model=model,
             ),
         )
-        data, content_type = await _post_audio(
-            http,
-            url,
-            headers=headers,
-            payload=payload,
-            params=request_params,
-            model_label="ElevenLabs",
+        data, content_type = await _post_at_best_format(
+            lambda wire: _post_audio(
+                http,
+                url,
+                headers=headers,
+                payload=payload,
+                params=wire,
+                model_label="ElevenLabs",
+                api_key=api_key,
+                # Only a batch stretches its waits; a single call keeps its timing.
+                jitter=spec.batch_submission,
+            ),
             api_key=api_key,
-            # Only a batch stretches its waits; a single call keeps its timing.
-            jitter=spec.batch_submission,
+            endpoint=("voiceover" if spec.direction == "voiceover" else "sound_effect"),
+            model=model,
+            params=request_params,
         )
 
     estimate = (
