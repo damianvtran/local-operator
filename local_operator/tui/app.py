@@ -38753,7 +38753,28 @@ class OperatorApp(App[None]):
         if self.use_command_palette and not palette_is_open(self):
             self.push_screen(OperatorCommandPalette(id="--command-palette"))
 
-    def _palette_entries(self) -> list[PaletteEntry]:
+    def _palette_session_rows(self) -> list[Any]:
+        """The session-store scan behind the palette's conversation rows.
+
+        Split from :meth:`_palette_entries` so the provider can run it in a
+        thread: the scan is uncapped by design (a capped catalogue cannot find
+        a session past the cap — the reasoning `/resume` records), and cold it
+        costs 1.5-2.2 s on a real store. On the event loop that is a frozen
+        frame between `ctrl+p` and the palette; off it, the palette paints and
+        the rows arrive.
+
+        Never raises: a palette that cannot list history still opens, and a
+        broken store must not turn a keystroke into a traceback.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.resume import recent_session_rows
+
+        try:
+            return list(recent_session_rows(config_dir(), limit=None))
+        except Exception:  # noqa: BLE001 — see docstring
+            return []
+
+    def _palette_entries(self, session_rows: Iterable[Any] | None = None) -> list[PaletteEntry]:
         """Every action the ``ctrl+p`` palette offers, in discovery order.
 
         The SINGLE seam that reads live state, called from the provider's
@@ -38776,7 +38797,6 @@ class OperatorApp(App[None]):
         """
         from local_operator import settings_io
         from local_operator.paths import config_dir
-        from local_operator.resume import recent_session_rows
         from local_operator.team_bridge import availability as bridge_availability
 
         directory = config_dir()
@@ -38785,10 +38805,8 @@ class OperatorApp(App[None]):
             for section in settings_io.SECTIONS
             if bridge_availability.section_visible(section.name, directory)
         ]
-        try:
-            session_rows = recent_session_rows(directory, limit=None)
-        except Exception:  # noqa: BLE001 — a palette that cannot list history still opens
-            session_rows = ()
+        if session_rows is None:
+            session_rows = self._palette_session_rows()
         return build_palette_entries(
             slash_commands=SLASH_COMMANDS,
             sections=sections,
@@ -38817,6 +38835,15 @@ class OperatorApp(App[None]):
             return
         if not entry.slash:
             return
+        # A full-page mode is a REPLACEMENT for the transcript, not a layer
+        # over it: while the settings page is open the transcript is
+        # `display = False`, so a slash command dispatched from here would
+        # paint its receipt (a listing, a picker, a notice) into a surface the
+        # user cannot see and leave the page still owning the frame. Leaving
+        # the mode first is the same route Esc takes, so focus and the boot
+        # layout settle exactly as a user-initiated exit does.
+        if self._settings_view is not None:
+            self._close_settings_view()
         pending = self._run_slash_command(entry.slash)
         if pending is not None:
             await pending

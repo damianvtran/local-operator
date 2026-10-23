@@ -33,11 +33,13 @@ the empty catalogue are unit-testable without a Screen. The app method
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Iterable, Sequence
 
 from rich.markup import escape
+from rich.text import Text
 from textual.command import CommandPalette, DiscoveryHit, Hit, Hits, Provider
 
 from local_operator.i18n.keys import tui_palette as _p
@@ -174,17 +176,33 @@ def build_palette_entries(
                 label=label or name,
                 description=summary,
                 # Address by the registry KEY, never the display label: `/agent`
-                # resolves the first token as the name.
-                slash=f"/agent {name}",
+                # resolves the first token as the name. The key also MATCHES,
+                # even when a chosen label is what is drawn — the key is what
+                # the user types to reach this agent.
+                slash=f"/agent ={name}",
+                aliases=name,
             )
         )
 
+    # ONE ROW PER NAME, first wins, compared on the same stripped casefold
+    # `_team_choices` uses — the composite registry can hold a session team and
+    # an account team under one spelling, and two identically-labelled rows
+    # that route to the same name are noise.
+    seen_teams: set[str] = set()
     for name in team_names:
+        key = name.strip().casefold()
+        if key in seen_teams:
+            continue
+        seen_teams.add(key)
         entries.append(
             PaletteEntry(
                 kind=KIND_TEAM,
                 label=name,
-                slash=f"/team {name}",
+                # `=` is `/team`'s literal-name escape: without it a team named
+                # `chart`, `new` or `edit` would open the chart/authoring
+                # subcommand instead of attaching (`/agent` takes the same
+                # escape, for its own reserved words).
+                slash=f"/team ={name}",
             )
         )
 
@@ -265,7 +283,12 @@ class OperatorCommandProvider(Provider):
         # `OperatorApp` is the only screen stack this provider is registered
         # on; the cast keeps the import out of this module (app.py imports us).
         app = self.app
-        self._entries = app._palette_entries()  # type: ignore[attr-defined]
+        # The session-store scan is uncapped (see `_palette_session_rows`) and
+        # cold it costs seconds. It runs in a thread so the palette paints and
+        # accepts keys while the rows are gathered; `Provider.startup` is
+        # already awaited off the search path.
+        rows = await asyncio.to_thread(app._palette_session_rows)  # type: ignore[attr-defined]
+        self._entries = app._palette_entries(session_rows=rows)  # type: ignore[attr-defined]
 
     async def shutdown(self) -> None:
         if self._system is not None:
@@ -283,7 +306,12 @@ class OperatorCommandProvider(Provider):
             if not entry.discovery:
                 continue
             yield DiscoveryHit(
-                display=entry.label,
+                # A `Text`, never a bare `str`: the framework turns a string
+                # display through `Content.from_markup`, so a session title
+                # such as ``fix [/] thing`` raised MarkupError inside the
+                # gather worker (a query that never finishes) and ``[WIP]``
+                # silently lost its brackets. Names are user data, not markup.
+                display=Text(entry.label),
                 command=self._hit_command(entry),
                 text=entry.label,
                 help=entry.help_text,
