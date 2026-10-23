@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: driver/ax-locator.ts (host-free shared policy (chrome.*-free by construction)).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (12 modules: access-flow.ts, access-queue.ts, ax-compact.ts, ax-locator.ts, deadline.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 568c6ba9f8c05f4e37ccf67083962261f4c0e9776ca8ef1e42d463fda2c217a7
+// Inputs sha256: e00a0ce1f8d14f09e91c27c598bb4456d43cc781a6cbb55838c816b093dfd7ab
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -97,16 +97,46 @@ function normalise(value: unknown): string {
     .trim();
 }
 
-/** One quoted or bare value, or null when the quotes never close. */
+/** One quoted or bare value, or null when it is not ONE value.
+ *
+ * STRICT ON PURPOSE (agent review round 1, R1-1). Reading a quoted value up to
+ * its first closing quote and ignoring the rest silently DROPPED a caller's
+ * constraint: `role=checkbox[name="Active"][checked]` parsed as "any checkbox
+ * named Active" and `text="Submit" please` as "Submit", so a locator that should
+ * have been refused selected something the caller never asked for. A malformed
+ * locator returns null and falls through to CSS, whose invalid-selector error
+ * names it.
+ *
+ * Backslash escapes are honoured symmetrically with `locatorFor`, which quotes
+ * with JSON.stringify (agent review round 1, R1-2): a name containing a quote
+ * round-trips to the same name instead of to a truncated one.
+ */
 function readValue(raw: string): string | null {
   const text = raw.trim();
   if (!text) return null;
   const quote = text[0];
   if (quote === '"' || quote === "'") {
-    const end = text.indexOf(quote, 1);
-    if (end < 0) return null;
-    return text.slice(1, end);
+    let value = "";
+    for (let index = 1; index < text.length; index += 1) {
+      const char = text[index] ?? "";
+      if (char === "\\" && index + 1 < text.length) {
+        value += text[index + 1] ?? "";
+        index += 1;
+        continue;
+      }
+      if (char === quote) {
+        // Trailing content is a second value or an unsupported predicate
+        // (`[checked]`): refuse the whole thing rather than drop it.
+        return index === text.length - 1 ? value : null;
+      }
+      value += char;
+    }
+    return null;
   }
+  // A bare value cannot carry the characters that bound the grammar, and a
+  // leading `*` is the operator, not content: `label=*=Home` was an undocumented
+  // spelling (R1-4) and is now refused rather than read as a name.
+  if (/[\[\]]/.test(text) || text.startsWith("*")) return null;
   return text;
 }
 
@@ -121,25 +151,29 @@ function readValue(raw: string): string | null {
  */
 export function parseLocator(value: string): Locator | null {
   const text = value.trim();
-  const match = /^(role|label|text)=([\s\S]+)$/i.exec(text);
+  // `*=` is the substring spelling and is only meaningful for `label`/`text`
+  // (`role` carries it inside `[name*=…]`). Supporting the documented form
+  // explicitly is what stops the undocumented `label=*=Home` from being the
+  // only way to ask (agent review round 1, R1-4).
+  const match = /^(role|label|text)(\*?)=([\s\S]+)$/i.exec(text);
   if (!match) return null;
-  const kind = match[1].toLowerCase();
-  const rest = match[2].trim();
+  const kind = (match[1] ?? "").toLowerCase();
+  const prefixSubstring = match[2] === "*";
+  const rest = (match[3] ?? "").trim();
   if (kind === "role") {
     // role=<role> optionally followed by [name="…"] or [name*="…"].
     const roleMatch = /^([A-Za-z][A-Za-z0-9_-]*)\s*(?:\[\s*name(\*?)=\s*([\s\S]+?)\s*\])?$/.exec(rest);
     if (!roleMatch) return null;
-    const role = roleMatch[1];
+    const role = roleMatch[1] ?? "";
     const substring = roleMatch[2] === "*";
-    const name = roleMatch[3] === undefined ? "" : readValue(roleMatch[3]);
+    const rawName = roleMatch[3];
+    const name = rawName === undefined ? "" : readValue(rawName);
     if (name === null) return null;
     return { kind: "role", role: role.toLowerCase(), name, substring };
   }
-  const substring = rest.startsWith('*=');
-  const raw = substring ? rest.slice(2) : rest;
-  const name = readValue(raw);
+  const name = readValue(rest);
   if (name === null) return null;
-  return { kind: kind === "label" ? "label" : "text", name, substring };
+  return { kind: kind === "label" ? "label" : "text", name, substring: prefixSubstring };
 }
 
 export interface LocatorHit {
@@ -206,8 +240,8 @@ export function resolveLocator(nodes: AXNode[], locator: Locator): LocatorHit | 
     collect((role) => CLICKABLE.has(role));
     if (!hits.length) collect(() => true);
   }
-  if (!hits.length) return null;
   const first = hits[0];
+  if (!first) return null;
   return { ...first, matched: hits.length };
 }
 
@@ -262,11 +296,23 @@ export function locatorSuggestions(
   return out;
 }
 
-/** The canonical spelling of a suggestion, safe to paste back as `selector`. */
+/** The canonical spelling of a suggestion, safe to paste back as `selector`.
+ *
+ * The quote is chosen from the name (agent review round 1, R1-2): JSON.stringify
+ * always uses `"`, so a name containing a quote produced a locator that parsed to
+ * a TRUNCATED name — a suggestion that cannot be used, which is worse than none.
+ * A name holding both quote characters still round-trips, through the escapes
+ * `readValue` honours.
+ */
 export function locatorFor(role: string, name: string): string {
-  // Only roles this module can match by name get the role form; anything else
-  // is named by its text, which always parses.
+  // A single-quoted value still unescapes `\X` (readValue treats the backslash
+  // as an escape under both quote styles), so it must escape its own
+  // backslashes — otherwise `C:\\path "quoted"` came back as `C:path "quoted"`
+  // (agent review round 2 residual).
+  const quoted = name.includes('"') && !name.includes("'")
+    ? `'${name.replace(/\\/g, "\\\\")}'`
+    : JSON.stringify(name);
   return role && /^[A-Za-z][A-Za-z0-9_-]*$/.test(role)
-    ? `role=${role}[name=${JSON.stringify(name)}]`
-    : `text=${JSON.stringify(name)}`;
+    ? `role=${role}[name=${quoted}]`
+    : `text=${quoted}`;
 }
