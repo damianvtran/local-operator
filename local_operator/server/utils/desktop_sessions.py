@@ -8396,6 +8396,42 @@ class DesktopSessions:
             return None
         return draft
 
+    def session_id_servable(self, session_id: str) -> bool:
+        """Whether this daemon still has ``session_id`` to serve.
+
+        THE REPLAY QUESTION, asked by the mint's receipt journal. A mint's
+        ``draft:<request_id>`` row exists so a lost response cannot register a
+        SECOND draft for one pane, and the id it records is the whole answer.
+        That id is not durable: the registry entry expires after
+        :data:`DRAFT_TTL_S`, and a draft that materialised can have its
+        conversation deleted. Replaying either hands the client an id the
+        session door answers "Unknown session" for — its ``/events`` streams
+        404, and a brand-new chat paints the terminal missing state over work
+        the user has not started. So a replay is conditional on exactly this.
+
+        TWO STATES ANSWER YES, and they are the two the doors resolve as local
+        (``files_target``, ``session``): a REGISTERED unexpired draft, through
+        :meth:`_draft_for` so expiry is answered where it is asked rather than
+        by a sweeper; and a MATERIALISED session, read off the marker
+        (``desktop.json``) — the same fact ``create`` writes and
+        ``assert_draft_unmaterialised`` reads, so the two cannot disagree about
+        which side of materialisation an id is on.
+
+        MARKER, NOT ``_door_may_open``, and the difference is load-bearing: a
+        warmed draft's engage leaves a residue directory (``.execution-lease`` +
+        ``.session.pid``, no marker, no transcript) whose origin reads as the
+        user's, so the door's origin predicate alone would call it openable
+        while the door itself still refuses it (M1's second leg). The marker is
+        both the cheaper fact and the stricter one.
+
+        Loop-only, like :meth:`_draft_for`: one dict lookup plus one ``is_file``
+        — no registry scan, no catalogue, no peer dial. A receipt only ever
+        names an id THIS daemon minted, so a peer cannot be the answer.
+        """
+        if self._draft_for(session_id) is not None:
+            return True
+        return (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file()
+
     def _draft_listing_exclusions(self) -> set[str]:
         """Ids no listing may carry: drafts not yet materialised, however known.
 
