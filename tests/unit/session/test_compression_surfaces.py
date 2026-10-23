@@ -563,13 +563,20 @@ def test_a_read_only_open_refuses_rather_than_restoring_in_place(
 
     config, directory = archived
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
-    # What a full or unwritable cache volume does: the copy cannot be made.
-    monkeypatch.setattr(compression, "_materialise", lambda *args, **kwargs: None)
+    # What a full or unwritable cache volume does: the copy cannot be made. The
+    # typed host error, not damage — m-1 split the two, and a read-only caller has
+    # to be able to tell "free some space" from "this file is broken".
+    def no_room(*_args: object, **_kwargs: object) -> Path:
+        raise compression.ArchiveCacheUnavailable(
+            f"{compression.PLAIN_FILENAME}.gz: not enough space to make a temporary plain copy"
+        )
+
+    monkeypatch.setattr(compression, "_materialise", no_room)
     # The lock file itself already exists (the compression pass took the lock),
     # so the proof is that this open leaves the directory EXACTLY as it was.
     before = sorted(entry.name for entry in directory.iterdir())
 
-    with pytest.raises(compression.ArchiveCorrupt, match="not enough space"):
+    with pytest.raises(compression.ArchiveCacheUnavailable, match="not enough space"):
         Transcript(directory, read_only=True)
 
     # The failure cost the reader an error, never a rewrite of the store.
@@ -586,7 +593,10 @@ def test_the_writer_open_still_restores_when_the_cache_cannot_be_used(
 
     config, directory = archived
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
-    monkeypatch.setattr(compression, "_materialise", lambda *args, **kwargs: None)
+    def no_room(*_args: object, **_kwargs: object) -> Path:
+        raise compression.ArchiveCacheUnavailable("transcript.jsonl.gz: no room in the cache")
+
+    monkeypatch.setattr(compression, "_materialise", no_room)
 
     transcript = Transcript(directory)
     try:
