@@ -1,11 +1,11 @@
 # TUI / desktop UI parity audit and slice plan
 
-Status: audit + plan for LOH-19 (2026-10-18). No product code is changed by this
-document.
+Status: audit + plan for LOH-19, updated 2026-10-22. No product code is changed
+by this document.
 
 Refs read:
 
-- desktop UI: `local-operator-ui` `origin/main` `f0df7b8994` (2026-10-22; feature paths were audited at `72f94df269`)
+- desktop UI: `local-operator-ui` `origin/main` `f0df7b8994` (2026-10-22)
 - TUI: `local-operator` `origin/main` `6bfac3fccb` (2026-10-22; 61 slash commands)
 
 The two trees are read at those refs. A capability is only marked present where
@@ -31,7 +31,7 @@ evidence for both.
 |---|---|---|---|---|
 | 1.1 | Conversation list with pinned/active/previous sections, pin/unpin, archive/unarchive/delete | ✅ | ✅ | UI `features/chat/components/chat-sidebar.tsx`, `chat-sections.ts`; TUI `widgets/session_sidebar.py`, `/archive`, `/unarchive`, `/delete` |
 | 1.2 | Conversation search over titles **and message bodies** | ✅ | ✅ | UI `shared/api/local-operator/session-search.ts`, `palette-search.ts`; TUI `widgets/session_picker.py` + `session/search_index.py` |
-| 1.4 | Global command palette / action search (`Cmd+K`, `Ctrl+K`, `Ctrl+P`) | ✅ | ◐ | UI `features/command-palette/*`; TUI inherits Textual's `ctrl+p` CommandPalette (`app.py:4578-4583`, `docs/design/keymap.md` §E.4) but registers no app-specific providers, so only framework system actions appear — **next slice P5** |
+| 1.4 | Global command palette / action search (`Cmd+K`, `Ctrl+K`, `Ctrl+P`) | ✅ | ◐ | UI `features/command-palette/*`; TUI inherits Textual's `ctrl+p` CommandPalette (`app.py:4743-4746`, `docs/design/keymap.md` §E.4) but registers no app-specific providers, so only framework system actions appear — **next slice P5** |
 | 1.5 | Agents and teams visible in the navigation column | ✅ | ◐ | UI `chat-sidebar.tsx` (Agents + Teams sections); TUI `/agent` and `/team` listings, no tree |
 | 1.6 | Notification / attention routing back to a conversation | ✅ | ◐ | UI attention store and sidebar badges; TUI `/notifications`, notifier app and status marks |
 
@@ -122,7 +122,7 @@ evidence for both.
 | 8.1 | Completion notifications and unread marks | ✅ | ✅ | UI native notifications + attention; TUI notifier app, `/notifications`, terminal marks |
 | 8.2 | Armed wake/monitor list with due time and delivery health | ✅ | ✅ | UI composer chips/run panel; TUI `wake_panel.py` |
 | 8.3 | Create/edit/cancel a wake from the app | ✅ | ✅ | UI schedules page/form; TUI `/schedule` create/edit/cancel (`widgets/schedule_view.py`) |
-| 8.4 | Schedules page grouped by conversation, including legacy agent schedules | ✅ | ✅ | UI `features/schedules/components/schedules-page.tsx`; TUI `/schedule` grouped view (delivered 2026-10-22) |
+| 8.4 | Schedules page grouped by conversation, including legacy agent schedules | ✅ | ◐ | UI `features/schedules/components/schedules-page.tsx`; TUI `/schedule` covers the current conversation only (`widgets/schedule_view.py`), not the machine-wide legacy `agent_state.schedules` page |
 
 ## 9. Ask flows
 
@@ -160,10 +160,11 @@ evidence for both.
 
 ## 13. Summary
 
-Counting the 71 rows above (statuses updated 2026-10-22):
+Counting the 71 capabilities above (split 2.3a/b and 6.2a/b rows
+counted once; statuses updated 2026-10-22):
 
-- Full parity: 42
-- TUI partial: 14
+- Full parity: 44
+- TUI partial: 12
 - TUI missing: 11
 - TUI-only: 1
 - Not applicable to a terminal: 3
@@ -173,8 +174,9 @@ only through an agent tool is **partial**, not missing. The remaining missing
 set clusters into three kinds:
 
 1. **Bounded direct surfaces** — the user profile (5.11). The underlying
-   profile data exists; only the page is absent. The schedules page (8.4) and
-   the code-request ledger (2.15) were delivered in the 2026-10-22 slice.
+   profile data exists; only the page is absent. The code-request ledger
+   (2.15) was delivered in the 2026-10-22 slice; 8.4 remains partial because
+   `/schedule` is current-conversation only, not the machine-wide legacy page.
 2. **Large desktop surfaces that need a terminal design and a client for a
    backend API** — the agent hub marketplace, skills library and public teams
    (4.5–4.9).
@@ -182,15 +184,15 @@ set clusters into three kinds:
    consent/approval chrome (7.1–7.3); voice dictation (2.4); the mesh graph
    (11.2, deliberately not planned for a terminal).
 
-The larger, more actionable group is the 14 **partial** rows: the capability
+The larger, more actionable group is the 12 **partial** rows: the capability
 exists only by asking the agent to use a tool, or as a read-only/stripped-down
 surface. The first six slices below target that group.
 
 ## 14. Prioritised slice plan
 
-Order is by user value per unit of delivery risk. The first six are proposed as
-serial TUI slices; P6–P9 are proposals, not implementation work, until their
-design is accepted.
+Order is by user value per unit of delivery risk. P5 is the next serial TUI
+slice; P6–P9 are proposals, not implementation work, until their design is
+accepted.
 
 Delivery status at `6bfac3fccb` (2026-10-22): **P0 `/review`, P1 `/schedule`,
 P2 project edit/milestones, P3 agent/team authoring forms and P4a `/view` are
@@ -201,7 +203,7 @@ P3's per-member model/effort override editing remains desktop-only.
 | Order | Slice | Gap closed | Why this rank | Risk |
 |---|---|---|---|---|
 | P0 | `/review` — code-request ledger page — **delivered** | 2.15 | No direct TUI surface; backend ledger and `service.view_rows` already exist; read-only; high value to a developer operator | Low: read-only, no protocol change |
-| P1 | `/schedule` — wake list/create/edit/cancel — **delivered** | 2.14, 8.3 | No direct TUI surface; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround | Medium: mutation, form validation, date/duration parsing |
+| P1 | `/schedule` — wake list/create/edit/cancel — **delivered; 8.4 remains partial** | 2.14, 8.3, 8.4 | No direct TUI surface; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround. The machine-wide legacy schedules page (8.4) remains absent | Medium: mutation, form validation, date/duration parsing |
 | P2 | Project parity completion: edit project, add/remove milestone — **delivered** | 10.3, 10.5 | Closes the last project gaps; store APIs already exist; TUI already has the page and form patterns | Low–medium |
 | P3 | Agent and team authoring forms — **delivered; per-member overrides remain desktop-only** | 4.2, 4.4 | Removes the agent-mediated workaround; desktop has the full field set to mirror; TUI already has `/agent` and `/team` surfaces | Medium: forms and validation |
 | P4a | Read-only text/code/markdown file preview — **delivered** | 2.3a, 6.2a | `/view` and supported callouts share a bounded local read-only viewer; richer rendering and editing are not included | Medium: file-type routing, bounded rendering |
@@ -313,5 +315,5 @@ slash-command registry, without creating a second registry.
   release-window owner.
 - No human review requests; the agent-review, QA, design and UX rounds are the
   gate.
-- One writer per area: the first slice touches `tui/widgets/`,
-  `tui/app.py`, `slash_commands.py`, `i18n/`, tests and docs only.
+- One writer per area: the next slice touches `tui/widgets/`, `tui/app.py`,
+  `slash_commands.py`, `i18n/`, tests and docs only.
