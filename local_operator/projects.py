@@ -121,13 +121,14 @@ ATTRIBUTION_MAX = 80
 #: the other one-line labels (80). Longer is refused rather than truncated.
 TITLE_MAX = 80
 
-#: Soft bound on the append-only history: a write keeps the newest
-#: ``UPDATES_MAX`` entries and drops the OLDEST TEXT-ONLY ones beyond it. An
-#: entry that carries attachments is never dropped, so a stored list may exceed
-#: this by the number of attachment-bearing entries — deliberately: the cap
-#: trims prose, it never deletes evidence whose files are on disk. Deep enough
-#: for weeks of real reporting and bounded for prose; a read never shortens the
-#: list at all (see :func:`_coerce_updates`).
+#: Soft bound on the append-only history: an APPEND keeps the newest
+#: ``UPDATES_MAX`` entries and drops the OLDEST TEXT-ONLY ones beyond it. Only
+#: an append trims — a write that does not append (``link_session``, a status
+#: edit) persists an over-cap list unchanged, and a read never shortens it at
+#: all (see :func:`_coerce_updates`). An entry that carries attachments is
+#: never dropped, so a stored list may exceed this by the number of
+#: attachment-bearing entries — deliberately: the cap trims prose, it never
+#: deletes evidence whose files are on disk.
 UPDATES_MAX = 500
 
 #: Attachments are COPIED into the store, so both the count per update and
@@ -539,8 +540,10 @@ class ProjectUpdateEntry(BaseModel):
     ``at`` is ISO-8601 UTC, ``text`` is the report as written (markdown,
     trimmed like every string field), ``by`` names the reporter (a session id
     or agent label; ``""`` when unknown), and ``attachments`` holds the files
-    copied beside it. The log is append-only, newest last, bounded at
-    :data:`UPDATES_MAX`; malformed or missing history reads as ``[]``.
+    copied beside it. The log is append-only, newest last, with
+    :data:`UPDATES_MAX` as a SOFT bound: an append trims text-only entries past
+    it and keeps every entry that carries attachments, so a stored list may be
+    longer. Malformed or missing history reads as ``[]``.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -585,6 +588,9 @@ def _coerce_updates(value: object) -> list[ProjectUpdateEntry]:
     slicing the oldest entries off here silently destroyed them on the next
     write, because the shortened list is what that write then persisted — and
     with them the attachments those entries described.
+    The cost is accepted deliberately: a hand-written row with a six-figure
+    entry count is parsed in full on every load, because truncating on read is
+    exactly the evidence loss this policy removes (N1).
     """
     if not isinstance(value, list):
         return []
@@ -785,10 +791,11 @@ class Project(BaseModel):
     milestones: list[ProjectMilestone] = Field(default_factory=list)
     # -- slice 2: the append-only history (rides any schema; the coordination
     # bump above does not touch it) --------------------------------------------
-    #: Every write of a NEW progress line appends one entry here (newest last,
-    #: bounded :data:`UPDATES_MAX`); the freshness pair above remains the
-    #: "current" pointer at its tail. Malformed history reads as ``[]`` — a
-    #: broken log never costs the row (:func:`_coerce_updates`).
+    #: Every write of a NEW progress line appends one entry here (newest last;
+    #: :data:`UPDATES_MAX` is a soft bound an append trims text-only entries
+    #: past, never an entry that carries evidence); the freshness pair above
+    #: remains the "current" pointer at its tail. Malformed history reads as
+    #: ``[]`` — a broken log never costs the row (:func:`_coerce_updates`).
     updates: list[ProjectUpdateEntry] = Field(default_factory=list)
 
     @field_validator("id")
@@ -1808,6 +1815,9 @@ class ProjectRegistry:
         #: writer a store must survive — an in-place rewrite, whose mtime can be
         #: restored with ``os.utime`` but whose ctime always moves.
         self._row_cache: dict[str, tuple[int, int, int, int, Project]] = {}
+        #: Duplicate-name sets already warned about, so the warning fires when
+        #: a pair APPEARS or changes membership rather than on every load (M2).
+        self._seen_duplicates: set[tuple[str, tuple[str, ...]]] = set()
         self._last_refresh_time = 0.0
         self._refresh_interval = refresh_interval
         # The directory mtime the snapshot was taken at. A peer's publish is a
@@ -1990,33 +2000,51 @@ class ProjectRegistry:
             )
 
     def _warn_duplicate_names(self, loaded: Mapping[str, Project]) -> None:
-        """Announce rows that ALREADY share a casefolded name. Warning only.
+        """Announce rows ON THE PAGE that share a casefolded name. Warning only.
 
-        Two rows may each hold history the other does not (and now, attachments
-        the other does not), so no auto-rename and no refusal: which survivor
-        keeps the name is the operator's call. What a reader must not have to
-        discover by hand is that the store holds a pair at all — the pre-fix
-        create path could mint one, and the warning names the name and every id
-        so both rows can be found and one renamed.
+        Two rows may each hold history the other does not, so no auto-rename and
+        no refusal: which survivor keeps the name is the operator's call. What a
+        reader must not have to discover by hand is that a pair exists at all —
+        the pre-fix create path could mint one — so the line names the name and
+        every id, and renaming one is then an ordinary update.
 
-        One line per colliding name per load (the load itself is the throttle:
-        it runs on construction and on every refresh), not one per save.
+        THIS CHECK SEES ONLY THE LOADED ROWS. It walks the recency page
+        (:data:`_MAX_ROWS`); a pair whose two rows are both beyond the page is
+        NOT reported, and finding it would cost a parse of the whole store on
+        every load — the bound this store exists to keep. "Loaded" in the line
+        is load-bearing: silence is not a guarantee about the store.
+
+        Deduped IN PROCESS on ``(name, sorted ids)``: one load runs on
+        construction and again inside every mutation (``_load`` under the lock),
+        and an undeduped warning measured seven identical lines for a construct
+        plus three updates and three links. A pair whose membership changes
+        warns again; the memo is REPLACED each load, so a pair that vanishes is
+        forgotten and a later reappearance is announced.
         """
         by_name: dict[str, list[str]] = {}
         for project in loaded.values():
             by_name.setdefault(project.name.casefold(), []).append(project.id)
+        collisions: set[tuple[str, tuple[str, ...]]] = set()
         for name, ids in sorted(by_name.items()):
             if len(ids) < 2:
                 continue
+            collision = (name, tuple(sorted(ids)))
+            collisions.add(collision)
+            if collision in self._seen_duplicates:
+                continue
             logger.warning(
-                "project store at %s holds %d rows named %r (ids: %s); uniqueness "
-                "applies when a name is ASSIGNED, so these rows stay readable and "
-                "writable — rename one when convenient.",
+                "the LOADED page of the project store at %s carries %d rows named "
+                "%r (ids: %s); uniqueness applies when a name is ASSIGNED, so these "
+                "rows stay readable and writable — rename one when convenient. A "
+                "pair entirely beyond the page is not reported by this check.",
                 self.projects_dir,
                 len(ids),
                 name,
                 ", ".join(sorted(ids)),
             )
+        # Replacing (not updating) the memo forgets a vanished pair, so a later
+        # reappearance is announced.
+        self._seen_duplicates = collisions
 
     @property
     def page_counts(self) -> PageCounts:
@@ -2256,7 +2284,7 @@ class ProjectRegistry:
         row = self._read_row_from_disk(project_id)
         return None if row is None else row.name
 
-    def _name_conflict(self, project: Project) -> Project | None:
+    def _name_conflict(self, project: Project, *, stored: Project | None = None) -> Project | None:
         """Another row using ``project.name``, when this save MOVES the name.
 
         Uniqueness is enforced on ASSIGNMENT, never on EXISTENCE. A store can
@@ -2274,7 +2302,10 @@ class ProjectRegistry:
         no stored name, so it always takes the scanning arm.
         """
         name_key = project.name.casefold()
-        stored_name = self._stored_name(project.id)
+        # ``stored`` is the row as this call already resolved it (``current`` in
+        # every mutator): passing it saves re-opening a DORMANT row's file that
+        # ``_resolve_locked`` just read. A page row is a dict hit either way.
+        stored_name = stored.name if stored is not None else self._stored_name(project.id)
         if stored_name is not None and stored_name.casefold() == name_key:
             return None
         for stored in self._projects.values():
@@ -2344,7 +2375,13 @@ class ProjectRegistry:
                 _unlock(fd)
             os.close(fd)
 
-    def _save_project_locked(self, project: Project, *, name_checked: bool = False) -> Project:
+    def _save_project_locked(
+        self,
+        project: Project,
+        *,
+        name_checked: bool = False,
+        stored: Project | None = None,
+    ) -> Project:
         """Validate and publish ``project`` while ``_persistence_lock`` is held.
 
         ``name_checked`` says the caller already proved the name is free inside
@@ -2370,7 +2407,7 @@ class ProjectRegistry:
         # migration's "untouched rows stay 1" rule).
         if project.schema_version != PROJECT_SCHEMA:
             project.schema_version = PROJECT_SCHEMA
-        occupant = None if name_checked else self._name_conflict(project)
+        occupant = None if name_checked else self._name_conflict(project, stored=stored)
         if occupant is not None:
             raise ProjectNameConflictError(f"project {project.name!r} already exists")
         target = self.projects_dir / f"{project_id}.json"
@@ -2724,12 +2761,15 @@ class ProjectRegistry:
                     ]
                     # THE CAP TRIMS TEXT, NEVER EVIDENCE. An entry that carries
                     # attachments is kept even when it is older than the newest
-                    # UPDATES_MAX entries: the files it describes are real and
-                    # unrecoverable, and dropping the entry would leak them (a
-                    # delete of the row cannot find them either). Only text-only
-                    # entries are dropped, oldest first, and their count rides
-                    # the receipt. Order is preserved: protected parents stay
-                    # ahead of the kept tail.
+                    # UPDATES_MAX entries: the entry is the only record
+                    # ATTRIBUTING a file to a history line, so dropping it
+                    # orphans the evidence from every surface — the file still
+                    # exists on disk, but no row, receipt or renderer names it.
+                    # (Deleting the ROW removes its attachment directory, which
+                    # is the one place the files themselves are reclaimed.)
+                    # Only text-only entries are dropped, oldest first, and
+                    # their count rides the receipt. Order is preserved:
+                    # protected parents stay ahead of the kept tail.
                     keep = appended[-UPDATES_MAX:]
                     overflow = appended[:-UPDATES_MAX]
                     protected = [entry for entry in overflow if entry.attachments]
@@ -2776,7 +2816,7 @@ class ProjectRegistry:
                     # diff came from normalisation, which still deserves a write.
                     changed = True
                 candidate.updated_at = now
-                saved = self._save_project_locked(candidate)
+                saved = self._save_project_locked(candidate, stored=current)
             except BaseException:
                 # A refusal raised BEFORE the row replace (name conflict,
                 # schema guard, validation, a write that never published) must
@@ -2830,7 +2870,7 @@ class ProjectRegistry:
             candidate.progress_refreshed_at = now
             candidate.progress_refreshed_by = _attribution(reporter, "progress_refreshed_by")
             candidate.updated_at = now
-            saved = self._save_project_locked(candidate)
+            saved = self._save_project_locked(candidate, stored=current)
             return ProjectUpdate(saved, changed=True, refreshed=True)
 
     def link_session(
@@ -2876,7 +2916,7 @@ class ProjectRegistry:
             setattr(candidate, other, [s for s in getattr(candidate, other) if s != session_id])
             setattr(candidate, target, [*getattr(candidate, target), session_id])
             candidate.updated_at = _utc_now()
-            return self._save_project_locked(candidate), True
+            return self._save_project_locked(candidate, stored=current), True
 
     def unlink_session(self, project_id: str, session_id: str) -> tuple[Project, bool]:
         """Unlink one session from one project, from EITHER list. Returns ``(project, removed)``.
@@ -2901,7 +2941,7 @@ class ProjectRegistry:
                 s for s in candidate.coordination_sessions if s != session_id
             ]
             candidate.updated_at = _utc_now()
-            return self._save_project_locked(candidate), True
+            return self._save_project_locked(candidate, stored=current), True
 
     def set_milestone(self, project_id: str, fields: MilestoneEdit) -> tuple[Project, str]:
         """Add, update or remove one milestone by name. Returns ``(project, action)``.
@@ -2961,7 +3001,7 @@ class ProjectRegistry:
             # and the full-replace form cannot disagree about what is legal.
             candidate.milestones = validate_milestones(candidate.milestones)
             candidate.updated_at = _utc_now()
-            return self._save_project_locked(candidate), action
+            return self._save_project_locked(candidate, stored=current), action
 
     def delete_project(self, project_id: str) -> None:
         """Permanently remove one row. Session directories are never touched."""
@@ -3446,7 +3486,7 @@ def migrate_coordination_links(
             candidate.schema_version = PROJECT_SCHEMA
             # Deliberately NOT moving ``updated_at``: this is a provenance
             # correction, not operator activity, and the board sorts on it.
-            registry._save_project_locked(candidate)
+            registry._save_project_locked(candidate, stored=project)
         logger.warning(
             "project migration: re-kinded %d chief-of-staff link%s into "
             "coordination (backup at %s)",

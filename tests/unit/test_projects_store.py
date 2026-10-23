@@ -1994,14 +1994,20 @@ def test_an_attachment_bearing_entry_is_never_evicted(store, tmp_path: Path) -> 
 
 
 def test_text_only_eviction_drops_the_oldest_and_reports_it(store, monkeypatch) -> None:
-    """A TEXT-ONLY tail is what the cap may drop, and the caller is told."""
+    """A TEXT-ONLY tail is what the cap may drop, and the caller is told.
+
+    The spy records EVERY invocation (even one with an empty path list): an
+    ``extend`` over the generator would record nothing for a call that deleted
+    nothing, so the test could not tell "never called" from "called empty" —
+    and the old code's call, which is the bug, would pass it (M4).
+    """
     project, _files = _seed_history(store, entries=UPDATES_MAX, name="text-row")
-    reclaimed: list[str] = []
-    monkeypatch.setattr(
-        ProjectRegistry,
-        "_reclaim_attachment_files",
-        lambda self, paths: reclaimed.extend(paths),
-    )
+    calls: list[list[str]] = []
+
+    def spy(self: ProjectRegistry, paths: Any) -> None:
+        calls.append(list(paths))
+
+    monkeypatch.setattr(ProjectRegistry, "_reclaim_attachment_files", spy)
 
     outcome = store.update_project(project.id, ProjectEdit(progress="one past the cap"))
 
@@ -2010,9 +2016,35 @@ def test_text_only_eviction_drops_the_oldest_and_reports_it(store, monkeypatch) 
     assert len(stored.updates) == UPDATES_MAX
     assert stored.updates[0].text == "line 1"
     assert stored.updates[-1].text == "one past the cap"
-    # Nothing to reclaim: the dropped entry carried no file, and eviction is
-    # no longer allowed to delete evidence.
-    assert reclaimed == []
+    # Not merely "nothing recorded": the helper was NOT INVOKED AT ALL.
+    assert calls == []
+
+
+def test_the_reclaim_spy_sees_a_real_file_bearing_call(store, tmp_path: Path, monkeypatch) -> None:
+    """Positive control for the eviction test's spy (M4).
+
+    A refused update takes its just-copied files back through the same helper
+    with REAL paths; if the spy recorded nothing here, ``calls == []`` in the
+    test above would prove nothing about eviction.
+    """
+    alpha = create(store)
+    create(store, name="beta")
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"z")
+    calls: list[list[str]] = []
+
+    def spy(self: ProjectRegistry, paths: Any) -> None:
+        calls.append(list(paths))
+
+    monkeypatch.setattr(ProjectRegistry, "_reclaim_attachment_files", spy)
+
+    with pytest.raises(ProjectNameConflictError):
+        store.update_project(
+            alpha.id, ProjectEdit(name="beta", progress="renamed onto beta"), attachments=[shot]
+        )
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 1 and calls[0][0].endswith(".png")
 
 
 def test_a_read_never_shortens_the_history(store) -> None:
@@ -2045,8 +2077,70 @@ def test_the_load_warns_once_for_a_duplicate_name(tmp_path: Path, caplog) -> Non
     assert "skill-bundle-carrier" in warnings[0]
     assert first.id in warnings[0] and second.id in warnings[0]
 
+    # Deduped IN PROCESS: on THIS registry, a reload and a mutation's in-lock
+    # load are the same fact, so the line is not repeated (M2).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        watcher = ProjectRegistry(tmp_path)
+        watcher.refresh()
+        watcher.link_session(first.id, SESSION_B)
+    assert len([r for r in caplog.records if "rows named" in r.getMessage()]) == 1
+
+    # A MEMBERSHIP change is a new fact and warns again.
+    caplog.clear()
+    _seed_row(store, "dup00000000000000000000000000005", name="SKILL-BUNDLE-CARRIER")
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        watcher.refresh()
+    changed = [r.getMessage() for r in caplog.records if "rows named" in r.getMessage()]
+    assert len(changed) == 1 and "3 rows named" in changed[0]
+
     # A store without a collision says nothing about names.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
         ProjectRegistry(tmp_path / "clean")
     assert [r for r in caplog.records if "rows named" in r.getMessage()] == []
+
+
+def test_the_duplicate_warning_walks_the_page_and_says_so(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """M3: the check sees the LOADED rows, and the line says which set it saw.
+
+    A pair whose two rows are both beyond the recency page is invisible to this
+    check — measuring the whole store would cost an all-row parse on every load
+    — so the line states the scope instead of implying the store.
+    """
+    from local_operator import projects as projects_module
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 2)
+    store = ProjectRegistry(tmp_path)
+    oldest = _seed_row(store, "dup00000000000000000000000000001", name="dup-name")
+    second = _seed_row(store, "dup00000000000000000000000000002", name="DUP-NAME")
+    _seed_row(store, "live0000000000000000000000000003", name="live-one")
+    _seed_row(store, "live0000000000000000000000000004", name="live-two")
+    for index, project in enumerate((oldest, second)):
+        path = store.projects_dir / f"{project.id}.json"
+        stamp = 1_700_000_000_000_000_000 + index
+        os.utime(path, ns=(stamp, stamp))
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        ProjectRegistry(tmp_path)
+    assert [r for r in caplog.records if "rows named" in r.getMessage()] == []
+
+    # Bring the PAIR onto the page — newer than every live row — and the line
+    # says which set it saw.
+    live_newest = max(
+        (store.projects_dir / f"{name}.json").stat().st_mtime_ns
+        for name in ("live0000000000000000000000000003", "live0000000000000000000000000004")
+    )
+    for offset, project in enumerate((oldest, second), start=1):
+        path = store.projects_dir / f"{project.id}.json"
+        stamp = live_newest + offset * 1_000_000
+        os.utime(path, ns=(stamp, stamp))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        ProjectRegistry(tmp_path)
+    visible = [r.getMessage() for r in caplog.records if "rows named" in r.getMessage()]
+    assert len(visible) == 1
+    assert "LOADED page" in visible[0] and "beyond the page is not reported" in visible[0]
