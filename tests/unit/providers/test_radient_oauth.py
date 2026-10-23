@@ -203,15 +203,16 @@ async def test_the_refresh_grant_updates_the_identity_label():
     assert refreshed["name"] == "Jane Q"
 
 
-def test_a_pre_identity_radient_row_is_upgraded_in_place(tmp_path):
-    """The first login after the upgrade must not leave two Radient rows.
+def test_a_pre_identity_radient_row_is_not_rebound_without_account_proof(tmp_path, monkeypatch):
+    """A pre-identity row might belong to another account; preserve its pin.
 
-    The row written before id_token decoding is keyed ``oauth:radient``; the
-    new login is keyed by the account id. Adopting the constant-keyed row is
-    what the constant key did before, so one account stays one row.
+    A newly identified login cannot prove ownership of an old constant-keyed
+    row. Only matching account and nonempty stored hub permit adoption;
+    the account-retention regressions exercise that separate upgrade path.
     """
     from local_operator.providers.auth_store import AuthStore
 
+    monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *args: None)
     store = AuthStore(tmp_path / "auth.db")
     old = store.upsert_credential(
         "radient", {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
@@ -222,11 +223,13 @@ def test_a_pre_identity_radient_row_is_upgraded_in_place(tmp_path):
         {"type": "oauth", "access": "a2", "refresh": "r2", "expires": 2, "account_id": "acct_1"},
     )
     rows = store.list_credentials("radient")
-    assert len(rows) == 1 and rows[0].id == old.id == new.id
-    assert rows[0].identity_key == "acct_1"
+    assert len(rows) == 2 and old.id != new.id
+    assert rows[0].identity_key == "oauth:radient"
+    assert new.data["account_id"] == "acct_1"
     # A SECOND account is still its own row.
     store.upsert_credential(
         "radient",
         {"type": "oauth", "access": "b", "refresh": "rb", "expires": 3, "account_id": "acct_2"},
     )
-    assert len(store.list_credentials("radient")) == 2
+    assert len(store.list_credentials("radient")) == 3
+    store.close()
