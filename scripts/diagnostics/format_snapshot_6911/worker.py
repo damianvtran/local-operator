@@ -42,38 +42,65 @@ def protected(text,name):
     return ''.join(text.splitlines(keepends=True)[start-1:node.end_lineno])
 
 
+def check_sources(root, manifest):
+    expected={'scripts/diagnostics/format_snapshot_6911/worker.py','scripts/diagnostics/format_snapshot_6911/controller.py','scripts/diagnostics/lfs_pair_6911/controller.py'}
+    if set(manifest['sources'])!=expected:raise ValueError('source schema STOP')
+    for name,sha in manifest['sources'].items():
+        path=root/name
+        if path.resolve()!=path or not path.is_file() or any(x.is_symlink() for x in (path,*path.parents)) or hashlib.sha256(path.read_bytes()).hexdigest()!=sha:
+            raise ValueError('source binding STOP')
+
+
 def tool(command,cwd,deadline):
+    status=dict(reason='LAUNCH_FAILURE',rc=None,launched=False,timeout=False,cap=False,reaped=False,settled=False,monitor_failed=False)
     known,pgid={},os.getpgrp()
     def observe():return owned(known,pgid)
     def kill():
         for pid,facts in observe().items():
             fresh=table().get(pid)
             if fresh and fresh['start']==facts['start']:os.kill(pid,9)
-    child=subprocess.Popen(command,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+    try:child=subprocess.Popen(command,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
         env={'PATH':os.environ['PATH'],'HOME':str(cwd),'TMPDIR':str(cwd),'BLACK_CACHE_DIR':str(cwd/'cache'),'PYTHONDONTWRITEBYTECODE':'1'})
+    except Exception:return status
+    status['launched']=True
     completed=False
     try:
         size=0
         with selectors.DefaultSelector() as selector:
             selector.register(child.stdout,selectors.EVENT_READ)
             while selector.get_map():
-                if time.monotonic()>=deadline:raise ValueError('format time STOP')
+                if time.monotonic()>=deadline:
+                    status['timeout']=True
+                    raise ValueError('time')
                 observe()
                 for key,_ in selector.select(.05):
                     data=os.read(key.fileobj.fileno(),16384)
                     if not data:selector.unregister(key.fileobj)
                     size+=len(data)
-                    if size>262144:raise ValueError('format output STOP')
+                    if size>262144:
+                        status['cap']=True
+                        raise ValueError('cap')
         completed=True
-    finally:state=finish_owned(child,observe,kill,lambda:None)
-    if not completed or state['errors'] or not state['owned_settled'] or state['rc']!=0:
-        raise ValueError('format tool STOP')
-    return state['rc']
+    except Exception:status['monitor_failed']=not(status['timeout'] or status['cap'])
+    finally:
+        state=finish_owned(child,observe,kill,lambda:None)
+        status.update(rc=state['rc'],reaped=state['reaped'],settled=state['owned_settled'])
+    status['reason']=('TIMEOUT' if status['timeout'] else 'OUTPUT_CAP' if status['cap'] else 'MONITOR_FAILURE' if not completed or status['monitor_failed'] else 'SETTLEMENT_FAILURE' if state['errors'] or not state['owned_settled'] else 'PASS' if state['rc']==0 else 'TOOL_FAILURE')
+    return status
+
+
+def run_tools(commands,work,deadline,proof,out):
+    for i,cmd in enumerate(commands):
+        proof['stage']='TOOLS'
+        proof['tools'][i]=tool([sys.executable,'-B','-m']+cmd,work,deadline)
+        (out/'format.json').write_text(json.dumps(proof)+'\n')
+        if proof['tools'][i]['reason']!='PASS':raise ValueError('tool STOP')
 
 
 def main():
     work=Path(sys.argv[1]);work.mkdir();out=Path(sys.argv[2]);out.mkdir(exist_ok=True)
     manifest=json.loads((ROOT/'scripts/diagnostics/format_snapshot_6911/manifest.json').read_text())
+    check_sources(ROOT,manifest)
     actual_tools={k:importlib.metadata.version(k) for k in ('black','isort','flake8')}
     if actual_tools != manifest['tools']:raise ValueError('tool version STOP')
     before={}
@@ -86,7 +113,8 @@ def main():
     deadline=time.monotonic()+25
     commands=[['isort',*FILES],['black','--workers','1',*FILES],
               ['black','--check','--workers','1',*FILES],['isort','--check-only',*FILES],['flake8','--jobs','1',*FILES]]
-    rcs=[tool([sys.executable,'-B','-m']+cmd,work,deadline) for cmd in commands]
+    run_tools(commands,work,deadline,PROOF,out)
+    PROOF['stage']='COMPATIBILITY'
     after={p:(work/p).read_text() for p in FILES}
     for p in FILES:
         if semantic(before[p])!=semantic(after[p]):raise ValueError('AST semantics STOP')
@@ -95,9 +123,20 @@ def main():
             raise ValueError('protected body bytes STOP')
     patch=''.join(''.join(difflib.unified_diff(before[p].splitlines(keepends=True),after[p].splitlines(keepends=True),fromfile='a/'+p,tofile='b/'+p)) for p in FILES)
     if len(patch.encode())>262144:raise ValueError('patch cap STOP')
+    PROOF['stage']='PATCH_READY'
     (out/'format.patch').write_text(patch)
-    (out/'format.json').write_text(json.dumps(dict(rcs=rcs,ast_compatible=True,protected_byte_equal=True,
-        patch_sha256=hashlib.sha256(patch.encode()).hexdigest(),before={p:hashlib.sha256(before[p].encode()).hexdigest() for p in FILES},after={p:hashlib.sha256(after[p].encode()).hexdigest() for p in FILES}))+'\n')
+    PROOF.update(qualified=True,stage='COMPLETE',ast_compatible=True,protected_byte_equal=True,
+        patch_sha256=hashlib.sha256(patch.encode()).hexdigest(),before={p:hashlib.sha256(before[p].encode()).hexdigest() for p in FILES},after={p:hashlib.sha256(after[p].encode()).hexdigest() for p in FILES})
 
 
-if __name__=='__main__':main()
+def entry():
+    global PROOF
+    out=Path(sys.argv[2]);out.mkdir(exist_ok=True)
+    PROOF=dict(qualified=False,stage='SOURCE_SETUP',tools=[dict(reason='UNRUN',rc=None) for _ in range(5)])
+    try:main()
+    except Exception:pass
+    finally:
+        (out/'format.json').write_text(json.dumps(PROOF)+'\n')
+    if not PROOF['qualified']:raise SystemExit(1)
+
+if __name__=='__main__':entry()
