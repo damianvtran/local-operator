@@ -1098,8 +1098,29 @@ class ConversationMemberIn(_Strict):
     display_label: str = Field(min_length=1, max_length=64)
 
 
-class ConversationCreateIn(_Strict):
+class ConversationOwnerIn(_Strict):
+    """Optional anti-replay receipt, separate from upstream authorization.
+
+    Older clients may omit the receipt. A guarded mutation must name the tenant
+    of the captured DATA, not the current picker/default OAuth organization: one
+    account can legitimately belong to several organizations. The client checks
+    the owner against the exact bearer snapshot; the server checks membership.
+    """
+
+    expected_account_id: str | None = Field(default=None, min_length=1, max_length=128)
     tenant_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _guard_target(self) -> "ConversationOwnerIn":
+        if self.expected_account_id is not None:
+            if not self.expected_account_id.strip():
+                raise ValueError("expected_account_id must be nonempty")
+            if self.tenant_id is None or not self.tenant_id.strip():
+                raise ValueError("a guarded mutation needs an explicit tenant_id")
+        return self
+
+
+class ConversationCreateIn(ConversationOwnerIn):
     kind: Literal["dm", "group", "channel"]
     name: str | None = Field(default=None, max_length=128)
     topic: str | None = Field(default=None, max_length=512)
@@ -1108,21 +1129,17 @@ class ConversationCreateIn(_Strict):
     members: list[ConversationMemberIn] = Field(default_factory=list, max_length=500)
 
 
-class ConversationSendIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationSendIn(ConversationOwnerIn):
     client_ref: str = Field(min_length=1, max_length=128)
     body: str = Field(min_length=1)
     agent_label: str | None = Field(default=None, max_length=64)
 
 
-class ConversationJoinIn(_Strict):
-    #: The organization the join targets. Required for a caller with more than one
-    #: eligible membership; the server answers ``invalid_request`` without it.
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationJoinIn(ConversationOwnerIn):
+    """A guarded join always names the captured target organization."""
 
 
-class ConversationReadIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationReadIn(ConversationOwnerIn):
     seq: int | None = Field(default=None, ge=0)
     muted: bool | None = None
     #: The per-member notification policy (agent-server #148). `muted` is the
@@ -1139,16 +1156,31 @@ class ConversationReadIn(_Strict):
         return self
 
 
-class ConversationConsentIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationConsentIn(ConversationOwnerIn):
     decision: Literal["accept", "decline"]
     consent_version: str = Field(min_length=1, max_length=128)
 
 
-class ConversationAdmitIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationAdmitIn(ConversationOwnerIn):
     verdict: Literal["allow", "reject"]
     body_hash: str = Field(min_length=1, max_length=128)
+
+
+def _conversation_owner_query(request: Request) -> ConversationOwnerIn:
+    """Receipt for bodyless writes and the legacy list-body member invitation.
+
+    Keep the member list's wire shape intact. Query and body receipts use the
+    same validation; never silently discard a supplied owner or guess a tenant.
+    The receipt is local-only and must not be forwarded to the service.
+    """
+
+    try:
+        return ConversationOwnerIn(
+            expected_account_id=request.query_params.get("expected_account_id"),
+            tenant_id=request.query_params.get("tenant_id"),
+        )
+    except ValueError:
+        _raise_read("invalid_request")
 
 
 def _conversation_client(config_manager: ConfigManager):
@@ -1268,11 +1300,13 @@ async def create_conversation(
     client = _conversation_client(config_manager)
     payload = {
         key: value
-        for key, value in body.model_dump().items()
+        for key, value in body.model_dump(exclude={"expected_account_id"}).items()
         if value is not None and not (key == "members" and not value)
     }
     payload["members"] = [member.model_dump(exclude_none=True) for member in body.members]
-    result = await _conversation_reply(client.create_conversation(payload))
+    result = await _conversation_reply(
+        client.create_conversation(payload, expected_account_id=body.expected_account_id)
+    )
     return reply(result)
 
 
@@ -1313,7 +1347,11 @@ async def conversation_archive(
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_lifecycle(conversation_id, "archive"))
+        await _conversation_reply(
+            client.conversation_lifecycle(
+                conversation_id, "archive", **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1331,7 +1369,11 @@ async def conversation_unarchive(
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_lifecycle(conversation_id, "unarchive"))
+        await _conversation_reply(
+            client.conversation_lifecycle(
+                conversation_id, "unarchive", **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1343,7 +1385,6 @@ async def add_conversation_members(
     conversation_id: str,
     request: Request,
     members: list[ConversationMemberIn],
-    tenant_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Invite members. Humans are invited; agents stay invited until their owner consents."""
@@ -1354,7 +1395,9 @@ async def add_conversation_members(
     payload = [member.model_dump(exclude_none=True) for member in members]
     return reply(
         await _conversation_reply(
-            client.conversation_members(conversation_id, payload, tenant_id=tenant_id)
+            client.conversation_members(
+                conversation_id, payload, **_conversation_owner_query(request).model_dump()
+            )
         )
     )
 
@@ -1376,7 +1419,11 @@ async def remove_conversation_member(
 
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_remove_member(conversation_id, account_id))
+        await _conversation_reply(
+            client.conversation_remove_member(
+                conversation_id, account_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1405,6 +1452,7 @@ async def conversation_consent(
                 decision=body.decision,
                 consent_version=body.consent_version,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
             )
         )
     )
@@ -1427,7 +1475,11 @@ async def conversation_join(
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(
-            client.conversation_join(conversation_id, tenant_id=body.tenant_id if body else None)
+            client.conversation_join(
+                conversation_id,
+                tenant_id=body.tenant_id if body else None,
+                expected_account_id=body.expected_account_id if body else None,
+            )
         )
     )
 
@@ -1446,7 +1498,13 @@ async def conversation_leave(
     _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
-    return reply(await _conversation_reply(client.conversation_leave(conversation_id)))
+    return reply(
+        await _conversation_reply(
+            client.conversation_leave(
+                conversation_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
 
 
 @router.get(
@@ -1533,6 +1591,7 @@ async def send_conversation_message(
                 client_ref=body.client_ref,
                 text=body.body,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
                 agent_label=body.agent_label,
             )
         )
@@ -1592,6 +1651,7 @@ async def conversation_admit(
                 verdict=body.verdict,
                 body_hash=body.body_hash,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
                 endpoint_id=endpoint_id,
             )
         )
@@ -1621,6 +1681,7 @@ async def conversation_read(
                 muted=body.muted,
                 notify=body.notify,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
             )
         )
     )
