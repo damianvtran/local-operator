@@ -175,7 +175,9 @@ comment.
 * A raw `key: <long hyphen phrase>` stays masked: it is indistinguishable from
   a passphrase and is not a render-site identifier. The sanctioned route for an
   identifier field is `VariableStore.identifier_span`, which the project tool
-  already uses.
+  already uses. The one base release that still applies is a value that repeats
+  its own name (`_repeats_its_own_name`); that is pre-existing and not widened
+  here.
 * A single lowercase word after `--secret` still masks in both passes. A
   digit-bearing hyphenated name after `--secret` is released by the **argument**
   pass (the flag is a name carrier and the command must execute) while the
@@ -188,7 +190,12 @@ comment.
   committed copy, not necessarily a reviewed one: a secret committed into a
   catalogue by a mistaken commit will be returned verbatim, so review of
   changes under those roots is the control. The route refuses working-tree
-  changes precisely so an agent cannot create that state silently.
+  changes precisely so an agent cannot create that state silently. Git's
+  cleanliness check honours `assume-unchanged`/`skip-worktree`: a file marked
+  so can hide a working-tree change, and the route then serves the `HEAD` blob
+  without the refusal sentence — no working-tree secret is exposed, because the
+  bytes still come from `HEAD`. A hard link is another working-tree name and
+  does not change `HEAD`; it is served for the same reason.
 
 ## 7. Enforcement map
 

@@ -3,9 +3,10 @@
 The reader is a result-redaction exemption, so its security boundary is the
 FILE it opens, not the masking pass.  Review round 1 reproduced the writable-root
 bypass — an agent writes a credential into a catalogue and reads it back
-verbatim — so these tests pin the answers: serve COMMITTED bytes at ``HEAD``,
-refuse a working-tree difference, a hard link, a symlink escape and an
-untracked file, and record every read before returning it.
+verbatim — so these tests pin the answers: serve the committed blob at
+``HEAD``, refuse a working-tree difference, a symlink escape and an untracked
+file, and record every read before returning it.  A hard link is another
+working-tree name and does not change ``HEAD``, so it is served.
 
 The fixture is a real miniature git checkout: ``HEAD`` is the whole control, so
 a test that never commits is not testing the route.
