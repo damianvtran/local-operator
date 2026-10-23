@@ -319,7 +319,11 @@ async def test_a_reply_pairs_thread_and_to_and_the_send_confirms_in_the_outbox(t
 @pytest.mark.parametrize("status", [200, 201])
 @pytest.mark.parametrize("advisory", ["", "synthetic advisory"])
 async def test_legacy_send_receipt_exposes_only_server_acceptance(
-    tmp_path, monkeypatch, op, status, advisory,
+    tmp_path,
+    monkeypatch,
+    op,
+    status,
+    advisory,
 ) -> None:
     """Both new acceptance and an idempotent server answer keep the old fields.
 
@@ -419,7 +423,10 @@ async def test_legacy_receipt_on_frozen_pending_intent_replay(tmp_path, monkeypa
     failed = await execute_bridge(runtime, args)
     assert failed["ok"] is False and failed["code"] == "send_unconfirmed"
     metadata = {
-        "destination_type", "receipt_stage", "conversation_history", "execution_confirmed",
+        "destination_type",
+        "receipt_stage",
+        "conversation_history",
+        "execution_confirmed",
     }
     assert not metadata.intersection(failed)
     outbox = Outbox(tmp_path)
@@ -469,7 +476,10 @@ async def test_refused_legacy_send_has_no_success_receipt(tmp_path, op) -> None:
     result = await execute_bridge(runtime, args)
     assert result["ok"] is False and result["code"] == "send_unconfirmed"
     metadata = {
-        "destination_type", "receipt_stage", "conversation_history", "execution_confirmed",
+        "destination_type",
+        "receipt_stage",
+        "conversation_history",
+        "execution_confirmed",
     }
     assert not metadata.intersection(result)
     assert "message_id" not in result and result.get("state") != "sent"
@@ -497,7 +507,10 @@ async def test_refused_legacy_send_has_no_success_receipt(tmp_path, op) -> None:
     ],
 )
 async def test_malformed_legacy_receipt_stays_pending_until_frozen_replay_confirms(
-    tmp_path, monkeypatch, op, receipt,
+    tmp_path,
+    monkeypatch,
+    op,
+    receipt,
 ) -> None:
     """A 2xx envelope is not a send receipt; never retire its retryable intent.
 
@@ -540,7 +553,10 @@ async def test_malformed_legacy_receipt_stays_pending_until_frozen_replay_confir
     assert "private-response-canary" not in json.dumps(result)
     assert "message_id" not in result and result.get("state") != "sent"
     metadata = {
-        "destination_type", "receipt_stage", "conversation_history", "execution_confirmed",
+        "destination_type",
+        "receipt_stage",
+        "conversation_history",
+        "execution_confirmed",
     }
     assert not metadata.intersection(result)
     outbox = Outbox(tmp_path)
