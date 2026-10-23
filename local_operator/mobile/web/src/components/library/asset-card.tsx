@@ -87,7 +87,10 @@ export function AssetCard({
 					   (z-10): a press on play must play, never open the asset, while a
 					   press anywhere else in the well still opens it. Mounted only once
 					   the tile approaches the viewport — same gate as the thumbnail. */
-					<div className="absolute inset-x-2 top-1/2 z-10 -translate-y-1/2">
+					<div
+						className="absolute inset-x-2 top-1/2 z-10 -translate-y-1/2"
+						data-sound-seat=""
+					>
 						{near ? (
 							<SoundPlayer
 								variant="compact"

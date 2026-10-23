@@ -289,12 +289,17 @@ export function SoundPlayer({
 		if (fraction !== null) seekFraction(fraction);
 	};
 
-	const onPointerUp = (event: PointerEvent<HTMLDivElement>) => {
+	/**
+	 * End the press. `click` is true only for a real pointer-up: a CANCEL is the
+	 * opposite of a play intent, so it drops the gesture without seeking further
+	 * and without playing (round-1 review N1).
+	 */
+	const finishPress = (event: PointerEvent<HTMLDivElement>, click: boolean) => {
 		const press = pressRef.current;
 		if (press === null) return;
 		pressRef.current = null;
 		trackRef.current?.releasePointerCapture?.(event.pointerId);
-		if (press.moved) {
+		if (!click || press.moved) {
 			/* A scrub only seeks; starting playback here would make every drag a
 			   play press, which is the gesture contract's one prohibition. */
 			setDragging(false);
@@ -385,8 +390,8 @@ export function SoundPlayer({
 					aria-valuetext={`${formatClock(time)} of ${formatClock(duration)}`}
 					onPointerDown={onPointerDown}
 					onPointerMove={onPointerMove}
-					onPointerUp={onPointerUp}
-					onPointerCancel={onPointerUp}
+					onPointerUp={(event) => finishPress(event, true)}
+					onPointerCancel={(event) => finishPress(event, false)}
 					onKeyDown={onTrackKeyDown}
 					className={cn(
 						"relative flex min-h-11 min-w-0 flex-1 touch-none select-none items-center overflow-hidden rounded-sm",
