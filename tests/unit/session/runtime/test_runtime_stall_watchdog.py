@@ -1070,62 +1070,188 @@ def test_a_beat_whose_rearm_failed_says_the_sibling_is_behind_the_last_beat(
         stall_watchdog.disarm()
 
 
-def test_a_reader_concurrent_with_a_beat_never_sees_a_partial_sibling(
+def _sample_deadline_overlap(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record_property: Any,
+    *,
+    lag: bool = False,
+    old_fixed: bool = False,
+    torn: bool = False,
+    dead: bool = False,
 ) -> None:
-    """THE SIBLING IS REPLACED, NOT REWRITTEN, so a reader gets a whole file or none.
+    """Sample different completed beats, not merely time with a phase flag set.
 
-    ``Path.write_text`` is open(O_TRUNC) + write + close, and a reader landing inside that
-    window observes a TRUNCATED file -- measured (QA round 1, Q4) at 398 beats/s: 2500 of
-    28,922 reads returned zero bytes. At the shipping cadence the exposure is one ~205 us
-    window per 15 s beat, which is small and not zero: a fire landing inside it leaves a
-    ZERO-BYTE sibling for a post-mortem that has no rule for one, which is the class of
-    unreadable artifact this module exists to remove.
-
-    ATOMICITY IS THE ASSERTION, NOT A TIMING BOUND: an atomic replace leaves a reader with
-    the previous file or the new one, so the shipped shape cannot produce a short read at
-    any cadence, and the mutated shape (write in place) produces them by the hundred at
-    this one. The read count is asserted too, so a reader that never ran fails as a dead
-    instrument instead of passing quietly.
-
-    MUTATION THIS CELL CATCHES: write the destination instead of the temp (replace the
-    ``os.replace`` with ``armed.deadline_path.write_text(...)``) -- the zero-byte reads come
-    back and ``partial`` is no longer 0.
+    The old 2000-beat loop could finish before its reader got scheduled (CI:
+    42 reads, zero partials). A read now earns credit only after a NEW completed
+    beat, and the writer continues until 200 such observations exist. A reader
+    cannot satisfy this by reading one frozen version 200 times. The clock
+    injection belongs only to the dead-reader control and expires after the
+    minimum workload, avoiding a twenty-second busy-loop negative control.
     """
+    import json
+    import platform
+
+    gate = threading.Condition()
+    stop = threading.Event()
+    release = threading.Event()
+    half = threading.Event()
+    sampled = threading.Event()
+    state: dict[str, Any] = {
+        "beats": 0,
+        "reads_during": 0,
+        "partial": 0,
+        "first_read_beat": None,
+        "last_read_beat": None,
+    }
+    errors: list[str] = []
+    started = time.monotonic()
+    deadline = started + 20.0
+    path = stall_watchdog.deadline_path(os.getpid(), tmp_path)
+    real_replace = os.replace
+
+    def replace(source: Any, destination: Any) -> None:
+        if torn and Path(destination) == path:
+            # Deterministic negative: hold an INCOMPLETE destination until the
+            # reader confirms a read. Not a probabilistic truncation race.
+            path.write_text("", encoding="utf-8")
+            half.set()
+            if not sampled.wait(5.0):
+                raise AssertionError("half-write reader never acknowledged the torn record")
+        real_replace(source, destination)
+
+    def read() -> None:
+        last = 0
+        try:
+            while not stop.is_set():
+                if torn and half.is_set() and not sampled.is_set():
+                    text = path.read_text(encoding="utf-8")
+                    with gate:
+                        state["partial"] += int(len(text.split()) != 3 or not text.endswith("\n"))
+                    sampled.set()
+                if (lag or dead) and not release.is_set():
+                    release.wait(0.05)
+                    continue
+                with gate:
+                    gate.wait_for(lambda: stop.is_set() or state["beats"] > last, timeout=0.05)
+                    if stop.is_set():
+                        break
+                    version = state["beats"]
+                    if version <= last:
+                        continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                with gate:
+                    state["reads_during"] += 1
+                    state["partial"] += int(len(text.split()) != 3 or not text.endswith("\n"))
+                    if state["first_read_beat"] is None:
+                        state["first_read_beat"] = version
+                    state["last_read_beat"] = version
+                    last = version
+                    gate.notify_all()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+            sampled.set()
+
+    reader = threading.Thread(target=read, name="deadline-reader")
     stall_watchdog.disarm()
     assert stall_watchdog.arm(seconds=30.0, directory=tmp_path) is True
-    path = stall_watchdog.deadline_path(os.getpid(), tmp_path)
-    stop = threading.Event()
-    seen = {"reads": 0, "partial": 0}
-
-    def read_forever() -> None:
-        while not stop.is_set():
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
-                # Not there YET is the first write's window, not a partial read.
-                continue
-            seen["reads"] += 1
-            # ``<epoch> <leg> <monotonic>``: three tokens is the whole record.
-            if len(text.split()) != 3 or not text.endswith("\n"):
-                seen["partial"] += 1
-
-    reader = threading.Thread(target=read_forever, daemon=True)
+    monkeypatch.setattr(stall_watchdog.os, "replace", replace)
     reader.start()
     try:
-        for _ in range(2000):
+        while True:
             stall_watchdog.beat(stall_watchdog.SERVING)
+            with gate:
+                state["beats"] += 1
+                beats = state["beats"]
+                if lag and beats >= 2001:
+                    release.set()
+                gate.notify_all()
+                if old_fixed and beats >= 2000:
+                    break
+                if beats >= 2000 and state["reads_during"] >= 200:
+                    break
+                now = deadline + 1.0 if dead and beats >= 2000 else time.monotonic()
+                assert now < deadline, f"dead instrument: reader never overlapped writer: {state}"
+                assert not errors, errors
+                # Once the old workload minimum is met, let the reader acknowledge
+                # this version before producing the next one; the total deadline
+                # remains the bound. No wall-time/performance assertion is added.
+                if beats >= 2000:
+                    gate.wait_for(
+                        lambda: state["last_read_beat"] == beats or bool(errors),
+                        timeout=min(0.05, max(0.0, deadline - time.monotonic())),
+                    )
+        assert state["beats"] >= 2000, state
+        assert state["reads_during"] >= 200, f"dead instrument: {state}"
+        assert state["last_read_beat"] > state["first_read_beat"], state
+        assert state["partial"] == 0, f"atomicity: partial sibling observed: {state}"
     finally:
         stop.set()
-        reader.join(timeout=10.0)
+        release.set()
+        sampled.set()
+        with gate:
+            gate.notify_all()
+        reader.join(timeout=5.0)
         stall_watchdog.disarm()
+        record_property(
+            "deadline_overlap",
+            json.dumps(
+                dict(
+                    state,
+                    wall=time.monotonic() - started,
+                    platform=platform.platform(),
+                    switchinterval=sys.getswitchinterval(),
+                    reader_joined=not reader.is_alive(),
+                ),
+                sort_keys=True,
+            ),
+        )
+        assert not reader.is_alive(), "deadline reader did not physically settle"
+        assert not errors, errors
 
-    assert not reader.is_alive(), "the reader thread never stopped"
-    assert seen["reads"] > 200, f"the concurrent reader is a dead instrument: {seen}"
-    assert seen["partial"] == 0, (
-        f"{seen['partial']} of {seen['reads']} reads concurrent with a beat saw a partial or "
-        f"empty sibling, so a post-mortem can be left holding a file with no meaning"
-    )
+
+def test_a_reader_concurrent_with_a_beat_never_sees_a_partial_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property: Any
+) -> None:
+    """Strict atomicity after 200 reads of progressing beats and at least 2000 beats."""
+    _sample_deadline_overlap(tmp_path, monkeypatch, record_property)
+
+
+def test_the_deadline_reader_can_start_after_the_old_workload_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property: Any
+) -> None:
+    """The 2001st beat releases the reader: continuing work makes it observable."""
+    _sample_deadline_overlap(tmp_path, monkeypatch, record_property, lag=True)
+
+
+def test_the_old_fixed_workload_rejects_the_delayed_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property: Any
+) -> None:
+    """Old driver ends at 2000, so it cannot release the instrument at beat 2001."""
+    with pytest.raises(AssertionError, match="dead instrument") as caught:
+        _sample_deadline_overlap(tmp_path, monkeypatch, record_property, lag=True, old_fixed=True)
+    record_property("deadline_control_oracle", str(caught.value))
+
+
+def test_the_deadline_reader_catches_a_forced_in_place_half_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property: Any
+) -> None:
+    """The mutation must fail atomicity, not the reader-health guard."""
+    with pytest.raises(AssertionError, match="atomicity: partial sibling") as caught:
+        _sample_deadline_overlap(tmp_path, monkeypatch, record_property, torn=True)
+    record_property("deadline_control_oracle", str(caught.value))
+
+
+def test_the_deadline_reader_rejects_a_dead_instrument_without_waiting_twenty_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property: Any
+) -> None:
+    """Inject expiry only after 2000 real beats, never weaken the positive bound."""
+    with pytest.raises(AssertionError, match="dead instrument: reader never overlapped") as caught:
+        _sample_deadline_overlap(tmp_path, monkeypatch, record_property, dead=True)
+    record_property("deadline_control_oracle", str(caught.value))
 
 
 def test_a_quiet_plane_is_named_in_the_dump_alongside_the_deadline_that_came_due(
