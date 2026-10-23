@@ -17,6 +17,15 @@ NODE = 'tests/unit/network/test_mobility_promotion_identity.py::test_a_peer_that
 SHA = '45e4030c7a19418600430ce7f6db3bef1520d465991a4f161eb11b661f6fdab8'
 ROWS, REPORTS = [], []
 CALLS = 0
+GUARDS = []
+
+def mark_guard(kind):
+    if len(GUARDS) < 8:
+        GUARDS.append(kind)
+
+def stop_guard(kind):
+    mark_guard(kind)
+    raise RuntimeError("MOVE fixed guard STOP")
 
 @pytest.fixture(autouse=True, params=('baseline', 'fresh'), ids=('baseline', 'fresh'))
 def _move_variant(request):
@@ -75,7 +84,7 @@ def pytest_runtest_call(item):
             state['fresh'] = link
             row['dial_ok'] = link is not None
             if link is None:
-                raise RuntimeError('MOVE fresh handshake STOP')
+                stop_guard('DIAL')
             # Actual generation on A must be NEW AND SELECTED for A -> B's first
             # move. An extra connection whose selection is old does NOT qualify.
             selected = a._link_for(b.identity.device_id)
@@ -85,10 +94,10 @@ def pytest_runtest_call(item):
                 candidates[0], link, record.network_id, a.identity.device_id, b.identity.device_id
             )
             if not row['correlated']:
-                raise RuntimeError('MOVE explicit dial handshake correlation STOP')
+                stop_guard('CORRELATION')
             row['selected_new'] = row['new_generation'] and selected is candidates[0]
             if not row['selected_new']:
-                raise RuntimeError('MOVE fresh generation not selected STOP')
+                stop_guard('SELECTION')
             state['admitted_selected'] = selected
         return answer
 
@@ -109,7 +118,7 @@ def pytest_runtest_call(item):
                 row['request_seen'] = True
                 row['selected_alive'], row['selected_closing'] = bool(link.alive), bool(link.closing)
                 if mode == 'fresh' and link is not state['admitted_selected']:
-                    raise RuntimeError('MOVE first operation lost fresh generation STOP')
+                    stop_guard('REQUEST')
             reply = original_request(link, *request_args, **request_kwargs)
             if relevant and reply is not None:
                 row['reply_seen'] = True
@@ -156,8 +165,10 @@ def pytest_runtest_logreport(report):
                 raise ValueError('MOVE missing call STOP')
             validate_row(ROWS[-1], ('baseline','fresh')[CALLS-1], CALLS, report.outcome)
         except (ValueError, KeyError, TypeError, IndexError):
+            mark_guard('ROW')
             SESSION.shouldstop = 'MOVE invalid completed call STOP'
     elif report.outcome != 'passed':
+        mark_guard('FIXTURE')
         SESSION.shouldstop = 'MOVE setup/fixture STOP'
 
 
@@ -230,4 +241,4 @@ def _move_diag_environment(isolate_environment, monkeypatch):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    Path(os.environ['LFS_MOVE_PROOF']).write_text(json.dumps(dict(rows=ROWS, reports=REPORTS, exitstatus=int(exitstatus))) + '\n')
+    Path(os.environ['LFS_MOVE_PROOF']).write_text(json.dumps(dict(rows=ROWS, reports=REPORTS, guards=GUARDS, exitstatus=int(exitstatus))) + '\n')
