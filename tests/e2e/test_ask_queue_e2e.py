@@ -1062,6 +1062,90 @@ async def test_an_idle_session_takes_an_open_ask_dismissal_without_a_turn(
 
 
 @pytest.mark.asyncio
+async def test_a_dismissal_parked_past_the_last_boundary_is_held_without_a_turn(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: the OTHER way a parked dismissal could reach a paid turn.
+
+    ``deliver_ask_messages`` parks a mid-turn row for "the next boundary". A turn
+    that is already PAST its last boundary never reaches one, so the only reader
+    left is ``_flush_parked_deliveries`` at turn end — and before this cell's fix
+    that flush handed the row to ``_prompt_messages``, buying a provider call to
+    say "noted".
+
+    The park happens for real, inside the turn's tail (``_persist_new_messages``,
+    the thread hop the flush's own docstring names) rather than by forcing
+    ``_is_streaming`` by hand, and the turn then ENDS NORMALLY — no abort, so the
+    stopped-work residue rule cannot be what holds it.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-tail",
+                arguments=_ask_args("which db?", timeout=1800),
+            ),
+            text_turn("working"),
+            text_turn("carrying on"),
+        ]
+    )
+    directory = headless_tui_env / "sessions" / "dismiss-tail"
+    session = _session(headless_tui_env, "dismiss-tail", stream)
+    session.set_ask_handler(_never_answers)
+    # THE TAIL, not a tool boundary: `_persist_new_messages` also runs at the
+    # compaction gate, which a boundary drain follows — a park there rides that
+    # boundary and never reaches the flush (measured: the row was drained at
+    # `harness/loop.py`'s `_collect_inflight_injections`).
+    # `_mark_code_requests_dirty` runs only from a turn's tail (and from
+    # wake/monitor deliveries, which this cell never makes).
+    original_tail = session._mark_code_requests_dirty
+    parked = False
+
+    async def park_then_tail() -> None:
+        nonlocal parked
+        if not parked:
+            parked = True
+            (ask_id,) = _ask_ids(directory)
+            # Past the last boundary: the row can only be parked here, and this
+            # assertion is what makes the cell about the FLUSH rather than about
+            # a delivery that would have parked anyway a moment later.
+            assert session.dismiss_ask(ask_id, by="remote", reason="moot") == {"ok": True}
+            await session.reconcile_asks()
+            assert session.queued_steering(), "the dismissal did not park on the queue"
+        await original_tail()
+
+    session._mark_code_requests_dirty = park_then_tail  # type: ignore[method-assign]
+    try:
+        with bounded(BOUND_S, "a dismissal parked past the last boundary"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(directory)
+            requests_before = len(stream.requests)
+            # The turn-end flush held it: durable, delivered, and NO provider call
+            # (with the old arm this count grew by one before the assert below).
+            await _wait_for_delivery(
+                session,
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the flush-held dismissal row",
+            )
+            assert session.ask_queue().find(ask_id)["delivered"] is True
+            await asyncio.sleep(0.3)
+            assert (
+                len(stream.requests) == requests_before
+            ), "the turn-end flush bought a turn for a dismissal"
+            # Not lost: the next real turn carries it.
+            await session.prompt("continue")
+            assert any(
+                "no longer needed" in (message.text or "")
+                for request in stream.requests[requests_before:]
+                for message in request.messages
+            ), "the next turn did not carry the flush-held dismissal row"
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
 async def test_a_running_session_takes_an_open_ask_dismissal_in_the_same_turn(
     headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

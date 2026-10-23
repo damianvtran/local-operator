@@ -12140,9 +12140,14 @@ class Session:
         """Whether agent work may be running.
 
         No longer a dismissal gate (SA-D4 retired §15's D6, which consulted this to
-        refuse an open ask while work ran). It survives as the predicate it always
-        was and as the one the ask e2e reads, because "is work running" is a fact
-        several readers ask for by name.
+        refuse an open ask while work ran), and no production caller is left — the
+        queue's probe and its ``_agent_running`` were deleted with that rule. KEPT,
+        deliberately (agent review round 1, R1-4): it is the one named spelling of
+        "stopped" (this method's three-part rule), and the ask e2e reads it to tell
+        an IDLE live session from a stopped one, which is the difference between
+        the SA-D4 arm and D2's residue arm. Deleting it would move
+        ``_abort_requested`` / ``_is_streaming`` / ``_turn_lock`` knowledge into
+        those cells, where the question would be re-derived instead of asked.
 
         The session is STOPPED (so not running) when the operator's stop is pending
         and no turn is in flight: ``_abort_requested`` is set by :meth:`abort`
@@ -12231,7 +12236,29 @@ class Session:
             return
         if len(self._user_messages) == _USER_MESSAGE_STAMP_CAP:
             self._user_message_stamp_truncated = True
-        self._user_messages.append((key, int(time.time() * 1000)))
+        self._user_messages.append((key, self._operator_message_stamp_ms(message)))
+
+    def _operator_message_stamp_ms(self, message: AgentMessage) -> int:
+        """The ONE clock an admitted operator message is stamped from.
+
+        The live stamp and the restart seed must produce the SAME number for the
+        same row: the count is compared with ``>`` against an ask's ``created_at``,
+        so a millisecond of drift across a restart could flip a message that
+        arrived in the ask's own millisecond (agent review round 1, R1-3 — QA had
+        measured the 1 ms gap). Both sides therefore read the row's durable
+        ``ts``: the seed from the replayed entry, this path from
+        ``latest_user_entry()``, the index the append just updated.
+
+        A message this runtime did NOT write (an initial that was already durable,
+        where a newer user row exists) falls back to the wall clock — which is the
+        transcript's own ``time.time()``, at a slightly later instant. Same source,
+        never a second clock.
+        """
+        row_id = str(getattr(message, "id", "") or "")
+        latest = self._transcript.latest_user_entry()
+        if row_id and latest is not None and latest.id == row_id:
+            return int(latest.ts * 1000)
+        return int(time.time() * 1000)
 
     def _seed_user_message_stamp(self) -> None:
         """Fill the stamp from the replayed conversation (SA-D7).
@@ -12241,10 +12268,20 @@ class Session:
         still has to say how much the operator has said since. The scan is over the
         rows the transcript ALREADY replayed into memory, keeps the newest
         ``_USER_MESSAGE_STAMP_CAP`` user rows, and applies the live path's exact
-        predicate — so a replayed goal continuation is not counted either.
+        predicate — so a replayed goal continuation is not counted either. The
+        stamp is ``int(entry.ts * 1000)``, the SAME field the live path reads
+        (:meth:`_operator_message_stamp_ms`), so a restart cannot move a count.
 
-        Best-effort: a stamp is a hint on a card, and no surface should fail to
-        open a conversation over it.
+        WHAT CANNOT DROP THESE ROWS (agent review round 1, open question a):
+        ``Transcript.compact_file`` drops only superseded collapsible CUSTOM
+        entries and folds PRUNE journals (whose targets are tool rows), and an
+        in-context compaction appends a marker that ``build_llm_history`` reads
+        — it never rewrites ``_entries``. So a user message entry survives both,
+        and the seed keeps reading a durable source rather than a best-effort
+        guess.
+
+        Best-effort in the one way that matters: a stamp is a hint on a card, and
+        no surface should fail to open a conversation over it.
         """
         try:
             entries = self._transcript.entries()
@@ -17546,9 +17583,9 @@ class Session:
             await self._deliver_deferred_job_results()
             # ...and whatever a busy latch parked for "the next boundary" on a
             # turn that never reached one again (see ``_flush_parked_deliveries``).
-            self._flush_parked_deliveries()
+            await self._flush_parked_deliveries()
 
-    def _flush_parked_deliveries(self) -> None:
+    async def _flush_parked_deliveries(self) -> None:
         """Hand over what a busy latch parked, now that the turn has ended.
 
         THE HOLE THIS CLOSES, measured on CI (run 37980552652, macos e2e).
@@ -17598,6 +17635,21 @@ class Session:
         arm), and an ask is not lost to the skip -- its answer is durable in
         the log and the next runtime's boot reconcile re-delivers it.
 
+        A DISMISSAL-ONLY BATCH IS HELD, NOT SPAWNED (SA-D4; agent review round 1,
+        R1-1). ``deliver_ask_messages``' idle arm already refuses to buy a turn for
+        the operator tidying a card, and this flush is the OTHER way such a row
+        reaches a turn: a dismissal parked for a boundary the turn never reached
+        would otherwise be handed to ``_prompt_messages`` -- one paid turn to say
+        "noted". It takes the same idle arm instead, through the same
+        ``_is_dismissal_batch`` predicate, so the two doors cannot disagree. A
+        batch with a plain steer in it is NOT dismissal-only: the steer needs the
+        run, and the dismissal rides beside it.
+
+        AWAITED rather than spawned, for the reason ``_deliver_deferred_job_results``
+        above is: the durability write of a held batch must land before the turn
+        releases its lock, and a spawned write is exactly what ``dispose`` cancels
+        in flight.
+
         One baked-in premise rides a flushed row (agent review round 1,
         MINOR-2): the busy-resume note some busy arms attach at hand-off
         (``_append_busy_resume_note`` -- the wake, monitor and resume-catch-up
@@ -17626,6 +17678,17 @@ class Session:
                 # else will read it: open its consumer now (see the tail-parked
                 # paragraph above).
                 self._ensure_steering_wake()
+            return
+        if self._is_dismissal_batch(parked) and all(
+            isinstance(item, CustomMessage) for item in drained
+        ):
+            # SA-D4 (agent review round 1, R1-1): held durably, no turn. Nothing
+            # needs re-queueing -- the dismissal-only case takes every drained
+            # item -- and the take changed the queue fold, so the snapshot is
+            # refreshed exactly as the spawned path below does.
+            await self._hold_deliveries_at_admission(list(parked))
+            self._courtesy_wake_count = 0
+            self.refresh_frontend_state()
             return
         # PARITY WITH THE PEER ARMS (agent review round 1, MINOR-1): both
         # ``receive_peer_message`` arms spawn with ``carried_prompt=True``,

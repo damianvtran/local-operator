@@ -140,6 +140,21 @@ async def dismiss_cold(
     # its own record of what it delivered and republishes its schedule list, so a
     # write from here would be lost — or would leave the owed notice delivered by
     # a boot with nobody's turn to read it.
+    #
+    # THE WINDOW AFTER THIS CHECK IS BENIGN, and deliberately not narrowed (agent
+    # review round 1, open question b). A runtime that boots between the probe and
+    # the append finds the dismissal in the LOG: the append is one `write` under
+    # an `O_APPEND` flock (`store.append_event`), so it lands whole beside whatever
+    # the new owner writes, and the owner's next reconcile folds it — a boot
+    # reconcile reads the log before its first turn, so the owed response row is
+    # delivered then. The two cold-door writes beside the log are healed or
+    # refused, not lost: the derived index has every writer's "the log is the
+    # truth" contract (`_dismiss_in_index` warns and the next reconcile rewrites
+    # it), and the wake disarm answers `wake_owner_present`, which this module
+    # already treats as "the owner owns the list now" (`_WAKE_REFUSALS`). Between
+    # the check and the append there is no READ that could go stale, which is why
+    # a second probe or a lock around the pair would add a race without removing
+    # one.
     if _live_owner(root, session_id) is not None:
         return {"ok": False, "code": "ask_owner_present"}
 

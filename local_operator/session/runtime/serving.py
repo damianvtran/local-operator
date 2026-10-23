@@ -6049,12 +6049,13 @@ class ServingSessionHandle(SessionHandle):
     async def ask_dismiss(self, ask_id: str, by: str = "", reason: str | None = None) -> str:
         """Dismiss an ask from the view. Asks the model nothing, ever.
 
-        An OPEN ask is accepted only while the session is stopped (D6, design §15);
-        the refusal arrives as the ``ValueError`` below.
-
-        The dismissal's own act injects nothing; the deadline notice the ask had
-        not delivered is a separate, still-owed row (fork A, 2026-10-16, design
-        §14), and ``dismiss_ask``'s ``_settled`` reconcile is what delivers it.
+        An OPEN ask is accepted in EVERY live state (SA-D4, design §15, replacing
+        D6's stopped-session gate); the refusal arrives as the ``ValueError`` below,
+        in the queue's own words. Mid-turn the response row rides the steering
+        queue to this turn's next boundary; the dismissal's own act injects
+        nothing, and the deadline notice the ask had not delivered is a separate,
+        still-owed row (fork A, 2026-10-16, design §14). ``dismiss_ask``'s
+        ``_settled`` reconcile is what delivers either one.
         """
         outcome = self._session.dismiss_ask(ask_id, by=by or "remote", reason=reason)
         if not outcome.get("ok"):

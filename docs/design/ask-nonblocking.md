@@ -113,7 +113,7 @@ deadline through the existing wake engine. Approvals are untouched and keep bloc
 | `queued` | `expires_at, timeout_s, urgent, tool_call_id, questions[{id,question,options,multi,secret,persist,recommended}]` — written only by the owning runtime |
 | `answered` | `by:{surface}`, `answers{qid:[str]}` — secret answers hold **`[<key>]` only, never a value** |
 | `declined` | `by` — explicit "no answer / decide yourself" (today's Esc) |
-| `dismissed` | `by`, `reason?` (`answered_in_chat` \| `moot`, default `moot`) — the operator puts an ask away. A timed-out ask: view-only, injects nothing OF ITS OWN, never cancels a deadline notice not yet delivered (§14). An OPEN ask (§15): accepted only on a cold or stopped session, and owes an `ask-response-<id>` row |
+| `dismissed` | `by`, `reason?` (`answered_in_chat` \| `moot`, default `moot`) — the operator puts an ask away. A timed-out ask: view-only, injects nothing OF ITS OWN, never cancels a deadline notice not yet delivered (§14). An OPEN ask (§15, amended 2026-10-23 by SA-D4): accepted in EVERY live state, not only on a cold or stopped session — mid-turn the `ask-response-<id>` row rides the steering queue to that turn's next boundary, and an idle live session holds it durably with no turn (a cold session owes it at its next boot) |
 
 **Status is a pure fold of (events, now)** — no `timed_out` event, which removes the
 answer-vs-deadline race. The precedence is **total** (first match wins, so every
@@ -1586,8 +1586,10 @@ deferral, narrowly. Plan: `ask-dismiss-plan.md` (D1–D6); this PR is the engine
    running session there was nothing to hold the row. SA-D4 measured that refusal against the field:
    it declined exactly while the operator was chatting, which is when a stale ask is noticed. The
    row now has two holding places on a live session — the steering queue mid-turn (§2.3), and
-   `_hold_deliveries_at_admission` on an idle one — so the dismissal is accepted everywhere and
-   the agent is told as soon as it is listening. **Cost, stated:** a mid-turn dismissal can keep the
+   `_hold_deliveries_at_admission` on an idle one, which is also where the turn-end flush sends a
+   dismissal parked past the last boundary (`_flush_parked_deliveries`; same predicate, so the row
+   never buys a turn on its own) — so the dismissal is accepted everywhere and the agent is told as
+   soon as it is listening. **Cost, stated:** a mid-turn dismissal can keep the
    inner loop running for one more provider call (any injection does), and an idle agent learns of
    it only at its next turn. **Cold-boot cost:** the dismissal itself boots nothing, but ANY later
    engage (even a warm-up) delivers the row into an idle runtime and runs one paid turn — the same
