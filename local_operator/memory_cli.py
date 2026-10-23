@@ -1054,8 +1054,8 @@ def _status_text(value: dict[str, Any]) -> str:
     lines.append(storage)
     if usage.get("storage_full"):
         lines += _shaped(
-            "Store FULL: the memory database has reached its byte cap, so no new fact "
-            "can be saved until space is freed."
+            "Store FULL: the memory database has reached its byte cap, so writes that "
+            "need a new page are refused until space is freed."
         )
         lines.append("Reclaim: `lop memory forget SCOPE/ID --revision REV --yes`.")
         lines.append(f"Compact: {_compact_command(usage)}.")
@@ -1071,8 +1071,8 @@ def _status_text(value: dict[str, Any]) -> str:
         else:
             lines += _shaped(
                 f"Near the storage cap: {percent}% of the {format_bytes(cap)} cap is in "
-                "use with no free pages left, so a write that needs new pages will be "
-                "refused."
+                "use with no free pages left, so a write that needs more pages than "
+                "remain will be refused."
             )
     quotas = usage.get("quotas") or []
     if quotas:

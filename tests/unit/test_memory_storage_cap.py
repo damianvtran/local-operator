@@ -127,6 +127,10 @@ def test_page_cap_refusal_is_distinct_actionable_and_names_the_store(tmp_path, m
     assert 1 < writes < 200
     assert "Memory store is full" in message
     assert f"reached its {human_bytes(4096 * 32)} cap" in message
+    # Scoped to writes that need a new page: at the cap, writes small enough to
+    # fit the remaining page space still succeed (measured: current grew 0->5).
+    assert "writes that need a new page are refused until space is freed" in message
+    assert "no new fact can be saved" not in message
     assert str(store.path) in message
     # Every remedy the operator needs, including the file the VACUUM acts on.
     assert "lop memory status" in message
@@ -158,7 +162,11 @@ def test_full_store_status_says_so_plainly_and_offers_the_way_out(tmp_path, monk
     assert usage["active_tokens"] == 0
     assert "Quota: global 0/16000" in text
     assert "Store FULL" in text
-    assert "no new fact can be saved until space is freed" in unwrapped(text)
+    flat = unwrapped(text)
+    assert "writes that need a new page are refused until space is freed" in flat
+    # The reviewer measured writes succeeding at this state until the intra-page
+    # budget is spent: the sentence must not say nothing can be saved.
+    assert "no new fact can be saved" not in flat
     assert "Reclaim: `lop memory forget SCOPE/ID --revision REV --yes`." in text
     assert f"Compact: `sqlite3 {store.path} 'VACUUM'`." in text
     assert "Run the Compact command first if the forget is also refused." in text
@@ -223,6 +231,7 @@ def test_near_cap_warning_covers_the_90_to_99_percent_state(tmp_path, monkeypatc
     flat = unwrapped(text)
     assert "Near the storage cap" in flat
     assert "with no free pages left" in flat
+    assert "needs more pages than remain" in flat
     assert "Store FULL" not in text
 
 
