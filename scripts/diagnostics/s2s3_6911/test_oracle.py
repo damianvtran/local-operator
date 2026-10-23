@@ -79,7 +79,7 @@ class Completion(unittest.TestCase):
 
     def protocol(self, mode):
         from oracle import span_record, held_record
-        rows = [dict(kind="scope", supplemental_gc="NOT_COLLECTED", excluded_gc=0), dict(kind="outcome", call="fail" if mode == "s3-split" else "pass", exitstatus=1 if mode == "s3-split" else 0), dict(kind="cleanup", worker_function_completed=True, task_settled=True), dict(kind="recorder", summary={})]
+        rows = [dict(kind="scope", supplemental_gc="NOT_COLLECTED", excluded_gc=0), dict(kind="outcome", call="fail" if mode == "s3-split" else "pass", exitstatus=1 if mode == "s3-split" else 0), dict(kind="cleanup", worker_function_completed=True, task_settled=True, errors=[]), dict(kind="recorder", summary={})]
         for i in range(3):
             rows.append(span_record("harvest", (0, i), (.001, i+.01), 1, manual=True, measured=True, i=i))
             rows.append(span_record("pause", (.001, i+.01), (.002, i+1), 1, manual=True, measured=True, i=i))
@@ -118,7 +118,7 @@ class Capacity(unittest.TestCase):
             "worst_wall_windows": []}})
         for kind in ("s2_idle", "s2_emit_burst", "s2_settle"):
             budget.add(kind, cpu_ms=1, wall_ms=2)
-        budget.add("cleanup", worker_function_completed=True, task_settled=True)
+        budget.add("cleanup", worker_function_completed=True, task_settled=True, errors=[])
         budget.add("outcome", call="pass", exitstatus=0)
 
     def test_actual_budget_replay_excludes_startup_gc_retains_m15(self):
@@ -425,6 +425,102 @@ class HeldTimeline(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             oracle.judge(row)
         self.assertFalse(str(caught.exception).startswith("HELD PROTOCOL DEFECT"))
+
+
+class HeldLoopLifetime(unittest.TestCase):
+    """QH1: does the TEST's own loop outlive the worker entry? (artifact run 39960859806)
+
+    Seconds after witness creation (first pause start 101.1876 s): the last measured
+    pause ended at 102.2846 s (+1.097) and the app's background harvest started the
+    refresh worker at 103.1537 s (+1.966), AFTER the recorder summary. The original
+    test's last statement before its assertions is ``await recorder.stop()``; the
+    plugin's patched stop awaits the witness task, so the loop is kept alive by the
+    plugin, not by the test. The fake loop below ends the instant the test body
+    returns, exactly as ``asyncio.run`` does. Source-derived, not a logged cause.
+    """
+
+    STOP_AT, ENTRY = 1.097, 1.966
+
+    def run_case(self, entry_at, mutate=None):
+        import asyncio, threading
+        import oracle
+        real_sleep = asyncio.sleep
+        clock = FakeClock(0.022)
+        class FakeAsyncio:
+            @staticmethod
+            async def sleep(delay):
+                clock.now += clock.step
+                await real_sleep(0)
+        entered, gate, records = Flag(clock, entry_at), Flag(), []
+        rec = lambda kind, **v: records.append(dict(kind=kind, **v))
+        w_source, w_ns = _extract("held_witness", "asyncio, time, threading, entered, gate, rec, requests, held_record",
+                                  "causal_released = False", "held_witness, (lambda: causal_released)")
+        exec(w_source, w_ns)
+        witness, _causal = w_ns["_make"](FakeAsyncio, clock, threading, entered, gate, rec, 1, oracle.held_record)
+        s_source, s_ns = _extract("stop", "original_stop, settle, span, rec",
+                                  "task = None\ndef set_task(value):\n    nonlocal task\n    task = value", "stop, set_task")
+        if mutate:
+            changed = mutate(s_source)
+            self.assertNotEqual(changed, s_source, "negative-control mutation did not apply")
+            s_source = changed
+        exec(s_source, s_ns)
+        async def original_stop(self, *a, **k):
+            await real_sleep(0)
+        stop, set_task = s_ns["_make"](original_stop, None, lambda *a, **k: None, rec)
+        class Recorder:
+            def measurement_summary(self):
+                return {}
+        outcome = {}
+        async def test_body():
+            task = asyncio.ensure_future(witness())
+            set_task(task)
+            while clock.now < self.STOP_AT:  # the three measured pause pairs
+                await real_sleep(0)
+            await stop(Recorder())  # the original test returns right after this
+        try:
+            asyncio.run(test_body())
+            outcome["error"] = None
+        except RuntimeError as exc:
+            outcome["error"] = str(exc)
+        outcome["ticks"] = sum(r["kind"] == "held_loop_tick" for r in records)
+        outcome["witnessed"] = sum(r["kind"] == "held_witness" for r in records)
+        outcome["gate"] = gate.is_set()
+        return outcome
+
+    def test_loop_outlives_the_observed_worker_entry_and_reaches_three_ticks(self):
+        got = self.run_case(self.ENTRY)
+        self.assertIsNone(got["error"])
+        self.assertGreaterEqual(got["ticks"], 3)
+        self.assertEqual(got["witnessed"], 1)
+        self.assertTrue(got["gate"])
+
+    def test_without_the_stop_await_the_loop_ends_before_entry(self):
+        # Negative control: remove the plugin's await and the loop dies first.
+        got = self.run_case(self.ENTRY, mutate=lambda s: s.replace("await task", "pass"))
+        self.assertLess(got["ticks"], 3)
+        self.assertEqual(got["witnessed"], 0)
+        self.assertFalse(got["gate"])
+
+    def test_a_worker_that_never_enters_fails_closed_inside_the_kept_alive_loop(self):
+        got = self.run_case(10 ** 6)
+        self.assertIsNotNone(got["error"])
+        self.assertIn("never entered", got["error"])
+        self.assertFalse(got["gate"])
+
+    def test_cleanup_errors_must_be_empty_and_are_labelled_for_held(self):
+        import oracle
+        for mode in ("s3-held", "s3-split"):
+            row = Completion("test_shared_producer_protocol_and_wrong_oracles").protocol(mode)
+            clean = next(r for r in row["data"]["records"] if r["kind"] == "cleanup")
+            clean["errors"] = ["ticker"]
+            with self.assertRaises(ValueError) as caught:
+                oracle.judge(row)
+            self.assertIn("cleanup errors STOP", str(caught.exception))
+            self.assertEqual(str(caught.exception).startswith("HELD PROTOCOL DEFECT"), mode == "s3-held")
+            self.assertNotIn("ticker", str(caught.exception))  # label text is not echoed
+            del clean["errors"]  # a record that does not say is as bad as one that fails
+            with self.assertRaisesRegex(ValueError, "cleanup errors STOP"):
+                oracle.judge(row)
 
 
 if __name__ == "__main__":

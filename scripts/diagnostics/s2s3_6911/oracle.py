@@ -69,6 +69,12 @@ def judge(row):
         # A held-control completion failure is a diagnostic-protocol defect, not
         # a product observation; other modes keep the unlabelled STOP.
         raise ValueError(("HELD PROTOCOL DEFECT: " if mode == "s3-held" else "") + "observed incomplete worker function/task STOP")
+    # The producer always writes the teardown error list; a record without it, or
+    # with entries, means a cleanup step (release / ticker / work-completion) did
+    # not complete cleanly even though both booleans are true. Only the length is
+    # reported: entries are step labels from this plugin, never test text.
+    if clean[0].get("errors") != []:
+        raise ValueError(("HELD PROTOCOL DEFECT: " if mode == "s3-held" else "") + "cleanup errors STOP")
     summaries = [r for r in records if r.get("kind") == "recorder"]
     if len(summaries) != 1:
         raise ValueError("missing original recorder STOP")
