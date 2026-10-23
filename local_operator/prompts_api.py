@@ -1021,6 +1021,13 @@ def build_system_blocks(
     with no open ask has to stay byte-identical to the tree before this existed.
     Empty-string-equals-absent is the same rule the goal, team and credentials
     sections follow above.
+
+    ``""`` from a host that cannot answer (no ask queue) is NOT the same fact as
+    ``""`` from a host whose queue is empty, and this builder does not decide
+    which it was: both render nothing, and ``Session._system_state_delta`` is
+    what refuses to turn the first into a removal the model would read as "your
+    asks are gone" (QA round 1, Q2). Callers with a queue pass its render;
+    callers without one pass nothing.
     """
     # THREE states, not two, and conflating the last two ships a false claim.
     # Membership, not visibility: a hidden tool is still callable, and telling

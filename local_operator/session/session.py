@@ -754,9 +754,13 @@ def _open_asks_clock(value: Any) -> str:
 def _open_asks_line(row: Mapping[str, Any]) -> str:
     """One bullet: the ask's id, when it was asked, and what it asks.
 
-    The ID is what ``ask_withdraw`` takes, the time is what lets the model place
-    the ask relative to a user message ("before or after what they just said"),
-    and the first question is the only part that says what is actually waiting.
+    The ask ID is what ``ask_withdraw`` takes; the QUESTION ids are what its
+    ``answers`` map is keyed by, and without them the model burns paid round trips
+    guessing (QA round 1: three attempts on a live run, two of them refusals — the
+    ask id offered as a question key, then a key that did not exist). The time
+    places the ask against the user's own words, and the first question says what
+    is actually waiting. All of it on ONE line, because the whole reminder is
+    meant to be a few hundred characters, not a second card.
     """
     ask_id = str(row.get("ask_id") or "")
     asked = _open_asks_clock(row.get("created_at"))
@@ -766,15 +770,22 @@ def _open_asks_line(row: Mapping[str, Any]) -> str:
         # A relay is a POINTER at another session's question: it holds no
         # questions of its own by construction, and an answer has to be written
         # on the ORIGIN's log — so the one useful fact here is where it lives.
+        # The settle reason is named because this door is narrower than the
+        # trailer implies: ``answered_in_chat`` on a relay is refused (#2520),
+        # and only the local retraction ``moot`` is accepted here.
         origin = str(relay.get("session_id") or "") or "another session"
-        return f"- {ask_id} — {when}, relayed from {origin} — answer it there"
+        return (
+            f"- {ask_id} — {when}, relayed from {origin} — answer it there; "
+            "only `moot` settles it here"
+        )
     questions = [item for item in (row.get("questions") or ()) if isinstance(item, Mapping)]
     count = len(questions)
     noun = "question" if count == 1 else "questions"
+    ids = ", ".join(str(item.get("id") or "") for item in questions)
     first = " ".join(str(questions[0].get("question") or "").split()) if questions else ""
     if len(first) > _OPEN_ASKS_QUESTION_CHARS:
         first = first[: _OPEN_ASKS_QUESTION_CHARS - 1] + "…"
-    return f'- {ask_id} — {when}, {count} {noun}: "{first}"'
+    return f'- {ask_id} — {when}, {count} {noun} (ids: {ids}): "{first}"'
 
 
 def _open_asks_reminder(rows: Sequence[Mapping[str, Any]], as_of_ms: Any) -> str:
@@ -790,8 +801,12 @@ def _open_asks_reminder(rows: Sequence[Mapping[str, Any]], as_of_ms: Any) -> str
     section's bytes are compared, not appended: the state-delta machinery ships
     it when (and only when) it moved, and gives up nothing when it did not. The
     "as of" stamp is what makes "moved" mean "the user said something":
-    within one turn it is fixed, so the section ships once per user message
-    rather than once per provider step.
+    within one turn it is fixed, so the section ships once per turn the user spoke
+    in — once per minute, since the stamp is minute-granular — rather than once
+    per provider step. Two messages inside one minute render the same bytes and
+    ship nothing, which is the dedupe the delta machinery gives for free; and a
+    RESTART adopts the replayed copy instead of re-shipping it (see the replay
+    rule in ``Session._system_state_delta``).
 
     Deliberately DOES NOT narrow to asks raised after some point, and never
     decides an ask is old: age is not evidence that the user stopped caring, and
@@ -801,14 +816,16 @@ def _open_asks_reminder(rows: Sequence[Mapping[str, Any]], as_of_ms: Any) -> str
         return ""
     ordered = sorted(rows, key=lambda row: _epoch_ms(row.get("created_at")))
     lines = [_open_asks_line(row) for row in ordered[:_OPEN_ASKS_SECTION_CAP]]
-    unlisted = len(ordered) - len(lines)
-    if unlisted > 0:
-        # Counted, not dropped: a reader told about eight of twelve would take
-        # the other four for settled, which is the one mistake this section
-        # cannot afford.
+    unlisted = ordered[_OPEN_ASKS_SECTION_CAP:]
+    if unlisted:
+        # Counted AND named: a reader told about eight of twelve would take the
+        # other four for settled, which is the one mistake this section cannot
+        # afford — and an id is enough to withdraw one the moment a listed ask
+        # settles, even without its questions.
+        ids = ", ".join(str(row.get("ask_id") or "") for row in unlisted)
         lines.append(
             # i18n: ignore model-facing open-asks reminder (not shown to the user)
-            f"- and {unlisted} more open, not listed here"
+            f"- and {len(unlisted)} more open, not listed here: {ids}"
         )
     parts: list[str] = []
     as_of = _open_asks_clock(as_of_ms)
@@ -822,9 +839,23 @@ def _open_asks_reminder(rows: Sequence[Mapping[str, Any]], as_of_ms: Any) -> str
         # i18n: ignore model-facing open-asks reminder (not shown to the user)
         "If the user's messages answered one of these, or made it irrelevant, "
         "settle it with `ask_withdraw`. An ask the user has not addressed stays "
-        "open."
+        "open; if you are unsure, leave it open."
     )
     return "\n\n".join(parts)
+
+
+def _open_asks_entries(section: str) -> tuple[str, ...]:
+    """An ``open_asks`` section's ask lines, without its "as of" anchor line.
+
+    Used by ONE comparison — the replay rule in ``Session._system_state_delta``.
+    The anchor is the only part of the section that moves on its own, so a restart
+    that merely crosses a minute would otherwise re-ship the same asks; these
+    lines are the part that states them, and they are compared instead of the
+    section's bytes for exactly that case. The bullet prefix is the section's own
+    format (``_open_asks_line``), so nothing here depends on how the anchor is
+    spelled.
+    """
+    return tuple(line for line in section.splitlines() if line.startswith("- "))
 
 
 def _is_dismissal_receipt(message: Any) -> bool:
@@ -3831,6 +3862,11 @@ class Session:
         self._frozen_system_blocks: list[str] | None = None
         self._last_system_blocks: list[str] | None = None
         self._system_state_message_id: str | None = None
+        #: Whether the state baseline the next delta compares against came from the
+        #: REPLAY fold — i.e. this runtime has not committed a state record yet.
+        #: True only in that window, and cleared by ``_prepare_system_blocks`` at the
+        #: first commit: see the open-asks replay rule in ``_system_state_delta``.
+        self._state_baseline_from_replay: bool = False
         marker = transcript.latest_entry("compaction")
         self._system_state_compaction_id = marker.id if marker is not None else None
         # Prefix bytes are session memory too. Reconstruct state once on resume
@@ -3848,6 +3884,7 @@ class Session:
                         self._last_system_blocks, payload.get("details", {}).get("blocks", {})
                     )
                     self._system_state_message_id = entry.id
+        self._state_baseline_from_replay = self._system_state_message_id is not None
         # Whether the block provider accepts the live ``model_label`` argument.
         # Computed once here rather than per call: the factory and subagent
         # providers do, a bare zero-arg callable (some hosts, most tests) does
@@ -6239,6 +6276,10 @@ class Session:
             self._system_state_message_id = message.id
         self._last_system_blocks = list(desired)
         self._system_state_compaction_id = compaction_id
+        # The replay window is ONE commit wide: from here on the baseline is what
+        # this runtime rendered, so a later message re-anchors the reminder
+        # normally (see the open-asks replay rule in ``_system_state_delta``).
+        self._state_baseline_from_replay = False
         return list(self._frozen_system_blocks)
 
     def _system_state_delta(
@@ -6302,6 +6343,9 @@ class Session:
             previous = self._visible_state_blocks()
         changes: dict[str, dict[str, str]] = {}
         visible: dict[tuple[int, str], set[str]] | None = None
+        # Sections this host cannot answer for. Their ABSENCE from ``desired`` is
+        # not a removal — see ``_open_asks_unknown`` and QA round 1, Q2.
+        unknown = frozenset({"open_asks"}) if self._open_asks_unknown() else frozenset()
         for index, block in enumerate(desired):
             if index == 0:
                 continue
@@ -6327,8 +6371,26 @@ class Session:
                     and text in visible.get((index, name), set())
                 ]:
                     del section_changes[name]
+            if (
+                "open_asks" in section_changes
+                and self._state_baseline_from_replay
+                and _open_asks_entries(section_changes["open_asks"])
+                == _open_asks_entries(str(prior.get("open_asks") or ""))
+            ):
+                # A RESTART DOES NOT RE-ANCHOR THE REMINDER (QA round 1, Q1).
+                # The only thing that moved is the "as of" line: the asks are the
+                # same ones the replayed record already states, and the model is
+                # reading that record a few messages up. Shipping the same list
+                # again for a clock tick is the duplication this avoids. From here
+                # on ``_last_system_blocks`` carries the new stamp, so the next
+                # message of THIS runtime re-anchors it normally.
+                del section_changes["open_asks"]
             section_changes.update(
-                {name: "" for name, text in prior.items() if name not in sections and text}
+                {
+                    name: ""
+                    for name, text in prior.items()
+                    if name not in sections and text and name not in unknown
+                }
             )
             if section_changes:
                 changes[str(index)] = section_changes
@@ -12443,8 +12505,24 @@ class Session:
         if len(entries) > _USER_MESSAGE_STAMP_CAP * 8:
             self._user_message_stamp_truncated = True
 
-    def _render_open_asks_section(self) -> str:
-        """The ``<open-asks>`` body for THIS step, or ``""`` when none are open.
+    def _open_asks_unknown(self) -> bool:
+        """Whether this host cannot answer "which asks are open" AT ALL (SA-D3).
+
+        THE ONE SPELLING of the reminder's third state, shared by the renderer
+        (which then renders nothing) and the delta machinery (which must not read
+        that absence as a removal). A session with no ask queue is a real shape,
+        not only a test one: ``lop exec --resume`` builds its Session without an
+        ask hook (#2803/#2834), so before this predicate existed a resumed
+        headless run told the model its still-open asks were gone — inverting the
+        failure this whole feature exists to fix (QA round 1, Q2).
+
+        Cheap by construction — the policy flag and the hook's presence, no log
+        read — because the delta asks once per provider step.
+        """
+        return self.ask_queue() is None
+
+    def _render_open_asks_section(self) -> str | None:
+        """The ``<open-asks>`` body for THIS step: text, ``""``, or ``None``.
 
         Read live per provider step, the same discipline as the tool inventory:
         an ask queued or settled mid-turn is reflected in the very next request,
@@ -12453,19 +12531,20 @@ class Session:
         or dismissed ask is absent for exactly the reason it is absent from every
         surface.
 
-        ``""`` — no queue (the blocking arm, a dead ask hook, a child session),
-        an unreadable log, or nothing open — is the ordinary path: the section is
-        then not rendered at all, and a session that never asks anything pays
-        nothing for this feature.
+        THREE ANSWERS, not two (QA round 1, Q2): ``None`` when this host has no
+        queue and therefore no answer, ``""`` when it has one and nothing is open,
+        text otherwise. Only the middle one may be shipped as "the asks are gone".
         """
+        if self._open_asks_unknown():
+            return None
         queue = self.ask_queue()
-        if queue is None:
-            return ""
         try:
             rows = queue.open_records()
         except Exception:  # noqa: BLE001 — a reminder is never worth a failed turn
             logger.debug("ask: could not read the queue for the open-asks section", exc_info=True)
-            return ""
+            # Unreadable is UNKNOWN, not empty: an exception here says nothing
+            # about whether the asks are still open.
+            return None
         return _open_asks_reminder(rows, self.latest_user_message_at())
 
     def withdraw_ask(

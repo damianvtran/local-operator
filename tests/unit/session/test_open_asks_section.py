@@ -17,11 +17,14 @@ user message. The properties worth pinning, and the acceptance list behind them:
   inside that turn ship nothing new (acceptance 2);
 - a later user message ⇒ the section re-ships with the new "as of"; two
   messages inside the same rendered minute ship nothing, because the bytes did
-  not move (acceptance 3);
+  not move (acceptance 3, softened by QA round 1's MINOR-1: the cadence is per
+  user-MINUTE, not per message);
 - settling an ask mid-turn ⇒ the next step ships the shrunk section, and `""`
   once the last one settles (acceptance 4);
-- a resumed session replays it, a compaction re-anchors it once, and a subagent
-  never renders it (acceptance 5);
+- a resumed session replays it and keeps the replayed copy across a minute
+  boundary instead of re-shipping it (QA round 1, Q1), a host with no ask queue
+  never ships a removal at all (QA round 1, Q2), a compaction re-anchors it
+  once, and a subagent never renders it (acceptance 5);
 - the section arrives as a DELTA — no new `system_prefix` epoch, so the prompt
   cache prefix holds (acceptance 6).
 """
@@ -86,12 +89,17 @@ class ScriptedStream:
 
 
 class ShiftedClock:
-    """``time`` for ``session.py``, moved forward by ``shift`` seconds.
+    """One ``time`` module, moved forward by ``shift`` seconds.
 
     The section's "as of" is minute-granular ON PURPOSE (a reader needs "as of
     17:42", not a millisecond), so a second message inside the same minute
     renders the same bytes and correctly ships nothing. Tests that need the
     clock to have moved move it here rather than sleeping a minute.
+
+    BOTH modules that stamp a message have to be patched together (agent review
+    round 1, MAJOR-1): ``session.py`` decides the stamp, but the number itself is
+    the transcript row's ``ts`` (``transcript.py``), so a shift applied only to
+    ``session.time`` leaves the durable stamp where it was and nothing re-renders.
     """
 
     def __init__(self, shift: float) -> None:
@@ -104,12 +112,21 @@ class ShiftedClock:
         return time.time() + self.shift
 
 
+def _shift_clock(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """Move every clock a user message is stamped from (see ``ShiftedClock``)."""
+    clock = ShiftedClock(seconds)
+    monkeypatch.setattr("local_operator.session.session.time", clock)
+    monkeypatch.setattr("local_operator.session.transcript.time", clock)
+
+
 def _provider(goal_state: GoalState, tools: list[AgentTool]):
     """The factory's closure in miniature: reads the holder, per render.
 
-    ``open_asks=goal_state.open_asks()`` is exactly what ``session_factory``
+    ``open_asks=goal_state.open_asks() or ""`` is exactly what ``session_factory``
     does — the provider is built before the Session exists, so the section is
-    read off the shared holder the facade publishes its renderer on.
+    read off the shared holder the facade publishes its renderer on, and the
+    tri-state collapses to text for the builder (``None`` = unknown renders
+    nothing, and the DELTA is what refuses to read that as a removal).
     """
 
     def provider(model_label: str = "") -> list[str]:
@@ -122,7 +139,7 @@ def _provider(goal_state: GoalState, tools: list[AgentTool]):
             channel=CHANNEL_NONE,
             host_has_browser=False,
             host_has_console=False,
-            open_asks=goal_state.open_asks(),
+            open_asks=goal_state.open_asks() or "",
         )
 
     setattr(provider, "append_only_state", True)
@@ -248,13 +265,17 @@ def test_one_line_per_ask_names_the_id_the_time_and_the_first_question() -> None
     text = _open_asks_reminder(rows, None)
     line = text.splitlines()[0]
     assert line.startswith("- a-b782 — asked ")
-    assert ', 2 questions: "Fix the cap first?"' in line
+    # The ask id AND the question ids: the first is what ``ask_withdraw`` takes,
+    # the second is what its ``answers`` map is keyed by (QA round 1: a live run
+    # burned two refusals guessing between them).
+    assert ', 2 questions (ids: cap_fix, charter_gates): "Fix the cap first?"' in line
     # No "as of" head without an admitted user message, and the settle advice
     # still reads correctly — it is the same sentence in both shapes.
     assert "As of the user's message" not in text
     assert "settle it with `ask_withdraw`" in text
-    # The rule the guidance leans on, stated where the reminder is read.
-    assert "An ask the user has not addressed stays open." in text
+    # The rule the guidance leans on, plus its tie-breaker, where it is read.
+    assert "An ask the user has not addressed stays open" in text
+    assert "if you are unsure, leave it open" in text
 
 
 def test_a_long_or_multi_line_question_is_collapsed_and_clipped() -> None:
@@ -275,9 +296,9 @@ def test_a_long_or_multi_line_question_is_collapsed_and_clipped() -> None:
 def test_the_reminder_names_the_oldest_and_counts_the_rest() -> None:
     """Mirroring the queue's own caps: a session can hold more open rows than
     any one budget (the model's 8, bridge 8, relays 8). The section names the
-    oldest few — the ones a message most likely already settled — and COUNTS
-    the remainder, because a reader told about 8 of 12 would take the other four
-    for settled."""
+    oldest few — the ones a message most likely already settled — and NAMES the
+    remainder by id, because a reader told about 8 of 12 would take the other
+    four for settled, and an id is enough to withdraw one later."""
     rows = [
         {"ask_id": f"a-{index}", "created_at": index, "status": "open", "questions": []}
         for index in range(12)
@@ -285,7 +306,7 @@ def test_the_reminder_names_the_oldest_and_counts_the_rest() -> None:
     lines = _open_asks_reminder(rows, None).splitlines()
     assert lines[0].startswith("- a-0 —")
     assert lines[7].startswith("- a-7 —")
-    assert lines[8] == "- and 4 more open, not listed here"
+    assert lines[8] == "- and 4 more open, not listed here: a-8, a-9, a-10, a-11"
 
 
 def test_a_relay_says_where_to_answer_it() -> None:
@@ -302,7 +323,7 @@ def test_a_relay_says_where_to_answer_it() -> None:
     ]
     line = _open_asks_reminder(rows, None).splitlines()[0]
     assert line.startswith("- a-9f2c — asked ")
-    assert "relayed from 77aa1b2c — answer it there" in line
+    assert "relayed from 77aa1b2c — answer it there; only `moot` settles it here" in line
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +458,7 @@ async def test_a_later_message_reships_with_the_new_as_of(
         assert _open_asks_sections(session) == first
 
         # A minute later the stamp moves, so the section ships again.
-        monkeypatch.setattr("local_operator.session.session.time", ShiftedClock(61))
+        _shift_clock(monkeypatch, 61)
         await session.prompt("a third message, a minute on")
         sections = _open_asks_sections(session)
         assert len(sections) == 2
@@ -487,12 +508,13 @@ async def test_settling_mid_turn_shrinks_the_section_then_removes_it(
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_session_replays_the_section_without_resending_it(
+async def test_a_resumed_session_keeps_the_replayed_section_across_a_minute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance 5: the section is a RECORD, so a resume replays it into the
-    folded state the model keeps seeing — and the unchanged render ships
-    nothing on the next turn."""
+    """Acceptance 5 and QA round 1 Q1: a resume replays the record, and the FIRST
+    message of the new runtime does not re-ship the same asks just because the
+    clock crossed a minute — that duplicate is what QA measured. The runtime's
+    NEXT message does re-anchor, because the baseline is then its own render."""
     directory = tmp_path / "sess"
     goal_state = GoalState()
     stream = ScriptedStream()
@@ -508,21 +530,82 @@ async def test_a_resumed_session_replays_the_section_without_resending_it(
     finally:
         await session.dispose()
 
-    resumed_state = GoalState()
+    # The restart crosses a minute boundary: without the replay rule this is the
+    # exact shape QA measured as two copies of one ask.
+    _shift_clock(monkeypatch, 120)
     resumed_stream = ScriptedStream()
-    resumed = _make_session(directory, resumed_stream, resumed_state)
+    resumed = _make_session(directory, resumed_stream, GoalState())
     resumed_queue = _install_queue(resumed, monkeypatch)
     try:
         assert ask_id in str(resumed._last_system_blocks)
         replayed = _open_asks_sections(resumed)
         assert any(ask_id in section for section in replayed), "the replayed record carries it"
+
         await resumed.prompt("carry on")
-        # The stamp seeded from history equals the render already in context, so
-        # the section is NOT re-sent.
-        assert _open_asks_sections(resumed) == replayed
+        assert _open_asks_sections(resumed) == replayed, "no duplicate after a restart"
+        assert _request_text(resumed_stream.requests[-1]).count("## Open asks") == 1
+
+        # The next message of THIS runtime re-anchors it: the baseline is now the
+        # render this runtime made, not the replayed one.
+        _shift_clock(monkeypatch, 240)
+        await resumed.prompt("and again")
+        sections = _open_asks_sections(resumed)
+        assert len(sections) == 2
+        assert sections[-1].splitlines()[1] != replayed[0].splitlines()[1], "a new 'as of'"
         assert resumed_queue.open_records()
     finally:
         await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resume_without_an_ask_queue_leaves_the_section_standing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1 Q2: a host that CANNOT answer must not say the asks are gone.
+
+    ``lop exec --resume`` builds its Session with no ask hook (#2803/#2834), so
+    ``ask_queue()`` is ``None`` there and the reminder's answer is UNKNOWN, not
+    empty. Before the tri-state, that ``""`` shipped as a removal and the model
+    was told its still-open ask had been settled — the failure this whole feature
+    exists to fix, inverted. QA's repro is the fixture: a real ask open in the
+    store, a reopen without the hook, one prompt.
+    """
+    directory = tmp_path / "sess"
+    session = _make_session(directory, ScriptedStream(), GoalState())
+    queue = _install_queue(session, monkeypatch)
+    ask_id = ""
+    try:
+        await session.prompt("freeze the prefix")
+        ask_id = _ask(queue)
+        await session.prompt("what is still open?")
+        assert len(_open_asks_sections(session)) == 1
+    finally:
+        await session.dispose()
+
+    nohook_stream = ScriptedStream()
+    nohook = _make_session(directory, nohook_stream, GoalState())
+    try:
+        assert nohook.ask_queue() is None
+        assert nohook._render_open_asks_section() is None, "unknown is not empty"
+        replayed = _state_records(nohook)
+        assert len(replayed) == 1 and ask_id in str(replayed[0].details["text"])
+
+        await nohook.prompt("carry on")
+        # The reopen's own inventory delta (this runtime has no ask tools) is
+        # expected; what must NOT appear is a record THIS runtime writes about
+        # open_asks. The replayed record stays in history and is not a write.
+        written = [record for record in _state_records(nohook) if record.id != replayed[0].id]
+        assert written, "the reopen journalled something, so the delta path really ran"
+        assert not any(
+            "open_asks" in (record.details.get("blocks") or {}).get("3", {}) for record in written
+        ), "no removal was written"
+        text = _request_text(nohook_stream.requests[-1])
+        assert "## Open asks" in text
+        assert "(empty)" not in text, "the model is not told its asks are gone"
+        # The ask really is still open; only this host cannot see the queue.
+        assert [row["ask_id"] for row in queue.open_records()] == [ask_id]
+    finally:
+        await nohook.dispose()
 
 
 @pytest.mark.asyncio

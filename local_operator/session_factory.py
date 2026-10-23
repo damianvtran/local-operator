@@ -3792,10 +3792,12 @@ def _make_system_blocks_provider(
         # The open-asks reminder (design §16/SA-D3), rendered by the session off
         # its own live queue. Read HERE, per provider step, because that is the
         # only cadence at which an ask raised or settled mid-turn can reach the
-        # next request; ``""`` renders no section at all, so a host that never
-        # asks anything keeps the exact start-context bytes it had before this
-        # existed.
-        open_asks = goal_state.open_asks() if goal_state is not None else ""
+        # next request. ``None`` is the reminder's third state — this host has no
+        # queue and cannot answer — and it renders NOTHING, exactly like the known
+        # empty ``""``; the difference is decided in ``Session._system_state_delta``
+        # (unknown must not ship as a removal), because only that layer can see the
+        # section the model is already reading (QA round 1, Q2).
+        open_asks = goal_state.open_asks() if goal_state is not None else None
         key = (
             knowledge_block,
             date_str,
@@ -3808,7 +3810,7 @@ def _make_system_blocks_provider(
             model_label,
             interactive,
             channel,
-            open_asks,
+            open_asks or "",
             tuple((tool.name, tool.description) for tool in tools),
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
@@ -3839,7 +3841,7 @@ def _make_system_blocks_provider(
             # tri-state note above and ``GoalState.interactivity``.
             interactive=interactive,
             channel=channel,
-            open_asks=open_asks,
+            open_asks=open_asks or "",
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )

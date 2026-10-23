@@ -520,17 +520,23 @@ class GoalState:
     #: installed AND uninstalled mid-session by ``set_ask_handler``.
     ask_probe: "Callable[[], bool] | None" = None
     #: Live probe answering "what does the open-asks reminder say RIGHT NOW" —
-    #: the rendered section body, or ``""`` when nothing is open. Published on
-    #: this holder by ``Session.__init__`` for the same seam reason as the two
-    #: probes above: the prompt closure is built before the facade exists, and
-    #: the ask queue it describes is created lazily on first use.
+    #: the rendered section body, ``""`` when nothing is open, or ``None`` when
+    #: this host cannot answer at all (no ask queue). Published on this holder by
+    #: ``Session.__init__`` for the same seam reason as the two probes above: the
+    #: prompt closure is built before the facade exists, and the ask queue it
+    #: describes is created lazily on first use.
     #:
-    #: A PROBE, not a snapshot, because this section is meant to be one small row
-    #: per USER MESSAGE: the render is stable within a turn (the "as of" stamp
-    #: moves only when a message is admitted), so the state-delta machinery ships
-    #: it once per message rather than once per provider step. ``None`` — a holder
-    #: no facade built, such as a delegated child's — renders no section at all.
-    open_asks_probe: "Callable[[], str] | None" = None
+    #: A PROBE, not a snapshot, because a render moves when the asks change or
+    #: when the operator speaks: within a turn the "as of" stamp is fixed, so the
+    #: state-delta machinery ships a change once per user-minute rather than once
+    #: per provider step.
+    #:
+    #: THREE STATES, and the last two must never be merged (QA round 1, Q2):
+    #: ``None`` is UNKNOWN — no queue on this host, a delegated child, a bare
+    #: test — and unknown must leave whatever the model already reads alone;
+    #: ``""`` is KNOWN AND EMPTY, which is the one state that may tell the model
+    #: its open asks are gone.
+    open_asks_probe: "Callable[[], str | None] | None" = None
 
     # --- the judged-goal record (see the dataclasses above) -------------------
     #: "" (none) | "active" | "done". `done` coexists with a non-empty `text`
@@ -644,22 +650,27 @@ class GoalState:
         except Exception:  # noqa: BLE001 — an unreadable probe states nothing
             return None
 
-    def open_asks(self) -> str:
-        """The open-asks reminder's body, or ``""`` when there is nothing to say.
+    def open_asks(self) -> str | None:
+        """The open-asks reminder's body, ``""`` when empty, or ``None`` if unknown.
 
-        ``""`` for every host that installed no probe — a delegated child, a
-        benchmark, a bare test — and for a probe that raised: a prompt section is
-        never worth failing a turn over, and the safe reading of an unreadable
-        queue is "no asks", which adds nothing to the prompt rather than claiming
-        a state nobody measured.
+        The tri-state is the contract (QA round 1, Q2): a session with no ask
+        queue cannot answer "which asks are open", and answering ``""`` there is
+        a claim rather than an absence — the delta machinery reads it as "the
+        asks are gone" and tells the model its open question was settled. So
+        ``None`` means UNKNOWN and every reader must leave the previous section
+        standing; ``""`` means KNOWN EMPTY and may be shipped as the removal.
+
+        ``None`` for a holder no facade bound (a delegated child, a benchmark) and
+        for a probe that raised: unreadable is unknown, never empty.
         """
         probe = self.open_asks_probe
         if probe is None:
-            return ""
+            return None
         try:
-            return str(probe() or "")
-        except Exception:  # noqa: BLE001 — an unreadable probe states nothing
-            return ""
+            rendered = probe()
+        except Exception:  # noqa: BLE001 — an unreadable probe is unknown, not empty
+            return None
+        return None if rendered is None else str(rendered)
 
     def set(self, text: str) -> str:
         """Store a trimmed, length-capped goal and return what was stored."""
