@@ -157,6 +157,64 @@ def read_observation(value,out):
     return dict(value)
 
 
+CONTEXT_MODULES=(('LOCAL_OPERATOR','local_operator.tui.events'),('TESTS','tests.unit.tui.test_app_pilot'))
+
+
+def effective_isort_context(checkout,snapshot,expected_sha,config_factory=None,classifier=None,version=None):
+    """Use installed pinned API; discovery topology is metadata, not App imports.
+
+    isort5.13.2 main converts --settings-path FILE to absolute settings_file.
+    Config then derives directory/src_paths from that file's original root.
+    Neither tool targets nor copied inputs are expanded by this binding.
+    """
+    if config_factory is None:
+        from isort.settings import Config
+        from isort.place import module_with_reason
+        from isort import __version__
+        config_factory=Config;classifier=module_with_reason;version=__version__
+    result=dict(version=version if version=='5.13.2' else 'OTHER',effective='CHECKOUT',config_sha256=None,canonical=None,snapshot=None)
+    def origin(path):
+        actual=Path(path).resolve()
+        for root,label in ((checkout,'CHECKOUT'),(snapshot,'SNAPSHOT')):
+            if actual==root:return label
+            if actual==root/'src':return label+'_SRC'
+        return 'OTHER'
+    for root,key in ((checkout,'canonical'),(snapshot,'snapshot')):
+        path=root/'pyproject.toml'
+        if path.is_symlink() or not path.is_file():raise ValueError('config file STOP')
+        sha=hashlib.sha256(path.read_bytes()).hexdigest()
+        if sha!=expected_sha:raise ValueError('config source STOP')
+        result['config_sha256']=sha
+        config=config_factory(settings_file=str(path),settings_path=str(root))
+        sections={label:classifier(module,config)[0] for label,module in CONTEXT_MODULES}
+        source_ok=any(type(row) is dict and row.get('source')==str(path) for row in config.sources)
+        result[key]=dict(directory=origin(config.directory),src_paths=[origin(p) for p in config.src_paths],config_source=origin(path.parent) if source_ok else 'OTHER',config_sha256=sha,sections=sections,packages={name:(root/name).is_dir() for name in ('local_operator','tests')})
+    return result
+
+
+def read_isort_context(value,expected_sha,require_canonical=False):
+    if value is None:
+        if require_canonical:raise ValueError('missing context STOP')
+        return None
+    if type(value) is not dict or set(value)!={'version','effective','config_sha256','canonical','snapshot'}:raise ValueError('context schema STOP')
+    origins=('CHECKOUT','CHECKOUT_SRC','SNAPSHOT','SNAPSHOT_SRC','OTHER')
+    if value['version'] not in ('5.13.2','OTHER') or value['effective'] not in origins or value['config_sha256']!=expected_sha:raise ValueError('context binding STOP')
+    for key,origin,sections,presence in (('canonical','CHECKOUT',('FIRSTPARTY','FIRSTPARTY'),(True,True)),('snapshot','SNAPSHOT',('THIRDPARTY','FIRSTPARTY'),(False,True))):
+        row=value[key]
+        if type(row) is not dict or set(row)!={'directory','src_paths','config_source','config_sha256','sections','packages'}:raise ValueError('context privacy STOP')
+        if row['directory'] not in origins or row['config_source'] not in origins or type(row['src_paths']) is not list or len(row['src_paths'])!=2 or any(p not in origins for p in row['src_paths']) or row['config_sha256']!=expected_sha:raise ValueError('context roots STOP')
+        if type(row['sections']) is not dict or set(row['sections'])!={'LOCAL_OPERATOR','TESTS'} or any(p not in ('FUTURE','STDLIB','THIRDPARTY','FIRSTPARTY','LOCALFOLDER') for p in row['sections'].values()):raise ValueError('context section STOP')
+        if type(row['packages']) is not dict or set(row['packages'])!={'local_operator','tests'} or any(type(v) is not bool for v in row['packages'].values()):raise ValueError('context topology STOP')
+        if require_canonical and (row['directory']!=origin or row['config_source']!=origin or row['src_paths']!=[origin+'_SRC',origin] or row['sections']!=dict(zip(('LOCAL_OPERATOR','TESTS'),sections)) or any(row['packages'][k] is not v for k,v in zip(('local_operator','tests'),presence))):raise ValueError('effective canonical context STOP')
+    if require_canonical and (value['version']!='5.13.2' or value['effective']!='CHECKOUT'):raise ValueError('effective context version STOP')
+    return {k:value[k] for k in ('version','effective','config_sha256','canonical','snapshot')}
+
+
+def format_commands(checkout):
+    settings=['--settings-path',str(checkout/'pyproject.toml')]
+    return [['isort',*settings,*FILES],['black','--workers','1',*FILES],['black','--check','--workers','1',*FILES],['isort','--check-only',*settings,*FILES],['flake8','--jobs','1',*FILES]]
+
+
 def check_sources(root, manifest):
     expected={'scripts/diagnostics/format_snapshot_6911/worker.py','scripts/diagnostics/format_snapshot_6911/controller.py','scripts/diagnostics/lfs_pair_6911/controller.py'}
     if set(manifest['sources'])!=expected:raise ValueError('source schema STOP')
@@ -272,8 +330,10 @@ def main():
         target=work/p;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(source.read_bytes())
         if p in FILES:before[p]=source.read_text()
     deadline=time.monotonic()+25
-    commands=[['isort',*FILES],['black','--workers','1',*FILES],
-              ['black','--check','--workers','1',*FILES],['isort','--check-only',*FILES],['flake8','--jobs','1',*FILES]]
+    PROOF['stage']='ISORT_CONTEXT'
+    PROOF['context']=effective_isort_context(ROOT,work,manifest['snapshot']['pyproject.toml'])
+    read_isort_context(PROOF['context'],manifest['snapshot']['pyproject.toml'],require_canonical=True)
+    commands=format_commands(ROOT)
     run_tools(commands,work,deadline,PROOF,out)
     PROOF['stage']='READBACK'
     after={p:(work/p).read_text() for p in FILES}
@@ -298,7 +358,7 @@ def main():
 def entry():
     global PROOF
     out=Path(sys.argv[2]);out.mkdir(exist_ok=True)
-    PROOF=dict(qualified=False,stage='SOURCE_SETUP',observation=None,tools=[dict(tool=k,reason='UNRUN',rc=None) for k in ('isort-format', 'black-format', 'black-check', 'isort-check', 'flake8-check')])
+    PROOF=dict(qualified=False,stage='SOURCE_SETUP',observation=None,context=None,tools=[dict(tool=k,reason='UNRUN',rc=None) for k in ('isort-format', 'black-format', 'black-check', 'isort-check', 'flake8-check')])
     try:main()
     except Exception:pass
     finally:
