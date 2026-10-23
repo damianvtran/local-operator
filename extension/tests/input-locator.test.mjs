@@ -139,21 +139,28 @@ test("a locator miss is typed and carries candidates", async () => {
   }
 });
 
-test("an unknown ref falls through to CSS exactly as before, with no a11y read", async () => {
+test("an unknown ref falls through to CSS, and the miss names real elements", async () => {
   // `e99` is not in this surface's ref table, so it is treated as a CSS type
-  // selector — the pre-existing (and deliberate) fall-through. What must not
-  // change is the COST: no a11y read for a selector-shaped value.
+  // selector — the pre-existing (and deliberate) fall-through. The miss now also
+  // carries the closest elements from the a11y tree, which is the diagnostics
+  // half of this lane: a guess costs one correction, not a whole call that says
+  // nothing.
   const { loaded, calls, close } = await loadWith({ queryNodeId: 0 });
   try {
     await assert.rejects(
       () => loaded.typeText({ tab: SURFACE, selector: "e99", text: "hello" }),
-      (error) => error.code === "element_not_found" && /matched nothing/.test(error.message),
+      (error) => {
+        assert.equal(error.code, "element_not_found");
+        assert.match(error.message, /matched nothing/);
+        assert.ok(Array.isArray(error.data.candidates));
+        assert.ok(error.data.candidates.some((entry) => entry.name === "Active"));
+        return true;
+      },
     );
     assert.deepEqual(
       calls.filter((call) => call.method === "DOM.querySelector").map((call) => call.params.selector),
       ["e99"],
     );
-    assert.ok(!calls.some((call) => call.method === "Accessibility.getFullAXTree"));
   } finally {
     await close();
   }
