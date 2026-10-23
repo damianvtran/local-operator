@@ -339,6 +339,11 @@ def _serialize_message(message: AgentMessage, drop_call_ids: set[str]) -> str | 
 
     parts: list[str] = []
     if message.role == "user":
+        # Document attachments are deliberately NOT materialized here. The
+        # summarizer reads text; extracting a PDF on every compaction would
+        # re-parse every attachment, and the durable reference survives in the
+        # marker's ``preserve_data["attachments"]`` manifest instead (contract
+        # amendment 5). Stated so the omission reads as a decision.
         parts.append(f"[User]\n{message.text}")
     elif message.role == "assistant":
         text = message.text

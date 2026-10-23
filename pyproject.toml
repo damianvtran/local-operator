@@ -55,6 +55,13 @@ dependencies = [
     # combination it has not published for.
     "pyyaml",
     "python-dotenv",
+    # Document attachments: PDF pages are extracted to page-marked text when
+    # the selected provider cannot take the file natively (the fallback arm of
+    # the attachment contract). Base rather than an extra because admission
+    # and every provider render may need it, and the desktop installer runs a
+    # bare `pip install local-operator`. Imported lazily so a conversation
+    # with no documents never pays the import.
+    "pypdf>=5.0",
     # Terminal UI. This is the default entry point of the `local-operator`
     # command, so it stays required rather than optional. Pure Python, no
     # compiled wheels — textual pulls rich, which pulls pygments and

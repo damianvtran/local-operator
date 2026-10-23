@@ -36,7 +36,10 @@ from local_operator.session.naming import (
 )
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
-from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.session.runtime.serving import (
+    AskUnavailableError,
+    ServingSessionHandle,
+)
 
 
 class FakeSession:
@@ -976,6 +979,70 @@ async def test_ask_gate_asks_multiple_questions_one_at_a_time() -> None:
     await handle.ask_answer(second.request_id, "yes")
     assert await asyncio.wait_for(asked, 1) == {"env": ["prod"], "confirm": ["yes"]}
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_the_ask_surface_can_be_installed_without_the_approval_gates() -> None:
+    """#2803: a resumed, unsupervised run gets the ASK half and nothing else.
+
+    The ask half is what makes the queue exist at all (``Session.ask_queue``
+    answers ``None`` without a hook), so a resume worker without it never builds
+    a queue, never advertises ``ask``/``ask_withdraw``, and cannot deliver a row
+    its conversation's ask log owes.
+    """
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    handle = ServingSessionHandle(
+        session, loop, cwd="/tmp", install_gates=False, install_ask_surface=True
+    )
+
+    assert handle._gates_installed is False
+    # NOTHING about approvals moved: that half is why `--control` is withheld
+    # from a resume worker in the first place.
+    assert getattr(session, "_approval_handler", None) is None
+    assert getattr(handle, "_approval_gate", None) is None
+    assert session._ask_handler is handle._ask_gate
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_neither_flag_installs_no_ask_surface() -> None:
+    """A fresh unsupervised ``lop exec`` still has no ``ask`` (SA-D2)."""
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    ServingSessionHandle(session, loop, cwd="/tmp", install_gates=False)
+
+    assert getattr(session, "_ask_handler", None) is None
+
+
+@pytest.mark.asyncio
+async def test_the_queued_only_ask_surface_refuses_in_words_when_awaited() -> None:
+    """The kill-switch arm must not report a user who was never shown a card.
+
+    Under the queued engine the handler is only a capability flag —
+    ``execute_ask`` awaits it on the BLOCKING arm alone. With the engine off
+    (``LOP_ASK_NONBLOCKING=0``) there is nobody to present the question, and
+    returning ``None`` would render as "the user closed the question", so the
+    arm raises a sentence instead.
+    """
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    handle = ServingSessionHandle(
+        session, loop, cwd="/tmp", install_gates=False, install_ask_surface=True
+    )
+    with pytest.raises(AskUnavailableError) as raised:
+        await session._ask_handler(
+            [
+                AskQuestion(
+                    id="q0",
+                    question="which?",
+                    options=[AskOption(label="yes"), AskOption(label="no")],
+                )
+            ]
+        )
+
+    assert "No one can be asked on this run" in str(raised.value)
+    assert "the queued-ask engine is off" in str(raised.value)
+    assert handle._ask_gate is session._ask_handler
 
 
 @pytest.mark.asyncio

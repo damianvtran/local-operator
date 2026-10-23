@@ -47,6 +47,43 @@ def test_a_receipt_is_not_consent(queued: str) -> None:
     assert "run nothing the ask was meant to authorise" in queued
 
 
+def test_settling_a_stale_ask_is_stated_in_the_queued_arm_only(queued: str) -> None:
+    """§16/SA-D1: the settle rule a model cannot infer — an answered or made-
+    irrelevant ask is settled in the SAME turn, age is never a reason, and an
+    answer is never recorded as a moot. Model-facing English, and true only of
+    the queued arm: the blocking call already returned the answer, so the inline
+    paragraph must not carry it."""
+    assert "settle every ask the user's messages answered" in queued
+    assert "(`moot`: they dropped or handed off the work the question was about" in queued
+    assert "or you decided it under a timeout)" in queued
+    assert (
+        "When you report open asks, settle the ones the user's messages answered or made "
+        "irrelevant in that same turn"
+    ) in queued
+    assert (
+        "An ask the user has not addressed stays open, however old it is; if unsure, leave it open"
+    ) in queued
+    assert (
+        "An answer, even if they used their own words rather than the options, is "
+        "`answered_in_chat` — never `moot`"
+    ) in queued
+    assert "Use a 24 h timeout only for a decision that stays valid for a day" in queued
+    # The old wording must be GONE, not merely supplemented: "stale" reads as
+    # "old", and the review round 1 MAJOR was that the set it named was not the
+    # set the same paragraph defines.
+    assert "settle the stale ones" not in queued
+    assert "mooted" not in queued
+    inline = _flat({"ask_queued": False, "ask_inline": True})
+    for line in (
+        "settle every ask the user's messages answered",
+        "settle the ones the user's messages answered",
+        "however old it is",
+        "An answer, even if they used their own words",
+        "stays valid for a day",
+    ):
+        assert line not in inline
+
+
 def test_destructive_actions_need_explicit_named_approval(queued: str) -> None:
     assert "require explicit user approval" in queued
     assert "never extends to a destructive or irreversible step by implication" in queued
