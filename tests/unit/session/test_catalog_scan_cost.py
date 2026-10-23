@@ -1061,6 +1061,14 @@ class TestTheRevalidationWindow:
         ``retention._ACTIVITY_FILES`` with transcript compression). The final
         +1 is the save's own ``is_dir`` probe on an existing cache directory,
         paid by any scan that writes.
+
+        RUN THIS ON AN ISOLATED ``HOME``. The root ``conftest.py``'s real-store
+        guard wraps ``os.replace`` and resolves both paths on every call — four
+        extra stats on the cache save — but only while the operator's real store
+        exists for it to guard. Measured on this host: the same branch reports 17
+        here and 13 under ``env -i HOME=<mktemp>`` (CI's shape, and the shape the
+        numbers above describe). The delta is identical on ``origin/main``'s base,
+        so it is the harness and not this scan; do NOT raise the numbers for it.
         """
         from local_operator import resume as resume_mod
 

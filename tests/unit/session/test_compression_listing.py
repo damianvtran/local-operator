@@ -206,6 +206,63 @@ def test_an_archive_without_a_sidecar_still_answers_through_the_tail(
     assert resume.stored_session_title(directory) == "Old session"
 
 
+def test_a_sidecar_less_archive_is_read_once_then_remembered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-2: one decompression per process, and a sidecar for the next one.
+
+    THE COST THIS PINS. Nothing rebuilt ``preview.json`` after an archive lost it (a
+    build before the sidecar wrote it, or a hand copy), and ``_tail_entries`` had no
+    memo — so every listing row of every cold pass streamed the whole archive:
+    measured at 19.5 ms a row on a 4.8 MB archive against 0.1 ms with the sidecar.
+    Two halves fix it and both are asserted here: the parsed window is memoised by
+    archive identity inside the process, and the read that had no sidecar writes one
+    so the next process starts cheap.
+    """
+    config = _store(tmp_path)
+    long_answer = "the crane arrives at dawn and the second one at dusk " * 8
+    directory = _session(config, "coldtail", _body("Cold tail", long_answer))
+    expected_wide = resume.session_preview(directory, max_chars=500)
+    expected_narrow = resume.session_preview(directory, max_chars=120)
+    assert compression.compress_session(directory).status == "compressed"
+    # Exactly the state a build without the sidecar leaves behind.
+    (directory / compression.PREVIEW_SIDECAR_NAME).unlink()
+    archive = compression.archive_path(directory)
+    assert archive is not None
+
+    reads: list[str] = []
+    real = compression._open_archive_reader  # noqa: SLF001 — the archive entry point
+
+    def counting(path: Path, codec: str) -> Any:
+        reads.append(path.name)
+        return real(path, codec)
+
+    monkeypatch.setattr(compression, "_open_archive_reader", counting)
+
+    # ROW 1, this process: one read, and it records what it learned.
+    assert resume.session_preview(directory, max_chars=500) == expected_wide
+    assert reads == [archive.name]
+    assert compression.read_listing_preview(directory) is not None
+
+    # ROW 2, same process, a request the sidecar's cap cannot serve: the MEMO
+    # answers, because that is the state a wide preview asks in.
+    assert resume.session_preview(directory, max_chars=500) == expected_wide
+    assert reads == [archive.name], reads
+
+    # THE NEXT PROCESS: an empty memo, and an archive reader that would fail the
+    # test if anything reached it. The sidecar has to answer on its own.
+    resume._tail_memo.clear()  # noqa: SLF001 — the memo is the subject
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the second process decompressed the archive")
+
+    monkeypatch.setattr(compression, "_open_archive_reader", forbidden)
+    monkeypatch.setattr(compression, "read_tail_window", forbidden)
+    assert resume.session_preview(directory, max_chars=120) == expected_narrow
+    assert resume.session_failure_summary(directory) == ""
+    assert reads == [archive.name], reads
+
+
 def test_restore_removes_the_listing_sidecar(tmp_path: Path) -> None:
     """The plain file is authoritative again; a stale preview would outlive it."""
     config = _store(tmp_path)
