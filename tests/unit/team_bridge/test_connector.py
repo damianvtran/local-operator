@@ -297,6 +297,89 @@ def test_pending_feed_refs_retry_on_204_without_poison_starvation(tmp_path, monk
     assert calls == ids + ids[:1]  # a following 204 does not replay terminal work
 
 
+def test_mixed_feed_failures_retain_exact_refs_and_retry_on_204(tmp_path, monkeypatch, caplog):
+    """Q1: both delivery lanes retire neighbours without losing failed refs.
+
+    Two independent failures prove that the first original exception still
+    controls the iteration's backoff. Conversation labels exercise the encoded
+    ref identity; they must never leak into the closed failure diagnostic.
+    """
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    store, owner = _enroll(tmp_path)
+    pair_failed = "bmsg_pair_failed"
+    pair_ok = "bmsg_pair_ok"
+    conv_failed = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+        conversation_name="PRIVATE_CONVERSATION_CANARY / name",
+        sender_label="PRIVATE_SENDER_CANARY / label",
+        sender_kind="human",
+    ).validated()
+    conv_ok = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef02",
+        conversation_seq=2,
+        mention=True,
+    ).validated()
+    pair_ref = f"message_available:message_id={pair_failed}"
+    refs = [
+        pair_ref,
+        f"message_available:message_id={pair_ok}",
+        conv_failed.encode(),
+        conv_ok.encode(),
+    ]
+    store.record_feed_batch(owner, feed_seq(9), refs, resync_required=False)
+    first = StoreRefused("policy_stale", "PRIVATE_PAIR_CANARY")
+    second = RuntimeError("PRIVATE_CONVERSATION_EXCEPTION_CANARY")
+    pair_calls = []
+    conv_calls = []
+
+    async def timeout(*args, **kwargs):
+        return None
+
+    async def pair_handler(owner_, mid, **kwargs):
+        pair_calls.append(mid)
+        if mid == pair_failed and pair_calls.count(mid) == 1:
+            raise first
+        return {"action": "delivered", "message_id": mid}
+
+    async def conv_handler(owner_, ref, **kwargs):
+        conv_calls.append(ref.encode())
+        if ref == conv_failed and conv_calls.count(ref.encode()) == 1:
+            raise second
+        return {"action": "delivered", "message_id": ref.message_id}
+
+    monkeypatch.setattr(pull_mod, "events", timeout)
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_handler)
+    monkeypatch.setattr(loop_mod, "handle_conversation_available", conv_handler)
+    with caplog.at_level("WARNING"), pytest.raises(StoreRefused) as caught:
+        asyncio.run(
+            loop_mod.run_iteration(
+                owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+            )
+        )
+    assert caught.value is first
+    assert set(pair_calls) == {pair_failed, pair_ok}
+    assert set(conv_calls) == {conv_failed.encode(), conv_ok.encode()}
+    assert set(store.drain_feed_refs(owner, 9)) == {pair_ref, conv_failed.encode()}
+    assert "stage=pair_handling code=policy_stale" in caplog.text
+    assert "stage=conversation_handling code=unexpected_failure" in caplog.text
+    assert "PRIVATE_" not in caplog.text
+    for _ in range(2):  # retry the exact failures, then prove terminal consumption
+        asyncio.run(
+            loop_mod.run_iteration(
+                owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+            )
+        )
+    assert pair_calls.count(pair_failed) == 2 and pair_calls.count(pair_ok) == 1
+    assert conv_calls.count(conv_failed.encode()) == 2 and conv_calls.count(conv_ok.encode()) == 1
+    assert store.drain_feed_refs(owner, 9) == []
+    assert store.sync_state(owner)["feed_seq"] == 9
+
+
 def test_204_empty_queue_has_no_delivery_or_resync_effects(tmp_path, monkeypatch):
     store, owner = _enroll(tmp_path)
     before = store.sync_state(owner)
