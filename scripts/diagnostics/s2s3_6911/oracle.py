@@ -1,8 +1,9 @@
 """Pure stdlib protocol, not app/native proof. Unexpected or missing evidence stops."""
 import json
 
-# Per-case budget. Derived from the OBSERVED whole first S2 case wall of 10.3 s
-# (run 39921114526) + the 5 s SlowListing test-fixture worker closure + the 3 s
+# Per-case budget. Derived from the 10.3 s run_bounded wall of the WHOLE first
+# driver run (run 39921114526), not pure case latency; the 5 s SlowListing
+# fixture closure below may double-count part of it. Plus the 3 s
 # physical reap allowance (1 s healthy wait + 2 s final wait in finish_child).
 # This is a CONSERVATIVE ceiling, not a measured future latency, and it leaves
 # the original CPU500/wall2000/noise/calibration bars and every other policy
@@ -227,7 +228,7 @@ class RecordBudget:
     """
     CRITICAL = frozenset({"recorder", "cleanup", "outcome", "error", "recorder_start",
                           "s2_idle", "s2_emit_burst", "s2_settle", "held_witness",
-                          "controlled_async_delay"})
+                          "controlled_async_delay", "worker_function_completed"})
     OPTIONAL = frozenset({"harvest", "pause", "worker_entry", "held_loop_tick", "held_release"})
 
     def __init__(self):

@@ -10,9 +10,9 @@
   ],
   "sources": {
     "tests/unit/test_tui_responsiveness.py": "d3db863252ca241bb88acfe64026070e37c5cf9853e9b7154ae97a21b8b75350",
-    "scripts/diagnostics/s2s3_6911/plugin.py": "c674befcb728deb478457add7116f71e048ca8c16991dde9104a64a0cbfceff8",
+    "scripts/diagnostics/s2s3_6911/plugin.py": "9aa9186e8ccac391b565363b2615e69bd2a7dba4f7b6dee0afe9dc51878951b6",
     "scripts/diagnostics/s2s3_6911/driver.py": "ec4f4705d14ddbaf81e6b4e88ed2869695ec3e521d477f887a12cbff8102af11",
-    "scripts/diagnostics/s2s3_6911/oracle.py": "e15dcbd20a3e454fc0d7dc83cd3b904d0b235fd114c7caeb3b8e75d288215212",
+    "scripts/diagnostics/s2s3_6911/oracle.py": "f636231d5cbf73411076d3ed03ef388c9a16fe50acd7f56e2eb0d575342e6e3a",
     "tests/loop_callback_spans.py": "227c81bf8b270e88da3452f725258237fda313140e0c154e06e64314cd7b8d7e"
   },
   "original_s2": "e1dc2a6c3532025f4caae8efcfc1adabee8ac719254eb12534268e176086bb22",

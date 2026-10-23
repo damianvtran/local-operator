@@ -115,11 +115,13 @@ def pytest_runtest_call(item):
                 raise RuntimeError("held worker bound: no causal loop release")
             return original_listing(self, *args, **kwargs)
         finally:
-            rec("worker_function_completed", thread=thread)
             with lock:
                 active -= 1
                 if active == 0:
                     finished.set()
+            # Recorded AFTER completion is signalled: a recording fault must never
+            # be able to leave the held case permanently "unfinished".
+            rec("worker_function_completed", thread=thread)
 
     async def held_witness():
         deadline = time.perf_counter() + 2
@@ -230,8 +232,9 @@ def pytest_runtest_call(item):
         patch(module.StallRecorder, "end_noise_window", end)
         if MODE == "s3-held":
             patch(module._SlowListing, "__call__", held_listing)
-        if MODE == "s2-original":
-            yield
+        # Unconditional: pluggy rejects a hook wrapper that does not yield, and
+        # only the optional s3-held patch above is mode-specific.
+        yield
     finally:
         errors = restore_all(restorations, gate.set, settle_task, completed)
         rec("cleanup", worker_function_completed=finished.is_set(),

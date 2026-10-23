@@ -8,7 +8,7 @@ No raw pytestoutput artifacts/forwarding. Structuralallowlist rejectsunknown fie
 
 S2 originalM15summary inclGC preserved; independentGC callbacks recordthreadCPU/wall/generation/is-loop orUNKNOWN. Extra S3M15 NOTCOLLECTED/optional. ExpectedoriginalassertionFAILretained in finalFAIL; unknown/setup/hash/privacy/signal/bounds/lifecyclefailureSTOP. Sourceonlytests do not prove App behavior/650cause or distribution.
 
-Unchangedbounds: child20+3reap(derivedfromobserved10.3swholefirstcase+5sSlowListing+3sreap; conservativeceiling,notmeasuredlatency)/4serial/outer100+5(4x23=92)/1024MiB/setup120s/job5m/output256KiBcase. Triggeraudit/currentrefs/source/closure preflight plus BOTHindependentdeltaACKs and explicitONEoffhostGO required beforeownedbranchpublication. No localpytest/App/native/install/WT execution. No physicalallocation or productfix claim.
+Unchangedbounds: child20+3reap(derivedfrom10.3srun_boundedwallofthewholefirstdriverrun+5sSlowListing+3sreap; conservativeceiling that may double-count the fixture, not purecaselatency)/4serial/outer100+5(4x23=92)/1024MiB/setup120s/job5m/output256KiBcase. Triggeraudit/currentrefs/source/closure preflight plus BOTHindependentdeltaACKs and explicitONEoffhostGO required beforeownedbranchpublication. No localpytest/App/native/install/WT execution. No physicalallocation or productfix claim.
 
 ## First physical result and capacity recovery
 

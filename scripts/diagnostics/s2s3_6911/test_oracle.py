@@ -1,4 +1,5 @@
 import re
+import ast
 import unittest
 from copy import deepcopy
 from oracle import final, judge
@@ -198,6 +199,96 @@ class Budget(unittest.TestCase):
         self.assertIn("timeout-minutes: 5", workflow)
         self.assertEqual(len(re.findall(r"--timeout", workflow)), 1)
         self.assertGreater(300, 120 + oracle.OUTER_SECONDS + oracle.OUTER_GRACE_SECONDS + 20)
+
+
+def _plugin_tree():
+    from pathlib import Path
+    return ast.parse(Path("plugin-source.txt").read_text())
+
+
+def _literal_record_kinds(tree):
+    """Every literal first argument of rec()/span() calls in the real plugin."""
+    kinds = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("rec", "span"):
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                kinds.add(node.args[0].value)
+    return kinds
+
+
+class PluginShape(unittest.TestCase):
+    def test_every_literal_record_kind_is_accepted_by_budget_and_judge(self):
+        from oracle import RecordBudget
+        kinds = _literal_record_kinds(_plugin_tree())
+        self.assertIn("worker_function_completed", kinds)
+        for kind in sorted(kinds):
+            budget = RecordBudget()
+            try:
+                budget.add(kind)
+            except ValueError as error:
+                self.fail("producer kind %r rejected by RecordBudget: %s" % (kind, error))
+        # The oracle's `known` allow-list is derived from the same classes.
+        self.assertIn("worker_function_completed", RecordBudget.OPTIONAL | RecordBudget.CRITICAL)
+
+    def test_held_worker_completion_record_cannot_gate_completion(self):
+        # rec() in the worker's finally must come AFTER the decrement and the
+        # event set, so a recording failure can never leave the held case unfinished.
+        tree = _plugin_tree()
+        held = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "held_listing")
+        final = next(n for n in ast.walk(held) if isinstance(n, ast.Try) and n.finalbody)
+        order = []
+        for stmt in final.finalbody:
+            text = ast.unparse(stmt)
+            if "worker_function_completed" in text:
+                order.append("record")
+            elif "finished.set" in text:
+                order.append("set")
+        self.assertEqual(order, ["set", "record"])
+
+    def test_every_mode_yields_exactly_once_unconditionally(self):
+        tree = _plugin_tree()
+        hook = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "pytest_runtest_call")
+        yields = [n for n in ast.walk(hook) if isinstance(n, ast.Yield)]
+        self.assertEqual(len(yields), 1)
+        # Parent chain from the hook body to the yield must contain no If/Else:
+        # a conditional yield means other modes never yield and pluggy rejects the wrapper.
+        def conditional(node, target, under_if=False):
+            if node is target:
+                return under_if
+            for child in ast.iter_child_nodes(node):
+                found = conditional(child, target, under_if or isinstance(node, ast.If))
+                if found is not None:
+                    return found
+            return None
+        self.assertIs(conditional(hook, yields[0]), False)
+        # Fake hook-shaped drive: for each mode the generator must reach its yield.
+        for mode in ("s2-original", "s3-split", "s3-held", "synthetic"):
+            self.assertTrue(self._reaches_yield(hook, mode), mode)
+
+    @staticmethod
+    def _reaches_yield(hook, mode):
+        """Evaluate only the MODE guards on the path to the yield, never App code."""
+        def walk(stmts):
+            for stmt in stmts:
+                if isinstance(stmt, ast.If):
+                    test = ast.unparse(stmt.test)
+                    taken = None
+                    if test.startswith("MODE =="):
+                        taken = mode == ast.literal_eval(stmt.test.comparators[0])
+                    elif all(isinstance(n, ast.Raise) for n in stmt.body) and not stmt.orelse:
+                        taken = False  # fail-closed precondition guard; not taken for valid nodes
+                    if taken is None:
+                        raise AssertionError("unexpected guard " + test)
+                    branch = stmt.body if taken else stmt.orelse
+                    if walk(branch):
+                        return True
+                elif isinstance(stmt, ast.Try):
+                    if walk(stmt.body):
+                        return True
+                elif any(isinstance(n, ast.Yield) for n in ast.walk(stmt)):
+                    return True
+            return False
+        return walk(hook.body)
 
 
 if __name__ == "__main__":
