@@ -287,3 +287,172 @@ async def test_scope_final_narrows_the_route_listing(api) -> None:
     refused = await client.get("/v1/desktop/library/assets", params={"scope": "nope"})
     assert refused.status_code == 422
     assert refused.json()["detail"]["code"] == "library_bad_filter"
+
+
+# ---------------------------------------------------------------------------
+# Waveform: peaks are read, never decoded by a renderer
+# ---------------------------------------------------------------------------
+
+
+def wav(seconds: float = 0.2, rate: int = 8000) -> bytes:
+    """A tiny real WAV, so miniaudio decodes it (a fake header would 404)."""
+    import io
+    import math
+    import struct
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(
+            b"".join(
+                struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * n / rate)))
+                for n in range(int(seconds * rate))
+            )
+        )
+    return buffer.getvalue()
+
+
+def audio_rows(
+    call_id: str, ts: float, digest: str, name: str = "boom.wav"
+) -> list[dict[str, Any]]:
+    """One ``generate_sound_effect`` result carrying an audio attachment block."""
+    block = {
+        "kind": "audio",
+        "attachment": digest,
+        "content_type": "audio/wav",
+        "name": name,
+        "size_bytes": len(wav()),
+        "duration_s": 0.2,
+    }
+    return [
+        {
+            "id": f"a-{call_id}",
+            "ts": ts,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "assistant",
+                "content": [],
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "name": "generate_sound_effect",
+                        "arguments": {"prompt": "boom"},
+                    }
+                ],
+            },
+        },
+        {
+            "id": f"t-{call_id}",
+            "ts": ts + 0.5,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "tool",
+                "content": [{"text": "ok"}, block],
+                "tool_call_id": call_id,
+                "tool_name": "generate_sound_effect",
+                "provider_payload": {
+                    "details": {
+                        "artifacts": [
+                            {
+                                "digest": digest,
+                                "kind": "audio",
+                                "name": name,
+                                "content_type": "audio/wav",
+                                "duration_s": 0.2,
+                            }
+                        ]
+                    }
+                },
+            },
+        },
+    ]
+
+
+async def test_waveform_reads_the_digest_sidecar_and_computes_a_path_asset_once(
+    api, monkeypatch
+) -> None:
+    client, root = api
+    text_id, _image_id, _digest = seed(root)
+    block = cache_media(wav(), "audio/wav", kind="audio", name="boom.wav")
+    assert block and block.attachment
+    clip = root.parent / "clip.wav"
+    clip.write_bytes(wav())
+    broken = root.parent / "broken.wav"
+    broken.write_bytes(b"not audio")
+    session(
+        root,
+        "999999999999",
+        write_rows("w9", 1, clip)
+        + write_rows("w8", 2, broken)
+        + audio_rows("s9", 3, block.attachment),
+    )
+    catalog = index.build_catalog(root, budget_s=None)
+    by_digest = {asset.digest: asset.id for asset in catalog.assets if asset.digest}
+    by_name = {asset.derived_name: asset.id for asset in catalog.assets}
+
+    digest_id = by_digest[block.attachment]
+    digest_response = await client.get(f"/v1/desktop/library/assets/{digest_id}/waveform")
+    assert digest_response.status_code == 200, digest_response.text
+    payload = digest_response.json()
+    assert payload["version"] == 1 and payload["bars"] == 240 and len(payload["peaks"]) == 240
+    assert digest_response.headers["x-content-type-options"] == "nosniff"
+    assert digest_response.headers["cache-control"] == "no-store"
+
+    path_id = by_name["clip.wav"]
+    path_response = await client.get(f"/v1/desktop/library/assets/{path_id}/waveform")
+    assert path_response.status_code == 200, path_response.text
+    assert path_response.json()["peaks"] == payload["peaks"]
+    # Computed ONCE, cached under the thumbnail cache's own stamp scheme.
+    cache_dir = root / "cache" / "library" / "peaks"
+    cached = list(cache_dir.glob(f"{path_id}-*.json"))
+    assert len(cached) == 1
+    # The second read must come from the cache: make a decode fail the test.
+    from local_operator.library import service as library_service
+
+    original_decode = library_service._decode_peaks_bounded
+    monkeypatch.setattr(
+        library_service,
+        "_decode_peaks_bounded",
+        lambda raw: pytest.fail("a cached waveform was decoded a second time"),
+    )
+    again = await client.get(f"/v1/desktop/library/assets/{path_id}/waveform")
+    assert again.status_code == 200 and again.json() == path_response.json()
+    # Restore before the 404 cases: an undecodable asset MUST reach the decoder.
+    monkeypatch.setattr(library_service, "_decode_peaks_bounded", original_decode)
+
+    # No waveform is a designed 404 -- never a fabricated flat line.
+    undecodable = by_name["broken.wav"]
+    broken_response = await client.get(f"/v1/desktop/library/assets/{undecodable}/waveform")
+    assert broken_response.status_code == 404
+    text = await client.get(f"/v1/desktop/library/assets/{text_id}/waveform")
+    assert text.status_code == 404
+    assert text.json()["detail"]["code"] == "library_content_missing"
+    traversal = await client.get("/v1/desktop/library/assets/../../etc/passwd/waveform")
+    assert traversal.status_code in (404, 422)
+    bad = await client.get("/v1/desktop/library/assets/la_nothex/waveform")
+    assert bad.status_code == 422
+
+
+def test_waveform_service_refuses_a_denied_path(tmp_path, monkeypatch) -> None:
+    """The denylist is re-checked on every read (``resolve_content``'s rule).
+
+    A path that was harmless when it was indexed can become sensitive later; the
+    waveform route maps the refusal to 404 like every other unavailable waveform.
+    """
+    from local_operator.library import service
+    from local_operator.session_files import service as files_service
+
+    root = config_root(monkeypatch, tmp_path)
+    clip = tmp_path / "denied.wav"
+    clip.write_bytes(wav())
+    session(root, SESSION, write_rows("w1", 1, clip))
+    catalog = index.build_catalog(root, budget_s=None)
+    asset_id = {asset.derived_name: asset.id for asset in catalog.assets}["denied.wav"]
+    monkeypatch.setattr(files_service, "make_deny", lambda config: (lambda path: True))
+    with pytest.raises(service.ContentUnavailable):
+        service.waveform(root, asset_id)

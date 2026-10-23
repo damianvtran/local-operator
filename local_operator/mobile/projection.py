@@ -2679,7 +2679,7 @@ class ProjectionFold:
             # is what ``durable.py`` fills from the journal on a cold open.
             held = p.supplements.get(event.anchor)
             if held is None or event.version >= int(held.get("version") or 0):
-                p.supplements[event.anchor] = {
+                beat = {
                     "anchor": event.anchor,
                     "job": event.job,
                     "version": event.version,
@@ -2691,6 +2691,13 @@ class ProjectionFold:
                     "error": event.error,
                     "error_type": event.error_type,
                 }
+                # Sounds ride the beat only when it has one: the event serializer's
+                # own absence rule, so a beat with no audio keeps the exact bytes
+                # this fold produced before the field existed (the frame pins hold
+                # supplement-free projections to the parent's bytes).
+                if event.sounds:
+                    beat["sounds"] = [dict(item) for item in event.sounds]
+                p.supplements[event.anchor] = beat
         # Unknown events are dropped by design: the fold renders a SUBSET of
         # the harness taxonomy (the phone has no use for wake/loop internals),
         # and ``extra="allow"`` on AgentEvent means matching must stay

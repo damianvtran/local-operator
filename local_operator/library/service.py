@@ -20,9 +20,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import stat
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -892,6 +895,145 @@ def thumbnail(config_dir: str | Path, asset_id: str, width: int = THUMB_MAX_WIDT
     )
 
 
+def _waveform_shape(raw: Any) -> dict[str, Any] | None:
+    """A ``{version, bars, peaks}`` payload that is safe to hand a renderer, or ``None``.
+
+    Validated on READ (the cache is a file on disk, not a value this process holds):
+    exactly ``PEAK_BARS`` finite numbers in 0..1 under the frozen version. A damaged or
+    stale cache answers ``None`` and is recomputed; a damaged SIDECAR is the attachment
+    store's own validator (``AttachmentStore.get_peaks``), which this mirrors.
+    """
+    from local_operator.audiogen.peaks import PEAK_BARS, PEAKS_VERSION
+
+    if not isinstance(raw, dict):
+        return None
+    version, bars, peaks = raw.get("version"), raw.get("bars"), raw.get("peaks")
+    if isinstance(bars, bool) or not isinstance(bars, int) or isinstance(version, bool):
+        return None
+    if version != PEAKS_VERSION or bars != PEAK_BARS or not isinstance(peaks, list):
+        return None
+    if len(peaks) != bars:
+        return None
+    values: list[float] = []
+    for value in peaks:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        if not math.isfinite(number) or number < 0.0 or number > 1.0:
+            return None
+        values.append(number)
+    return {"version": version, "bars": bars, "peaks": values}
+
+
+def _decode_peaks_bounded(raw: bytes) -> list[float] | None:
+    """Peaks for ``raw``, decoded in a CHILD process under the recovery module's bounds.
+
+    A native codec cannot be interrupted inside this process: a malformed clip could pin
+    an HTTP worker for good. ``audiogen.recovery`` already owns exactly this problem for
+    legacy attachment repair -- an input cap in the child, a deadline in the parent, and
+    no fabricated silence on failure -- so its module entry point is reused rather than
+    a second decoder being written here. ``None`` is the honest "no waveform".
+    """
+    from local_operator.audiogen.peaks import PEAK_BARS
+    from local_operator.audiogen.recovery import (
+        MAX_RECOVERY_BYTES,
+        RECOVERY_TIMEOUT_SECONDS,
+    )
+
+    if not raw or len(raw) > MAX_RECOVERY_BYTES:
+        return None
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "local_operator.audiogen.recovery"],
+            input=raw,
+            capture_output=True,
+            timeout=RECOVERY_TIMEOUT_SECONDS,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        logger.debug("library: bounded decode unavailable", exc_info=True)
+        return None
+    if not isinstance(payload, list) or len(payload) != PEAK_BARS:
+        return None
+    peaks: list[float] = []
+    for value in payload:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        peaks.append(float(value))
+    return peaks
+
+
+def waveform(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
+    """``{version, bars, peaks}`` for one audio asset. See the module docstring's rule.
+
+    NO RENDERER EVER DECODES AUDIO (``audiogen.peaks``): peaks are computed once and
+    read afterwards. Two kinds of asset, two sources of truth:
+
+    * digest-backed -- the bytes live in the content-addressed store, so the
+      ``<digest>.peaks.json`` sidecar written at creation IS the answer; the bounded
+      legacy repair behind ``waveform_payload`` covers artifacts stored before a
+      decoder was installed.
+    * path-backed -- an indexed user file has no sidecar, so the first request decodes
+      it ONCE and caches the payload under ``cache/library/peaks/<id>-<stamp>.json``
+      (stamp = the source's mtime, the thumbnail cache's own invalidation key). The
+      cache file is validated on read, so a stale/half-written one is recomputed
+      rather than served.
+
+    A refusal is ``ContentUnavailable`` -- an ordinary 404 on the route. There is no
+    fabricated flat waveform: a surface draws its no-waveform state, exactly as a
+    missing thumbnail degrades to a placeholder.
+    """
+    config = Path(config_dir)
+    asset = _catalog_asset(config, asset_id)
+    if asset.digest:
+        from local_operator.audiogen.recovery import waveform_payload
+
+        payload = waveform_payload(AttachmentStore(config / "attachments"), asset.digest)
+        if payload is None:
+            raise ContentUnavailable("content_missing")
+        return payload
+
+    source = resolve_content(config, asset_id)
+    stamp = int(source.modified_at or 0)
+    cache_dir = config / "cache" / "library" / "peaks"
+    target = cache_dir / f"{asset.id}-{stamp}.json"
+    try:
+        cached = _waveform_shape(json.loads(target.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        cached = None
+    if cached is not None:
+        return cached
+
+    from local_operator.audiogen.recovery import MAX_RECOVERY_BYTES
+
+    try:
+        if source.path.stat().st_size > MAX_RECOVERY_BYTES:
+            # A partial decode of a truncated file would summarise the first seconds
+            # as if they were the whole clip -- a wrong waveform is worse than none.
+            raise ContentUnavailable("content_missing")
+        raw = source.path.read_bytes()
+    except OSError:
+        raise ContentUnavailable("content_missing") from None
+    peaks = _decode_peaks_bounded(raw)
+    if peaks is None:
+        raise ContentUnavailable("content_missing")
+    from local_operator.audiogen.peaks import peaks_payload
+
+    payload = peaks_payload(peaks)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # Atomic: two grid renders can ask for the same waveform at once, and a
+        # half-written JSON is a broken player, not a stale one (thumbnail's rule).
+        temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        temp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        os.replace(temp, target)
+    except OSError:
+        # The payload is already in hand; a read-only cache is not a failed request.
+        logger.debug("library: waveform cache write failed for %s", asset_id, exc_info=True)
+    return payload
+
+
 __all__ = [
     "AssetNotFound",
     "ContentRef",
@@ -918,4 +1060,5 @@ __all__ = [
     "set_tags",
     "thumbnail",
     "update_asset",
+    "waveform",
 ]

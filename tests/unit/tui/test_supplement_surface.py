@@ -48,6 +48,7 @@ def _rows(
     more: list[str] | None = None,
     files_more: int | None = None,
     components: list[dict[str, Any]] | None = None,
+    sounds: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     details: dict[str, Any] = {
         "anchor": ANCHOR,
@@ -63,6 +64,8 @@ def _rows(
         details["more"] = list(more)
     if files_more is not None:
         details["files_more"] = files_more
+    if sounds is not None:
+        details["sounds"] = list(sounds)
     return details
 
 
@@ -125,6 +128,46 @@ def test_block_rows_carry_label_path_size_and_the_more_row() -> None:
     ]
     # The more row is the click target; collapsing records its line.
     assert block._more_line == 2
+
+
+def _sound(n: int) -> dict[str, Any]:
+    return {
+        "attachment": f"{n:032x}",
+        "mime": "audio/mpeg",
+        "title": f"Storm swell {n}",
+        "duration_s": 2.0,
+    }
+
+
+def test_every_sound_gets_its_own_row_after_the_files() -> None:
+    """14 sounds from one batch are 14 terminal rows, in generation order.
+
+    The defect was a three-cap all the way down; a count or a single summary row
+    would hide the same eleven sounds one layer higher.
+    """
+    block = _block(_rows([_file("reports/q3.md")], sounds=[_sound(n) for n in range(14)]))
+    lines = _painted(block).plain.splitlines()
+    assert len(lines) == 15
+    # The files half keeps its own one-line arm (one file, no component); the sounds
+    # still get a row each underneath it.
+    assert lines[0] == "  1 file: q3.md"
+    assert lines[1:] == [f"  ♪ Storm swell {n} · 2.0 s" for n in range(14)]
+    # A sound-only row still paints: existence is never conditional on files.
+    sounds_only = _block(_rows([], sounds=[_sound(0)]))
+    assert _painted(sounds_only).plain == "  ♪ Storm swell 0 · 2.0 s"
+
+
+def test_sound_row_is_text_and_never_claims_a_length_it_does_not_know() -> None:
+    assert (
+        supplement_mod.sound_row_text({"title": "Storm swell", "duration_s": 2.0})
+        == "♪ Storm swell · 2.0 s"
+    )
+    # 0.0 is the trigger's "no usable length" sentinel: print no clock at all.
+    assert supplement_mod.sound_row_text({"title": "Storm swell", "duration_s": 0}) == (
+        "♪ Storm swell"
+    )
+    assert supplement_mod.sound_row_text({}) == "♪ Generated audio"
+    assert len(supplement_mod.sound_rows([_sound(n) for n in range(14)])) == 14
 
 
 def test_block_more_row_expands_in_place() -> None:
@@ -389,6 +432,37 @@ async def test_the_live_beat_mounts_under_its_answer_and_swaps_in_place() -> Non
         await pilot.pause()
         assert _supplement_blocks(app) == [block]
         assert _painted(block).plain == "  1 file: q3.md"
+
+
+@pytest.mark.asyncio
+async def test_a_live_beat_paints_every_sound_and_a_later_beat_keeps_them() -> None:
+    """Sounds ride the wire beat, and a beat that omits them must not erase them.
+
+    The 14-row fixture again: the beat that carries the batch paints all 14, and
+    the ``running`` beat (which carries no lists by design) merges over the row
+    instead of replacing it -- the same rule the file callouts already follow.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 32)) as pilot:
+        await _boot(app, pilot, session)
+        _mount_answer(app, ANCHOR)
+        await pilot.pause()
+        sounds = [_sound(n) for n in range(14)]
+        expected = [f"  ♪ Storm swell {n} · 2.0 s" for n in range(14)]
+        app.post_message(
+            SupplementProgress(ANCHOR, JOB, 1, "decided", files=[], components=[], sounds=sounds)
+        )
+        await pilot.pause()
+        block = _supplement_blocks(app)[0]
+        lines = _painted(block).plain.splitlines()
+        assert lines[:14] == expected
+        assert lines[14].endswith("Preparing highlights…")
+        app.post_message(SupplementProgress(ANCHOR, JOB, 1, "running", stage="generating"))
+        app.post_message(SupplementProgress(ANCHOR, JOB, 1, "done", files=[], components=[]))
+        await pilot.pause()
+        assert _supplement_blocks(app) == [block]
+        assert _painted(block).plain.splitlines() == expected
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,8 @@ __all__ = [
     "files_summary_line",
     "more_text",
     "preparing_line",
+    "sound_row_text",
+    "sound_rows",
     "state_rank",
 ]
 
@@ -185,6 +187,36 @@ def file_size_text(size_bytes: object) -> str:
             text = f"{value:.1f}".rstrip("0").rstrip(".")
             return f"{text} {unit}"
     return ""
+
+
+def sound_row_text(sound: Mapping[str, object]) -> str:
+    """One generated sound as the compact terminal row: ``♪ Storm swell · 2.0 s``.
+
+    A TEXT ROW, NOT A PLAYER. A terminal cannot play audio, so the row states only
+    what the artifact IS -- title and length -- and never grows a glyph or label
+    implying it can be played (the block's D10 rule: no affordance a terminal cannot
+    honour). It is painted for EVERY sound the turn generated, at every state that
+    paints the block, because a sound the user generated exists whether or not this
+    surface can render its waveform.
+
+    ``title`` is display-stripped (it originates in a prompt or a provider), and an
+    absent/zero duration is OMITTED rather than printed as ``0.0 s``: the trigger
+    writes 0.0 when a result stated no usable length, so a printed zero would claim
+    a fact nobody knows. One decimal keeps a row short and reads as a length.
+    """
+    title = display_text(sound.get("title")) or "Generated audio"
+    duration = sound.get("duration_s")
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+        return f"♪ {title}"
+    seconds = float(duration)
+    if not seconds > 0:
+        return f"♪ {title}"
+    return f"♪ {title} · {seconds:.1f} s"
+
+
+def sound_rows(sounds: Sequence[Mapping[str, object]]) -> list[str]:
+    """Every sound's row, in generation order (the row's own order, never re-sorted)."""
+    return [sound_row_text(sound) for sound in sounds]
 
 
 def file_row_parts(file: Mapping[str, object]) -> tuple[str, str, str]:
