@@ -77,7 +77,7 @@ from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
-    from local_operator.harness.types import AudioContent, ImageContent
+    from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
     from local_operator.secrets.session import SessionRegistration
     from local_operator.session.errors import RuntimeRetiring
     from local_operator.session.runtime.publication import PublicationGate
@@ -111,6 +111,7 @@ from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
 from local_operator.session.runtime.server import AckDetail, SessionHandle
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
+from local_operator.session.runtime.server import document_blocks as _document_blocks
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
@@ -507,6 +508,10 @@ class _PromptCommand:
     #: recording to carry. The blocks are ALREADY sniffed (``audio_blocks``):
     #: this queue never re-derives the format.
     audio: list["AudioContent"] | None = None
+    #: The resolved document blocks that ride this admission onto
+    #: ``Message.user(..., documents=...)``. Resolved from ``Prompt.files`` in
+    #: the synchronous prelude, so nothing here touches the store again.
+    documents: list["DocumentContent"] | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -3631,6 +3636,7 @@ class ServingSessionHandle(SessionHandle):
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
+        files: list[dict[str, Any]] | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
@@ -3650,6 +3656,14 @@ class ServingSessionHandle(SessionHandle):
         ingest images already use) or pass through already-decoded, and the
         blocks reach ``Session.prompt`` only when its signature takes the
         keyword — same probe, same reasoning.
+
+        ``files`` are ``Prompt.files``' references; they are resolved against
+        THIS owner's attachment store in the synchronous prelude below, so a
+        missing digest is an :class:`AttachmentMissing` refusal raised where
+        this method's caller can report it (contract amendment 3) rather than
+        a detached failure. A session whose ``prompt`` predates the
+        ``documents`` keyword is refused (``DocumentCarriageUnsupported``),
+        never forwarded without its files.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
@@ -3725,6 +3739,20 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(audio)
             else _audio_blocks(cast(list[dict[str, str]] | None, audio))
         )
+        # Documents are resolved in the same synchronous prelude, for the same
+        # measured reason audio is (no thread hop: ``_admit_without_waiting_
+        # for_the_turn`` budgets a few loop turns for reportable refusals), and
+        # deliberately NOT with the image path's drop-on-bad-entry contract: a
+        # missing digest raises ``AttachmentMissing`` naming the file. The
+        # store read is bounded by the upload cap (32 MB/file, 8 files).
+        document_blocks_decoded = _document_blocks(files, getattr(self._session, "model", None))
+        if document_blocks_decoded:
+            parameters = inspect.signature(self._session.prompt).parameters
+            if "documents" not in parameters:
+                from local_operator.session.errors import DocumentCarriageUnsupported
+
+                self._command_reservations.reject(command_id)
+                raise DocumentCarriageUnsupported()
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
         # Restore intentionally keeps missing attachments readable. Admission is
@@ -3782,13 +3810,14 @@ class ServingSessionHandle(SessionHandle):
         # (``process._refresh_for``), so the queue is never a promise to a
         # successor that does not come.
         if self._updating:
-            if blocks:
-                # An inbox row is text, so carrying an image-carrying prompt
-                # would shed the user's file while promising it was queued. The
-                # refusal returns the draft, which is true here — the text IS
-                # still theirs — and it names no build: the window's own phrase
-                # would claim "the one it loaded is gone from disk", which is
-                # false for a superseded tree (the D10/MAJOR-2 class).
+            if blocks or document_blocks_decoded:
+                # An inbox row is text, so carrying an image- or document-
+                # carrying prompt would shed the user's file while promising it
+                # was queued. The refusal returns the draft, which is true here
+                # — the text IS still theirs — and it names no build: the
+                # window's own phrase would claim "the one it loaded is gone
+                # from disk", which is false for a superseded tree (the
+                # D10/MAJOR-2 class).
                 self._command_reservations.reject(command_id)
                 raise self._retiring_refusal()
             try:
@@ -3836,7 +3865,12 @@ class ServingSessionHandle(SessionHandle):
             # prompt would return a receipt for a message that arrives without
             # its attachment — losing the user's file while telling them it was
             # queued. It takes the refusal, which returns both to the composer.
-            if self._draining and not self._exit_committed and not blocks:
+            if (
+                self._draining
+                and not self._exit_committed
+                and not blocks
+                and not document_blocks_decoded
+            ):
                 try:
                     receipt = await self._spool_for_successor(
                         text,
@@ -3878,6 +3912,7 @@ class ServingSessionHandle(SessionHandle):
             input_mode=input_mode,
             input_path=input_path,
             audio=audio_blocks_decoded,
+            documents=document_blocks_decoded,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -4757,6 +4792,13 @@ class ServingSessionHandle(SessionHandle):
                     # this command's prelude.
                     if "audio" in parameters:
                         fields["audio"] = command.audio
+                    # Documents, probed the same way. The reservation path
+                    # already refused a session without this keyword when the
+                    # command carried documents, so the probe cannot silently
+                    # drop them here; it keeps a reduced test session that
+                    # never sees documents on its exact old call shape.
+                    if "documents" in parameters:
+                        fields["documents"] = command.documents
                     await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;
@@ -4829,6 +4871,7 @@ class ServingSessionHandle(SessionHandle):
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
+        files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
     ) -> str:
         self._check_loop_thread()
@@ -4853,6 +4896,18 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(audio)
             else _audio_blocks(cast(list[dict[str, str]] | None, audio))
         )
+        # Documents ride a steer exactly as they ride a prompt: resolved in the
+        # same synchronous prelude (a missing digest refuses the correction
+        # before it is queued), and refused when this session's ``steer``
+        # predates the keyword rather than dropped on the floor.
+        document_blocks_decoded = _document_blocks(files, getattr(self._session, "model", None))
+        if document_blocks_decoded:
+            parameters = inspect.signature(self._session.steer).parameters
+            if "documents" not in parameters:
+                from local_operator.session.errors import DocumentCarriageUnsupported
+
+                self._command_reservations.reject(command_id)
+                raise DocumentCarriageUnsupported()
         if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted"
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
@@ -4864,14 +4919,17 @@ class ServingSessionHandle(SessionHandle):
         # the owner's receipt: the successor runs it, at the head of the turn the
         # prompt above it opens.
         #
-        # IMAGES (AND NOW A RECORDING) ARE THE ONE THING THE VEHICLE CANNOT
-        # CARRY and take the refusal, exactly as an attachment-carrying prompt
-        # does (see that arm for why an inbox row cannot hold them). Checked on
-        # the RAW argument rather than on the decoded blocks because the
-        # decision has to happen before the attach, and a non-empty ``images``
-        # or ``audio`` is the same fact one decode earlier.
+        # ATTACHMENTS — IMAGES, A RECORDING, AND NOW DOCUMENTS — ARE THE ONE
+        # THING THE VEHICLE CANNOT CARRY and take the refusal, exactly as an
+        # attachment-carrying prompt does (see that arm for why an inbox row
+        # cannot hold them). Checked on the RAW image/audio arguments rather
+        # than on the decoded blocks because the decision has to happen before
+        # the attach, and a non-empty ``images`` or ``audio`` is the same fact
+        # one decode earlier; a resolved document block is the only form the
+        # fact takes, because resolving it is what raises the refusal a
+        # missing digest owes.
         if self._updating:
-            if images or audio:
+            if images or audio or document_blocks_decoded:
                 self._command_reservations.reject(command_id)
                 raise self._retiring_refusal()
             try:
@@ -4911,6 +4969,11 @@ class ServingSessionHandle(SessionHandle):
         # keyword it would drop.
         if "audio" in parameters:
             fields["audio"] = audio_blocks_decoded
+        # Documents ride the correction's keyword, probed like the rest; the
+        # reservation path above already refused a session without it when
+        # documents were present.
+        if "documents" in parameters:
+            fields["documents"] = document_blocks_decoded
         # The structural stamp rides the steer for the same reason it rides a
         # prompt: a MID-TURN delivery is one of the two ways a spooled owner
         # prompt replays (``process._run_owner_prompt``'s steer fallback), and

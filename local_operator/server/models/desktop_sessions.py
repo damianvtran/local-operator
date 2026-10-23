@@ -1543,3 +1543,26 @@ class PresenceKinds(BaseModel):
     """
 
     can_notify_kinds: list[str]
+
+
+class StoredFile(BaseModel):
+    """One uploaded attachment, as the composer receives it back.
+
+    The client holds this record while a file sits on the composer chip and
+    sends ONLY its ``digest`` (plus display fields) in ``Prompt.files``: the
+    bytes never ride the 900 kB control frame. ``path`` is the ORIGIN path the
+    client supplied — provenance the transcript keeps — while
+    ``stored_path`` is the retained copy inside the attachment store, which
+    is what survives the user moving or deleting the original.
+
+    The sidecar behind these fields deliberately stores only MIME and size
+    (contract amendment 7): a repeat upload of identical bytes returns THIS
+    send's name/path, never an earlier selection's.
+    """
+
+    digest: str
+    name: str | None = None
+    mime_type: str
+    bytes: int
+    path: str | None = None
+    stored_path: str
