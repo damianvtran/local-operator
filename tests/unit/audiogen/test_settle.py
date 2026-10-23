@@ -203,11 +203,11 @@ async def test_settle_cancelled_audio_records_the_revision_and_the_row(monkeypat
         return observed
 
     monkeypatch.setattr(audio_settle, "observe_audio_settlement", fake_observe)
-    registered: list[tuple[bytes, str, str]] = []
+    registered: list[tuple[bytes, str, str, str | None]] = []
 
-    def fake_cache_media(data, content_type, *, kind):
-        registered.append((data, content_type, kind))
-        return SimpleNamespace(attachment="a" * 32)
+    def fake_cache_media(data, content_type, *, kind, name=None):
+        registered.append((data, content_type, kind, name))
+        return SimpleNamespace(attachment="a" * 32, name=name)
 
     import local_operator.session.attachments as attachments
 
@@ -230,12 +230,15 @@ async def test_settle_cancelled_audio_records_the_revision_and_the_row(monkeypat
             "rev": 0,
             "units": 44.0,
             "unit": "chars",
+            "prompt": "A late voiceover",
         },
         record_spend=spent.append,
         journal=journal,
     )
 
-    assert registered == [(AUDIO_BYTES, "audio/mpeg", "audio")], "one registration path"
+    assert registered == [
+        (AUDIO_BYTES, "audio/mpeg", "audio", "late-voiceover.mp3")
+    ], "one registration path, named from the request the payload carries"
     assert len(spent) == 1
     record = spent[0]
     assert record.record_id == "audio:req-late" and record.rev == 1
@@ -251,6 +254,7 @@ async def test_settle_cancelled_audio_records_the_revision_and_the_row(monkeypat
     assert row["version"] == 1 and row["settlement_observed"] is True
     assert row["digest"] == "a" * 32
     assert row["artifacts"][0]["kind"] == "audio"
+    assert row["artifacts"][0]["name"] == "late-voiceover.mp3"
     assert row["cost_usd"] == 0.03
 
 
