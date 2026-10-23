@@ -9,7 +9,7 @@ it when the answer is "none of them".
 WHY A TABLE RATHER THAN A FLAG ON ``ModelSpec``. The decision is not a
 property of the model alone. The same OpenAI model can be reached through
 Chat Completions or the Responses API depending on credentials and config,
-and OracleRouter/Mistral ride the OpenAI-compatible client with their own
+and OpenRouter/Mistral ride the OpenAI-compatible client with their own
 part shape. Amendment 6 of the attachment contract is explicit: the policy is
 computed at REQUEST time from the actual endpoint/wire/model, including a
 failover attempt, because a ``/model`` switch must never send a PDF natively
@@ -56,7 +56,6 @@ import hashlib
 import io
 import logging
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -300,10 +299,14 @@ def extract_document_text(block: "DocumentContent") -> str:
 
 
 def _extract_pdf(block: "DocumentContent", raw: bytes) -> str:
+    # The cache holds the EXTRACTION only, never the display header: the same
+    # bytes can be re-attached under a new filename, and a cached header would
+    # then name a file the user is no longer sending.
     digest = block.digest or hashlib.sha256(raw).hexdigest()[:32]
-    cached = _read_cached_text(digest, block)
+    header = f"[Document: {block.filename} ({block.mime_type}, {block.bytes} bytes)]"
+    cached = _read_cached_text(digest)
     if cached is not None:
-        return cached
+        return f"{header}\n{cached}"
     try:
         from pypdf import PdfReader
 
@@ -335,15 +338,13 @@ def _extract_pdf(block: "DocumentContent", raw: bytes) -> str:
         logger.warning("document: PDF extraction failed for %s", block.filename, exc_info=True)
         return _reference_text(block, reason="it is a PDF the text extractor could not read")
     body = "\n".join(chunks)
-    notice = ""
     if total > pages_read:
-        notice = f"\n[... only the first {pages_read} of {total} pages were read]"
-    text = f"[Document: {block.filename} ({block.mime_type}, {block.bytes} bytes)]\n{body}{notice}"
-    _write_cached_text(digest, text)
-    return text
+        body += f"\n[... only the first {pages_read} of {total} pages were read]"
+    _write_cached_text(digest, body)
+    return f"{header}\n{body}"
 
 
-def _read_cached_text(digest: str, block: "DocumentContent") -> str | None:
+def _read_cached_text(digest: str) -> str | None:
     try:
         return _cached_text_path(digest).read_text(encoding="utf-8")
     except OSError:
@@ -381,13 +382,3 @@ def _reference_text(block: "DocumentContent", *, reason: str | None = None) -> s
 def fallback_document_text(block: "DocumentContent") -> str:
     """One entry point for the serializers' fallback arm."""
     return extract_document_text(block)
-
-
-@lru_cache(maxsize=64)
-def _has_pypdf() -> bool:
-    try:
-        import pypdf  # noqa: F401
-
-        return True
-    except Exception:  # noqa: BLE001
-        return False
