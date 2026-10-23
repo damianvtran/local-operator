@@ -348,8 +348,9 @@ justified by removal-honoring, otherwise V4 rejects).
 - **V4 drops justified**: an atom in `drops` must be a b-derived atom that one
   side removed/shortened; a `Δ` or added atom may never be dropped.
 - **V5 size**: the assembled field respects the field's cap (agents:
-  `MAX_INSTRUCTIONS_CHARS = 8_000`, `agent_profiles.py:111`; teams:
-  `MAX_TEAM_INSTRUCTIONS_CHARS = 32_768`, `teams.py:89`; team description
+  `MAX_INSTRUCTIONS_CHARS = 10_000` in `agent_profiles`, which
+  `hub_sync.service.AGENT_INSTRUCTIONS_MAX` derives from rather than restating;
+  teams: `MAX_TEAM_INSTRUCTIONS_CHARS = 32_768`, `teams.py:89`; team description
   ≤ `HUB_TEAM_DESCRIPTION_MAX_CHARS = 2000`, `teams.py:384`).
 - **V6 structure**: fenced blocks balanced; headings unchanged (the LLM may not
   rename/reorder regions).
@@ -874,10 +875,10 @@ Strategy, in escalating order (each step only if the previous doesn't fit):
 1. **Only conflicts go to the model, and only their own region text.** Because
    the deterministic core (A4) already resolved every non-conflicting atom, the
    prompt carries just the conflicting *regions* (base/local/remote of that
-   region + removal list), not the whole field. Agent instructions cap at 8 000
-   chars (`agent_profiles.MAX_INSTRUCTIONS_CHARS` `agent_profiles.py:111`) and
-   team briefs at 32 768 (`teams.MAX_TEAM_INSTRUCTIONS_CHARS` `teams.py:89`) —
-   ≈ 2k and 8k tokens: **the common case fits any modern window in one call**.
+   region + removal list), not the whole field. Agent instructions cap at 10 000
+   chars (`agent_profiles.MAX_INSTRUCTIONS_CHARS`) and team briefs at 32 768
+   (`teams.MAX_TEAM_INSTRUCTIONS_CHARS` `teams.py:89`) — ≈ 2.5k and 8k tokens:
+   **the common case fits any modern window in one call**.
 2. **One call per conflicting region** (the plan is the region list from A3; the
    recombination is mechanical concatenation in local order by the core, not by
    the model), so a 30-section brief with 3 conflicts is 3 small calls, each
@@ -1474,7 +1475,7 @@ Isolated run: fresh `ISO=$(mktemp -d)`, `env -i HOME=$ISO LOCAL_OPERATOR_CONFIG_
 4. **Regrowth via stale baseline.** If a baseline record is lost (manual delete), items degrade to baseline-unknown (safe: check-only). If a baseline is *wrong* (the record says B but the user's L predates it) a deletion could be misattributed. Mitigation: records are only written by pull/publish/merge with fp recorded; tag/record disagreement ⇒ unknown.
 5. **Multi-process races.** `lop serve`, TUI, CLI and scheduler processes can each run a check. Mitigation: store lease (B4.1) + per-row fingerprint re-verify under the registry lock (agents: no lock exists — see Q4).
 6. **Boot cost / import graph.** Guarded by the lazy imports and the import-graph test; runner first tick delayed 60 s.
-7. **Hub-side caps.** A merged team/agent may exceed hub limits on a later push (`teams.py:384-389`, `agent_profiles.py:111`); pull-side enforces local caps, push-side must enforce hub caps.
+7. **Hub-side caps.** A merged team/agent may exceed hub limits on a later push (`teams.py:384-389`, `agent_profiles.MAX_INSTRUCTIONS_CHARS`); pull-side enforces local caps, push-side must enforce hub caps.
 8. **Team semantics.** Hub roster kind is free-form (`teams.py` docstring 552-556); unknown kinds map to `agent` on import (`teams.py:1620-1625`). A merge must not launder an unknown kind into `agent` on the *push* side; A7 keeps the original kind in the record.
 9. **Deleted-on-hub vs membership-lost** are indistinguishable (404); never auto-delete locally.
 

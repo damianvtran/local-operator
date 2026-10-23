@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager, read_config_values
 from local_operator.hub_sync import provenance as prov
@@ -157,6 +158,14 @@ def _pull_agent(
 
 def _text(agents: AgentRegistry, agent_id: str) -> str:
     return agents.get_agent_system_prompt(agent_id).strip()
+
+
+def _brief_of(length: int) -> str:
+    """A plausible brief of exactly ``length`` characters, no trailing space."""
+    head = "## Rules\n"
+    line = "Cite the record you read, never the note about it.\n"
+    lines, tail = divmod(length - len(head), len(line))
+    return head + line * lines + "x" * tail
 
 
 def test_local_deletion_survives_a_remote_edit_elsewhere_and_the_hub_addition_lands(env) -> None:
@@ -560,6 +569,42 @@ def test_the_team_hub_caps_are_enforced_with_the_hubs_own_words(env) -> None:
         report.reports[0].outcome == "refused"
         and "at most 64 items (submitted 70)" in report.reports[0].message
     )
+
+
+def test_the_agent_sync_cap_is_the_profile_cap_not_a_second_literal() -> None:
+    """A second number beside the constant is how the two sides drift apart.
+
+    ``AGENT_INSTRUCTIONS_MAX`` was such a literal (8,000), wired into the
+    ``instructions`` spec, so the sync path enforced a bound no other local
+    surface did. It has to BE the constant, not merely equal it today.
+    """
+    assert svc.AGENT_INSTRUCTIONS_MAX == MAX_INSTRUCTIONS_CHARS
+    assert ("instructions", "markdown", MAX_INSTRUCTIONS_CHARS, None) in svc._specs("agent")
+
+
+def test_a_merged_agent_body_lands_up_to_the_profile_cap_and_is_refused_above_it(env) -> None:
+    """9,055 characters merges through the real path; 10,001 is refused and unsaved.
+
+    Those lengths are literals on purpose: a cap that drops back to 8,000 turns
+    the first apply into a refusal, which is the failure being pinned. Before the
+    cap was derived, a body every other surface admitted (the profile read path,
+    the ``agent`` tool, the desktop route) was refused HERE at 8,000 — a hub
+    update lost to a bound nothing else enforced.
+    """
+    ctx, hub, agents, _t, root = env
+    stamped = _pull_agent(agents, hub, root)
+    hub.agents["h1"] = (_brief_of(9_055), "d")
+    report = svc.apply_items(ctx, kind="agent", allow_llm=False)
+    assert report.reports[0].outcome == "merged"
+    assert len(_text(agents, stamped.id)) == 9_055
+
+    hub.agents["h1"] = (_brief_of(10_001), "d")
+    refused = svc.apply_items(ctx, kind="agent", allow_llm=False)
+    assert refused.reports[0].outcome == "refused"
+    assert "instructions must be at most 10000 characters (submitted 10001)" in (
+        refused.reports[0].message
+    )
+    assert len(_text(agents, stamped.id)) == 9_055  # the refusal wrote nothing
 
 
 def test_update_all_stops_on_a_systemic_failure_and_marks_the_rest_skipped(env) -> None:

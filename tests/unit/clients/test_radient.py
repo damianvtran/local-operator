@@ -1557,16 +1557,18 @@ def test_build_instruction_set_document_counts_characters_not_bytes() -> None:
     document = build_instruction_set_document(
         name="コーダー",
         description="コーディングを行います。",
-        instructions="指示" * 4000,
+        instructions="指示" * (MAX_INSTRUCTIONS_CHARS // 2),
         kind="role",
         version="1.0.0",
     )
 
-    assert len(document["instructions"]) == 8000
+    # Admitted at the cap itself, not a fraction of it: the count is characters,
+    # so a body of double-width characters is not refused early.
+    assert len(document["instructions"]) == MAX_INSTRUCTIONS_CHARS
 
 
 def test_build_instruction_set_document_refuses_an_over_long_body() -> None:
-    """8000 is the profile's cap and the hub's cap: the same number, once."""
+    """The profile's cap, refused locally; the hub states its own number."""
     with pytest.raises(InstructionSetError) as exc_info:
         build_instruction_set_document(
             name="Coder",
@@ -1577,7 +1579,7 @@ def test_build_instruction_set_document_refuses_an_over_long_body() -> None:
         )
 
     assert exc_info.value.field == "instructions"
-    assert exc_info.value.rule == "must be at most 8000 characters"
+    assert exc_info.value.rule == "must be at most 10000 characters"
 
 
 def test_validate_document_overrides_refuses_an_unknown_field() -> None:
