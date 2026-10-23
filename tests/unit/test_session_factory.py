@@ -3337,6 +3337,59 @@ async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: P
         await parent.dispose()
 
 
+@pytest.mark.asyncio
+async def test_the_factory_closure_carries_the_open_asks_section(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SA-D3: the REAL prompt closure reads the reminder off the goal holder.
+
+    The section is built by the session (its queue, its stamp) but reaches the
+    provider through the holder the factory closure reads, so a missing argument
+    at ``build_system_blocks`` — or a missing read at the closure — would leave
+    the feature dead while every session-level test still passed.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.asks import policy
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+
+    async def hook(questions):  # pragma: no cover — presence is what gates ask
+        return None
+
+    session.set_ask_handler(hook)
+    queue = session.ask_queue()
+    assert queue is not None
+    try:
+        blocks = session._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        assert "<open-asks>" not in str(blocks[-1]), "nothing open, nothing shipped"
+
+        outcome = queue.enqueue(
+            [{"id": "ship", "question": "Ship it tonight?", "options": []}], 3600
+        )
+        assert outcome["ok"], outcome
+        blocks = session._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        tail = str(blocks[-1])
+        assert "<open-asks>" in tail
+        assert "Ship it tonight?" in tail
+        assert str(outcome["details"]["ask_id"]) in tail
+        # No prompt has been admitted, so there is no "as of" to claim — the
+        # honest shape, not a zero or a made-up clock.
+        assert "As of the user's message" not in tail
+    finally:
+        await session.dispose()
+
+
 def test_a_bom_does_not_survive_into_the_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

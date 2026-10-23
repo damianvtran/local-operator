@@ -706,6 +706,126 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
 #: line".
 _USER_MESSAGE_STAMP_CAP = 256
 
+#: How many open asks the reminder NAMES (design §16/SA-D3). Deliberately NOT
+#: ``asks.policy.OPEN_ASK_CAP``: that is the model's asking budget, and bridge
+#: requests and relays ride their own eight each, so a session can hold more open
+#: rows than any one of those caps. The section is a reminder, not the queue — so
+#: it names the OLDEST few (the ones a user message most likely already settled)
+#: and says how many more there are rather than dropping the rest in silence.
+_OPEN_ASKS_SECTION_CAP = 8
+
+#: How much of an ask's first question the reminder quotes. One line per ask is
+#: the whole point: the card has the full text, the reminder only has to say
+#: WHICH question is still waiting on the reader.
+_OPEN_ASKS_QUESTION_CHARS = 80
+
+
+def _epoch_ms(value: Any) -> int:
+    """An epoch-millisecond stamp as an int, ``0`` when it is not one.
+
+    Tolerant on purpose: the ask log is stdlib-only JSONL that a hand edit, an
+    older writer or a relay row can leave without a usable timestamp, and a
+    reminder that raised over one bad row would cost the turn.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _open_asks_clock(value: Any) -> str:
+    """An epoch-ms instant as ``HH:MM ZONE`` in the OS local zone, or ``""``.
+
+    Local time WITH its zone, unlike ``asks/render._stamp``: this text is read
+    beside the operator's own clock ("I saw that at 18:05"), and a bare 17:42 on a
+    host in another zone is a fact the reader cannot place.
+
+    No date, for the reason the receipts state: the absolute date is on the
+    transcript row, and a date here would rewrite the section at midnight for no
+    gain. The zone survives even when the host IS in UTC, so UTC is never assumed.
+    """
+    ms = _epoch_ms(value)
+    if ms <= 0:
+        return ""
+    at = datetime.fromtimestamp(ms / 1000.0).astimezone()
+    return f"{at.strftime('%H:%M')} {at.tzname() or at.strftime('%z')}"
+
+
+def _open_asks_line(row: Mapping[str, Any]) -> str:
+    """One bullet: the ask's id, when it was asked, and what it asks.
+
+    The ID is what ``ask_withdraw`` takes, the time is what lets the model place
+    the ask relative to a user message ("before or after what they just said"),
+    and the first question is the only part that says what is actually waiting.
+    """
+    ask_id = str(row.get("ask_id") or "")
+    asked = _open_asks_clock(row.get("created_at"))
+    when = f"asked {asked}" if asked else "asked at an unknown time"
+    relay = row.get("relay")
+    if isinstance(relay, Mapping):
+        # A relay is a POINTER at another session's question: it holds no
+        # questions of its own by construction, and an answer has to be written
+        # on the ORIGIN's log — so the one useful fact here is where it lives.
+        origin = str(relay.get("session_id") or "") or "another session"
+        return f"- {ask_id} — {when}, relayed from {origin} — answer it there"
+    questions = [item for item in (row.get("questions") or ()) if isinstance(item, Mapping)]
+    count = len(questions)
+    noun = "question" if count == 1 else "questions"
+    first = " ".join(str(questions[0].get("question") or "").split()) if questions else ""
+    if len(first) > _OPEN_ASKS_QUESTION_CHARS:
+        first = first[: _OPEN_ASKS_QUESTION_CHARS - 1] + "…"
+    return f'- {ask_id} — {when}, {count} {noun}: "{first}"'
+
+
+def _open_asks_reminder(rows: Sequence[Mapping[str, Any]], as_of_ms: Any) -> str:
+    """The body of the ``<open-asks>`` section, or ``""`` when nothing is open.
+
+    ONE small row per open ask, re-shipped at the start of every turn in which
+    the user said something (design §16/SA-D3). The reason it exists at all is
+    the measured failure: an ask nothing ever mentions again stays open until the
+    user spends a message asking about the asks — 18 such messages in one week,
+    and 16 of 40 withdrawals arrived only after one.
+
+    The reminder is emitted HERE rather than as a transcript row because this
+    section's bytes are compared, not appended: the state-delta machinery ships
+    it when (and only when) it moved, and gives up nothing when it did not. The
+    "as of" stamp is what makes "moved" mean "the user said something":
+    within one turn it is fixed, so the section ships once per user message
+    rather than once per provider step.
+
+    Deliberately DOES NOT narrow to asks raised after some point, and never
+    decides an ask is old: age is not evidence that the user stopped caring, and
+    a reminder that quietly forgot an ask would be the failure it exists to fix.
+    """
+    if not rows:
+        return ""
+    ordered = sorted(rows, key=lambda row: _epoch_ms(row.get("created_at")))
+    lines = [_open_asks_line(row) for row in ordered[:_OPEN_ASKS_SECTION_CAP]]
+    unlisted = len(ordered) - len(lines)
+    if unlisted > 0:
+        # Counted, not dropped: a reader told about eight of twelve would take
+        # the other four for settled, which is the one mistake this section
+        # cannot afford.
+        lines.append(
+            # i18n: ignore model-facing open-asks reminder (not shown to the user)
+            f"- and {unlisted} more open, not listed here"
+        )
+    parts: list[str] = []
+    as_of = _open_asks_clock(as_of_ms)
+    if as_of:
+        parts.append(
+            # i18n: ignore model-facing open-asks reminder (not shown to the user)
+            f"As of the user's message at {as_of}:"
+        )
+    parts.append("\n".join(lines))
+    parts.append(
+        # i18n: ignore model-facing open-asks reminder (not shown to the user)
+        "If the user's messages answered one of these, or made it irrelevant, "
+        "settle it with `ask_withdraw`. An ask the user has not addressed stays "
+        "open."
+    )
+    return "\n\n".join(parts)
+
 
 def _is_dismissal_receipt(message: Any) -> bool:
     """Whether this row is the operator PUTTING AN ASK AWAY (D2, SA-D4).
@@ -3867,6 +3987,11 @@ class Session:
         # A PROBE, not a copied flag: the hook is installed and uninstalled
         # mid-session, and the block must follow it in both directions.
         self._goal_state.ask_probe = lambda: self._ask_user is not None
+        # The open-asks reminder (design §16/SA-D3) rides the same seam for the
+        # same reason: the provider closure cannot see this facade, and the queue
+        # is built lazily on first use. A BOUND METHOD, so the closure reads the
+        # live queue at each provider step rather than a snapshot captured now.
+        self._goal_state.open_asks_probe = self._render_open_asks_section
 
         self._loop = AgentLoop()
         replayed_messages = list(transcript.build_llm_history())
@@ -12317,6 +12442,31 @@ class Session:
         # seed never saw, so the ring is truncated by construction in that case.
         if len(entries) > _USER_MESSAGE_STAMP_CAP * 8:
             self._user_message_stamp_truncated = True
+
+    def _render_open_asks_section(self) -> str:
+        """The ``<open-asks>`` body for THIS step, or ``""`` when none are open.
+
+        Read live per provider step, the same discipline as the tool inventory:
+        an ask queued or settled mid-turn is reflected in the very next request,
+        which is what lets a settle shrink the section (or remove it) without a
+        separate event. The rows come from the queue's own fold, so a timed-out
+        or dismissed ask is absent for exactly the reason it is absent from every
+        surface.
+
+        ``""`` — no queue (the blocking arm, a dead ask hook, a child session),
+        an unreadable log, or nothing open — is the ordinary path: the section is
+        then not rendered at all, and a session that never asks anything pays
+        nothing for this feature.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return ""
+        try:
+            rows = queue.open_records()
+        except Exception:  # noqa: BLE001 — a reminder is never worth a failed turn
+            logger.debug("ask: could not read the queue for the open-asks section", exc_info=True)
+            return ""
+        return _open_asks_reminder(rows, self.latest_user_message_at())
 
     def withdraw_ask(
         self,
