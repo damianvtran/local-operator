@@ -53,8 +53,10 @@ def qualify_rows(rows, reports):
     raise ValueError('MOVE non-transport baseline failure STOP')
 
 def qualify(proof, expected):
-    if set(proof) != {'rows', 'reports', 'exitstatus'}:
+    if set(proof) != {'rows', 'reports', 'guards', 'exitstatus'}:
         raise ValueError('MOVE protocol keys')
+    if proof['guards'] != []:
+        raise ValueError('MOVE observed guard STOP')
     allowed = {'reply_seen', 'request_seen', 'first_assertion', 'first_ok', 'move_calls', 'call_pass', 'first_unreachable', 'dial_ok', 'correlated', 'restored', 'identity', 'pair_calls', 'selected_alive', 'token', 'dial_attempted', 'selected_closing', 'mode', 'new_generation', 'selected_new'}
     for row in proof['rows']:
         if set(row) != allowed:
@@ -74,6 +76,77 @@ def qualify(proof, expected):
     if proof['exitstatus'] != expected_rc:
         raise ValueError('MOVE pytest status')
     return result
+
+
+def partial_proof(proof):
+    out = {'stage':'UNKNOWN','rows':[], 'reports':[]}
+    if type(proof) is not dict:
+        return out
+    stages = {'SOURCE','NATIVE_IMPORT','IDENTITY','PRODUCER','EXECUTOR','COMPLETE'}
+    if type(proof.get('stage')) is str and proof['stage'] in stages:
+        out['stage'] = proof['stage']
+    rows, reports = proof.get('rows'), proof.get('reports')
+    if type(rows) is list:
+        out['row_count_capped'] = min(len(rows), 3)
+        for row in rows[:2]:
+            if type(row) is not dict: continue
+            safe = {}
+            for k, v in row.items():
+                if k in ('mode',) and v in ('baseline','fresh'): safe[k] = v
+                elif k in ('token','pair_calls','move_calls') and type(v) is int and 0 <= v <= 2: safe[k] = v
+                elif k in ('dial_attempted','dial_ok','new_generation','selected_new','correlated','selected_alive','selected_closing','request_seen','reply_seen','first_ok','first_unreachable','call_pass','restored','first_assertion') and type(v) is bool: safe[k] = v
+            out['rows'].append(safe)
+    if type(reports) is list:
+        out['report_count_capped'] = min(len(reports), 7)
+        for report in reports[:6]:
+            if type(report) is dict and report.get('phase') in ('setup','call','teardown') and report.get('outcome') in ('passed','failed','skipped'):
+                out['reports'].append({'phase':report['phase'],'outcome':report['outcome']})
+    guards = proof.get('guards')
+    if type(guards) is list:
+        out['guards'] = [g for g in guards[:8] if type(g) is str and g in ('DIAL','SELECTION','CORRELATION','REQUEST','FIXTURE','ROW')]
+    if type(proof.get('data')) is dict:
+        data = proof['data']
+        out['native_counts'] = {k:min(len(data[k]),258) for k in ('rows','windows') if type(data.get(k)) is list}
+        out['native_flags'] = {k:data[k] for k in ('ready','trailing','restored','cancel_seen','error_seen') if type(data.get(k)) is bool}
+    return out
+
+
+def finalize_proof(work, result, expected, settled=True, reader=None, deleter=None):
+    # ONLY the reviewed common lifecycle may invoke this with settled=True.
+    # Proof rejection and actual filesystem deletion are independent outcomes.
+    result['full_proof_qualified'] = False
+    result['proof_stage'] = 'UNKNOWN'
+    result['root_deletion'] = 'NOT_ATTEMPTED'
+    if not settled:
+        result['proof_stage'] = 'UNSETTLED'
+        return
+    try:
+        try:
+            if reader is None:
+                path = work / 'proof.json'
+                if not path.exists():
+                    result['proof_stage'] = 'MISSING_PROOF'
+                    return
+                if path.stat().st_size > 262144:
+                    result['proof_stage'] = 'OVERCAP'
+                    return
+                proof = json.loads(path.read_text())
+            else:
+                proof = reader()
+            result['partial'] = partial_proof(proof)
+            result['proof_stage'] = 'QUALIFICATION'
+            verdict = qualify(proof, expected)
+            result['verdict'] = verdict
+            result['rows'] = result['partial']['rows']
+            result['identities'] = [row['identity'] for row in proof['rows']]
+            result['full_proof_qualified'] = True
+            result['proof_stage'] = 'QUALIFIED'
+        except (ValueError, KeyError, TypeError, IndexError, OSError):
+            if result['proof_stage'] == 'UNKNOWN': result['proof_stage'] = 'MALFORMED_PROOF'
+    finally:
+        result['root_deletion'] = 'FAILED'
+        (deleter or (lambda: shutil.rmtree(work)))()
+        result['root_deletion'] = 'REMOVED'
 
 
 def main():
@@ -103,13 +176,8 @@ def main():
             fresh = table().get(pid)
             if fresh and fresh["start"] == facts["start"]:os.kill(pid, 9)
     def remove():
-        path = work / "proof.json"
-        if path.stat().st_size > 32768:raise ValueError("proof cap")
-        proof = json.loads(path.read_text())
-        result["verdict"] = qualify(proof, expected)
-        # Strict structural projection, not wholesale plugin output forwarding.
-        result["rows"] = [{k:r[k] for k in ('mode', 'token', 'pair_calls', 'move_calls', 'dial_attempted', 'dial_ok', 'new_generation', 'selected_new', 'correlated', 'selected_alive', 'selected_closing', 'request_seen', 'reply_seen', 'first_ok', 'first_unreachable', 'call_pass', 'restored', 'first_assertion', 'identity')} for r in proof['rows']]
-        shutil.rmtree(work)
+        finalize_proof(work, result, expected)
+
     try:
         child = subprocess.Popen([sys.executable,"-B","-m","pytest",NODE,
             "-n0","-q","--tb=no","-o","addopts=",
@@ -131,7 +199,7 @@ def main():
                         if total>262144:raise RuntimeError("output STOP")
         finally:
             lifecycle=finish_owned(child,observe,kill_owned,remove)
-        result["qualified"]=not lifecycle["errors"] and lifecycle["synthetic_root_removed"] and lifecycle["rc"] in (0,1)
+        result["qualified"]=result.get("full_proof_qualified") is True and not lifecycle["errors"] and lifecycle["synthetic_root_removed"] and lifecycle["rc"] in (0,1)
     except Exception:
         result["qualified"]=False
     finally:

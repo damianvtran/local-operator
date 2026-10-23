@@ -11,8 +11,8 @@
     "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
     "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
     "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
-    "tests/unit/network/lfs_move_plugin_6911.py": "067e19ed4b9cf449b6b6c8c25fcc8e873c459277ca77dade503e19d0eb05e3fc",
-    "scripts/diagnostics/lfs_move_6911/controller.py": "b327f9458c2ec34f1198e4ea9f52edda18c144f314fe30e5cfc94e3e3eccbe19"
+    "tests/unit/network/lfs_move_plugin_6911.py": "fa0fa8a13ced5473137acf41d59b70d038ceb8fdb442aa4bc6fbded779f4288f",
+    "scripts/diagnostics/lfs_move_6911/controller.py": "bbda4f62ff01e774c7f02c4b3ceff6b0a60dcbb6a817104472014ec502622bd4"
   },
   "loaded_sources": [
     "tests/unit/network/test_mobility_promotion_identity.py",
