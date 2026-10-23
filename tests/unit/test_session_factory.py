@@ -3197,6 +3197,50 @@ async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
 
 
 @pytest.mark.asyncio
+async def test_a_childs_env_block_carries_its_own_session_id(tmp_config_dir: Path) -> None:
+    """The child shape is a session too, and it holds the ``sessions`` tool.
+
+    ``_construct_child_session`` builds its own blocks (the factory is not
+    reused), so threading the id into the factory's provider alone would have
+    left the COMMONEST shape — a delegated child, ~93% of sessions — with the
+    old three-line env block and no way to recognise its own row. The id here
+    is the same field its ToolContext carries, so the prompt and the listing
+    agree byte-for-byte.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-self-id",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+            child_id = child._transcript.directory.name
+            assert child_id != parent._transcript.directory.name
+            assert f"Session ID: {child_id}" in blocks[2]
+            # The parent's id must not leak in as the child's identity.
+            assert f"Session ID: {parent._transcript.directory.name}" not in blocks[2]
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: Path) -> None:
     """A parent with no runtime probe answers "nothing measured", and that is
     not the same as "attached" — the fail-open default belongs to the PARK
