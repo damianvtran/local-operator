@@ -8,7 +8,7 @@ Two reported defects share this file because they share one piece of state.
   takes its same-pair early return, and that path journalled nothing: the
   ``selected_model`` row carried the pair and the effort level, never the dial.
   The effort level survives for exactly this reason (see
-  ``_journal_effort_if_selection_changed``); the dial had no equivalent.
+  ``_journal_knobs_if_selection_changed``); the dial had no equivalent.
 * the same issue's second half — a provider that refuses fast mode turns the
   dial off from ``_on_fast_refused``, and the host that repaints the toggle was
   told nothing about why its saved preference stopped applying.
@@ -46,6 +46,11 @@ BOOT = ModelSpec(
 #: A real row with NO fast tier: the table keys the tier on the pair, and
 #: neither Anthropic's explicit list nor OpenAI's family rule names this one.
 NO_TIER = ModelSpec(provider="anthropic", model_id="claude-sonnet-5-5", context_window=200_000)
+
+#: The BOOT spec as the CREATE path can hand it (``DraftModel.fast_mode``): the
+#: marker's dial seeds the constructed spec, so a restore runs with a session
+#: whose ``self._model`` already says ``True``.
+BORN_FAST = BOOT.model_copy(update={"fast_mode": True})
 
 
 class RecordingStream(ScriptedStream):
@@ -198,3 +203,64 @@ async def test_a_refusal_with_the_dial_already_off_says_nothing(tmp_path):
 
     assert [event for event in events if isinstance(event, NoticeEvent)] == []
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_saved_off_clears_a_dial_the_session_arrived_with(tmp_path):
+    """The OFF edge is a DECISION, so a restore must clear a dial that arrived on.
+
+    The create path can birth a conversation on fast (``DraftModel.fast_mode``,
+    ui#1265): the marker's dial seeds the constructed spec, so the resumed
+    session's ``self._model`` already says ``True`` before the journal is read.
+    A restore that only ever ORs ``True`` therefore cannot express the user
+    turning the dial off — the conversation comes back on premium pricing with
+    the decision it recorded saying otherwise, which is the reported defect
+    (ui#1266) resurrected through the new field.
+
+    The row is the newest snapshot of a live dial, which is what makes this
+    reading safe: ``False`` here is not the absence of an opinion (no row
+    written before this change carries the key at all — see the test below).
+    """
+    born = _session(tmp_path, RecordingStream(), model=BORN_FAST)
+    assert born.model.fast_mode is True, "the constructor's seed is the dial"
+    born.set_model(born.model.model_copy(update={"fast_mode": False}))
+    await born.dispose()
+
+    resumed = _session(tmp_path, RecordingStream(), model=BORN_FAST)
+    assert resumed.model.fast_mode is False, "the journalled OFF must clear the seed"
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_row_without_the_dial_leaves_the_birth_choice_alone(tmp_path):
+    """``fast`` ABSENT is "no opinion", never "off".
+
+    Every row written before the dial was journalled carries no ``fast`` key, and
+    reading that absence as an OFF decision would silently disable fast mode on
+    every conversation that predates the change — the reported defect one layer
+    down. A session whose own seed says fast (the create path) must keep it when
+    the journal has nothing to say about the dial.
+    """
+    session = _session(tmp_path, RecordingStream(), model=BORN_FAST)
+    session.set_model(session.model.model_copy(update={"reasoning_effort": "max"}))
+    await session.dispose()
+    rows = _rows(session)
+    assert rows and "fast" in rows[-1], "this build writes the key"
+
+    # The legacy shape: a row from a build that had no dial field at all.
+    from local_operator.session.transcript import Transcript as _Transcript
+
+    legacy = _Transcript(tmp_path / "legacy")
+    await legacy.append_custom(
+        SELECTED_MODEL_CUSTOM_TYPE,
+        {"version": 2, "selector": "anthropic/claude-opus-5", "effort": "high"},
+    )
+    resumed = Session(
+        model=BORN_FAST,
+        stream_fn=RecordingStream(),
+        tools=[],
+        transcript=legacy,
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    assert resumed.model.fast_mode is True, "no evidence is not a decision to be off"
+    await resumed.dispose()

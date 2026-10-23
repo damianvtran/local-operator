@@ -278,7 +278,13 @@ from local_operator.session.credential_binding import (
 )
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
-from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
+
+# ONE implementation of "what dial does this row state", shared with the
+# runtime-less cold frame so the pane and the first turn cannot disagree.
+from local_operator.session.model_selection import (
+    SELECTED_MODEL_CUSTOM_TYPE,
+    fast_dial_from_row,
+)
 from local_operator.session.naming import (
     CONVERSATION_NAME_CUSTOM_TYPE,
     MAX_TITLE_CHARS,
@@ -2989,26 +2995,6 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             # and the one a block with no known split still gets): the text IS
             # the block.
             blocks[index] = str(value)
-
-
-def _fast_dial_from_row(stored: bool | None, spec: ModelSpec) -> bool:
-    """The speed dial a journal row implies for ``spec``, or ``False``.
-
-    Two independent answers, and BOTH have to be yes — the same conjunction the
-    failover carry uses (``providers.failover.spec_for_target``), because the
-    two failure modes are opposite: a row that says ``fast`` on a route that
-    does not sell the tier puts the speed key on a request the provider 400s
-    (the turn the restore exists to open), and honouring the dial on a route
-    this build cannot confirm is how a status band claims a premium nobody is
-    serving.
-
-    ``stored is None`` is a row with NO opinion — every row written before the
-    dial was journalled — and must never read as an OFF decision: the row is a
-    snapshot of a live dial, so treating absence as ``False`` would silently
-    disable fast mode on every conversation that predates this change, which is
-    the reported defect one layer down.
-    """
-    return bool(stored) and bool(getattr(spec, "supports_fast_mode", False))
 
 
 def _chosen_level_from(level: str | None, spec: ModelSpec) -> str | None:
@@ -27454,8 +27440,15 @@ class Session:
             # reported reset was NOT observed: the conversation was already on
             # the row's pair, so nothing below ran and the dial stayed at the
             # birth spec's ``False`` even after the row learned to carry it.
-            if _fast_dial_from_row(saved.fast, self._model):
-                self._model = self._model.model_copy(update={"fast_mode": True})
+            #
+            # BOTH EDGES APPLY: the create path can hand this session a spec
+            # that is already switched on (the marker's seed, ui#1265), so an
+            # OFF row has to clear it or the decision is undone by the next
+            # reopen — the same defect (ui#1266) through the new field. ``None``
+            # is no evidence and leaves the incoming spec alone.
+            dial = fast_dial_from_row(saved.fast, self._model)
+            if dial is not None:
+                self._model = self._model.model_copy(update={"fast_mode": dial})
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`
         # builds the target model's own spec (its base_url, window,
@@ -27496,13 +27489,19 @@ class Session:
                 }
             )
         # The DIAL last, against the target the row resolved to, so both halves
-        # of the clamp in ``_fast_dial_from_row`` are read from the spec that
+        # of the clamp in ``fast_dial_from_row`` are read from the spec that
         # will actually serve. Placed after the effort clamp above because the
         # dial is independent of it (a speed preference is orthogonal to how
         # hard the model thinks) and before ``self._model`` is published, so no
-        # reader can observe a spec still carrying the birth dial's ``False``.
-        if _fast_dial_from_row(saved.fast, spec):
-            spec = spec.model_copy(update={"fast_mode": True})
+        # reader can observe a spec still carrying the previous dial.
+        #
+        # Written for ``False`` as well as ``True``: ``spec_for_target`` builds
+        # the target's own spec and ``build_model_spec`` never seeds the dial, so
+        # this is where an OFF row lands too — an explicit assignment rather than
+        # an OR is what makes the row, not the constructor, the authority.
+        dial = fast_dial_from_row(saved.fast, spec)
+        if dial is not None:
+            spec = spec.model_copy(update={"fast_mode": dial})
         self._model = spec
         # AGAINST THE TARGET SPEC, not the birth spec (review round 2, M5). A
         # withdrawal row now stores the TARGET's seed, so comparing it to the

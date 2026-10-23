@@ -243,6 +243,18 @@ def static_feature_flags() -> dict[str, Any]:
         # field, and a pick that silently did nothing would be worse than
         # a chip that never offered itself).
         "draft_selection": 1,
+        # Whether a draft may be born on the FAST tier: `fast_mode` on
+        # `DraftModel`, accepted by create and reported by preview
+        # (ui#1265). Its own key rather than a bump of `draft_selection`,
+        # by that entry's rule — and because the two gate different
+        # controls: a renderer on a backend without this one keeps its
+        # model and effort chips exactly as they are and holds the SPEED
+        # toggle inert. The hazard it removes is the same one, one field
+        # over: `DraftModel` is `extra="forbid"`, so an unknown field
+        # refuses the WHOLE create body — a toggle that dispatched into it
+        # would take the pair and level the user had just picked down with
+        # it, where a toggle that never offered itself costs nothing.
+        "draft_fast": 1,
         # The provider registry VIEW: `brand` / `capabilities` / `state` /
         # `identity` / `account_count` on the rows of
         # `GET /v1/auth/providers` (a.k.a. the census), AND the licence
