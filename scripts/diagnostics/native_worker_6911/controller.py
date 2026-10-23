@@ -167,7 +167,7 @@ STYLE_FILES = ('tests/unit/test_tui_responsiveness.py','tests/unit/test_worker_c
                'tests/worker_code_identity.py','tests/loop_callback_spans.py')
 
 
-def style_summary(tool, inner_rc, launched, timeout, overcap, settled, output):
+def style_summary(tool, inner_rc, launched, timeout, overcap, settled, output, monitor_completed, monitor_failed):
     files = []
     if type(output) is bytes and len(output) <= 262144:
         for line in output.decode('utf-8', errors='replace').splitlines():
@@ -179,14 +179,17 @@ def style_summary(tool, inner_rc, launched, timeout, overcap, settled, output):
             if path is not None:
                 path = path.removeprefix(str(ROOT)+'/')
                 if path in STYLE_FILES and path not in files: files.append(path)
-    safe = launched and not timeout and not overcap and settled.get('reaped') is True and settled.get('owned_settled') is True and not settled.get('errors')
+    physical = settled.get('reaped') is True and settled.get('owned_settled') is True and not settled.get('errors')
+    safe = monitor_completed and not monitor_failed and launched and not timeout and not overcap and settled.get('reaped') is True and settled.get('owned_settled') is True and not settled.get('errors')
     reason = 'PASS' if safe and inner_rc == 0 else 'TOOL_FAILURE'
     if safe and inner_rc == 1 and files and tool in ('black','isort'): reason = 'FORMAT_REQUIRED'
     if not launched: reason = 'LAUNCH_FAILED'
     elif timeout: reason = 'TIMEOUT'
     elif overcap: reason = 'OUTPUT_CAP'
-    elif not safe: reason = 'UNSETTLED'
+    elif not physical: reason = 'UNSETTLED'
+    elif monitor_failed or not monitor_completed: reason = 'MONITOR_FAILURE'
     return dict(inner_rc=inner_rc, launched=launched, timeout=timeout, output_cap=overcap,
+        monitor_completed=monitor_completed, monitor_failed=monitor_failed,
         reaped=settled.get('reaped') is True, owned_settled=settled.get('owned_settled') is True,
         reason=reason, files=files if reason == 'FORMAT_REQUIRED' else [])
 
@@ -202,6 +205,7 @@ def style_main(tool, destination):
             if fresh and fresh['start'] == facts['start']: os.kill(pid, 9)
     child, settled, output = None, {}, bytearray()
     timed, capped = False, False
+    monitor_completed, monitor_failed = False, False
     try:
         child = subprocess.Popen([sys.executable,'-B','-m',tool]+options+list(STYLE_FILES),
             cwd=ROOT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
@@ -221,11 +225,12 @@ def style_main(tool, destination):
                             capped=True
                             raise ValueError('style output STOP')
                         output.extend(chunk)
+            monitor_completed = True  # ONLY healthy EOF completes the monitor.
         finally:
             settled=finish_owned(child,observe,kill_owned,lambda:None)
     except Exception:
-        pass  # Fixed metadata below remains failure; never export exception text.
-    summary=style_summary(tool,settled.get('rc'),child is not None,timed,capped,settled,bytes(output))
+        monitor_failed = True  # Latch unexpected faults even if final wait succeeds.
+    summary=style_summary(tool,settled.get('rc'),child is not None,timed,capped,settled,bytes(output),monitor_completed,monitor_failed)
     Path(destination).write_text(json.dumps(summary)+'\n')
     raise SystemExit(0 if summary['reason']=='PASS' else 1)
 
