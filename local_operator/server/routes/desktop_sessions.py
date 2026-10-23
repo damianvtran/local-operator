@@ -4274,6 +4274,28 @@ async def decode_images(images: list[Image]):
     return await image_blocks_in_thread([image.model_dump() for image in images])
 
 
+#: The dismissal refusal's LAST RESORT, and not user copy (agent review round 1,
+#: R1-5). Every refusal this door can receive already IS a sentence: the cold door
+#: answers with ``render.dismiss_refusal``'s words and the facade's verdict with
+#: the owner's, so an empty one means a door broke its contract, not that the user
+#: needs telling something new. Keying this string would translate one of FOUR
+#: identical guards (the two ``serving.py`` op refusals and the answer arm just
+#: below keep theirs unkeyed) and would still leave a blank 409 the worse failure.
+#: `test_a_door_that_refuses_without_a_sentence_still_answers_409` pins both
+#: halves: a real door always supplies one, and a broken one still gets a body.
+_DISMISSAL_REFUSED = "the dismissal was refused"
+
+
+def _dismissal_refusal(error: object) -> HTTPException:
+    """The 409 for a refused dismissal, in the ask's own words when there are any.
+
+    ``None`` is normalised away explicitly: ``str(None)`` is ``"None"``, which a
+    bare ``or`` would happily put on the wire.
+    """
+    sentence = "" if error is None else str(error).strip()
+    return HTTPException(409, sentence or _DISMISSAL_REFUSED)
+
+
 async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, body: Answer) -> str:
     """Put a queued ask away from the desktop — the NO-BOOT door (SA-D5, §14).
 
@@ -4315,7 +4337,7 @@ async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, bo
         if outcome.get("ok"):
             return "dismissed"
         if str(outcome.get("code") or "") != "ask_owner_present":
-            raise HTTPException(409, str(outcome.get("error") or "the dismissal was refused"))
+            raise _dismissal_refusal(outcome.get("error"))
     try:
         # THE FACADE'S VERDICT CONTRACT (``AttachedSession.dismiss_ask``): a dict,
         # and a refusal is ``{"ok": False, "error": …}`` rather than an exception.
@@ -4327,10 +4349,10 @@ async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, bo
         # Belt for a facade that predates the verdict shape: the same classes
         # ``_ask_verdict`` swallows, mapped to the refusal they describe rather
         # than to the 503 the shared ladder would produce.
-        raise HTTPException(409, str(error) or "the dismissal was refused") from None
+        raise _dismissal_refusal(error) from None
     if not (isinstance(verdict, Mapping) and verdict.get("ok")):
         refusal = verdict.get("error") if isinstance(verdict, Mapping) else verdict
-        raise HTTPException(409, str(refusal) or "the dismissal was refused")
+        raise _dismissal_refusal(refusal)
     return "dismissed"
 
 

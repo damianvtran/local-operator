@@ -9330,8 +9330,16 @@ class _AskRemote:
     revision caught only ``ValueError`` and let the shared ladder answer 503.
     """
 
-    def __init__(self, *, refuse_with: str = "", detail: str = "answered") -> None:
+    def __init__(
+        self,
+        *,
+        refuse_with: str = "",
+        detail: str = "answered",
+        silent_refusal: bool = False,
+    ) -> None:
         self.refuse_with = refuse_with
+        #: A refusal with NO sentence — the contract break R1-5's guard covers.
+        self.silent_refusal = silent_refusal
         self.detail = detail
         #: ``(ask_id, answers, decline, revise)`` — the third and fourth are the
         #: two intent flags, positional because each cell asserts the whole tuple.
@@ -9371,6 +9379,8 @@ class _AskRemote:
         cold door" from "dialled the owner" by which list is non-empty.
         """
         self.dismissals.append((ask_id, by, reason))
+        if self.silent_refusal:
+            return {"ok": False}
         if self.refuse_with:
             return {"ok": False, "error": self.refuse_with}
         return {"ok": True}
@@ -9542,6 +9552,27 @@ async def test_a_peer_conversation_skips_the_local_cold_door(answers_api) -> Non
     )
     assert result.status_code == 200, result.text
     assert remote.dismissals == [("a-1", "desktop", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_door_that_refuses_without_a_sentence_still_answers_409(
+    answers_api, monkeypatch
+) -> None:
+    """R1-5, the second half: the fallback is a CONTRACT-BREAK guard, not copy.
+
+    A real door always supplies a sentence (``tests/unit/asks/test_dismiss.py``
+    pins that), so this one feeds a facade that breaks the contract on purpose:
+    the refusal must still be a well-formed 409 rather than a blank detail.
+    """
+    client, app = answers_api
+    monkeypatch.setattr("local_operator.resume.live_runtime_pid", lambda root, session_id: 4242)
+    remote = _AskRemote(silent_refusal=True)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "dismiss": True}
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "the dismissal was refused"
 
 
 @pytest.mark.asyncio

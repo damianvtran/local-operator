@@ -7255,6 +7255,35 @@ async def test_the_user_message_stamp_counts_only_the_operators_own_words(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_the_user_message_stamp_is_identical_across_a_restart(tmp_path):
+    """R1-3: the live stamp and the replay seed are the SAME NUMBER per row.
+
+    The count is compared with ``>`` against an ask's ``created_at``, so a
+    millisecond of drift across a restart could flip a message that arrived in the
+    ask's own millisecond — QA measured a 1 ms gap when the live path read the
+    wall clock and the seed read ``entry.ts``. Both now read ``entry.ts`` through
+    one conversion (:meth:`Session._operator_message_stamp_ms`), so a restart over
+    the same directory reproduces the pairs exactly.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(2)])
+    session = make_session(tmp_path, stream)
+    try:
+        await session.prompt("first")
+        await session.prompt("second")
+        live = list(session._user_messages)
+        assert len(live) == 2
+    finally:
+        await session.dispose()
+
+    revived = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    try:
+        assert list(revived._user_messages) == live, "the seed moved a stamp across the restart"
+        assert revived.latest_user_message_at() == live[-1][1]
+    finally:
+        await revived.dispose()
+
+
+@pytest.mark.asyncio
 async def test_ask_agent_running_is_false_only_for_a_stopped_idle_session(tmp_path):
     """D6 predicate: pending abort AND no turn in flight. Idle-without-abort and
     mid-turn are both "running"."""
