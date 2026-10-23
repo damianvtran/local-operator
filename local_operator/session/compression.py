@@ -194,6 +194,8 @@ __all__ = [
     "MIN_AFTER_DAYS",
     "Outcome",
     "PLAIN_FILENAME",
+    "WRITER_LOCK_WAIT_S",
+    "WRITER_WAIT_POLL_S",
     "acquire_writer",
     "archive_path",
     "available_codec",
@@ -206,6 +208,7 @@ __all__ = [
     "read_head",
     "read_tail",
     "release_writer",
+    "transcript_state",
     "restore_for_write",
     "run_compression",
     "transcript_for_read",
@@ -372,6 +375,40 @@ def archive_path(directory: Path) -> Path | None:
     return None
 
 
+#: The three answers :func:`transcript_state` gives. ``unreadable`` is NOT
+#: absence: a directory this process may not traverse must never be read as
+#: "nothing durable here", because every remover in the product treats that
+#: answer as permission.
+TRANSCRIPT_PRESENT = "present"
+TRANSCRIPT_ABSENT = "absent"
+TRANSCRIPT_UNREADABLE = "unreadable"
+
+
+def transcript_state(directory: Path) -> str:
+    """``present`` / ``absent`` / ``unreadable`` for the session in ``directory``.
+
+    THE existence question, with the unreadable case kept separate instead of
+    folded into ``absent``. A caller that only needs "can I show this row" wants
+    :func:`has_transcript`; a caller that DELETES on absence — the two
+    failed-create removals, the audited removal primitive, a sweep that deletes
+    an unreferenced attachment — must ask this, because an ``EACCES`` on the
+    directory is not evidence that the transcript is gone.
+    """
+    directory = Path(directory)
+    try:
+        if plain_path(directory).exists():
+            return TRANSCRIPT_PRESENT
+    except OSError:
+        return TRANSCRIPT_UNREADABLE
+    for name in ARCHIVE_FILENAMES:
+        try:
+            if (directory / name).is_file():
+                return TRANSCRIPT_PRESENT
+        except OSError:
+            return TRANSCRIPT_UNREADABLE
+    return TRANSCRIPT_ABSENT
+
+
 def has_transcript(directory: Path) -> bool:
     """Whether this session has a transcript in ANY physical form.
 
@@ -381,14 +418,12 @@ def has_transcript(directory: Path) -> bool:
     conversation on open. A zero-byte plain file counts as present — it is a
     transcript that exists and holds nothing, which is a different fact from
     absence and is the caller's to interpret.
+
+    An unreadable directory answers ``False`` here (this is the tolerant form,
+    used by listing surfaces whose failure mode is a missing row). Anything that
+    acts ON the answer must use :func:`transcript_state`.
     """
-    directory = Path(directory)
-    try:
-        if plain_path(directory).exists():
-            return True
-    except OSError:
-        return False
-    return archive_path(directory) is not None
+    return transcript_state(directory) == TRANSCRIPT_PRESENT
 
 
 def transcript_source(directory: Path) -> tuple[Path, str | None]:
@@ -1096,7 +1131,20 @@ def lock_is_busy(directory: Path) -> bool:
             pass
 
 
-def acquire_writer(directory: Path) -> bool:
+#: How often :func:`acquire_writer` re-attempts a held lock while it waits.
+#: Short enough that a single-session compress (well under a second) is invisible
+#: to the opener, long enough that a second real runtime costs a handful of
+#: syscalls rather than a spin.
+WRITER_WAIT_POLL_S = 0.025
+
+#: How long ``Transcript.__init__`` waits for the compressor before it opens
+#: WITHOUT the writer lock. Long enough that one session's compress (measured in
+#: well under a second) never loses a runtime its history, short enough that a
+#: genuinely contended open is not a stalled launch.
+WRITER_LOCK_WAIT_S = 5.0
+
+
+def acquire_writer(directory: Path, *, wait_s: float = 0.0) -> bool:
     """Take the session's writer lock for this process; ``False`` when busy.
 
     Held for the lifetime of a ``Transcript`` (stage B), which is exactly the
@@ -1104,18 +1152,35 @@ def acquire_writer(directory: Path) -> bool:
     attempt then fails and the session is skipped rather than rewritten under a
     live writer. Refcounted per path so two holders in ONE process share the
     kernel lock instead of fighting over it.
+
+    ``wait_s`` BOUNDS THE COMPRESSOR RACE, and it exists because the loser of
+    that race is the conversation. ``Transcript.__init__`` restores a compressed
+    journal and then reads it; a compressor that held the lock while it did so
+    would publish its archive and unlink the plain file AFTER the restore's
+    no-op check and BEFORE the runtime's first append — which then recreates an
+    empty plain file that the reader prefers, hiding the archive's real history.
+    Waiting for the lock makes "the compressor is mid-pass" a short pause rather
+    than a silent wipe. It is deliberately BOUNDED (the caller passes a few
+    seconds): the other holder may be a second real runtime, and the documented
+    two-writer hazard is not something a longer wait fixes.
     """
     key = os.path.realpath(os.fspath(directory))
-    with _WRITERS_GUARD:
-        held = _WRITERS.get(key)
-        if held is not None:
-            held[1] = int(held[1]) + 1
-            return True
-        fd = _try_acquire_lock(Path(directory))
-        if fd is None:
+    deadline = time.monotonic() + max(0.0, float(wait_s))
+    while True:
+        with _WRITERS_GUARD:
+            held = _WRITERS.get(key)
+            if held is not None:
+                held[1] = int(held[1]) + 1
+                return True
+            fd = _try_acquire_lock(Path(directory))
+            if fd is not None:
+                _WRITERS[key] = [fd, 1]
+                return True
+        if time.monotonic() >= deadline:
             return False
-        _WRITERS[key] = [fd, 1]
-        return True
+        # OUTSIDE the guard: sleeping under it would serialize every other
+        # session's acquisition in this process behind one held lock.
+        time.sleep(WRITER_WAIT_POLL_S)
 
 
 def release_writer(directory: Path) -> None:
