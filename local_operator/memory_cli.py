@@ -25,9 +25,11 @@ from typing import Any, NoReturn
 from local_operator.memory import (
     MAX_BULK_FORGET,
     SCOPES,
+    STORAGE_WARNING_PERCENT,
     MemoryError,
     MemoryIdentity,
     MemoryStore,
+    format_bytes,
     quota_relief,
 )
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
@@ -943,6 +945,17 @@ _PEER_REMEDY: dict[str, str] = {
 }
 
 
+def _compact_command(usage: dict[str, Any]) -> str:
+    """The VACUUM remedy for a full store, pointing at THIS store's file.
+
+    The path comes from the status payload rather than the default location:
+    memory can live under a relocated config dir, and a VACUUM against the
+    wrong file is a silent no-op that reads as a failed remedy.
+    """
+    path = str(usage.get("database_path") or "")
+    return f"`sqlite3 {shlex.quote(path)} 'VACUUM'`" if path else "`VACUUM`"
+
+
 def _status_text(value: dict[str, Any]) -> str:
     policy_ = value["policy"]
     sync = value["sync"]
@@ -1024,10 +1037,36 @@ def _status_text(value: dict[str, Any]) -> str:
                 lines += _shaped(f"Remedy: {fallback}")
             lines += _shaped("Full peer text: `lop memory status --json`.")
     usage = value["usage"]
-    lines.append(
-        f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded · "
-        f"{usage.get('storage_bytes', 0)} bytes"
+    lines.append(f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded")
+    # Bytes and tokens are SEPARATE budgets with different failure modes: token
+    # headroom does not mean the store can grow, and a full page cap refuses
+    # writes while the token quota still reports plenty left. Both are always
+    # shown, so neither can hide the other.
+    used = int(usage.get("storage_bytes") or 0)
+    cap = int(usage.get("storage_cap_bytes") or 0)
+    percent = float(usage.get("storage_percent") or 0.0)
+    storage = (
+        f"Storage: {format_bytes(used)} of {format_bytes(cap)} ({percent}% of the store cap)"
+        if cap
+        else f"Storage: {format_bytes(used)}"
     )
+    lines.append(storage)
+    if usage.get("storage_full"):
+        lines += _shaped(
+            "Store FULL: the memory database has reached its byte cap, so writes that "
+            "need a new page are refused and nothing is saved."
+        )
+        lines.append("Reclaim: `lop memory forget SCOPE/ID --revision REV --yes`.")
+        lines.append(
+            f"Compact: {_compact_command(usage)} — run this first if the forget is refused."
+        )
+    elif cap and percent >= STORAGE_WARNING_PERCENT:
+        lines += _shaped(
+            f"Near the storage cap: {percent}% of the {format_bytes(cap)} cap is in use, "
+            "so a write that needs new pages will be refused."
+        )
+        lines.append("Free space: `lop memory forget SCOPE/ID --revision REV --yes`.")
+        lines.append(f"Compact: {_compact_command(usage)}.")
     quotas = usage.get("quotas") or []
     if quotas:
         # Wrapped at the repo's row bar: a NoticeBlock clips a longer line at the
