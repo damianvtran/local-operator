@@ -1707,6 +1707,27 @@ that names an unknown id. No new event, no fold change, no wire or mobile type c
    prompted-withdrawal counts not falling from 16/40 — the second reopens auto-supersede, which is
    frozen out today.
 
+   **As shipped (PR-3, 2026-10-23)** — the deviations from the paragraph above, all QA- or
+   review-driven and all inside its stated budget:
+   - each line also names the ask's QUESTION ids (`answers` is keyed by them, not by the ask id: a
+     live probe spent two refusals guessing between the two), and the overflow line names the
+     unlisted asks' ids rather than only counting them;
+   - the trailer is "If the user's messages answered one of these, or made it irrelevant, settle it
+     with `ask_withdraw`. An ask the user has not addressed stays open; if you are unsure, leave it
+     open." — no "since then", so it reads correctly on a session that has admitted no message
+     yet, plus SA-D1's tie-breaker; a relay line adds "only `moot` settles it here" because
+     `answered_in_chat` is refused on a relay (#2520);
+   - the cadence is once per user-MINUTE, not once per message: the "as of" is minute-granular, so
+     two messages inside one minute render the same bytes and ship nothing;
+   - a RESTART adopts the replayed copy instead of re-anchoring it — a section that differs only in
+     its "as of" line is not shipped while the baseline is the replayed record (QA round 1);
+   - the section is TRI-STATE: a host with no ask queue (`lop exec --resume` until #2834) answers
+     UNKNOWN, which ships nothing at all, never the `""` removal that would tell the model its open
+     asks were settled (QA round 1);
+   - `_OPEN_ASKS_SECTION_CAP` is 8 ask lines and is deliberately not `policy.OPEN_ASK_CAP`: the
+     model's 8, bridge 8 and relays 8 are separate budgets, so a session can hold more open rows
+     than the reminder names.
+
 4. **SA-D4 — the operator can dismiss an OPEN ask while the agent runs (PR-4a, R5; replaces §15
    D6).** The `agent_running` refusal goes: mid-turn, the dismissed response row rides the existing
    steering path to the next boundary; on an idle live runtime it is held durably with NO turn.
