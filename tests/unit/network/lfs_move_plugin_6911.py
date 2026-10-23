@@ -23,6 +23,14 @@ def _move_variant(request):
     return request.param
 
 
+def same_handshake(accepted, returned, network_id, a_device, b_device):
+    """Private causal binding only; never serialize handshake IDs/endpoints."""
+    left, right = accepted.link_id, returned.link_id
+    return (type(left) is bytes and bool(left) and type(right) is bytes
+            and left == right and accepted.network_id == returned.network_id == network_id
+            and accepted.device_id == b_device and returned.device_id == a_device)
+
+
 def pytest_collection_modifyitems(items):
     if len(items) != 2 or len({id(x) for x in items}) != 2:
         raise RuntimeError('MOVE distinct two original items required')
@@ -44,7 +52,7 @@ def pytest_runtest_call(item):
     original_pair, original_move = module._pair_settled, module._move
     row = dict(mode=mode, token=CALLS, pair_calls=0, move_calls=0,
                dial_attempted=False, dial_ok=False, new_generation=False,
-               selected_new=False, selected_alive=False, selected_closing=False,
+               selected_new=False, correlated=False, selected_alive=False, selected_closing=False,
                request_seen=False, reply_seen=False, first_ok=False,
                first_unreachable=False, call_pass=False, restored=False, first_assertion=False, identity=identity)
     state = dict(a=None, b=None, selected=None, admitted_selected=None, fresh=None, previous=set())
@@ -73,6 +81,11 @@ def pytest_runtest_call(item):
             selected = a._link_for(b.identity.device_id)
             candidates = [x for x in a.links.values() if x.device_id == b.identity.device_id and id(x) not in state['previous']]
             row['new_generation'] = len(candidates) == 1
+            row['correlated'] = row['new_generation'] and same_handshake(
+                candidates[0], link, record.network_id, a.identity.device_id, b.identity.device_id
+            )
+            if not row['correlated']:
+                raise RuntimeError('MOVE explicit dial handshake correlation STOP')
             row['selected_new'] = row['new_generation'] and selected is candidates[0]
             if not row['selected_new']:
                 raise RuntimeError('MOVE fresh generation not selected STOP')
@@ -159,7 +172,7 @@ def qualify_rows(rows, reports):
     for i, row in enumerate(rows):
         validate_row(row, ('baseline', 'fresh')[i], i+1, reports[3*i+1]['outcome'])
     baseline, fresh = rows
-    if not all(fresh[k] for k in ('dial_attempted', 'dial_ok', 'new_generation', 'selected_new', 'selected_alive', 'request_seen', 'reply_seen', 'call_pass')) or fresh['selected_closing']:
+    if not all(fresh[k] for k in ('dial_attempted', 'dial_ok', 'new_generation', 'selected_new', 'correlated', 'selected_alive', 'request_seen', 'reply_seen', 'call_pass')) or fresh['selected_closing']:
         raise ValueError('MOVE fresh selected transport STOP')
     if baseline['call_pass']:
         return 'INCONCLUSIVE_NOT_EXONERATED'
