@@ -1776,6 +1776,21 @@ class PendingAskState(BaseModel):
     #: to a reader built before the field: the UI row type is open-ended and an
     #: unknown key is ignored (``extra="allow"``).
     attachments: dict[str, list[dict[str, Any]]] | None = None
+    #: THE ASK CARD'S CONTEXT LINE (SA-D7, design §15): how many operator messages
+    #: were admitted after this ask was raised, and when the latest one was (ms).
+    #: The pair the card renders as "3 messages from you since this was asked (last
+    #: 19:36)", carried on the ROW because the desktop reads rows, not sessions.
+    #:
+    #: ``None`` means the writing runtime COULD NOT COUNT IT — an older runtime, an
+    #: ask older than its retained window, or a session that has admitted no
+    #: operator message — and every surface renders no line at all for it. That is
+    #: why these are nullable rather than defaulted to zero: a zero is a fact (the
+    #: ask is newer than every message), and absence must not be spelled as one.
+    #: The same added-key trade-off as ``attachments`` above: this model serialises
+    #: its ``None`` fields, so a snapshot carries ``null`` here where
+    #: ``pending_row`` and the phone's ``PendingAskWire`` simply omit the key.
+    user_messages_since: int | None = None
+    last_user_message_at: int | None = None
 
 
 class _FrozenSequence(tuple[Any, ...]):

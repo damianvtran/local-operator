@@ -1570,31 +1570,40 @@ deferral, narrowly. Plan: `ask-dismiss-plan.md` (D1–D6); this PR is the engine
 4. **D3 — the cold door still removes the deadline wake row**, on the grounds in §14's amended
    paragraph. Cost: an idle cold asker no longer wakes at the deadline; if nothing starts it within
    7 d the row lapses unread. Parked sessions keep their wake row, as before.
-5. **D6 — an OPEN ask is dismissible only when no agent work is running.** **(Superseded by §16
-   SA-D4, 2026-10-23: the `agent_running` refusal is retired, and an idle live runtime holds the
-   dismissal without spawning a turn. The table below is the rule this amendment replaced; it is
-   kept as the record of the D6 decision, not as live design.)**
+5. **D6 — an OPEN ask is dismissible wherever the operator can see it.** *Amended 2026-10-23
+   (R5 / SA-D4, whose decision record is §16 item 4): D6 as written refused the live case, and
+   the table below is the CURRENT rule rather than the one D6 stated.*
 
    | owning session | open-ask dismissal | what the agent gets |
    |---|---|---|
    | cold (no runtime) | accepted, boots nothing (`dismiss_cold`) | the response row at the next boot, which runs ONE paid turn (as §14) |
    | runtime up, **stopped** | accepted, buys no turn (D2) | the response row at its next turn |
-   | runtime up, **not stopped** (idle or mid-turn) | **refused**, nothing written | nothing; reply in chat, or the agent uses `ask_withdraw` |
+   | runtime up, **idle** | accepted, buys no turn (SA-D4) | the response row, held durably, in the next turn's request |
+   | runtime up, **mid-turn** | accepted (SA-D4) | the response row at the running turn's next boundary, in that same turn |
    | any, ask `timed_out` | unchanged (§14) | unchanged |
 
-   "Stopped" is `Session.ask_agent_running() is False`: a stop is pending (`_abort_requested`) AND no
-   turn is in flight (`_is_streaming` false, `_turn_lock` free). Idle-vs-mid-turn is not a stable
-   distinction (an idle runtime can begin a turn at any moment), so the cut is "stopped or cold" vs
-   "running". A queue whose session cannot answer counts as running (fail closed). Team-bridge asks
-   (any question carrying a `question_id`) stay timed-out-only. The refusal is
-   `render.DISMISS_AGENT_RUNNING`: "the agent is still running — reply in chat to settle this ask, or
-   stop the session first and dismiss it then." **Cost:** on a running session a stale open ask still
-   cannot be closed from its card. **Cold-boot cost:** the dismissal itself boots nothing, but ANY later engage (even a warm-up) delivers the row into an idle runtime and runs one paid turn — the same cost §14 accepted for a timed-out ask's notice; only a stopped live runtime holds the row turn-free. **Mixed versions:** an older runtime folding a pre-deadline dismissal computes neither `response_owed` nor `notice_owed`, so the agent is not told until a new runtime reads the log. **What would change it:** a request for live dismissal, which would
-   also need the row to join a live turn (steering, §2.3).
-6. **Refusals.** `render.dismiss_refusal(record, agent_running=)` replaces the lapsed-only rule:
-   `open`/`timed_out` accepted (open subject to D6 and the bridge rule); `dismissed` →
-   `DISMISS_ALREADY_DISMISSED`; `late` → "this ask was already answered."; the other settled states →
-   `refusal_copy`. `DISMISS_NOT_LAPSED` is retired: it would be false in every state it was returned for.
+   D6 refused the last two rows because a dismissal "never starts, wakes or injects", and on a
+   running session there was nothing to hold the row. SA-D4 measured that refusal against the field:
+   it declined exactly while the operator was chatting, which is when a stale ask is noticed. The
+   row now has two holding places on a live session — the steering queue mid-turn (§2.3), and
+   `_hold_deliveries_at_admission` on an idle one — so the dismissal is accepted everywhere and
+   the agent is told as soon as it is listening. **Cost, stated:** a mid-turn dismissal can keep the
+   inner loop running for one more provider call (any injection does), and an idle agent learns of
+   it only at its next turn. **Cold-boot cost:** the dismissal itself boots nothing, but ANY later
+   engage (even a warm-up) delivers the row into an idle runtime and runs one paid turn — the same
+   cost §14 accepted for a timed-out ask's notice; only a stopped or idle live runtime holds the row
+   turn-free. Team-bridge asks (any question carrying a `question_id`) stay timed-out-only, and a
+   relay's open ask is still dismissed at its origin. **Mixed versions:** an older runtime folding a
+   pre-deadline dismissal computes neither `response_owed` nor `notice_owed`, so the agent is not
+   told until a new runtime reads the log; and an older runtime still refuses the live case in
+   `DISMISS_AGENT_RUNNING`'s words, which is honest and is what the desktop's
+   `features.ask_dismiss` gate hides.
+6. **Refusals.** `render.dismiss_refusal(record)` replaces the lapsed-only rule: `open`/`timed_out`
+   accepted (open subject to the relay and bridge rules — NOT to any runtime state, see D6 above);
+   `dismissed` → `DISMISS_ALREADY_DISMISSED`; `late` → "this ask was already answered."; the other
+   settled states → `refusal_copy`. `DISMISS_NOT_LAPSED` is retired: it would be false in every state
+   it was returned for. `DISMISS_AGENT_RUNNING` and the `agent_running=` parameter are retired with
+   D6's live refusal (SA-D4); a caller can no longer pass a fact that decides nothing.
 7. **Audit receipt.** `harness.rows.ask_response_notice` gains a `dismissed` branch — "Dismissed by you
    (phone) — settled in chat (ask a-1)" — instead of falling back to "Answered — delivering".
 
@@ -1672,7 +1681,7 @@ that names an unknown id. No new event, no fold change, no wire or mobile type c
 3. **SA-D3 — the open-asks reminder (PR-3, R2).** An authoritative `[session-state]` tail section
    `open_asks` (`<open-asks>` marker), built per provider step from `open_records()`, at most 8 lines,
    headed "As of the user's message at HH:MM TZ" — the latest admitted user message, held on the
-   Session — and ending "If the user's messages since then answered or mooted one, settle it with
+   Session — and ending "If the user's messages since then answered or made irrelevant one, settle it with
    `ask_withdraw`." It re-ships once per user message while asks are open, ships `""` once when the
    last ask settles, and ships nothing at all when no ask is open (the start-context budget must be
    byte-identical to main in that state). This replaces §12.1's optional-runtime-assist PROPOSAL ("the

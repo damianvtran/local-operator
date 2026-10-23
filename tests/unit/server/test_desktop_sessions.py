@@ -9268,15 +9268,19 @@ async def test_the_stored_pages_through_id_cut_is_exercised_directly(tmp_path) -
 # ---------------------------------------------------------------------------
 
 
-def _install_ask_remote(app: FastAPI, remote: Any) -> None:
+def _install_ask_remote(app: FastAPI, remote: Any, *, remote_row: Any = None) -> None:
     """Point the answers route at a stub bridge carrying ``remote``.
 
     The pool is the only thing stubbed: the route, its body model, the refusal
     ladder and the response envelope are the real ones. ``SimpleNamespace`` is
     what the route reads (``bridge.remote``), which is the same shape
     ``test_viewer_protocol`` pins for the real bridge.
+
+    ``remote_row`` marks the session as a PEER'S conversation, which is the one
+    case the dismissal route skips the local cold door for (this device holds no
+    ask log for it).
     """
-    bridge = SimpleNamespace(remote=remote)
+    bridge = SimpleNamespace(remote=remote, remote_row=remote_row)
 
     class _Pool:
         @contextlib.asynccontextmanager
@@ -9304,6 +9308,10 @@ async def answers_api(tmp_path: Path, monkeypatch):
     app = FastAPI()
     app.state.config_manager = ConfigManager(tmp_path)
     app.include_router(desktop_sessions.router)
+    # The capability map is served by its own router, and the dismissal gate reads
+    # the key it publishes (`features.ask_dismiss`) — the same route the renderer
+    # negotiates against, so the cell exercises the real advertisement.
+    app.include_router(capabilities.router)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
@@ -9328,6 +9336,9 @@ class _AskRemote:
         #: ``(ask_id, answers, decline, revise)`` — the third and fourth are the
         #: two intent flags, positional because each cell asserts the whole tuple.
         self.calls: list[tuple[str, Any, bool, bool]] = []
+        #: ``(ask_id, by, reason)`` — the LIVE dismissal op, kept apart from
+        #: ``calls`` so a cell can prove which door answered.
+        self.dismissals: list[tuple[str, str, str | None]] = []
         # The route reads ``remote.frontend_state.epoch`` on the GATE arm (the
         # queued-ask arm skips the epoch check by design), so the double has to
         # carry the attribute the real ``AttachedSession`` carries. Declared as
@@ -9347,6 +9358,22 @@ class _AskRemote:
         if self.refuse_with:
             raise RuntimeError(self.refuse_with)
         return self.detail
+
+    async def dismiss_ask(
+        self, ask_id: str, *, by: str = "", reason: str | None = None
+    ) -> dict[str, Any]:
+        """The LIVE dismissal op (SA-D5), in the REAL facade's verdict shape.
+
+        ``AttachedSession.dismiss_ask`` answers ``{"ok": …}`` and reports a
+        refusal in that dict rather than raising, so a double that returned a
+        detail string would let the route read the wrong contract and pass. The
+        call is appended separately from ``calls`` so a cell can tell "took the
+        cold door" from "dialled the owner" by which list is non-empty.
+        """
+        self.dismissals.append((ask_id, by, reason))
+        if self.refuse_with:
+            return {"ok": False, "error": self.refuse_with}
+        return {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -9415,6 +9442,177 @@ async def test_a_queued_ask_body_without_answers_or_decline_is_a_422(answers_api
         result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
         assert result.status_code == 422, (body, result.text)
     assert remote.calls == [], "a malformed body must not reach the runtime"
+
+
+# ---------------------------------------------------------------------------
+# The DESKTOP DISMISSAL (SA-D5, design §15)
+# ---------------------------------------------------------------------------
+
+
+def _cold_open_ask(root: Path, *, session: str = "0123456789ab", ask_id: str = "a-1") -> Path:
+    """A session directory holding ONE OPEN ask, with no runtime anywhere."""
+    from local_operator.asks import store
+
+    directory = store.session_dir(root, session)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    # NOW, not a fixed instant: the cold door folds at the wall clock, so a
+    # constant would seed a deadline that lapsed seven days ago.
+    now = store.now_ms()
+    store.append_event(
+        directory,
+        {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_QUEUED,
+            "ask_id": ask_id,
+            "at": now,
+            "created_at": now,
+            "expires_at": now + 3_600_000,
+            "timeout_s": 3600,
+            "urgent": False,
+            "tool_call_id": "",
+            "questions": [
+                {
+                    "id": "q0",
+                    "question": "ship it?",
+                    "options": [{"label": "yes", "description": ""}],
+                    "multi": False,
+                    "secret": False,
+                    "persist": False,
+                }
+            ],
+        },
+    )
+    return directory
+
+
+@pytest.mark.asyncio
+async def test_a_cold_open_ask_is_dismissed_without_dialling_anything(answers_api) -> None:
+    """SA-D5 + §14: no live owner means the NO-BOOT door — the route writes the
+    dismissal and never touches the facade, which is what could start a runtime."""
+    from local_operator.asks import store
+
+    client, app = answers_api
+    root = app.state.config_manager.config_dir
+    directory = _cold_open_ask(root)
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "dismiss": True, "reason": "answered_in_chat"},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "dismissed"}
+    assert remote.dismissals == [], "a cold dismissal must not dial (a bind BOOTS)"
+    assert remote.calls == []
+    events = store.read_events(directory)
+    assert events[-1]["kind"] == store.EVENT_DISMISSED
+    assert events[-1]["by"] == {"surface": "desktop"}
+    assert events[-1]["reason"] == "answered_in_chat"
+
+
+@pytest.mark.asyncio
+async def test_a_live_owner_gets_the_live_dismiss_op(answers_api, monkeypatch) -> None:
+    """``ask_owner_present`` from the cold door is the ONE refusal that dials: the
+    owner settles its own ask, and the frame takes the operator's reason."""
+    client, app = answers_api
+    monkeypatch.setattr("local_operator.resume.live_runtime_pid", lambda root, session_id: 4242)
+    remote = _AskRemote(detail="dismissed")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "dismiss": True, "reason": "moot"},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "dismissed"}
+    assert remote.dismissals == [("a-1", "desktop", "moot")]
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_conversation_skips_the_local_cold_door(answers_api) -> None:
+    """A PEER's ask has no local log to fold, so the local door could only answer
+    "not in this session's queue". The session's owner is the one to ask."""
+    client, app = answers_api
+    remote = _AskRemote(detail="dismissed")
+    _install_ask_remote(app, remote, remote_row=SimpleNamespace(owner_device="peer-1"))
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "dismiss": True},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.dismissals == [("a-1", "desktop", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_dismissal_answers_409_with_the_asks_own_sentence(answers_api) -> None:
+    """No owner and no such ask: the queue's sentence, as a 409 — never the 503
+    ladder's reconnect remedy, which cannot work for a settled or unknown ask."""
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-nope", "dismiss": True}
+    )
+    assert result.status_code == 409, result.text
+    assert "not in this session's queue" in result.json()["detail"]
+    assert remote.dismissals == []
+
+
+@pytest.mark.asyncio
+async def test_a_live_refusal_on_the_dismissal_is_a_409_not_a_503(answers_api, monkeypatch) -> None:
+    """The wire raises ``RuntimeError`` for a refusal with no known code, and the
+    shared ladder would map that to 503 — the answer path's own lesson (QA Q1)."""
+    client, app = answers_api
+    monkeypatch.setattr("local_operator.resume.live_runtime_pid", lambda root, session_id: 4242)
+    remote = _AskRemote(refuse_with="you already dismissed this.")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "dismiss": True}
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "you already dismissed this."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"dismiss": True},
+        {"ask_id": "a-1", "dismiss": True, "answers": {"q0": ["yes"]}},
+        {"ask_id": "a-1", "dismiss": True, "decline": True},
+        {"ask_id": "a-1", "dismiss": True, "revise": True},
+        {
+            # A real payload, because an EMPTY image list is the existing wire's
+            # way to say "no images" on every other shape too — the refusal is
+            # for a dismissal that actually carries one.
+            "ask_id": "a-1",
+            "dismiss": True,
+            "images": [{"question_id": "q0", "data_b64": "aGk=", "mime_type": "image/png"}],
+        },
+        {"ask_id": "a-1", "reason": "moot"},
+        {"ask_id": "a-1", "dismiss": True, "reason": "because"},
+    ],
+)
+async def test_a_malformed_dismissal_body_is_a_422(answers_api, body: dict[str, Any]) -> None:
+    """Every shape a dismissal cannot honour is refused at the boundary: a no-op
+    field is a 422 here rather than a silently dropped intent (§10)."""
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
+    assert result.status_code == 422, (body, result.text)
+    assert remote.dismissals == []
+
+
+@pytest.mark.asyncio
+async def test_the_capabilities_map_advertises_ask_dismiss(answers_api) -> None:
+    """``Answer`` is ``extra=\"forbid\"``, so the renderer MUST gate on the key —
+    without it an older backend 422s the user's own tap."""
+    client, _ = answers_api
+    result = await client.get("/v1/capabilities")
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["features"]["ask_dismiss"] == 1
 
 
 @pytest.mark.asyncio
