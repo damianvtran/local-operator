@@ -1145,3 +1145,55 @@ def test_a_derived_tear_with_a_failed_rebuild_keeps_refusing(tmp_path, monkeypat
     assert LibraryStore(root).state().get("recovery_failed") == "0"
     indexer.rebuild_now(root)
     assert query(root)["total"] == 4
+
+
+def test_a_healed_file_reaches_ready_quickly_every_time(tmp_path, monkeypatch) -> None:
+    """QA Q-1: a healed index reported `building` for up to 61 s.
+
+    Recovery resets the denominator while the indexer may already have written
+    it (or be parked on its next tick), so the wake is what turns "rows are all
+    here" into `ready`. Ten independent heal rounds, each from a refused state.
+    """
+    for round_number in range(10):
+        base = tmp_path / f"heal-{round_number}"
+        base.mkdir()
+        root = config_root(monkeypatch, base)
+        asset = base / "kept.txt"
+        asset.write_text("x")
+        session(root, SESSION, write_rows("w1", 1.0, asset))
+        indexer.rebuild_now(root)
+
+        # A live worker, settled: this is the process that must NOT serve a
+        # spinner while the catalog is complete.
+        indexer.ensure_started(root)
+        settled = service.list_assets(root, service.Query())
+        assert settled["state"] == "ready" and settled["total"] == 1
+
+        # A refusal persisted on a now-healthy file: the next process heals.
+        raw = sqlite3.connect(LibraryStore(root).path)
+        try:
+            raw.execute(
+                "INSERT INTO idx_state(key, value) VALUES('recovery_failed', '1') "
+                "ON CONFLICT(key) DO UPDATE SET value = '1'"
+            )
+            raw.commit()
+        finally:
+            raw.close()
+        LibraryStore._ready_paths.clear()
+        LibraryStore._failed_paths.clear()
+        MetadataStore._ready_paths.clear()
+
+        started = time.monotonic()
+        frame = service.list_assets(root, service.Query())
+        while time.monotonic() - started < 5.0:
+            if frame["state"] == "ready" and frame["total"] == 1 and frame["rows"]:
+                break
+            time.sleep(0.02)
+            frame = service.list_assets(root, service.Query())
+        elapsed = time.monotonic() - started
+        assert frame["state"] == "ready" and frame["total"] == 1, (
+            f"round {round_number} stayed {frame['state']} with total "
+            f"{frame['total']} after {elapsed:.2f}s"
+        )
+        assert elapsed < 5.0
+        indexer.reset_for_tests()

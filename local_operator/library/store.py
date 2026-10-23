@@ -772,9 +772,10 @@ class LibraryStore:
         if not rebuilt:
             self._refuse("the database cannot be rebuilt from its metadata")
             return False
-        # The replacement file carries no flag row at all (only the AUTHORITATIVE
-        # tables are copied), so record the healthy verdict explicitly: a later
-        # boot must not have to guess whether an absent row means "never failed".
+        # The replacement carries no ``recovery_failed`` ROW (only the
+        # authoritative rows are copied into a freshly created derived schema),
+        # so record the healthy verdict explicitly: a later boot must not have to
+        # guess whether an absent row means "never failed".
         self._ready_paths.add(self._key)
         self._persist_recovery_failure(False)
         return True
@@ -890,6 +891,18 @@ class LibraryStore:
             return
         if not self.recover_derived():
             raise IndexUnavailable("library metadata is unreadable", corrupt=True)
+        # Recovery resets ``sessions_total``/``backfill_done``. The worker may be
+        # parked on its next tick, and the reset can even land AFTER an in-flight
+        # reconcile wrote the real count — either way the catalog then serves
+        # every row as `building` until the 60 s tick (measured: 61.46 s, QA
+        # Q-1). Wake it so a fresh reconcile re-writes the denominator and its
+        # end-of-reconcile finish check flips the build to done.
+        try:
+            from local_operator.library import indexer as library_indexer
+
+            library_indexer.ensure_started(self.config_dir).wake()
+        except Exception:  # noqa: BLE001 - a failed wake must not fail the read
+            logger.warning("library: could not wake the indexer after recovery", exc_info=True)
 
     def _persist_recovery_failure(self, failed: bool) -> None:
         """Record the refusal in ``idx_state`` so it survives the process.
