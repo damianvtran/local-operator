@@ -3,8 +3,8 @@
 TRANSPORT SHAPE, pinned by §6.7/§13.3. The connector's ONLY recurring bridge
 traffic is ONE outstanding ``GET /v1/messaging/events?after=<cursor>&wait=25``:
 ``200`` → refs are recorded and drained, ``204`` → the read returns ``None``
-and the loop simply reissues. There is deliberately no periodic status/inbox
-call, no plain-poll fallback, and no scheduled model wake — a missed event
+and any already-committed refs are drained before the loop reissues. There is
+no periodic status/inbox call, no plain-poll fallback, and no scheduled model wake — a missed event
 costs LATENCY, never state, because the inbox list is the source of truth and
 the resync walk repairs gaps (empty ``events`` + fresh cursor, or a cursor the
 server no longer honours).
@@ -29,6 +29,7 @@ environment mid-flight (restart-scoped, §13.3).
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,47 @@ RETRY_MAX_S = 3600.0
 RETRY_MAX_ATTEMPTS = 11
 RETRY_BATCH_LIMIT = 8
 _RETRY_ATTEMPTS: dict[str, int] = {}
+
+logger = logging.getLogger(__name__)
+
+# Operational codes only: exception messages, arbitrary .code values, feed
+# refs and tracebacks may carry peer content or credentials. A pre-screen
+# failure has no attempt/hold row yet, so record its stage and a closed code
+# without fabricating a screening result or logging the exception itself.
+_DIAGNOSTIC_FAILURE_CODES = frozenset(
+    {
+        "policy_stale",
+        "bridge_off",
+        "owner_changed",
+        "credential_changed",
+        "consent_revoked",
+        "no_designation",
+        "stale_generation",
+        "schema_damaged",
+        "owner_mismatch",
+        "wrong_recipient",
+        "wrong_tenant",
+        "malformed_message",
+        "mismatched_id",
+        "rate_limited",
+        "bridge_not_available",
+        "bridge_disabled",
+        "messaging_unavailable",
+        "recipient_unavailable",
+        "consent_version_unknown",
+    }
+)
+
+
+def _log_delivery_failure(stage: str, failure: Exception) -> None:
+    """Content-free diagnostic; the original exception still drives backoff."""
+    code = getattr(failure, "code", None)
+    safe_code = (
+        code
+        if isinstance(code, str) and code in _DIAGNOSTIC_FAILURE_CODES
+        else "unexpected_failure"
+    )
+    logger.warning("bridge connector failure: stage=%s code=%s", stage, safe_code)
 
 
 async def resync_walk(owner: Any, *, config_dir: Path, access: Any) -> dict[str, Any]:
@@ -350,7 +392,14 @@ async def run_iteration(
     batch = await _pull.events(
         owner, config_dir=config_dir, access=access, after=after, wait=EVENTS_WAIT_S
     )
-    if batch is None:
+    # The feed cursor commits BEFORE screening. A failed handler leaves its
+    # durable ref behind, but the hub can now legitimately answer 204 forever.
+    # Drain that existing queue even on a timeout; never reset the cursor or
+    # synthesize refs from historical inbox rows to recover a failed handoff.
+    reissued = batch is None
+    cursor = int(after) if batch is None else batch["cursor"]
+    refs = _pull.drain_feed_refs(owner, config_dir=config_dir, upto_seq=cursor)
+    if reissued and not refs:
         return {
             "events": 0,
             "reissued": True,
@@ -358,21 +407,26 @@ async def run_iteration(
             "handled": [],
             "retries": retries,
         }
-    refs = _pull.drain_feed_refs(owner, config_dir=config_dir, upto_seq=batch["cursor"])
     # H5e: the routing rule is stated ONCE (team_bridge.events) so the CoS
     # refresh consumer cannot drift from this loop: deliveries wake; the
     # state_changed/request_* refs are refresh hints and NEVER a wake kind.
     plan = plan_feed_refs(refs)
     handled: list[dict[str, Any]] = []
+    failures: list[tuple[str, Exception]] = []
     for message_id in plan.deliveries:
-        outcome = await handle_message_available(
-            owner,
-            message_id,
-            config_dir=config_dir,
-            auth_store=auth_store,
-            access=access,
-            settings=settings,
-        )
+        try:
+            outcome = await handle_message_available(
+                owner,
+                message_id,
+                config_dir=config_dir,
+                auth_store=auth_store,
+                access=access,
+                settings=settings,
+            )
+        except Exception as failure:  # one poison ref must not starve the rest
+            _log_delivery_failure("pair_handling", failure)
+            failures.append((f"message_available:message_id={message_id}", failure))
+            continue
         handled.append(outcome)
         if outcome.get("action") == "hold":
             # TB-04: a hold after consumption gets a DURABLE retry row — the
@@ -382,14 +436,19 @@ async def run_iteration(
     for conversation_ref in plan.conversation_deliveries:
         # Conversation deliveries have their OWN card path; the pair inbox
         # reader above must never see one.
-        outcome = await handle_conversation_available(
-            owner,
-            conversation_ref,
-            config_dir=config_dir,
-            auth_store=auth_store,
-            access=access,
-            settings=settings,
-        )
+        try:
+            outcome = await handle_conversation_available(
+                owner,
+                conversation_ref,
+                config_dir=config_dir,
+                auth_store=auth_store,
+                access=access,
+                settings=settings,
+            )
+        except Exception as failure:  # preserve the conversation lane's own ref
+            _log_delivery_failure("conversation_handling", failure)
+            failures.append((conversation_ref.encode(), failure))
+            continue
         handled.append(outcome)
         if outcome.get("action") == "hold":
             _persist_hold_backoff(
@@ -400,15 +459,26 @@ async def run_iteration(
     # here is what stops the quadratic re-wake/ACK growth across polls and
     # restarts. A crash before this point replays the batch (at-least-once);
     # the receiver's own dedupe absorbs the replay.
-    store.delete_feed_refs(owner, refs)
-    resync = bool(batch["resync"]) or bool(store.sync_state(owner)["pending_resync"])
+    # Retire only outcomes actually handled. Failed refs stay durable, while
+    # successful neighbours do not repeat merely because a later ref failed.
+    # One attempt per ref per iteration; re-raising preserves run_forever's
+    # bounded failure backoff (including Retry-After), not a new hot retry loop.
+    failed_refs = {ref for ref, _ in failures}
+    store.delete_feed_refs(owner, [ref for ref in refs if ref not in failed_refs])
+    if failures:
+        raise failures[0][1]
+    # A 204 is still NOT an inbox-resync signal. Keep the existing bootstrap /
+    # re-enable replay fence and historical inbox materialization contract.
+    resync = batch is not None and (
+        bool(batch["resync"]) or bool(store.sync_state(owner)["pending_resync"])
+    )
     walk: dict[str, Any] | None = None
     if resync:
         walk = await resync_walk(owner, config_dir=config_dir, access=access)
     return {
         "events": len(refs),
-        "cursor": batch["cursor"],
-        "reissued": False,
+        "cursor": cursor,
+        "reissued": reissued,
         "resync": resync,
         "walk": walk,
         "handled": handled,
