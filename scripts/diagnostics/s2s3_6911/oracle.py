@@ -1,6 +1,19 @@
 """Pure stdlib protocol, not app/native proof. Unexpected or missing evidence stops."""
 import json
 
+# Per-case budget. Derived from the OBSERVED whole first S2 case wall of 10.3 s
+# (run 39921114526) + the 5 s SlowListing test-fixture worker closure + the 3 s
+# physical reap allowance (1 s healthy wait + 2 s final wait in finish_child).
+# This is a CONSERVATIVE ceiling, not a measured future latency, and it leaves
+# the original CPU500/wall2000/noise/calibration bars and every other policy
+# (job 5 min, setup 120 s, 1024 MiB, 250 records, 256 KiB output, 4 serial
+# cases) untouched. 4 x (20 + 3) = 92 s < 100 s outer; no automatic further raise.
+CHILD_SECONDS = 20
+REAP_SECONDS = 3
+CASE_COUNT = 4
+OUTER_SECONDS = 100
+OUTER_GRACE_SECONDS = 5
+
 MODES = ("s2-original", "s3-split", "s3-held", "synthetic")
 
 

@@ -1,3 +1,4 @@
+import re
 import unittest
 from copy import deepcopy
 from oracle import final, judge
@@ -178,6 +179,25 @@ class Capacity(unittest.TestCase):
         tree = ast.parse(Path("plugin-source.txt").read_text())
         self.assertFalse(any(isinstance(n, ast.Import) and any(a.name == "gc" for a in n.names) for n in ast.walk(tree)))
         self.assertFalse(any(isinstance(n, ast.Attribute) and n.attr == "callbacks" and isinstance(n.value, ast.Name) and n.value.id == "gc" for n in ast.walk(tree)))
+
+
+class Budget(unittest.TestCase):
+    def test_numeric_budget_single_source_and_arithmetic(self):
+        import oracle
+        from pathlib import Path
+        self.assertEqual((oracle.CHILD_SECONDS, oracle.REAP_SECONDS, oracle.CASE_COUNT, oracle.OUTER_SECONDS, oracle.OUTER_GRACE_SECONDS), (20, 3, 4, 100, 5))
+        self.assertEqual(oracle.CASE_COUNT * (oracle.CHILD_SECONDS + oracle.REAP_SECONDS), 92)
+        self.assertLess(92, oracle.OUTER_SECONDS)
+        # Actual 10.3 s first-case wall + 5 s fixture + 3 s reap fits the child budget.
+        self.assertLessEqual(10.3 + 5 + oracle.REAP_SECONDS, oracle.CHILD_SECONDS + oracle.REAP_SECONDS)
+        driver = Path("driver-source.txt").read_text()
+        self.assertIn("time.monotonic()+CHILD_SECONDS", driver)
+        self.assertNotIn("monotonic()+12", driver)
+        workflow = Path("workflow-source.txt").read_text()
+        self.assertIn("--timeout 100 --grace 5 --memory-mb 1024", workflow)
+        self.assertIn("timeout-minutes: 5", workflow)
+        self.assertEqual(len(re.findall(r"--timeout", workflow)), 1)
+        self.assertGreater(300, 120 + oracle.OUTER_SECONDS + oracle.OUTER_GRACE_SECONDS + 20)
 
 
 if __name__ == "__main__":

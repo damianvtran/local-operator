@@ -8,10 +8,14 @@ No raw pytestoutput artifacts/forwarding. Structuralallowlist rejectsunknown fie
 
 S2 originalM15summary inclGC preserved; independentGC callbacks recordthreadCPU/wall/generation/is-loop orUNKNOWN. Extra S3M15 NOTCOLLECTED/optional. ExpectedoriginalassertionFAILretained in finalFAIL; unknown/setup/hash/privacy/signal/bounds/lifecyclefailureSTOP. Sourceonlytests do not prove App behavior/650cause or distribution.
 
-Unchangedbounds: child12+3 waitallowance/4serial/outer60+5/1024MiB/setup120s/job5m/output256KiBcase. Triggeraudit/currentrefs/source/closure preflight plus BOTHindependentdeltaACKs and explicitONEoffhostGO required beforeownedbranchpublication. No localpytest/App/native/install/WT execution. No physicalallocation or productfix claim.
+Unchangedbounds: child20+3reap(derivedfromobserved10.3swholefirstcase+5sSlowListing+3sreap; conservativeceiling,notmeasuredlatency)/4serial/outer100+5(4x23=92)/1024MiB/setup120s/job5m/output256KiBcase. Triggeraudit/currentrefs/source/closure preflight plus BOTHindependentdeltaACKs and explicitONEoffhostGO required beforeownedbranchpublication. No localpytest/App/native/install/WT execution. No physicalallocation or productfix claim.
 
 ## First physical result and capacity recovery
 
 QA report s2s3-actual-39921114526.md: firstS2rc1/reapedtrue/noSignal/noTimeout/identitypass; exactly250records(244supplementalGC), missingmandatorysummary/phases/cleanup. Later3NOTDISPATCHED; no natural650cause/workerleak inferred. This head removes supplementalGLOBALgc.callbacks entirely; startup/offthreadGC NOTCOLLECTED. REQUIRED originalM15 scopedwindows.gc/threadsummary unchanged.
 
 Actualproducer uses sharedRecordBudget:250TOTAL includes234optional+14critical+scope+overflow;32k optionalbytes/128000bytes-summary/512bytes-othercritical/172000payloadbytesleaveboundedtrailerreserve insideprior180kproducer/200kJSON/256KiBcapture. No capraise. Out-of-scopeoldGCseamexcludedandexplicitlycounted; no globalcallbackregistered. Exhaustionneverraisesfromcollector; explicitboundedoverflow/dropped+criticaldrop countersFAILmeasurement/STOP. Scope/outcome mandatory; missingcleanupPROOF isnot observedunsettledwork nor unreapedchild. No originaltest/GCbehavior/threshold/calibration/productchange. Runtimeproof needsnewindependentdeltaACKs+managerallocation.
+
+## Budget delta
+
+Only numeric: child12→20s, outer60→100s (grace5, reap3 unchanged). job5min/setup120s/1024MiB/250records/256KiB/4cases/original CPU500,wall2000,noise,calibration and Native512/UI7.8 policies unchanged. No automatic further raise/retry.
