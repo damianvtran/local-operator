@@ -8,6 +8,8 @@ and GitLab MR, real ETag/304 behaviour) are recorded in the PR body instead.
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -130,6 +132,182 @@ async def test_github_fetch_maps_summary_comments_and_ci() -> None:
     assert ci["status"] == "failure" and ci["total"] == 2 and ci["passed"] == 1
     assert sorted(outcome.validators) == ["ci", "comments", "reviews", "summary"]
     assert outcome.validators["summary"]["etag"] == 'W/"sum-1"'
+
+
+# ---------------------------------------------------------------------------
+# CI ACCOUNTING. These four shapes are the ones that made a merge gate lie:
+# ``skipped`` and ``neutral`` were in _PASS_CONCLUSIONS, so a run with zero
+# successes published a pass count and (with nothing pending) the word
+# "success". Each shape below is a field-for-field subset of a LIVE GitHub
+# check-runs response; the run ids are named where the shape was measured.
+# ---------------------------------------------------------------------------
+
+
+def _github_ci(*runs: tuple[str, str], total: int | None = None) -> dict[str, Any]:
+    """The ``pieces["ci"]`` shape ``_fetch_ci`` stores, from (status, conclusion)."""
+    items = [
+        {"name": f"job-{i}", "status": run_status, "conclusion": conclusion}
+        for i, (run_status, conclusion) in enumerate(runs)
+    ]
+    return {
+        "ci": {
+            "fetched": True,
+            "runs": items,
+            "total": total if total is not None else len(items),
+            "url": None,
+        }
+    }
+
+
+def test_skipped_checks_are_never_counted_as_passes() -> None:
+    """(a) skipped-only -> not passed. Measured shape: radient-ml/agent-server
+    run 40002268730 (2 SKIPPED, 7 queued/in_progress, ZERO success) reported
+    "2 passed" from this exact payload."""
+    ci = github.ADAPTER.ci(
+        _github_ci(
+            ("completed", "skipped"),
+            ("completed", "skipped"),
+            ("queued", ""),
+            ("queued", ""),
+            ("queued", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+        )
+    )
+    assert ci["passed"] == 0, "a skipped check is not a pass"
+    assert ci["skipped"] == 2
+    assert ci["pending"] == 7
+    assert ci["status"] == "pending"
+    assert ci["status"] != "success"
+
+
+def test_queued_and_in_progress_checks_are_pending_not_passed() -> None:
+    """(b) queued/in_progress -> not passed, and the payload distinguishes the
+    states. The counters must PARTITION the run set (``skipped``/``neutral``
+    exist as their own keys); before the fix there was no ``skipped`` key at
+    all, which is how a skip could vanish into the pass count."""
+    ci = github.ADAPTER.ci(
+        _github_ci(
+            ("queued", ""),
+            ("queued", ""),
+            ("queued", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+            ("in_progress", ""),
+        )
+    )
+    assert ci["passed"] == 0
+    assert ci["pending"] == 7
+    assert ci["failed"] == 0
+    assert ci["status"] == "pending"
+    assert ci["skipped"] == 0 and ci["neutral"] == 0
+    assert (
+        ci["passed"] + ci["failed"] + ci["skipped"] + ci["neutral"] + ci["pending"] == ci["total"]
+    )
+
+
+def test_success_count_excludes_skips_in_a_mixed_run() -> None:
+    """(c) mixed success+skipped -> the pass count is successes only.
+
+    Measured shape: a 49-check run in damianvtran/local-operator with 5
+    success and 39 skipped, which used to report ``44 passed``.
+    """
+    ci = github.ADAPTER.ci(
+        _github_ci(
+            *([("completed", "success")] * 5),
+            *([("completed", "skipped")] * 39),
+            *([("queued", "")] * 5),
+        )
+    )
+    assert ci["passed"] == 5, "only successes are passes"
+    assert ci["skipped"] == 39
+    assert ci["pending"] == 5
+    assert ci["status"] == "pending"
+    assert (
+        ci["passed"] + ci["failed"] + ci["skipped"] + ci["neutral"] + ci["pending"] == ci["total"]
+    )
+
+    # The settled version of the same mix: no work in flight, yet not green.
+    settled = github.ADAPTER.ci(
+        _github_ci(
+            ("completed", "success"),
+            ("completed", "success"),
+            ("completed", "skipped"),
+        )
+    )
+    assert settled["passed"] == 2
+    assert settled["skipped"] == 1
+    assert settled["status"] == "skipped", "a settled non-pass is not `success`"
+
+
+def test_a_run_with_zero_successes_never_reaches_success() -> None:
+    """(d) zero successes can never buy the success headline.
+
+    The dangerous case is not the one with pending work (that already said
+    ``pending``): it is a FULLY SETTLED run where every check was skipped,
+    which used to publish ``status: success, passed: N`` with no success at
+    all. Neutral and unclassifiable conclusions get the same treatment, and
+    the one genuinely all-success run still passes.
+    """
+    all_skipped = github.ADAPTER.ci(_github_ci(("completed", "skipped"), ("completed", "skipped")))
+    assert all_skipped["passed"] == 0
+    assert all_skipped["status"] == "skipped"
+
+    all_neutral = github.ADAPTER.ci(_github_ci(("completed", "neutral"), ("completed", "neutral")))
+    assert all_neutral["passed"] == 0
+    assert all_neutral["status"] == "neutral"
+
+    # A conclusion this version does not classify is never a pass either.
+    unclassified = github.ADAPTER.ci(
+        _github_ci(("completed", "success"), ("completed", "cancelled"))
+    )
+    assert unclassified["passed"] == 1
+    assert unclassified["status"] == "unknown"
+
+    # The control: every check concluded success -> the only path to `success`.
+    green = github.ADAPTER.ci(_github_ci(("completed", "success"), ("completed", "success")))
+    assert green["passed"] == 2 and green["status"] == "success"
+
+
+def test_a_partial_check_run_read_is_never_a_pass() -> None:
+    """``total_count`` above the one page read means the unread tail could hold
+    the failure that decides the gate, so a partial read cannot be green."""
+    ci = github.ADAPTER.ci(_github_ci(*([("completed", "success")] * 100), total=150))
+    assert ci["passed"] == 100
+    assert ci["status"] == "unknown"
+
+
+def test_a_partial_read_stays_unknown_when_page_one_carries_a_skip() -> None:
+    """Review round 1, F1: ``skipped`` used to outrank the partial-read flag, so
+    a page that happened to carry one skip reported a settled non-pass word and
+    dropped the incomplete-read signal entirely -- permanent for any repo with
+    more than 100 checks."""
+    ci = github.ADAPTER.ci(
+        _github_ci(
+            ("completed", "skipped"),
+            *([("completed", "success")] * 99),
+            total=150,
+        )
+    )
+    assert ci["passed"] == 99 and ci["skipped"] == 1
+    assert ci["status"] == "unknown", "an incomplete read is not a settled state"
+
+
+def test_a_fetched_but_empty_set_with_a_positive_total_is_unknown() -> None:
+    """Review round 1, F3: ``runs: []`` with ``total_count: 9`` is an
+    inconsistent read, not the definitive \"no checks ran\" the ``none`` word
+    claims."""
+    ci = github.ADAPTER.ci({"ci": {"fetched": True, "runs": [], "total": 9, "url": None}})
+    assert ci["status"] == "unknown"
+    assert ci["total"] == 9
+    assert ci["passed"] is None, "no runs were read, so no counter may be invented"
+
+    # The control: a genuinely empty set still gets its own word.
+    empty = github.ADAPTER.ci({"ci": {"fetched": True, "runs": [], "total": 0, "url": None}})
+    assert empty["status"] == "none" and empty["total"] == 0
 
 
 @pytest.mark.asyncio
