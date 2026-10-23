@@ -1568,7 +1568,7 @@ def test_build_instruction_set_document_counts_characters_not_bytes() -> None:
 
 
 def test_build_instruction_set_document_refuses_an_over_long_body() -> None:
-    """10000 is the profile's cap and the hub's cap: the same number, once."""
+    """The profile's cap, refused locally; the hub states its own number."""
     with pytest.raises(InstructionSetError) as exc_info:
         build_instruction_set_document(
             name="Coder",
