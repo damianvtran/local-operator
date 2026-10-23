@@ -52,7 +52,7 @@ def check_sources(root, manifest):
 
 
 def tool(command,cwd,deadline):
-    status=dict(reason='LAUNCH_FAILURE',rc=None,launched=False,timeout=False,cap=False,reaped=False,settled=False,monitor_failed=False)
+    status=dict(reason='LAUNCH_FAILURE',rc=None,launched=False,timeout=False,cap=False,reaped=False,settled=False,monitor_failed=False,completed=False)
     known,pgid={},os.getpgrp()
     def observe():return owned(known,pgid)
     def kill():
@@ -85,6 +85,7 @@ def tool(command,cwd,deadline):
     finally:
         state=finish_owned(child,observe,kill,lambda:None)
         status.update(rc=state['rc'],reaped=state['reaped'],settled=state['owned_settled'])
+    status['completed']=completed
     status['reason']=('TIMEOUT' if status['timeout'] else 'OUTPUT_CAP' if status['cap'] else 'MONITOR_FAILURE' if not completed or status['monitor_failed'] else 'SETTLEMENT_FAILURE' if state['errors'] or not state['owned_settled'] else 'PASS' if state['rc']==0 else 'TOOL_FAILURE')
     return status
 
@@ -92,7 +93,8 @@ def tool(command,cwd,deadline):
 def run_tools(commands,work,deadline,proof,out):
     for i,cmd in enumerate(commands):
         proof['stage']='TOOLS'
-        proof['tools'][i]=tool([sys.executable,'-B','-m']+cmd,work,deadline)
+        label=proof['tools'][i]['tool']
+        proof['tools'][i]=dict(tool=label,**tool([sys.executable,'-B','-m']+cmd,work,deadline))
         (out/'format.json').write_text(json.dumps(proof)+'\n')
         if proof['tools'][i]['reason']!='PASS':raise ValueError('tool STOP')
 
@@ -132,7 +134,7 @@ def main():
 def entry():
     global PROOF
     out=Path(sys.argv[2]);out.mkdir(exist_ok=True)
-    PROOF=dict(qualified=False,stage='SOURCE_SETUP',tools=[dict(reason='UNRUN',rc=None) for _ in range(5)])
+    PROOF=dict(qualified=False,stage='SOURCE_SETUP',tools=[dict(tool=k,reason='UNRUN',rc=None) for k in ('isort-format', 'black-format', 'black-check', 'isort-check', 'flake8-check')])
     try:main()
     except Exception:pass
     finally:
