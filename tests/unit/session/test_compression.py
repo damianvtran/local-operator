@@ -373,6 +373,54 @@ def test_every_guard_skips_with_its_own_reason(
     assert compression.archive_path(directory) is None
 
 
+def test_mail_and_open_asks_do_not_stop_a_reversible_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unread mail and an answerable ask hold a DELETION, not a rewrite.
+
+    ``_keep_reason`` calls ``cleanup._transcript_write_guard``, not
+    ``cleanup._guard``, because compression restores the transcript on open and
+    never opens ``inbox.jsonl``/``asks.jsonl``. Pinned here as behaviour rather
+    than as a call: on the real store this pass ran over 15 sessions older than
+    the threshold and compressed NONE of them, all skipped on
+    "has unread spooled mail" — a guard for an irreversible removal applied to a
+    reversible one.
+    """
+    from local_operator.asks import store as ask_store
+    from local_operator.session.runtime.inbox import INBOX_NAME
+
+    config = _store(tmp_path)
+    directory = _session(config, "mailed01")
+    transcript = directory / compression.PLAIN_FILENAME
+    stamp = transcript.stat().st_mtime
+    # The inbox is part of the activity clock, so it is dated like the
+    # transcript it arrived with: this session is old, merely mailed.
+    inbox = directory / INBOX_NAME
+    inbox.write_text('{"from": "peer"}\n', encoding="utf-8")
+    os.utime(inbox, (stamp, stamp))
+    assert ask_store.append_event(
+        directory,
+        {
+            "ask_id": "ask-1",
+            "kind": ask_store.EVENT_QUEUED,
+            "at": ask_store.now_ms(),
+            "expires_at": ask_store.now_ms() + 600_000,
+            "timeout_s": 600,
+        },
+    )
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+
+    result = compression.run_compression(config, _policy())
+
+    assert [row.session for row in result.compressed] == ["mailed01"], result.skipped_rows
+    assert compression.archive_path(directory) is not None
+    assert not transcript.exists()
+    # And the deletion guard still refuses the very same directory, which is
+    # the point of the split: two questions, two answers.
+    assert cleanup._guard(directory, config, time.time()) == "has unread spooled mail"
+
+
 def test_the_pass_fails_closed_when_a_store_wide_guard_cannot_be_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -901,9 +949,7 @@ def _journal(turns: int = 6) -> bytes:
     # byte-needle readers (``find_row_for_custom_type`` and friends) search for
     # ``"custom_type":"x"`` with no space, so a spaced fixture would exercise the
     # parse-walk fallback instead of the fast path this matrix is comparing.
-    return b"".join(
-        json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in rows
-    )
+    return b"".join(json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in rows)
 
 
 def _twin_store(tmp_path: Path, name: str = "twin") -> tuple[Path, Path, Path]:
@@ -1008,7 +1054,11 @@ async def test_a_transcript_on_an_archive_restores_appends_and_keeps_every_row(
 def test_listing_order_and_previews_are_identical_before_and_after_a_pass(
     tmp_path: Path,
 ) -> None:
-    from local_operator.resume import recent_session_rows, recent_sessions, session_preview
+    from local_operator.resume import (
+        recent_session_rows,
+        recent_sessions,
+        session_preview,
+    )
 
     config = _store(tmp_path, name="listing")
     one = _session(config, "list0001", body=_journal(), age_days=40)
@@ -1148,9 +1198,7 @@ def test_a_fork_of_a_compressed_parent(tmp_path: Path) -> None:
     finally:
         opened.close()
 
-    filtered = fork_module.fork_session(
-        config, "arch0001", exclude_entry_ids=frozenset({"row003"})
-    )
+    filtered = fork_module.fork_session(config, "arch0001", exclude_entry_ids=frozenset({"row003"}))
     filtered_dir = sessions / filtered
     assert compression.archive_path(filtered_dir) is None
     body = (filtered_dir / compression.PLAIN_FILENAME).read_bytes()

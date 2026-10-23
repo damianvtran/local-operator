@@ -1508,10 +1508,19 @@ def _keep_reason(
     store-wide sets (``parents``, ``projects``) are computed once per pass; an
     unreadable one stops the whole pass in :func:`run_compression`.
 
-    ``cleanup._guard`` is reused rather than copied so operator holds, live
-    claims, leases, armed wakes and monitors, unread spooled mail and open asks
-    mean here exactly what they mean to the cleanup policy — one definition, and
-    a new guard added there protects this pass too.
+    ``cleanup._transcript_write_guard`` is reused rather than copied, so an
+    operator hold, a live claim, a lease, an armed wake and a monitor mean here
+    exactly what they mean to the cleanup policy — one definition, and a new
+    hazard added there protects this pass too.
+
+    The CONTENT probes are deliberately NOT reused. ``cleanup._guard`` also
+    refuses on unread spooled mail and on an open ask, and it must: deleting the
+    directory destroys a message the user never read or a question they can
+    still answer. Compression is reversible (a verified restore happens on open)
+    and never touches ``inbox.jsonl``/``asks.jsonl``, so those two are not
+    hazards to a rewrite — asking them here made the pass skip every old
+    transcript that had ever exchanged mail, which on a real store meant none of
+    the operator's sessions older than the threshold were compressed at all.
     """
     name = directory.name
     if live_dir is not None:
@@ -1527,7 +1536,7 @@ def _keep_reason(
     from local_operator.session import cleanup, delegated_retention
 
     try:
-        guard = cleanup._guard(directory, config_dir, now)
+        guard = cleanup._transcript_write_guard(directory, config_dir, now)
     except Exception as exc:  # noqa: BLE001 — a guard that cannot answer keeps
         return f"guard failed: {type(exc).__name__}"
     if guard is not None:
@@ -1570,7 +1579,9 @@ def run_compression(
     directory): the session is not ``live_dir``; its activity clock exists and is
     older than ``policy.after_days``; its id is not in the roster of a live or
     recent session (transitively); it is not linked to an open project; and
-    ``cleanup._guard`` raises no objection. Then, per candidate, an unpushed or
+    ``cleanup._transcript_write_guard`` raises no objection (the deletion-only
+    content probes are deliberately excluded — see ``_keep_reason``). Then, per
+    candidate, an unpushed or
     uncommitted scratchpad repo keeps it, and a held writer lock skips it as
     "session in use".
 
