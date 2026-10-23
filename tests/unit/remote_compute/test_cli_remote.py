@@ -589,7 +589,8 @@ def test_a_name_the_server_would_refuse_is_refused_before_the_request(
     """
     assert _run(BASE + HOSTING + ["--name", given, "do it"], monkeypatch) == 1
     err = capsys.readouterr().err
-    assert err.startswith("remote compute failed: a run name must be a single line")
+    assert err.startswith("remote compute failed: a run name must be non-blank")
+    assert "one line with no control" in err
     assert "at most 100 bytes of UTF-8" in err
     assert origin.requests == []
 
