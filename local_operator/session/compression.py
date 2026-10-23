@@ -473,7 +473,12 @@ def read_head(directory: Path, limit: int) -> bytes:
     budget = max(0, int(limit))
     if budget == 0:
         return b""
-    reader, codec = _open_reader(Path(directory))
+    try:
+        reader, codec = _open_reader(Path(directory))
+    except (OSError, ValueError):
+        # Same contract as ``read_tail``: a plain journal that cannot be opened
+        # reads as empty; an archive's ArchiveError propagates.
+        return b""
     try:
         with reader:
             try:
@@ -504,7 +509,14 @@ def read_tail(directory: Path, limit: int) -> bytes:
     budget = max(0, int(limit))
     if budget == 0:
         return b""
-    reader, codec = _open_reader(Path(directory))
+    try:
+        reader, codec = _open_reader(Path(directory))
+    except (OSError, ValueError):
+        # A PLAIN journal that cannot be opened — absent, a directory, a
+        # permission change — reads as empty here, which is what an unreadable
+        # `read` always answered. An archive's own failures are ArchiveError
+        # (not OSError) and deliberately propagate: they are never "empty".
+        return b""
     tail = bytearray()
     try:
         with reader:
@@ -876,7 +888,17 @@ def _archive_writer(path: Path, codec: str) -> Iterator[Any]:
     if codec == "zstd":
         if _zstd is None:  # pragma: no cover - available_codec prevents this
             raise ArchiveUnavailable("zstd is not available in this Python build")
-        with _zstd.ZstdFile(os.fspath(path), "wb", level=ZSTD_LEVEL) as handle:
+        # A FRAME CHECKSUM, not just the level: gzip has always carried a CRC32
+        # over the payload, so a flipped byte in a ``.gz`` archive fails at decode
+        # time. A zstd frame without ``checksum_flag`` is happy to hand back
+        # corrupted bytes, which would make the gzip half of this codec pair the
+        # only half that detects damage. ``level`` and ``options`` are mutually
+        # exclusive on ``ZstdFile``, so the level rides inside the options dict.
+        options = {
+            _zstd.CompressionParameter.compression_level: ZSTD_LEVEL,
+            _zstd.CompressionParameter.checksum_flag: 1,
+        }
+        with _zstd.ZstdFile(os.fspath(path), "wb", options=options) as handle:
             yield handle
         return
     with gzip.GzipFile(os.fspath(path), "wb", compresslevel=GZIP_LEVEL) as handle:
@@ -1344,12 +1366,19 @@ def _compress_session_locked(directory: Path, codec: str, started: float) -> Out
         logger.error("transcript compression: cannot publish %s: %s", archive.name, exc)
         _unlink_file(tmp)
         return done("failed", "cannot publish the archive")
-    if _stat_sig(source) != sig0:
+    sig_after = _stat_sig(source)
+    if sig_after is not None and sig_after != sig0:
         # A writer restored or appended to the plain file between the publish and
         # this stat. The archive is NOT the current content any more, so it must
         # not be left as a stale second form: remove it and keep the source.
         _unlink_file(archive)
         return done("skipped", "the transcript changed while it was being compressed")
+    # ``sig_after is None`` is the source having VANISHED, not changed — and the
+    # two must not share a branch. Something removed the plain file after the
+    # publish (a restore that reversed our replace, a manual cleanup, a sweep),
+    # so the archive just published is the ONLY surviving copy of the
+    # conversation. Removing it here would lose the session outright; only a
+    # source that is present AND different may retire its archive.
     _unlink_file(source)
     _fsync_dir(directory)
     _after_archive(directory, archive, codec)
@@ -1466,6 +1495,7 @@ def run_compression(
     actor: str = "startup",
     budget_s: float | None = None,
     should_stop: Callable[[], bool] | None = None,
+    delegated_window_hours: float | None = None,
 ) -> CompressionResult:
     """Compress every eligible transcript under ``config_dir/sessions``.
 
@@ -1509,7 +1539,19 @@ def run_compression(
     from local_operator.session import delegated_retention, retention
 
     try:
-        parents = delegated_retention.active_parent_sessions(config_dir, moment)
+        # The SAME window the delegated reap pass uses, when the caller knows it:
+        # a parent kept alive by a widened ``cleanup.delegated.max_age_hours``
+        # could still resume its children, so compressing them under a narrower
+        # module default would protect the parent and strand the child.
+        parents = delegated_retention.active_parent_sessions(
+            config_dir,
+            moment,
+            **(
+                {"window_hours": float(delegated_window_hours)}
+                if delegated_window_hours is not None
+                else {}
+            ),
+        )
         projects = delegated_retention.open_project_sessions(config_dir)
     except Exception as exc:  # noqa: BLE001 — cannot read the keep rules: keep everything
         logger.warning("transcript compression: cannot read the store's keep rules: %s", exc)
@@ -1519,9 +1561,10 @@ def run_compression(
         return result
 
     try:
-        entries = [
-            entry for entry in os.scandir(sessions_dir) if entry.is_dir(follow_symlinks=False)
-        ]
+        # A context manager so the scandir descriptor is released at the end of
+        # the walk rather than whenever CPython finalises the exhausted iterator.
+        with os.scandir(sessions_dir) as scan:
+            entries = [entry for entry in scan if entry.is_dir(follow_symlinks=False)]
     except OSError as exc:
         logger.warning("transcript compression: cannot scan %s: %s", sessions_dir, exc)
         result.skipped = "cannot scan the store"
@@ -1650,6 +1693,13 @@ def compress_from_config(
         policy = policy_from_config(config_manager)
         if not policy.enabled and not dry_run:
             return CompressionResult(skipped="disabled")
+        # The keep rule must agree with the delegated reap pass about which
+        # parents are still active, so read the CONFIGURED window through that
+        # pass's own reader (which clamps a hand-edited value) rather than the
+        # module constant.
+        from local_operator.session.cleanup import policy_from_config as cleanup_policy
+
+        delegated_hours = cleanup_policy(config_manager).delegated_max_age_hours
         result = run_compression(
             config_dir,
             policy,
@@ -1659,6 +1709,7 @@ def compress_from_config(
             actor=actor,
             budget_s=budget_s,
             should_stop=should_stop,
+            delegated_window_hours=delegated_hours,
         )
     except Exception as exc:  # noqa: BLE001 — see the docstring
         logger.warning("transcript compression: pass failed: %s", exc, exc_info=True)
