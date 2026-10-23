@@ -34,6 +34,19 @@ logger = logging.getLogger(__name__)
 _PAGE_COUNT_CACHE: dict[str, int | None] = {}
 
 
+def known_pdf_page_count(digest: str | None) -> tuple[bool, int | None]:
+    """``(cached, count)`` for ``digest`` — lets a caller skip decoding bytes.
+
+    A token estimate that already knows the page count must not base64-decode
+    a 20 MB PDF just to hand ``pdf_page_count`` bytes it will not read: the
+    digest-keyed answer is the whole reason the cache exists (agent review
+    round 3, minor 1).
+    """
+    if digest is None or digest not in _PAGE_COUNT_CACHE:
+        return False, None
+    return True, _PAGE_COUNT_CACHE[digest]
+
+
 def pdf_page_count(raw: bytes, digest: str | None = None) -> int | None:
     """Pages in ``raw``, or ``None`` when the document cannot be parsed.
 

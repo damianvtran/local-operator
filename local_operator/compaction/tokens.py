@@ -113,7 +113,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from local_operator.harness.pdf_pages import pdf_page_count
+from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
 from local_operator.harness.types import (
     AttachmentContent,
     DocumentContent,
@@ -176,14 +176,20 @@ def _document_token_estimate(block: DocumentContent) -> int:
     THIS function or the upper bound stops being an upper bound.
     """
     if block.mime_type == "application/pdf" and block.data:
-        try:
-            raw = base64.b64decode(block.data, validate=False)
-        except (ValueError, TypeError):
-            raw = None
-        if raw is not None:
-            pages = pdf_page_count(raw, block.digest)
-            if pages is not None:
-                return min(pages * PDF_PAGE_TOKEN_ESTIMATE, MAX_DOCUMENT_TOKEN_ESTIMATE)
+        # Cached page count first: the digest-keyed answer is enough, and
+        # decoding 20 MB of base64 only to hand the parser bytes it has
+        # already read cost ~30 ms per turn on the pre-gate path (round-3
+        # minor 1).
+        cached, pages = known_pdf_page_count(block.digest)
+        if not cached:
+            try:
+                raw = base64.b64decode(block.data, validate=False)
+            except (ValueError, TypeError):
+                raw = None
+            if raw is not None:
+                pages = pdf_page_count(raw, block.digest)
+        if pages is not None:
+            return min(pages * PDF_PAGE_TOKEN_ESTIMATE, MAX_DOCUMENT_TOKEN_ESTIMATE)
     return min(len(block.data), MAX_DOCUMENT_TOKEN_ESTIMATE)
 
 
@@ -880,7 +886,7 @@ def estimate_messages_tokens(messages: Sequence[Message]) -> int:
     return sum(estimate_tokens(m) for m in messages)
 
 
-def estimate_wire_bytes(messages: Sequence[Message]) -> int:
+def estimate_wire_bytes(messages: Sequence[Message], *, utf8_text: bool = False) -> int:
     """Serialized request size in BYTES — deliberately NOT a token count.
 
     A third ruler, answering the one question neither token estimator asks:
@@ -926,7 +932,9 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
       measured mean of -2.42% and a worst case of -17.39% across 4,686 real
       sessions. Two known causes, both deliberate: message text is counted as
       characters rather than UTF-8 bytes, and the request's own JSON envelope
-      (roles, keys, block wrappers) is not modelled at all.
+      (roles, keys, block wrappers) is not modelled at all. ``utf8_text=True``
+      closes the text half for callers that must not under-count (the
+      document budget does; its 5% pad then covers only the envelope).
 
     That residual is absorbed by the budget's headroom rather than modelled —
     24 MB against a 32 MB cap is a ~28% margin, several times the worst
@@ -947,7 +955,13 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
     for message in messages:
         for block in message.content:
             if isinstance(block, TextContent):
-                total += len(block.text)
+                # The default keeps the long-standing character ruler every
+                # calibrated caller was measured against (documented under-
+                # count below). Callers that compare against a PROVIDER's byte
+                # ceiling must not under-count: ``utf8_text`` sizes the JSON
+                # string exactly — UTF-8 plus escape expansion — which is the
+                # same fast path ``_string_bytes`` already provides.
+                total += _string_bytes(block.text) if utf8_text else len(block.text)
             elif isinstance(block, AttachmentContent):
                 # Never serialized to a provider, so it contributes nothing to
                 # the wire — the same rule as `_compute_tokens` above. Without
