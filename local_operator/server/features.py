@@ -368,6 +368,14 @@ def static_feature_flags() -> dict[str, Any]:
         # live body read, never a cached one. The server dark gate still answers
         # 503, which the status route renders as a state.
         "team_bridge_conversations": 1,
+        # Optional captured DATA-owner receipts on conversation create/send
+        # (including retry), join/read+notify/consent/admit, archive/unarchive,
+        # member add/remove and leave. New renderers require this capability AND
+        # supply expected_account_id + explicit target tenant_id on every write.
+        # Legacy omission remains compatible. Threads/reactions are not present
+        # in this runtime: feature branches must adopt the same guard before
+        # advertising their mutations alongside this capability.
+        "team_bridge_conversation_owner_guard": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
