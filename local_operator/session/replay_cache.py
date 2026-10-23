@@ -74,11 +74,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from local_operator.session.attachments import store_for_transcript_dir
+from local_operator.session import compression
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import (
-    TRANSCRIPT_FILENAME,
     read_replay_suffix,
     replay_entries,
     usages_since_newest_shrink,
@@ -240,7 +240,10 @@ def replay_key(
             return (value,)
         return tuple(value or ())
 
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    # The PHYSICAL source (see ``page_cache.page_key``): an archive's own
+    # inode/size/mtime is a sound cache identity, and it is the only one a
+    # compressed session has.
+    path, _codec = compression.transcript_source(Path(directory))
     try:
         stat = path.stat()
     except OSError:

@@ -89,11 +89,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from local_operator.session import compression
 from local_operator.session.retention import (
     _SIDECAR_NAMES,
     LIVE_MARKER_NAME,
     SESSIONS_DIRNAME,
-    TRANSCRIPT_FILENAME,
     _is_claimed,
     _process_alive,
     session_activity,
@@ -1296,7 +1296,18 @@ def remove_fresh_session_dir(
     # even a zero-byte one another writer created, means the directory is no
     # longer the one this request left empty.
     try:
-        if (resolved / TRANSCRIPT_FILENAME).exists():
+        # ``transcript_state``, not a stat of the plain name: an archived
+        # transcript is still a transcript, AND an unreadable directory is not
+        # proof of absence — this is the identity proof the whole removal rests
+        # on, and either misreading lets a real conversation be deleted.
+        state = compression.transcript_state(resolved)
+        if state == compression.TRANSCRIPT_UNREADABLE:
+            logger.warning(
+                "session cleanup: REFUSED to remove fresh %s (its contents cannot be read)",
+                resolved.name,
+            )
+            return False
+        if state == compression.TRANSCRIPT_PRESENT:
             logger.warning(
                 "session cleanup: REFUSED to remove fresh %s (a transcript exists)",
                 resolved.name,
@@ -2507,8 +2518,15 @@ def _is_deletable_dir(directory: Path) -> bool:
 
 
 def _has_transcript(directory: Path) -> bool:
+    """Whether the session holds a NON-EMPTY transcript, in any physical form.
+
+    The physical source's size, so a compressed session still answers "yes, and
+    it has content": the archive is the conversation, and stat-ing the absent
+    plain name would report an empty session in the census.
+    """
+    source, _codec = compression.transcript_source(directory)
     try:
-        return (directory / TRANSCRIPT_FILENAME).stat().st_size > 0
+        return source.stat().st_size > 0
     except OSError:
         return False
 
@@ -2547,8 +2565,13 @@ def measure_session_dir(
         "contents_complete": True,
         "skipped_entries": 0,
     }
+    transcript_file, _codec = compression.transcript_source(directory)
     try:
-        contents["transcript_bytes"] = (directory / TRANSCRIPT_FILENAME).stat().st_size
+        # The PHYSICAL bytes the conversation occupies now (the journal, or the
+        # archive that replaced it). A removal receipt states what is on disk, and
+        # the census compares like with like across passes; a compressed session
+        # reporting 0 would read as a 300 MB content loss.
+        contents["transcript_bytes"] = transcript_file.stat().st_size
     except OSError:
         pass
     total = 0

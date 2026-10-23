@@ -16763,7 +16763,6 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     ``resume.session_origin``; the name follows it.
     """
     from local_operator.resume import (
-        TRANSCRIPT_NAME,
         is_user_session,
         session_origin,
         workstream_opened_by,
@@ -16801,7 +16800,13 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     extras["primary"] = assignment["primary"]
 
     try:
-        transcript = directory / TRANSCRIPT_NAME
+        # The PHYSICAL file, not the plain name: a compressed session's bytes are
+        # in the archive, and reporting a path that does not exist to a caller
+        # asking where the conversation lives is the "empty session" reading this
+        # whole module's resolver exists to prevent.
+        from local_operator.session import compression
+
+        transcript, _codec = compression.transcript_source(directory)
         if transcript.is_file():
             extras["transcript_path"] = str(transcript)
     except OSError:
@@ -17740,13 +17745,18 @@ def _peek_head(directory: Path, *, need: int) -> _PeekWindow:
     ``has_newer`` the way the anchored page's lookahead answers it.
     """
 
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
         _iter_complete_lines_forward,
     )
 
-    path = directory / TRANSCRIPT_NAME
+    # A seekable, whole transcript whichever form it is on disk in: the plain
+    # journal, or the archive decompressed into compression's bounded cache. A
+    # peek is a READ, so it must never be answered from the plain name alone.
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
     entries: list[TranscriptEntry] = []
     scanned = 0
     capped = False
@@ -17837,13 +17847,16 @@ def _peek_search(
     read (a compaction between the two reads, reported as the miss it is).
     """
 
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
         _iter_complete_lines_backward,
     )
 
-    path = directory / TRANSCRIPT_NAME
+    # Same resolution as ``_peek_head``: the seekable source, archive included.
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
     scanned = 0
     hit_id = ""
     budget_stop = False
@@ -18165,7 +18178,7 @@ async def _sessions_peek(
     session_id = target.session_id
     directory = config_dir() / "sessions" / session_id
 
-    from local_operator.resume import TRANSCRIPT_NAME, session_name
+    from local_operator.resume import session_name
 
     def _peek_name() -> str:
         """The header's name: the live record's, else the stored title, else the id."""
@@ -18247,9 +18260,11 @@ async def _sessions_peek(
         return _error(
             tool_call_id,
             "sessions",
+            # Naming the DIRECTORY, not the plain file: this error now means
+            # "neither form exists", and printing a path that was legitimately
+            # absent would keep asserting the old, plain-only layout.
             f"session {session_id!r} has no transcript to peek at "
-            f"({directory / TRANSCRIPT_NAME}) — it may not have written a first "
-            "turn yet.",
+            f"({directory}) — it may not have written a first turn yet.",
         )
     text, spill = spill_truncate(text, "sessions", context)
     if spill:

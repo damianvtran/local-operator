@@ -194,13 +194,6 @@ ATTEMPT_REASONS = frozenset({"wedged", "failed", "raised"})
 _ENV_DISABLE = "LOCAL_OPERATOR_NO_AIDA"
 _FALSY = {"0", "false", "no", "off", ""}
 
-#: The transcript file name, spelled locally for the same reason ``spooled``
-#: spells its spool fields locally: the ghost rule ("a record whose target
-#: session is gone") must not import ``local_operator.resume`` onto the
-#: supervisor's resident set.
-_TRANSCRIPT_NAME = "transcript.jsonl"
-
-
 @dataclass(frozen=True)
 class TriggerInstance:
     """One live condition, as a source reports it.
@@ -1129,6 +1122,8 @@ def reconcile(config_dir: Path, pending: dict[str, dict[str, Any]]) -> None:
       transcript is the existence test, matching ``supervisor._session_exists``
       (a directory without a transcript is not a session anything can resume).
     """
+    from local_operator.session import compression
+
     moment = _now_ms()
     for session_id, record in list(pending.items()):
         if not isinstance(record, dict):
@@ -1137,8 +1132,13 @@ def reconcile(config_dir: Path, pending: dict[str, dict[str, Any]]) -> None:
         updated = record.get("updated_at_ms")
         updated_ms = updated if isinstance(updated, int) and not isinstance(updated, bool) else 0
         expired = updated_ms > 0 and (moment - updated_ms) / 1000.0 > RECORD_TTL_S
-        transcript = Path(config_dir) / "sessions" / session_id / _TRANSCRIPT_NAME
-        if expired or not transcript.is_file():
+        # ``has_transcript``, not a stat of the plain name: an archive is a
+        # transcript too, and a ghost is a session with NEITHER form. The import
+        # is function-local and cheap — ``compression`` is stdlib-only at module
+        # level by its own design, which is why this module may take it without
+        # pulling ``resume`` onto the supervisor's resident set.
+        session_dir = Path(config_dir) / "sessions" / session_id
+        if expired or not compression.has_transcript(session_dir):
             try:
                 pending_path(config_dir, session_id).unlink()
             except FileNotFoundError:

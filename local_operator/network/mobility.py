@@ -2680,7 +2680,12 @@ def settle_promoted_handoff(root: Path, session_id: str) -> bool:
     if str(entry.get("phase") or "") != "handing-off":
         return False
     target = Path(root) / "sessions" / session_id
-    if not (target / "transcript.jsonl").is_file():
+    # ANY physical form: the destination HAS arrived when its transcript exists,
+    # and a compressed copy is a arrived conversation, not a missing one. The
+    # plain name would leave the finished handoff entry in flight forever.
+    from local_operator.session import compression
+
+    if not compression.has_transcript(target):
         return False
     from local_operator.network import sync as sync_mod
 
