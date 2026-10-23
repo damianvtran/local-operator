@@ -291,6 +291,34 @@ async def test_oversized_instructions_are_refused(context) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_long_brief_is_kept_whole_up_to_ten_thousand_chars(context, registry) -> None:
+    """The cap admits a 9,500-char role brief and refuses 10,001.
+
+    Literal sizes on purpose: a test written against the constant passes at any
+    value, so it would not notice the cap dropping back under the briefs real
+    prompts carry (a chief-of-staff role measures 16,496 characters, and at
+    8,000 more than half of it was cut before the session ever saw it).
+    """
+    brief = "x" * 9_500
+    body = await call(
+        context, op="create", name="chief-of-staff", description="d", instructions=brief
+    )
+    assert "created role 'chief-of-staff'" in body
+
+    created = registry.get_agent_by_name("chief-of-staff")
+    assert created is not None
+    assert len(registry.get_agent_system_prompt(created.id)) == 9_500
+    profile = resolve_profile("chief-of-staff", registry=registry)
+    assert profile is not None and len(profile.instructions) == 9_500
+
+    refused = await call(
+        context, op="create", name="over-long", description="d", instructions="y" * 10_001
+    )
+    assert "instructions exceed 10000 chars" in refused
+    assert registry.get_agent_by_name("over-long") is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("op", ["show", "install", "create", "update"])
 async def test_ops_that_need_a_name_say_so(context, op: str) -> None:
     assert "needs 'name'" in await call(context, op=op)
