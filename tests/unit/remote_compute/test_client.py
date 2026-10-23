@@ -1067,12 +1067,35 @@ def test_every_white_space_code_point_the_server_trims_is_trimmed_here(
         RunSpec(**_fields(name=whitespace * 5 + "a" * (MAX_RUN_NAME_BYTES + 1)))
 
 
-@pytest.mark.parametrize("given", ["a\nb", "a\x00b", "a\x1cb", "a\x7fb"])
+@pytest.mark.parametrize(
+    "given",
+    [
+        "a\nb",
+        "a\x00b",
+        "a\x1cb",
+        "a\x7fb",
+        # Round-2 MINOR-1: separators break the row like \n does, and the
+        # bidi controls let one label render as another.
+        "a\u2028b",
+        "a\u2029b",
+        "a\u202eb",
+        "a\u202ab",
+        "a\u2066b",
+        "a\u2069b",
+    ],
+)
 def test_a_given_name_must_be_one_line(given: str) -> None:
     """Q3 — a run name is a single-line label, so an interior control character
     is refused rather than shipped to every surface that lists runs."""
     with pytest.raises(ValueError, match="a single line"):
         RunSpec(**_fields(name=given))
+
+
+@pytest.mark.parametrize("given", ["\U0001f468\u200d\U0001f4bb deploy", "caf\u00e9 \u00b7 review"])
+def test_a_given_name_keeps_ordinary_format_characters(given: str) -> None:
+    """Only the bidi controls among ``Cf`` are refused: a ZWJ emoji sequence or
+    ordinary punctuation is a legitimate label and is sent as typed."""
+    assert RunSpec(**_fields(name=given)).to_body()["name"] == given
 
 
 def test_a_given_name_may_be_padded_with_the_whitespace_the_server_trims() -> None:
