@@ -186,6 +186,66 @@ describe("AsksSheet", () => {
 		expect(screen.queryByTestId("ask-sheet-empty")).toBeNull();
 	});
 
+	it("does not repeat a dismissal once its own row arrives", async () => {
+		/* SA-D8, design D1 = UX U2. Before this PR the row LEFT the aggregate, so
+		   the receipt was the only trace. Now a pre-deadline dismissal keeps its
+		   row, and the card states the same catalogue sentence — so the sheet
+		   said one fact twice, once unattributed above a different card and once
+		   on the row it belonged to. The row is the statement; the receipt covers
+		   only the gap until the read that carries it lands. */
+		const { sendCommand } = await import("./api");
+		let current = [ask({ ask_id: "a1" }), ask({ ask_id: "a2" })];
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ asks: current }));
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+			current = current.map((row) =>
+				row.ask_id === "a1"
+					? {
+							...row,
+							status: "dismissed",
+							dismissed_at: Date.now(),
+							dismissed_reason: "moot",
+						}
+					: row,
+			);
+			return { ok: true, detail: "dismissed" };
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
+		fireEvent.click(screen.getAllByRole("button", { name: /^dismiss…$/ })[0]);
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		/* The settled row is back, saying why … */
+		await waitFor(() => expect(screen.getByText("Dismissed — no longer needed")).toBeTruthy());
+		/* … and the receipt is gone, so it says it once. */
+		expect(screen.queryByTestId("ask-receipt")).toBeNull();
+		expect(screen.getAllByTestId("ask-card").length).toBe(2);
+	});
+
+	it("keeps a lapsed dismissal's receipt while its id is still listed", async () => {
+		/* The LAPSED door is the exception: a dismissal at or after the deadline
+		   still removes the row (case 2 of §17), so no row ever arrives and the
+		   receipt is that door's only acknowledgement. It therefore stays even if
+		   a read still carries the id — the race this rule must not turn into a
+		   silent dismissal. */
+		const { sendCommand } = await import("./api");
+		let current = [ask({ ask_id: "a1", status: "timed_out" })];
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ asks: current }));
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+			ok: true,
+			detail: "dismissed",
+		}));
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		/* A lapsed card keeps its one door INSIDE a closed Disclosure (D12), so the
+		   tap is two: expand, then dismiss. */
+		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		await waitFor(() => expect(screen.getByTestId("ask-receipt")).toBeTruthy());
+		expect(screen.getByTestId("ask-receipt").textContent).toBe("Dismissed — no reply sent");
+		/* The read still lists the id: the receipt must survive it. */
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(1));
+		expect(screen.getByTestId("ask-receipt")).toBeTruthy();
+	});
+
 	it("retires the receipt when the operator's next act is an answer", async () => {
 		/* M1(b): with the receipt kept only by "not empty", answering a second ask
 		   left "Dismissed — no longer needed" over an answer — the receipt outliving

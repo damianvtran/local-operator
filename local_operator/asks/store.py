@@ -940,7 +940,14 @@ def dismissed_hidden(
         return False
     if relay:
         return True
-    if dismissed_at is None:
+    # FALSY IS ABSENT, and the two readers must agree on that (review round 1,
+    # m3). ``fold`` records ``int(at or 0)``, so a damaged or hand-written event
+    # yields 0; the projection read that 0 as an early stamp and SHOWED the row,
+    # while ``pending_row`` omits a falsy stamp from the index row and the index
+    # reader HID it. One row, two answers — the drift this predicate exists to
+    # stop. Absence and zero are the same statement here: "this row cannot prove
+    # it was dismissed before the deadline".
+    if not dismissed_at:
         return True
     try:
         stamp = int(dismissed_at)

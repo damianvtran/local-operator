@@ -27647,11 +27647,21 @@ class OperatorApp(App[None]):
             self._paint_sidebar_asks()
             return
         self._ask_rows = list(rows)
-        # A session-scope `x` holds its row in flight until the frame drops it
-        # (`_dismiss_ask`); THIS is that frame. Only those marks are swept here —
-        # never a fleet op's, which `_fleet_ask_worker` ends itself (M1).
-        present_ids = {row.ask_id for row in self._ask_rows}
-        for ask_id in [i for i in self._ask_dismiss_in_flight if i not in present_ids]:
+        # A session-scope `x` holds its row in flight until the row stops being a
+        # thing the gesture can act on: ABSENT from this frame (the old sweep —
+        # the row left the queue), or PRESENT and NO LONGER ANSWERABLE (SA-D8).
+        # The second arm is load-bearing now: a dismissal taken before the ask's
+        # deadline KEEPS its row as a settled receipt (§17), so waiting for the
+        # frame to drop it means the `…` mark never goes away — a busy glyph on
+        # a row that is finished, and one id held for the life of the session.
+        # A row that cannot take the gesture has nothing left for the mark to
+        # protect; a repeat tap is the queue's own refusal either way.
+        # Only these marks are swept here — never a fleet op's, which
+        # `_fleet_ask_worker` ends itself (M1).
+        present = {row.ask_id: row for row in self._ask_rows}
+        for ask_id in [
+            i for i in self._ask_dismiss_in_flight if i not in present or not present[i].answerable
+        ]:
             self._ask_dismiss_in_flight.discard(ask_id)
             self._mark_ask_in_flight(ask_id, False)
         self._refresh_ask_secret_notice()
@@ -29317,8 +29327,9 @@ class OperatorApp(App[None]):
         """The one place a refused ask op becomes words on screen.
 
         ``clear_in_flight`` ends a gesture's in-flight mark on a REFUSAL only: an
-        accepted op keeps it until the snapshot that drops the row, so the row
-        never flickers back to live between the reply and the frame.
+        accepted op keeps it until the row settles or leaves (``_sync_ask_surface``
+        sweeps both), so the row never flickers back to live between the reply and
+        the frame.
 
         ``notice`` is the ACCEPTED op's own receipt (UX round 1, U2), reported in
         the same slot: an ask op that worked used to say nothing at all.
@@ -29393,9 +29404,11 @@ class OperatorApp(App[None]):
             return
         # Acknowledge `x` AT ONCE (#2481 round 1): the row is marked in flight —
         # the same `…` mark and second-press guard a fleet answer uses — until the
-        # frame that drops it lands, or a refusal clears it. Before this, a
+        # frame that SETTLES it lands, or a refusal clears it. Before this, a
         # viewer's dismiss crossed the wire with nothing on screen saying the key
-        # had landed. Snapshots clear it when the row leaves (`_sync_ask_surface`).
+        # had landed. Snapshots clear it when the row leaves OR stops being
+        # answerable (`_sync_ask_surface`); since SA-D8 a dismissed row stays, so
+        # only the second arm can end this mark.
         self._ask_dismiss_in_flight.add(ask_id)
         self._mark_ask_in_flight(ask_id, True)
         outcome: Any = reader(ask_id, by="terminal", reason=reason)

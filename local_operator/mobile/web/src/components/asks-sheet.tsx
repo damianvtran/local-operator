@@ -192,6 +192,24 @@ export function AsksSheet({
 	/* THE HEAD FIRST, then the wire's own order (`orderedForDisplay`) — the
 	   order the minimized chip names (UX round 1, U8). */
 	const listed = useMemo(() => orderedForDisplay(rows), [rows]);
+	/* THE RECEIPT IS THE INSTANT ECHO, AND ONLY WHILE ITS OWN ROW IS MISSING
+	   (SA-D8, design D1 = UX U2). Since §17 a dismissal taken before the ask's
+	   deadline KEEPS the row as a settled receipt, so from the first read after
+	   the tap the sheet would state one fact twice: this unattributed line above
+	   the list, and the same catalogue sentence on the card below it — two type
+	   sizes, two ink tokens, one `gap-3` apart, and the upper one reads as a
+	   status of whatever sits directly under it.
+
+	   The ROW is the statement; the receipt covers the gap until it arrives, and
+	   is matched on the ask id it already keeps. THE LAPSED DOOR IS THE
+	   EXCEPTION and stays unconditional: a dismissal at or after the deadline
+	   still removes the row (case 2 of §17), so no row ever arrives to replace
+	   the receipt — it is that door's only acknowledgement. */
+	const shownReceipt =
+		receipt &&
+		(receipt.reason === "lapsed" || !listed.some((row) => row.ask_id === receipt.askId))
+			? receipt
+			: null;
 	/* QUESTIONS, the same unit the bar and the header entry state (agent review
 	   round 1, R3): three surfaces answering "how much is waiting" in two units is
 	   the defect. All three now count this one conversation's rows.
@@ -245,17 +263,21 @@ export function AsksSheet({
 				    round 2, U9). It used to render only when the list was empty, so a
 				    dismissal from a queue of two acknowledged nothing at all; it now
 				    sits above whatever remains — the place the card left — with the
-				    empty state below it saying only that nothing is waiting. */}
-				{receipt ? (
+				    empty state below it saying only that nothing is waiting.
+
+				    AND IT STANDS DOWN ONCE ITS OWN ROW ARRIVES (SA-D8): the settled
+				    card below states the same sentence, so keeping both would say one
+				    thing twice. See `shownReceipt`. */}
+				{shownReceipt ? (
 					<p className="text-body-sm text-ink-muted" data-testid="ask-receipt">
 						{messageRuntime.t(
-							receipt.reason === "lapsed"
+							shownReceipt.reason === "lapsed"
 								? "relay.ask.dismiss.receipt"
-								: `relay.ask.dismiss.receipt_${receipt.reason}`,
+								: `relay.ask.dismiss.receipt_${shownReceipt.reason}`,
 						)}
 					</p>
 				) : null}
-				{loaded && rows.length === 0 && !error && !receipt ? (
+				{loaded && rows.length === 0 && !error && !shownReceipt ? (
 					<p className="text-body-sm text-ink-muted" data-testid="ask-sheet-empty">
 						nothing waiting — questions the agent asks will appear here.
 					</p>

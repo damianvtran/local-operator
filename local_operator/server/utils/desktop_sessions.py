@@ -110,6 +110,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
+    bound_ask_snapshot_in_place,
     bound_delta_rows_in_place,
     job_trajectory_wire_value,
     sync_wire_payload,
@@ -3295,14 +3296,30 @@ class DesktopSessionBridge:
             )
         )
 
+    def _cold_verdict(self) -> bool:
+        """Whether this bridge's facade is COLD, read now, with no I/O.
+
+        ONE spelling of the override's own gate, asked twice: before the index
+        read (so a warm owner pays nothing) and again immediately before the rows
+        are applied (so a facade that resynced during the await cannot have index
+        rows laid over its live fold — review round 1, m1). Three local reads, no
+        round trip, which is what makes the second ask free.
+
+        ``remote is None`` is "no facade yet", not cold: there is nothing to
+        override and ``state()`` would raise.
+        """
+        remote = self.remote
+        return remote is not None and self.remote_row is None and remote.is_cold
+
     async def _cold_ask_rows(self) -> tuple[list[dict[str, Any]] | None, int] | None:
         """This conversation's ask rows from the DERIVED INDEX, or ``None``.
 
         ``None`` means "do not override": a live owner's own frame is
         authoritative (it carries the drafts the index deliberately does not), and
-        a PEER's rows are the peer's to serve. The three gates are the same facts
-        ``_cold_fields`` publishes, read from the same place, so a frame can
-        never claim to be cold while serving a live owner's stale rows.
+        a PEER's rows are the peer's to serve. The gate is :meth:`_cold_verdict`,
+        re-asked by the caller before it applies — so a frame can neither claim to
+        be cold while serving a live owner's stale rows, nor serve index rows over
+        a facade that warmed up while this read was in flight.
 
         A cold facade that ATTACHED and is mid-resync (``is_cold`` while its
         owner still answers) also lands here. That is not a regression: the
@@ -3311,9 +3328,14 @@ class DesktopSessionBridge:
 
         Off the loop: one small file read per cold snapshot, on the route that
         already reads a journal page off it.
+
+        AN INDEX WITH NO ENTRY IS NOT AN EMPTY QUEUE (QA round 1, Q1): the caller
+        leaves the facade's own values alone, because absence of the file means
+        "this conversation has no queued-ask entry" — including the case QA named,
+        where the TTL sweep has removed an entry whose rows are all terminal and
+        past the horizon while a retained fold still carries them.
         """
-        remote = self.remote
-        if remote is None or self.remote_row is not None or not remote.is_cold:
+        if not self._cold_verdict():
             return None
         from local_operator.asks import store
         from local_operator.asks.visibility import lapsed_visible_ms
@@ -3530,12 +3552,34 @@ class DesktopSessionBridge:
         # host that cannot answer (``asks_open`` absent).
         cold_asks = await self._cold_ask_rows()
         state = self.state()
-        if cold_asks is not None:
+        # THE VERDICT IS ASKED AGAIN HERE, not carried over (review round 1, m1).
+        # The read above yields the loop twice, and a facade can finish a resync
+        # in that window; applying rows judged "cold" a moment ago would then lay
+        # index rows OVER a live owner's own fold — and a delta at or below this
+        # frame's watermark would be dropped as superseded while the frame carried
+        # the older rows. The verdict is three local reads, so it is cheap to ask
+        # again, and this is the last look before the assignment.
+        if cold_asks is not None and self._cold_verdict():
             rows, open_count = cold_asks
             snapshot = state.get("snapshot")
             if isinstance(snapshot, dict):
-                snapshot["asks"] = rows
+                if rows is None:
+                    snapshot.pop("asks", None)
+                else:
+                    snapshot["asks"] = rows
+                # ``asks_open`` counts OUTSTANDING rows over the WHOLE list, taken
+                # before the bound — the live path's own rule (a capped frame
+                # states the real tally, not the prefix's).
                 snapshot["asks_open"] = open_count
+                # THE WIRE'S OWN BOUND, on THESE rows (review m2). This override
+                # runs after ``sync_wire_payload`` bounded the FACADE's list, so
+                # without it a cold frame could ship every fat index row past the
+                # budget while ``asks_truncated`` still described the facade's
+                # list — the "bound on one route only" leak that file records
+                # twice. The flag is cleared first so it can only ever describe
+                # the rows this frame carries.
+                snapshot.pop("asks_truncated", None)
+                bound_ask_snapshot_in_place(snapshot)
         seq, epoch = self.sequence, self.epoch
         if open_trace.enabled():
             open_trace.mark(

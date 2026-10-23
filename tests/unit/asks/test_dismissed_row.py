@@ -234,6 +234,40 @@ def test_lapsed_visible_for_does_not_move_a_dismissed_receipt(tmp_path: Path):
         assert _statuses(projected) == [store.STATUS_DISMISSED], window
 
 
+def test_a_zero_stamp_reads_as_absent_on_both_readers(tmp_path: Path):
+    """Review round 1, m3: ``fold`` records ``int(at or 0)``, so a damaged or
+    hand-written dismissal stamps ``0``.
+
+    The projection used to read that 0 as an EARLY stamp and show the row, while
+    ``pending_row`` omits a falsy stamp from the index row — so the index reader
+    hid the same ask. One row, two answers, which is the drift the shared
+    predicate exists to stop. Absence and zero are one statement here: a row that
+    cannot prove an early dismissal has not earned a receipt.
+    """
+    queue = _queue(tmp_path, FakeSession(), now=BASE)
+    ask_id = str(queue.enqueue(_questions(), TIMEOUT_S)["details"]["ask_id"])
+    store.append_event(
+        queue.session_dir,
+        {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_DISMISSED,
+            "ask_id": ask_id,
+            "at": 0,
+            "by": {"surface": "phone"},
+            "reason": "moot",
+        },
+    )
+    (record,) = queue.records(EXPIRES_AT + HOUR_MS)
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["dismissed_at"] == 0
+
+    assert queue.projection(EXPIRES_AT + HOUR_MS) == []
+    row = store.pending_row(record, None)
+    assert "dismissed_at" not in row, "a falsy stamp is not published"
+    store.write_entry(tmp_path, "s1", cwd="/tmp/w", asks=[row])
+    assert store.session_asks(tmp_path, "s1", now=EXPIRES_AT + HOUR_MS) == []
+
+
 # ---------------------------------------------------------------------------
 # Relay rows (case 4)
 # ---------------------------------------------------------------------------

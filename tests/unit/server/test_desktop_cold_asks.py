@@ -43,7 +43,9 @@ TIMEOUT_S = 3600
 EXPIRES_AT = BASE + TIMEOUT_S * 1000
 
 
-def _bridge_with_retained_asks(tmp_path: Path, *, warm: bool = False) -> Any:
+def _bridge_with_retained_asks(
+    tmp_path: Path, *, warm: bool = False, asks_truncated: bool = False
+) -> Any:
     """The bridge, over a real facade whose retained state says one ask is OPEN.
 
     That retained fold is the stale shape Q-1 measured: it was true when the
@@ -69,6 +71,7 @@ def _bridge_with_retained_asks(tmp_path: Path, *, warm: bool = False) -> Any:
                 )
             ],
             asks_open=1,
+            asks_truncated=asks_truncated,
         )
     )
     if warm:
@@ -134,6 +137,98 @@ async def test_a_cold_snapshot_still_says_nothing_when_the_index_has_no_entry(tm
     # and this conversation's ask engine is not what is being described.
     assert [row["status"] for row in rows] == [store.STATUS_OPEN]
     assert open_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_facade_that_warms_up_during_the_read_is_not_overridden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Review round 1, m1: the verdict is re-asked before the rows are applied.
+
+    The index read yields the loop twice, so a facade can finish a resync in that
+    window. Judging "cold" only before the await would then lay index rows over
+    the live fold, and a delta at or below this frame's watermark would be
+    dropped as superseded while the frame carried the older rows. Here the flip
+    happens INSIDE the read, which is exactly the window.
+    """
+    bridge = _bridge_with_retained_asks(tmp_path)
+    remote = bridge.remote
+    assert remote.is_cold, "the fixture must start cold"
+    _dismissed_entry(tmp_path)
+
+    real = store.session_asks
+
+    def warming(*args: Any, **kwargs: Any) -> Any:
+        rows = real(*args, **kwargs)
+        # The owner answers between the gate and the apply.
+        remote._client = cast(Any, SimpleNamespace(connected=True))
+        remote._ready_for_events = True
+        return rows
+
+    monkeypatch.setattr(store, "session_asks", warming)
+
+    rows, open_count = _snapshot_asks(await bridge.snapshot())
+
+    assert not remote.is_cold
+    assert [row["status"] for row in rows] == [
+        store.STATUS_OPEN
+    ], "the live fold must win: index rows over it are the m1 defect"
+    assert open_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cold_snapshot_bounds_the_index_rows(tmp_path: Path):
+    """Review round 1, m2: the override runs AFTER ``sync_wire_payload`` bounded
+    the facade's own list, so it has to bind its own rows too — and the tally is
+    the WHOLE list's outstanding count, taken before the bound, exactly as the
+    live path does."""
+    bridge = _bridge_with_retained_asks(tmp_path)
+    fat = "Rotate the deploy key before the cutover? " * 60
+    store.write_entry(
+        tmp_path,
+        "s1",
+        cwd=str(tmp_path),
+        asks=[
+            {
+                "ask_id": f"a-{index}",
+                "created_at": BASE,
+                "expires_at": EXPIRES_AT,
+                "timeout_s": TIMEOUT_S,
+                "urgent": False,
+                "status": store.STATUS_OPEN,
+                "delivered": False,
+                "questions": [{"id": "q1", "question": fat, "options": []}],
+            }
+            for index in range(20)
+        ],
+    )
+
+    snapshot = await bridge.snapshot()
+    rows, open_count = _snapshot_asks(snapshot)
+    front = snapshot["payload"]["frontend"]["snapshot"]
+
+    assert 0 < len(rows) < 20, "the wire's budget must trim the index rows"
+    assert front.get("asks_truncated") is True
+    assert open_count == 20, "the tally is the whole list's, not the prefix's"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_truncation_flag_does_not_survive_the_override(tmp_path: Path):
+    """The other half of m2: the flag must describe the rows THIS frame ships.
+
+    A facade that went cold carries the last state it was handed, ``asks_truncated``
+    included. Clearing it before the bound is what stops a two-row frame from
+    claiming the list it holds was clipped.
+    """
+    bridge = _bridge_with_retained_asks(tmp_path, asks_truncated=True)
+    _dismissed_entry(tmp_path)
+
+    snapshot = await bridge.snapshot()
+    rows, _ = _snapshot_asks(snapshot)
+    front = snapshot["payload"]["frontend"]["snapshot"]
+
+    assert [row["status"] for row in rows] == [store.STATUS_DISMISSED]
+    assert "asks_truncated" not in front
 
 
 @pytest.mark.asyncio
