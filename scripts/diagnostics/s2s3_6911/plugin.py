@@ -6,12 +6,17 @@ not a product seam. No releaser thread or timed-success release is permitted.
 """
 import asyncio
 import json
+import gc
 import os
 import re
 import threading
 import time
 
 import pytest
+from scripts.diagnostics.s2s3_6911.oracle import MODES, span_record, held_record, restore_all, project
+
+child_identity = None
+record_lock = threading.RLock()
 
 S2 = "tests/unit/test_tui_responsiveness.py::test_s2_send_to_agent_end_keeps_the_loop_under_the_bar"
 S3 = "tests/unit/test_tui_responsiveness.py::test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free"
@@ -21,10 +26,11 @@ report = {"call": None, "assertion": None, "setup_ok": False}
 
 
 def rec(kind, **values):
-    row = dict(kind=kind, **values)
-    if len(records) >= 250 or len(json.dumps(records + [row]).encode()) > 180000:
-        raise RuntimeError("diagnostic output bound")
-    records.append(row)
+    with record_lock:
+        row = dict(kind=kind, **values)
+        if len(records) >= 250 or len(json.dumps(records + [row]).encode()) > 180000:
+            raise RuntimeError("diagnostic output bound")
+        records.append(row)
 
 
 def clock():
@@ -32,9 +38,8 @@ def clock():
 
 
 def span(kind, start, **values):
-    cpu, wall = clock()
-    rec(kind, cpu_ms=(cpu-start[0])*1000, wall_ms=(wall-start[1])*1000,
-        start_wall=start[1], end_wall=wall, thread=threading.get_ident(), **values)
+    values = span_record(kind, start, clock(), threading.get_ident(), **values)
+    rec(values.pop("kind"), **values)
 
 
 def pytest_collection_modifyitems(items):
@@ -66,7 +71,10 @@ def pytest_runtest_call(item):
     from local_operator.tui.app import OperatorApp
     from local_operator.model import configure
     from textual.pilot import Pilot
+    global child_identity
+    from scripts.diagnostics.s2s3_6911.driver import identity
     module = item.module
+    child_identity = identity(require_loaded=True, original_module=module)
     restorations = []
     gate, entered, finished = threading.Event(), threading.Event(), threading.Event()
     finished.set()
@@ -111,7 +119,7 @@ def pytest_runtest_call(item):
                 raise RuntimeError("held worker bound: no causal loop release")
             return original_listing(self, *args, **kwargs)
         finally:
-            rec("worker_done", thread=thread)
+            rec("worker_function_completed", thread=thread)
             with lock:
                 active -= 1
                 if active == 0:
@@ -126,7 +134,8 @@ def pytest_runtest_call(item):
                 ticks += 1
                 rec("held_loop_tick", thread=threading.get_ident())
                 if ticks == 3:
-                    rec("held_release", origin="loop-witness", thread=threading.get_ident(), requests=requests)
+                    witness = held_record(ticks, requests, threading.get_ident())
+                    rec(witness.pop("kind"), **witness)
                     gate.set()
                     return
         raise RuntimeError("held worker/tick witness missing")
@@ -141,7 +150,7 @@ def pytest_runtest_call(item):
         try:
             return original_harvest(self, *args, **kwargs)
         finally:
-            span("harvest", start, manual=manual)
+            span("harvest", start, manual=manual, measured=manual, i=manual_harvests)
 
     async def pause(self, *args, **kwargs):
         nonlocal loop, loop_thread, task, injected, measured_pauses, burst, settle
@@ -157,16 +166,16 @@ def pytest_runtest_call(item):
             settle = clock()
         start = clock()
         try:
-            if MODE == "s3-delayed" and measured and not injected:
+            if MODE == "s3-split" and measured and not injected:
                 injected = True
-                rec("injected_async_delay", seconds=0.6)
+                delay_started = clock()
                 await asyncio.sleep(0.6)
+                span("controlled_async_delay", delay_started)
             return await original_pause(self, *args, **kwargs)
         finally:
             if measured:
                 measured_pauses += 1
-            if manual:
-                span("pause", start, measured=measured)
+            span("pause", start, manual=manual, measured=measured, i=measured_pauses)
 
     async def start(self, *args, **kwargs):
         rec("recorder_start", thread=threading.get_ident())
@@ -195,37 +204,62 @@ def pytest_runtest_call(item):
             if task is not None:
                 await task
 
-    patch(OperatorApp, "_harvest_subagent_costs", harvest)
-    patch(Pilot, "pause", pause)
-    patch(configure, "refresh_model_info_background", refresh)
-    patch(module.StallRecorder, "start", start)
-    patch(module.StallRecorder, "stop", stop)
-    patch(module.StallRecorder, "begin_noise_window", begin)
-    patch(module.StallRecorder, "end_noise_window", end)
-    if MODE == "s3-held":
-        patch(module._SlowListing, "__call__", held_listing)
+    gc_started = {}
+    def gc_event(phase, info):
+        thread = threading.get_ident()
+        if phase == "start":
+            gc_started[thread] = clock()
+        elif thread in gc_started:
+            span("gc", gc_started.pop(thread), generation=info.get("generation"),
+                 is_loop=None if loop_thread is None else thread == loop_thread)
+
+    def settle_task():
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+            if loop is None or loop.is_running() or loop.is_closed():
+                raise RuntimeError("ticker settlement unavailable")
+            async def retrieve():
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            loop.run_until_complete(retrieve())
+        if not task.cancelled():
+            task.result()  # Retrieves an already-done fault too.
+
+    def completed():
+        if not finished.wait(3):
+            raise RuntimeError("worker function not completed")
+
     try:
+        patch(OperatorApp, "_harvest_subagent_costs", harvest)
+        patch(Pilot, "pause", pause)
+        patch(configure, "refresh_model_info_background", refresh)
+        patch(module.StallRecorder, "start", start)
+        patch(module.StallRecorder, "stop", stop)
+        patch(module.StallRecorder, "begin_noise_window", begin)
+        patch(module.StallRecorder, "end_noise_window", end)
+        if MODE == "s3-held":
+            patch(module._SlowListing, "__call__", held_listing)
+        if MODE == "s2-original":
+            gc.callbacks.append(gc_event)
         yield
     finally:
-        # Cleanup release is NEVER accepted as the causal witness. The real
-        # worker's completion precedes restoration and parent sandbox deletion.
-        gate.set()
-        if task is not None and not task.done():
-            task.cancel()
-        if task is not None and loop is not None and not loop.is_running() and not loop.is_closed():
-            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
-        settled = finished.wait(3)
-        for owner, name, original in reversed(restorations):
-            setattr(owner, name, original)
-        rec("cleanup", worker_joined=settled, task_settled=task is None or task.done())
-        if not settled:
-            raise RuntimeError("listing worker unsettled")
+        if gc_event in gc.callbacks:
+            gc.callbacks.remove(gc_event)
+        errors = restore_all(restorations, gate.set, settle_task, completed)
+        rec("cleanup", worker_function_completed=finished.is_set(),
+            task_settled=task is None or task.done(), errors=errors)
+        if errors:
+            raise RuntimeError("diagnostic teardown failed")
 
 
 def pytest_sessionfinish(session, exitstatus):
     from scripts.diagnostics.s2s3_6911.driver import identity
-    payload = dict(mode=MODE, exitstatus=int(exitstatus), records=records, identity=identity(), **report)
-    encoded = json.dumps(payload)
+    payload = dict(mode=MODE, exitstatus=int(exitstatus), records=records, identity=child_identity, **report)
+    encoded = json.dumps(project(payload))
     if len(encoded.encode()) > 200000:
         raise RuntimeError("diagnostic evidence bound")
     with open(os.environ["S2S3_OUT"], "w", encoding="utf8") as stream:
@@ -235,7 +269,15 @@ def pytest_sessionfinish(session, exitstatus):
 async def synthetic():
     from tests.unit.test_tui_responsiveness import StallRecorder
     from tests.loop_callback_spans import CallbackSpans
+    from scripts.diagnostics.s2s3_6911.driver import identity
+    measured_identity = identity(require_loaded=True)
     output = []
+    def burn():
+        thread = threading.get_ident()
+        start = time.thread_time()
+        while time.thread_time()-start < 0.2:
+            pass
+        return (time.thread_time()-start)*1000, thread
     for mode in ("sync", "offload"):
         windows = 0
         with CallbackSpans(asyncio.get_running_loop()) as callbacks:
@@ -253,11 +295,9 @@ async def synthetic():
             ready = windows > 0
             before = windows
             if mode == "sync":
-                cpu = time.thread_time()
-                while time.thread_time() - cpu < 0.2:
-                    pass
+                worker_cpu, worker_thread = burn()
             else:
-                await asyncio.to_thread(time.sleep, 0.2)
+                worker_cpu, worker_thread = await asyncio.to_thread(burn)
             deadline = time.perf_counter() + 1
             while windows <= before and time.perf_counter() < deadline:
                 await asyncio.sleep(0.005)
@@ -271,10 +311,12 @@ async def synthetic():
                 caught = True
             summary = recorder.measurement_summary()
             output.append(dict(mode=mode, ready=ready, trailing=windows > before,
-                               cpu_trip=caught, worst_cpu_ms=summary["worst_cpu_ms"]))
+                               cpu_trip=caught, worst_cpu_ms=summary["worst_cpu_ms"],
+                               worker_cpu_ms=worker_cpu, worker_thread=worker_thread,
+                               loop_thread=threading.get_ident()))
     with open(os.environ["S2S3_OUT"], "w", encoding="utf8") as stream:
         from scripts.diagnostics.s2s3_6911.driver import identity
-        json.dump(dict(mode="synthetic", controls=output, identity=identity()), stream)
+        json.dump(project(dict(mode="synthetic", controls=output, identity=measured_identity)), stream)
 
 
 if __name__ == "__main__":

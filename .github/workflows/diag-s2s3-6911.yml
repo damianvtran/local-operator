@@ -23,7 +23,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python -B -c 'import json,sys; assert sys.version_info[:3]==(3,13,16); assert json.load(open("scripts/diagnostics/s2s3_6911/manifest.json"))["textual_pin"], "canonical exact Textual pin unresolved; SOURCE WIP NOT READY"'
-          python -m pip install -e '.[dev]'
+          python -m pip install -e '.[dev]' textual==8.2.8
       - name: Four fixed serial observations
         timeout-minutes: 2
         shell: bash
@@ -37,6 +37,5 @@ jobs:
           name: s2s3-6911-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/s2s3-6911/*.json
-            ${{ runner.temp }}/s2s3-6911/*.log
           if-no-files-found: warn
           retention-days: 3
