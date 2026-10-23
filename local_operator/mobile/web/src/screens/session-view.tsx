@@ -266,6 +266,14 @@ function Header({
 				onClose={() => setGateOpen(false)}
 				sessionId={sessionId}
 				onReceipt={setGateReceipt}
+				/* THE STATE THE SHEET SHOWS COMES FROM THE RUNTIME. The projection
+				   publishes the effective mode beside a pending approval, so that is
+				   where this screen reads it — never from `gateReceipt`, which reports
+				   only what THIS screen last did and would call a session auto after
+				   the terminal tightened it. Absent while nothing is pending, which the
+				   sheet renders as no line rather than a guess. */
+				approvalMode={projection.pending?.approval_mode}
+				approvalProvenance={projection.pending?.approval_provenance}
 			/>
 		</header>
 		{gateReceipt ? (

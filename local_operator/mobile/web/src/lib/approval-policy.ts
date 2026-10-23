@@ -27,6 +27,7 @@
  *     land an unproven global write behind a typo.
  */
 import { requestOperatorChallenge, sendCommandWithProof, type CommandReceipt } from "../api";
+import type { ApprovalMode, ApprovalProvenance } from "../types";
 import { operatorFieldsFor } from "./operator-device";
 
 /** The scopes a phone surface may ask for, in the runtime's spelling. */
@@ -102,11 +103,54 @@ async function signAndSend(
  *
  * THE FALLBACK NAMES THE DEFAULT, NOT "ALL SESSIONS". It is used only when the
  * receipt carries no prose, and it deliberately does not say "all sessions": a
- * session with its own per-session override is not changed by a default write,
- * so "all" would be a claim the runtime never made.
+ * conversation with its own choice keeps it (the runtime's own receipt says so),
+ * so "all" would be a claim neither the runtime nor this phone can make.
  */
 export function globalDefaultReceipt(receipt: CommandReceipt): string {
 	const said = receipt.detail.trim();
 	if (said) return said;
-	return "the default is now auto — sessions that follow it run gated tools without asking";
+	return "the default for sessions that follow it is now auto";
+}
+
+/**
+ * The effective mode and its provenance, as ONE line for the phone.
+ *
+ * WHY THE CARD AND THE SHEET BOTH NEED IT. The phone can change the gate from
+ * two places, and until this line existed neither said what the gate IS: a
+ * reader who had loosened a session yesterday, or whose machine default an
+ * agent changed, saw only the two handles and no state. The line is the
+ * runtime's answer (the projection carries `approval_mode`/`approval_provenance`
+ * on the pending approval), not the phone's memory of its own last gesture — a
+ * gate moved from the terminal must not be described by this screen's receipts.
+ *
+ * THE SCOPE WORDS ARE THE TUI CARD'S, deliberately: the same machine, two
+ * surfaces, one vocabulary. A session override states the alternative it
+ * overrides ("global Auto"), because that is the fact a reader needs before
+ * deciding which handle to press — an override exists BECAUSE it deviates from
+ * the other side, which is how `tui/widgets/approval.py`'s `_state_text` derives
+ * the same word.
+ *
+ * EMPTY MEANS SAY NOTHING. Both fields are absent on a runtime that predates
+ * them, and half a statement ("Approvals: Ask.") is still a true one — but a
+ * mode with no provenance must not invent a scope, so the fallback names the
+ * mode only.
+ */
+export function approvalPolicyLine(input: {
+	approval_mode?: ApprovalMode | "";
+	approval_provenance?: ApprovalProvenance | "";
+}): string {
+	const mode =
+		input.approval_mode === "auto" ? "Auto" : input.approval_mode === "ask" ? "Ask" : "";
+	if (!mode) return "";
+	const provenance = input.approval_provenance;
+	if (provenance === "session") {
+		const other = mode === "Ask" ? "Auto" : "Ask";
+		return `Approvals: ${mode} — session override; global ${other}.`;
+	}
+	if (provenance === "pin") return `Approvals: ${mode} — this run.`;
+	if (provenance === "global") return `Approvals: ${mode} — global default.`;
+	/* A newer owner naming a scope this build does not know: state the mode,
+	 * claim no origin. Guessing "global default" here would be the one wording
+	 * this line exists to prevent. */
+	return `Approvals: ${mode}.`;
 }

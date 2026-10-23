@@ -276,6 +276,15 @@ export interface AskQuestion {
 	persist: boolean;
 }
 
+/** The effective approval mode a conversation is running under. */
+export type ApprovalMode = "ask" | "auto";
+
+/** Where that mode came from. `global` is `tool_approval_mode` in the machine's
+    config (every conversation that follows it); `session` is this
+    conversation's own saved choice; `pin` is a `--yolo`-style flag on THIS run,
+    which outlives no restart and outranks both. */
+export type ApprovalProvenance = "global" | "session" | "pin";
+
 export interface PendingRequest {
 	request_id: string;
 	kind: "approval" | "ask";
@@ -290,6 +299,14 @@ export interface PendingRequest {
 	    can show "Question 1 of 2" and the user knows more follow (U1). */
 	question_index: number;
 	question_total: number;
+	/** The mode IN FORCE for this conversation, and where it came from. Both are
+	    OPTIONAL and absent (or empty) on an older owner — a phone talking to a
+	    runtime that predates them must render no policy line rather than a
+	    guessed one (`lib/approval-policy.approvalPolicyLine`). They ride the
+	    projection, so the card states the runtime's answer, never the phone's
+	    memory of the last gesture it made from this screen. */
+	approval_mode?: ApprovalMode | "";
+	approval_provenance?: ApprovalProvenance | "";
 }
 
 export interface CompletionAttention {

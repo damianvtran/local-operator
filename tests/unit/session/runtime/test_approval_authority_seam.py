@@ -2389,8 +2389,6 @@ async def test_a_paired_phone_is_offered_the_loosening_in_its_report(
     pinned separately by ``test_the_capability_name_appears_only_where_it_has_to``
     (which drives the same sentence through both branches). Two pins, one fact.
     """
-    from local_operator.harness.approval import approvals_default_notice
-
     rig = await _phone_over_relay(tmp_path, monkeypatch)
     try:
         remote = [c for c in rig.live.runtime._clients.values() if c.locality == "remote"]
@@ -2409,9 +2407,6 @@ async def test_a_paired_phone_is_offered_the_loosening_in_its_report(
         # indistinguishable by accident, so the distinction it draws is "proved"
         # versus "did not say".
         assert rig.live.runtime._connection_may_loosen(frame, conn) is not True
-        offered = approvals_default_notice(may_loosen=False)
-        assert "has to come from the window" not in offered, offered
-        assert "needs the operator's own consent" in offered, offered
     finally:
         await rig.aclose()
 

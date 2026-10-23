@@ -1220,7 +1220,7 @@ async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> No
         "  A. Allow all",
         "     stop asking for this session",
         "Approvals: Ask — global default.",
-        "Set auto for this session [s]  ·  Set auto for all sessions [g]",
+        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 
@@ -6041,7 +6041,7 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
         "  A. Allow all",
         "     stop asking for this session",
         "Approvals: Ask — global default.",
-        "Set auto for this session [s]  ·  Set auto for all sessions [g]",
+        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 
@@ -6990,7 +6990,7 @@ async def test_the_approval_gate_is_byte_identical_with_the_thumb() -> None:
         "  A. Allow all",
         "     stop asking for this session",
         "Approvals: Ask — global default.",
-        "Set auto for this session [s]  ·  Set auto for all sessions [g]",
+        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 

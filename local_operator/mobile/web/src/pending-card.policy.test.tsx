@@ -94,9 +94,9 @@ vi.mock("./store", async (importOriginal) => {
 	};
 });
 
-function approval(requestId = "req-approve"): PendingRequest {
+function approval(overrides: Partial<PendingRequest> = {}): PendingRequest {
 	return {
-		request_id: requestId,
+		request_id: "req-approve",
 		kind: "approval",
 		title: "run shell command",
 		detail: "rm -rf build && make",
@@ -104,6 +104,7 @@ function approval(requestId = "req-approve"): PendingRequest {
 		secret: false,
 		question_index: 0,
 		question_total: 1,
+		...overrides,
 	};
 }
 
@@ -142,8 +143,8 @@ function answerFrames(): unknown[] {
 		.filter((op) => op?.op === "approval_answer" || op?.op === "ask_answer");
 }
 
-function renderCard() {
-	slot = { projection: projection(approval()), connected: true };
+function renderCard(pending: PendingRequest = approval()) {
+	slot = { projection: projection(pending), connected: true };
 	render(<SessionScreen sessionId="s1" />);
 	return screen.findByRole("button", { name: "approve" });
 }
@@ -183,8 +184,8 @@ describe("the pending card's approval-policy links", () => {
 		expect((approve as HTMLButtonElement).disabled).toBe(false);
 		// ...and the inline line says the mode changed AND the call did not.
 		const said = await screen.findByRole("status");
-		expect(said.textContent).toContain("auto for this session");
-		expect(said.textContent).toContain("this call still needs your answer");
+		expect(said.textContent).toContain("this session is now auto");
+		expect(said.textContent).toContain("This call still needs your answer.");
 	});
 
 	it("sends the global default, proven, from the card too", async () => {
@@ -205,8 +206,44 @@ describe("the pending card's approval-policy links", () => {
 		});
 		expect(answerFrames()).toHaveLength(0);
 		const said = await screen.findByRole("status");
-		expect(said.textContent).toContain("auto for all sessions");
-		expect(said.textContent).toContain("this call still needs your answer");
+		/* m4: the fallback names the DEFAULT, never "all sessions" — a conversation
+		   with its own choice keeps it. */
+		expect(said.textContent).toContain("the default for sessions that follow it is now auto");
+		expect(said.textContent).not.toContain("all sessions");
+		expect(said.textContent).toContain("This call still needs your answer.");
+	});
+
+	it("shows the runtime's own exception in the confirmation (U1)", async () => {
+		/* The defect this replaces: the card printed a fixed "auto for all
+		   sessions" sentence and discarded the runtime's account — including the
+		   one case that matters, a conversation whose own Ask keeps Ask. */
+		mocks.sendCommandWithProof.mockResolvedValueOnce({
+			ok: true,
+			detail:
+				"tool approvals: auto — saved to /Users/tester/.config/config.yml " +
+				"(tool_approval_mode); other conversations with their own choice keep it",
+		});
+		await renderCard();
+		fireEvent.click(screen.getByRole("button", { name: "Set auto for all sessions" }));
+		const said = await screen.findByRole("status");
+		expect(said.textContent).toContain("other conversations with their own choice keep it");
+		expect(said.textContent).toContain("This call still needs your answer.");
+	});
+
+	it("confirms nothing when the runtime reports the write refused", async () => {
+		mocks.sendCommandWithProof.mockResolvedValueOnce({
+			ok: true,
+			detail: "not on this build — this surface cannot set the default",
+			refused: true,
+		});
+		await renderCard();
+		fireEvent.click(screen.getByRole("button", { name: "Set auto for this session" }));
+		const refusal = await screen.findByRole("alert");
+		expect(refusal.textContent).toContain("cannot set the default");
+		expect(screen.queryByRole("status")).toBeNull();
+		expect((screen.getByRole("button", { name: "approve" }) as HTMLButtonElement).disabled).toBe(
+			false,
+		);
 	});
 
 	it("leaves the card answerable when the policy write is refused", async () => {
@@ -248,5 +285,34 @@ describe("the pending card's approval-policy links", () => {
 		await screen.findByRole("button", { name: /blue/ });
 		expect(screen.queryByRole("button", { name: "Set auto for this session" })).toBeNull();
 		expect(screen.queryByRole("button", { name: "Set auto for all sessions" })).toBeNull();
+	});
+});
+
+describe("the pending card's effective-mode line", () => {
+	it("says a session override and the global it overrides", async () => {
+		await renderCard(approval({ approval_mode: "ask", approval_provenance: "session" }));
+		expect(screen.getByText("Approvals: Ask — session override; global Auto.")).toBeTruthy();
+	});
+
+	it("mirrors the session override in the auto direction", async () => {
+		await renderCard(approval({ approval_mode: "auto", approval_provenance: "session" }));
+		expect(screen.getByText("Approvals: Auto — session override; global Ask.")).toBeTruthy();
+	});
+
+	it("says a global default when that is what is in force", async () => {
+		await renderCard(approval({ approval_mode: "ask", approval_provenance: "global" }));
+		expect(screen.getByText("Approvals: Ask — global default.")).toBeTruthy();
+	});
+
+	it("separates a run pin from both saved scopes", async () => {
+		await renderCard(approval({ approval_mode: "auto", approval_provenance: "pin" }));
+		expect(screen.getByText("Approvals: Auto — this run.")).toBeTruthy();
+	});
+
+	it("renders no line when the owner publishes neither field", async () => {
+		/* An older runtime owns the session: the card must not guess "global
+		   default" — that is the one claim this line exists to stop making. */
+		await renderCard(approval({ approval_mode: "", approval_provenance: "" }));
+		expect(screen.queryByText(/^Approvals:/)).toBeNull();
 	});
 });

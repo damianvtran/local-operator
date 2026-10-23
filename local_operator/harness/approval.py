@@ -837,50 +837,6 @@ CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE = (
 #: where the reader is — and ``None`` means the connection has not PROVED it may
 #: loosen, which takes the conservative form (agent review round 3, R3-1).
 #:
-#: THE CONSERVATIVE FORM NAMES THE REAL LEVERS, NOT THE SPAWNER (revision 2, §5).
-#: It used to read "/approvals auto has to come from the window that started it",
-#: and under the spawner-authority model that was true. Under this one it is the
-#: user-visible regression the redesign exists to delete: a background-started
-#: runtime HAS no window that started it, so the sentence sent its reader looking
-#: for something that does not exist, and the remedy behind it — retire the
-#: runtime and reopen it here — is exactly the capability loss being repaired.
-#: The replacement names the three levers that work from anywhere, in the order a
-#: reader can act on them: this machine's presence store, a paired phone, and the
-#: launch-time lever for a NEW session. It is deliberately the same set
-#: ``OPERATOR_AUTHORITY_REQUIRED_NOTICE`` names, because a reader who has seen one
-#: of these sentences has seen the other.
-#:
-#: It stays under the 400-character error-frame cap (``server.py``'s
-#: ``str(exc)[:400]``) so it travels whole rather than truncated mid-remedy.
-def approvals_default_notice(*, may_loosen: bool | None, anchor_unusable: bool = False) -> str:
-    switch = (
-        "/approvals ask|auto switches this session now"
-        if may_loosen
-        else "/approvals ask switches this session now; /approvals auto needs the "
-        "operator's own consent — from this machine (Touch ID) or your paired phone "
-        "— and a NEW session can start loosened with --yolo or tool_approval_mode: auto"
-    )
-    if not may_loosen and anchor_unusable:
-        # THE HOST STATE IS NAMED BEFORE THE LEVERS IT DISABLES (UX round 6, U1/U2).
-        # Naming two remedies on a host where neither can run is the same defect as
-        # the refusal above, on the surface an operator reads BEFORE acting: they
-        # take the sentence at its word, try, and are refused. ``anchor_unusable``
-        # is the caller's answer (it is the only side that can read the level) and
-        # defaults False so an implementation that does not pass it keeps the
-        # pre-existing sentence rather than acquiring a claim it did not compute.
-        switch = (
-            "/approvals ask switches this session now; /approvals auto needs the operator's "
-            "own consent, but authority is not installed here yet: ask Local Operator to "
-            "set up operator authority (one approval and one admin password prompt); a new "
-            "session can start loosened via --yolo"
-        )
-
-    return (
-        "/approvals default writes the config file of the machine this session runs on — "
-        f"a file edit or the app's settings. {switch}"
-    )
-
-
 #: Runtime pid -> capability, for the runtimes THIS process spawned.
 #:
 #: This is "the console's memory" the design names, and a module-level dict
@@ -1678,7 +1634,6 @@ __all__ = [
     "REARM_KEPT_BY_AUTO_NOTICE",
     "SUPERVISOR_FD_FLAG",
     "SupervisorCapChannel",
-    "approvals_default_notice",
     "deliver_operator_cap_to",
     "open_supervisor_cap_channel",
     "OperatorCapHandoff",

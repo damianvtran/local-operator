@@ -57,6 +57,10 @@ class FakeSession:
     #: fake stands in for without creating it.
     _name_state: ConversationName
     conversation_name_state: ConversationName
+    #: Some cases attach a transcript directory so the handle's two-hop sidecar
+    #: read has something real to resolve; declared here so the facade tests can
+    #: set it without an attr-defined complaint.
+    transcript: Any
 
     def __init__(self) -> None:
         self.session_id = "sess-1"

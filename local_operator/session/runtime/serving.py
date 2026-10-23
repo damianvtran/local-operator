@@ -6944,6 +6944,19 @@ class ServingSessionHandle(SessionHandle):
             front = self._projection.pending
             payload = front.to_json() if front is not None else None
             if payload is not None:
+                # The policy in force rides WITH the card: a viewer cannot
+                # derive it (the per-conversation record outranks the file), and
+                # "Ask — session override; global Auto" is the one line that
+                # explains why this gate is asking while the file says auto.
+                from local_operator.session.approval_policy import resolve_effective
+
+                mode, provenance = resolve_effective(
+                    self._explicit_approvals_mode,
+                    "auto" if self._auto_approve else "ask",
+                    pinned_auto=self._auto_approve if self._approval_pinned else None,
+                )
+                payload["approval_mode"] = mode
+                payload["approval_provenance"] = provenance
                 # The card gains the session's name so a DESKTOP banner for it
                 # can be triaged: "Waiting for approval" with three sessions
                 # open names none of them (design round 1, D3). Stamped here
@@ -9746,7 +9759,7 @@ class ServingSessionHandle(SessionHandle):
             )
         if argument == "default" or argument.startswith("default "):
             # THE PERSIST HALF IS HONOURED NOW (2026-10-23). It used to answer
-            # with ``approvals_default_notice`` — "a default belongs to the
+            # with the notice this method now writes — "a default belongs to the
             # terminal whose launches it governs" — which was the machine-
             # locality rule and is documented in full on
             # :meth:`_approvals_default_slash`, together with why the operator
@@ -9905,15 +9918,23 @@ class ServingSessionHandle(SessionHandle):
             },
         )
 
-    def _persist_approval_override(self, mode: str | None) -> str | None:
+    def _persist_approval_override(
+        self, mode: str | None, *, had_record: bool = True
+    ) -> str | None:
         """Record (or clear) this conversation's choice; return a failure clause.
 
         ``mode`` is ``"ask"``, ``"auto"`` or ``None`` — ``None`` writes the
         explicit "no choice" document, which is how ``/approvals default`` makes
-        the ISSUING conversation follow the new global (the design round's
-        refinement: the command already promised "this session and every new
-        one", so leaving this conversation's own record in place would make the
-        receipt's claim false for the one surface the user is looking at).
+        the ISSUING conversation follow the new global: leaving this
+        conversation's own record in place would make the receipt's "this
+        conversation follows it" false for the one surface the user is looking
+        at.
+
+        ``had_record`` distinguishes "the stored choice could not be released"
+        from "there was nothing stored": a read-only config dir fails the
+        no-choice write too, and telling the reader their saved choice could not
+        be cleared when none existed is a false alarm (agent review round 1,
+        n1).
 
         ``None`` is also returned for there being nothing to disclose: either
         the record was written, or this handle has no session directory at all
@@ -9941,6 +9962,8 @@ class ServingSessionHandle(SessionHandle):
                 exc_info=True,
             )
             if mode is None:
+                if not had_record:
+                    return None
                 return (
                     " — this conversation follows it now, but its saved choice could not be "
                     f"cleared ({error.__class__.__name__})"
@@ -10055,7 +10078,7 @@ class ServingSessionHandle(SessionHandle):
                     "approval_reason": error.__class__.__name__,
                 },
             )
-        cleared = self._persist_approval_override(None)
+        cleared = self._persist_approval_override(None, had_record=previous_override is not None)
         direct = False
         if self._auto_approve != (mode == "auto"):
             # The delivery inside ``write_setting`` is SYNCHRONOUS, so a gate

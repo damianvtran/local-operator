@@ -1962,7 +1962,7 @@ async def test_a_narrow_card_still_names_what_it_is_authorising() -> None:
         assert "A.Allow all" in text, lines
         # ...and both setting destinations are named, so the row that used to
         # carry the hint still carries an actionable sentence.
-        assert "[s]session" in lines[-1] and "[g]all sessions" in lines[-1], lines
+        assert "[S]session" in lines[-1] and "[G]all sessions" in lines[-1], lines
 
         pending.cancel()
         try:
