@@ -11,8 +11,11 @@ ledger.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import Any
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
@@ -1292,6 +1295,266 @@ async def test_batch_partial_failure_uses_actual_http_rejection(monkeypatch):
     assert _details(result)["cost"]["basis"] == "billed"
     assert _details(result)["cost_complete"] is False
     assert _details(result)["artifacts"][0]["units"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Stop → resume: a later batch must WAIT out the work the stop abandoned.
+# ---------------------------------------------------------------------------
+
+
+class _SlotServer:
+    """Two admission slots, a 45 s vendor hold, and virtual time.
+
+    It models the ONE server fact this regression turns on: a cancel does not
+    abort a running vendor call (agent-server's
+    ``TestRunningCancelDoesNotAbortTheCall``), so an abandoned job keeps its
+    per-account slot until the provider's ``ElevenLabsSpeechTimeout`` — 45 s.
+    ``clock`` is virtual: the rung's own poll and submit waits advance it, so a
+    45 s hold costs the test no wall time, and no vendor is ever called.
+    """
+
+    HOLD_S = 45.0
+
+    def __init__(self, *, capacity: int = 2, generate_s: float = 1.0) -> None:
+        self.capacity = capacity
+        self.generate_s = generate_s
+        self.clock = 0.0
+        # Only the FIRST batch's tail is slow: those are the calls the stop
+        # abandons, still running at the vendor when the client goes away.
+        self.first_batch = True
+        self._seq = 0
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.posts: dict[str, list[int]] = {}
+        self.completed = 0
+        self.eleven_done = asyncio.Event()
+        self.both_in_flight = asyncio.Event()
+
+    # -- virtual time ---------------------------------------------------
+    async def sleep(self, seconds: float) -> None:
+        """Both the poll pace and the admission backoff, in virtual seconds.
+
+        Yields once for real: the rung's own awaits resolve synchronously
+        against a MockTransport, so without this the whole batch would run to
+        completion before the test could observe (and stop) it.
+        """
+        self.clock += seconds
+        self._release()
+        await asyncio.sleep(0)
+
+    def _release(self) -> None:
+        for job in self.jobs.values():
+            if job["status"] == "running" and job["ready_at"] <= self.clock:
+                job["status"] = "COMPLETED"
+                self.completed += 1
+                if self.completed == 11:
+                    self.eleven_done.set()
+
+    def _in_use(self) -> int:
+        self._release()
+        return sum(1 for job in self.jobs.values() if job["status"] == "running")
+
+    def abandon(self, request_id: str) -> None:
+        """A cancel that does NOT stop the vendor call: the 45 s hold remains."""
+        job = self.jobs.get(request_id)
+        if job is not None and job["status"] == "running":
+            job["ready_at"] = self.clock + self.HOLD_S
+
+    # -- routes ---------------------------------------------------------
+    def submit(self, body: dict[str, Any]) -> httpx.Response:
+        prompt = str(body["prompt"])
+        self._release()
+        if self._in_use() >= self.capacity:
+            self.posts.setdefault(prompt, []).append(429)
+            return httpx.Response(
+                429,
+                json={
+                    "code": "audio_rate_limited",
+                    "error": "Audio generation is busy right now. Wait a moment and try again.",
+                },
+            )
+        self._seq += 1
+        request_id = f"job-{self._seq}"
+        index = int(prompt.rsplit("-", 1)[1])
+        slow = self.first_batch and index >= 11
+        self.jobs[request_id] = {
+            "prompt": prompt,
+            "ready_at": self.clock + (self.HOLD_S if slow else self.generate_s),
+            "status": "running",
+        }
+        self.posts.setdefault(prompt, []).append(200)
+        if self.posts.get("sound-11", [])[-1:] == [200] and self.posts.get("sound-12", [])[-1:] == [
+            200
+        ]:
+            self.both_in_flight.set()
+        return httpx.Response(200, json={"request_id": request_id, "status": "IN_QUEUE"})
+
+    def status(self, request_id: str) -> httpx.Response:
+        self._release()
+        job = self.jobs.get(request_id)
+        if job is None:
+            return httpx.Response(404, json={"error": "unknown request"})
+        payload: dict[str, Any] = {
+            "request_id": request_id,
+            # The contract's OPEN word while the job runs; the terminal pair is
+            # COMPLETED (or COMPLETED + an error_type, the frozen failure shape).
+            "status": "COMPLETED" if job["status"] == "COMPLETED" else "IN_QUEUE",
+            "model": "eleven_text_to_sound_v2",
+        }
+        if job["status"] == "COMPLETED":
+            payload["cost"] = {
+                "amount_usd": 0.002,
+                "basis": "billed",
+                "units": 1,
+                "unit": "seconds",
+            }
+        return httpx.Response(200, json=payload)
+
+    @staticmethod
+    def audio(request_id: str) -> bytes:
+        return b"ID3" + request_id.encode()
+
+    def result(self, request_id: str) -> httpx.Response:
+        data = self.audio(request_id)
+        return httpx.Response(
+            200,
+            json={
+                "status": "COMPLETED",
+                "audio": {
+                    "url": f"https://fixture.invalid/{request_id}.mp3",
+                    "content_type": "audio/mpeg",
+                    "duration_seconds": 0.5,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                },
+            },
+        )
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return self.submit(json.loads(request.content))
+        if request.url.path.endswith("/result"):
+            return self.result(request.url.params["request_id"])
+        if request.url.path.endswith("/status"):
+            return self.status(request.url.params["request_id"])
+        return httpx.Response(200, content=self.audio(request.url.path.rsplit("/", 1)[-1][:-4]))
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_batch_waits_out_the_work_a_stop_abandoned(monkeypatch):
+    """REGRESSION: the stop abandoned two vendor calls and the resume failed 3/3.
+
+    Reproduces the reported shape end to end — 14 items, a stop after 11, then a
+    second call with the remaining 3 — against a two-slot server that keeps the
+    cancelled jobs running for 45 s (its real contract). The property under
+    test: the resumed items must never fail on their FIRST submission because
+    of work the stop abandoned. They wait out the hold and retry instead, and
+    the resumed call's signal is a fresh one (a surviving abort would render
+    "Never started", not a retry).
+    """
+    from local_operator.audiogen import cascade, rungs
+    from local_operator.harness.types import AbortSignal
+
+    monkeypatch.setattr(cascade.audio_availability, "radient_available", lambda cfg=None: True)
+    monkeypatch.setattr(cascade.audio_availability, "elevenlabs_key", lambda cfg=None: None)
+    monkeypatch.setattr(cascade.audio_availability, "openai_audio_key", lambda cfg=None: None)
+
+    server = _SlotServer()
+    # ONE seam for every wait: the admission ladder AND the poll pace, in
+    # virtual seconds (so 45 s of hold and 65 s of ladder cost nothing here).
+    monkeypatch.setattr(rungs, "_submit_sleep", server.sleep)
+    monkeypatch.setattr(rungs.random, "uniform", lambda low, high: 1.0)
+
+    async def fake_cancel(handle):
+        if handle is not None and handle.request_id:
+            server.abandon(str(handle.request_id))
+        return rungs.AudioCancelReceipt(
+            outcome="cancelled",
+            vendor_stopped=False,
+            reason="the provider has no cancel API",
+        )
+
+    monkeypatch.setattr(rungs, "best_effort_cancel", fake_cancel)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(server.handle)) as client:
+
+        async def route(route, **kwargs):
+            assert route == AudioRoute.RADIENT
+            return await rungs.run_radient(
+                kwargs["spec"],
+                base_url="https://fixture.invalid/v1",
+                credential="tok",
+                handle=kwargs["handle"],
+                emit=kwargs["emit"],
+                pause=server.sleep,
+                client=client,
+            )
+
+        monkeypatch.setattr(cascade, "_run_route", route)
+
+        sounds = [{"prompt": f"sound-{n}", "duration_s": 0.5} for n in range(14)]
+        stop_signal = AbortSignal()
+        batch = asyncio.create_task(
+            audio_tool.execute_generate_sound_effect(
+                "first", {"sounds": sounds}, stop_signal, None, None
+            )
+        )
+        # Deterministic stop point: item 11 has completed and BOTH tail calls
+        # are in flight at the vendor — exactly what the report describes.
+        await asyncio.wait_for(server.eleven_done.wait(), timeout=10)
+        await asyncio.wait_for(server.both_in_flight.wait(), timeout=10)
+        batch.cancel()
+        first = await batch
+
+        # The stop abandoned two calls and the server kept their two slots.
+        assert server._in_use() == 2
+        server.first_batch = False
+        resumed_at = server.clock
+        # Only the POSTs the RESUMED call makes are evidence for the retry
+        # claim; the first batch's own submits are already in this log.
+        posted_before = {prompt: len(codes) for prompt, codes in server.posts.items()}
+
+        resumed_signal = AbortSignal()
+        resumed = await audio_tool.execute_generate_sound_effect(
+            "second", {"sounds": sounds[11:]}, resumed_signal, None, None
+        )
+
+    first_details = _details(first)
+    assert first_details["completed"] == 11, "the reported batch stopped at 11"
+    assert first_details["cancelled"] == 3
+
+    details = _details(resumed)
+    assert (details["completed"], details["failed"], details["cancelled"]) == (3, 0, 0)
+    rows = details["artifacts"]
+    assert [row["status"] for row in rows] == ["completed", "completed", "completed"]
+    assert all(row["error"] is None for row in rows)
+
+    # Each resumed row names the prompt it ran, and the two items exposed to the
+    # held window show the ladder's story in the server's own POST log. The
+    # third item is dequeued after the window reopens (2 workers, 2 slots), so
+    # it needs no retry — that is the property, not a weaker assertion.
+    by_prompt = {server.jobs[row["request_id"]]["prompt"]: row for row in rows}
+    assert set(by_prompt) == {"sound-11", "sound-12", "sound-13"}
+
+    def resumed_posts(prompt: str) -> list[int]:
+        return server.posts[prompt][posted_before.get(prompt, 0) :]
+
+    # The two items exposed to the held slots: refused on the first submission,
+    # refused again while the hold lasted, then admitted — never failed. The
+    # exact number of refusals depends on how the two workers interleave their
+    # waits, so the shape asserted is "refusals … then the admitted submit".
+    for prompt in ("sound-11", "sound-12"):
+        codes = resumed_posts(prompt)
+        assert codes[0] == 429, "the hold refused the resumed first submission"
+        assert len(codes) >= 2 and codes[-1] == 200
+        assert set(codes[1:-1]) <= {429}
+    # The third item is dequeued by a freed worker only AFTER one of those
+    # submissions is admitted (2 workers, 2 slots), so it never meets the hold.
+    assert resumed_posts("sound-13") == [200]
+
+    # And the admission that ended the refusals happened only after the 45 s
+    # hold had expired: the resumed batch waited it out instead of failing.
+    assert server.clock - resumed_at >= _SlotServer.HOLD_S
+    # A fresh signal: nothing from the stopped call survived into this one.
+    assert resumed_signal.aborted is False
 
 
 def test_hub_reason_error_appends_the_reason_and_keeps_typed_fields() -> None:
