@@ -67,6 +67,14 @@ from local_operator.paths import config_dir as app_config_dir
 # its own module rather than living here.
 from local_operator.resume import ResumeNotFound, resume_dir
 
+# The conversation's own approval record, also a stdlib-only module (its
+# docstring states why it must stay that way): read here so a resumed
+# conversation's gate starts in the mode its human left it in. Aliased so the
+# call site reads as a policy question rather than a bare ``read_override``.
+from local_operator.session.approval_policy import (
+    read_override as read_approval_override,
+)
+
 if TYPE_CHECKING:
     # Type-only imports: this module's whole discipline is that the heavy
     # engine, registry and provider modules load lazily inside the functions
@@ -4712,7 +4720,29 @@ async def _prepare(
     # exec-launched headless session (the 2026-09-28 incident's addendum), and
     # the posture surfaces had to carve an exception around a gate that ignored
     # the file they report against.
-    request_approval = _make_request_approval(yolo or _approval_mode_is_auto(config_manager))
+    #
+    # THE CONVERSATION'S OWN RECORDED CHOICE OUTRANKS THE FILE, in BOTH
+    # directions (2026-10-23). ``transcript_dir`` is this run's session
+    # directory, so a ``--resume`` reads the resumed conversation's
+    # ``approvals.json`` and starts in the mode its human left it in —
+    # including a recorded ``ask`` that must beat a config ``auto``. A fresh
+    # run's directory has no such file, which is exactly why reading it here
+    # keeps the config default for new conversations without a separate
+    # resume branch: the sidecar IS the choice, and its absence is the absence
+    # of one.
+    #
+    # Degrading to ``ask`` is preserved: an unreadable record reads as ``ask``
+    # (``approval_policy.read_override`` fails closed), and the config read
+    # itself still falls back to ``ask`` on an odd or missing file.
+    _persisted_approval, _approval_warning = read_approval_override(transcript_dir)
+    if _approval_warning:
+        print(f"\033[1;33mWarning: {_approval_warning}\033[0m", file=sys.stderr)
+    _approval_auto = (
+        _persisted_approval == "auto"
+        if _persisted_approval is not None
+        else _approval_mode_is_auto(config_manager)
+    )
+    request_approval = _make_request_approval(yolo or _approval_auto)
     # The variables surface behind list_variables/read_variable: config
     # overrides ride above the project file and process environment, and
     # values stay out of the system prompt (read on demand, not baked).

@@ -213,6 +213,15 @@ async def start_exec_control(
     attached supervisor — the behavioural difference this module's header
     calls out.
 
+    THE CONVERSATION'S OWN RECORDED CHOICE COMES FIRST (2026-10-23), ahead of
+    the config read above: a resumed conversation that carries ``approvals.json``
+    starts in the mode its human typed there, in BOTH directions. Without that
+    the seed below would hand a resumed, deliberately-ungated conversation to
+    the file, and the handle's own read of the same sidecar would disagree with
+    the value it was constructed from — the M1 posture hazard this paragraph
+    exists to prevent, one source over. ``--yolo`` still outranks both, because
+    a flag on this run is narrower and newer than either.
+
     Imports are function-local by contract, not by habit: ``serving`` pulls the
     composition root and ``server`` pulls asyncio, and this package sits on the
     CLI startup path (see the module header and :mod:`.serving`).
@@ -267,20 +276,41 @@ async def start_exec_control(
     # than overstated (review R1-4).
     auto_approve = yolo
     if not yolo:
-        try:
-            approval_mode = (
-                str(
-                    ConfigManager(config_dir=config_directory).get_config_value(
-                        "tool_approval_mode", "ask"
+        # THE CONVERSATION'S OWN RECORDED CHOICE OUTRANKS THE MACHINE DEFAULT
+        # (2026-10-23), and it is consulted HERE as well as in the handle
+        # because this value is what the handle is CONSTRUCTED with: a resumed
+        # conversation told to start ungated must not park its first card while
+        # waiting for a delivery. The read is the same sidecar the handle reads
+        # in ``_adopt_persisted_approval_override`` — that one then finds this
+        # value already adopted and agrees with it, which is the point (gate and
+        # posture equal, one read).
+        transcript = getattr(session, "transcript", None) or getattr(session, "_transcript", None)
+        directory = getattr(transcript, "directory", None)
+        override: str | None = None
+        if directory is not None:
+            from pathlib import Path
+
+            from local_operator.session.approval_policy import read_override
+
+            if isinstance(directory, Path):
+                override, _warning = read_override(directory)
+        if override is not None:
+            auto_approve = override == "auto"
+        else:
+            try:
+                approval_mode = (
+                    str(
+                        ConfigManager(config_dir=config_directory).get_config_value(
+                            "tool_approval_mode", "ask"
+                        )
                     )
+                    .strip()
+                    .lower()
                 )
-                .strip()
-                .lower()
-            )
-        except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
-            logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
-            approval_mode = "ask"
-        auto_approve = approval_mode == "auto"
+            except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
+                logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
+                approval_mode = "ask"
+            auto_approve = approval_mode == "auto"
     handle = ServingSessionHandle(
         session,
         loop,

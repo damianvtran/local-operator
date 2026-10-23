@@ -942,13 +942,21 @@ def test_the_report_frame_carries_the_handshake_proof() -> None:
     client._operator_salt = operator_nonce()
     client._authority_bearing = True
 
-    report = {"op": "slash_result", "command": "approvals", "args": "default auto"}
+    report = {"op": "slash_result", "command": "approvals", "args": ""}
     presented = client._present_authority(dict(report))
     assert presented["operator_handshake"] == handshake_proof(
         cap, client_nonce=client._operator_nonce, server_salt=client._operator_salt
     )
     # The report is ORDINARY: it carries no authority of its own.
     assert "operator_cap" not in presented
+
+    # `/approvals default auto` is authority-INCREASING, so the same kind of
+    # frame DOES carry the capability; the handshake proof alone is never
+    # authority (agent review round 4 / the classification seam).
+    loosening = {"op": "slash_result", "command": "approvals", "args": "default auto"}
+    presented_loosening = client._present_authority(dict(loosening))
+    assert "operator_cap" in presented_loosening
+    assert presented_loosening["operator_cap"] is not None
 
     # Any other op carries nothing.
     assert "operator_handshake" not in client._present_authority({"op": "prompt", "text": "hi"})

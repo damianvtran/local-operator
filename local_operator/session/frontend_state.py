@@ -1721,6 +1721,16 @@ class PendingGateState(BaseModel):
     #: gaining a ``notification`` frame of their own — a second channel for a
     #: card the app already receives is how one question becomes two banners.
     session_name: str = ""
+    #: The approval rule in force and its provenance, for a viewer that shows
+    #: the policy beside the pending question. Defaulted for the same skew
+    #: reason as ``session_name``: an old payload has neither key and must read
+    #: as "not stated", never as a mode the runtime did not stamp. See
+    #: ``mobile.types.PendingRequest`` for the vocabulary.
+    approval_mode: str = ""
+    approval_provenance: str = ""
+    #: The machine default the mode outranks; ``""`` when not stated. See
+    #: ``mobile.types.PendingRequest`` for why it is not derivable.
+    approval_global_mode: str = ""
 
 
 class PendingAskState(BaseModel):

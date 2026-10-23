@@ -10701,6 +10701,11 @@ def _pending_request(state: Any) -> PendingRequest | None:
         # gate state (which has neither key) safe.
         recommended=(raw if isinstance(raw := getattr(state, "recommended", None), int) else None),
         persist=bool(getattr(state, "persist", False)),
+        # Additive policy keys, defaulted so an older owner's gate state (which
+        # has neither) rebuilds as "not stated" rather than failing the card.
+        approval_mode=str(getattr(state, "approval_mode", "") or ""),
+        approval_provenance=str(getattr(state, "approval_provenance", "") or ""),
+        approval_global_mode=str(getattr(state, "approval_global_mode", "") or ""),
     )
 
 

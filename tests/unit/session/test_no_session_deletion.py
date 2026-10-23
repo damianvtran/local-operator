@@ -103,6 +103,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Only the failed sibling mkstemp regular file; never a session or transcript.",
     ),
+    # The conversation's approvals.json sidecar. `replace` swaps a sibling
+    # mkstemp TEMP FILE onto that file, and `unlink` removes only that temp file
+    # after a failed write. The session directory is the CONTAINER (the target
+    # is <session_dir>/approvals.json), so neither call can rename or remove a
+    # directory, and no path here is ever a session directory itself.
+    (
+        "local_operator/session/approval_policy.py::write_override",
+        "os.replace",
+        "Atomic swap of a sibling mkstemp temp FILE onto <session>/approvals.json; "
+        "never a directory",
+    ),
+    (
+        "local_operator/session/approval_policy.py::write_override",
+        "os.unlink",
+        "Removes only the failed write's own mkstemp temp FILE beside approvals.json; "
+        "never a directory",
+    ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
     # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
@@ -3832,6 +3849,9 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # (``<config>/network/pending-move.json``). Its receiver is that file, and
         # the move's own reader turns a missing one into "no handoff in flight".
         "local_operator/session/placement.py::_write_journal",  # tmp -> journal FILE
+        # tmp -> approvals.json, a FILE inside the conversation's own directory
+        # (the atomic-write shape every other sidecar writer here uses).
+        "local_operator/session/approval_policy.py::write_override",
     }
 )
 
