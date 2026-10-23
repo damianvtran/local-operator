@@ -1476,6 +1476,13 @@ def test_a_default_shaped_subtree_write_keeps_nested_user_values(tmp_path: Path)
     }
     assert values["subagents"]["model_choice"] == "med"
     assert values["subagents"]["models"]["hi"] == "openai/gpt-5"
+    # The caller handed in SHALLOW copies of the defaults, and preservation applies
+    # in place: without the writer's copy-on-set this merged the file's chains into
+    # `DEFAULT_CONFIG` itself, and the next manager built on an empty config dir
+    # inherited them (CI caught it as a cascade-refusal test seeing a chain it never
+    # wrote). Pin the isolation of the process-wide defaults directly.
+    assert DEFAULT_CONFIG.values["retry"]["fallbackChains"] == {}
+    assert DEFAULT_CONFIG.values["subagents"] == {}
 
     # And the same through the migration, which rewrites the whole file.
     from local_operator.config_migrations import migrate_session_cleanup
