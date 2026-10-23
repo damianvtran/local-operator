@@ -14,13 +14,32 @@ from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
 from local_operator.hub_sync.identity import LinkPolicy
-from local_operator.hub_sync.runner import HubSyncRunner, TickReport
+from local_operator.hub_sync.runner import (
+    SESSION_START_CHECK_THROTTLE_S,
+    HubSyncRunner,
+    TickReport,
+)
 from local_operator.hub_sync.settings import HubSyncSettings
 from tests.unit.hub_sync.test_service import BASE, Hub, _pull_agent
 
 
+class Clock:
+    """A monotonic clock a test can move, injected as the runner's ``clock``.
+
+    The session-start throttle is a time window, and a test that has to sleep
+    through 120 real seconds (or patch the stdlib globally) is either slow or
+    lying. The runner takes the clock as a constructor argument for exactly this.
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
 @pytest.fixture
-def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     root = tmp_path / ".local-operator"
     hub = Hub()
     monkeypatch.setattr(
@@ -43,7 +62,14 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             resolver=None,
         )
 
-    runner = HubSyncRunner(config_manager=cm, build_ctx=build, startup_delay=0)
+    # An indirect ``rig`` param is the CLOCK these tests move; the default rig
+    # keeps the real monotonic clock.
+    runner = HubSyncRunner(
+        config_manager=cm,
+        build_ctx=build,
+        startup_delay=0,
+        clock=getattr(request, "param", None),
+    )
     return runner, hub, agents, root, cm, state
 
 
@@ -1120,3 +1146,102 @@ async def test_a_resolved_link_publishes_after_a_local_edit_from_the_seeded_rece
     after = prov_mod.read_baseline(root, "agent", row.id)
     assert after is not None and after.outbound is not None
     assert after.outbound.remote_revision == fake.revision
+
+
+# -- session-start trigger ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_session_start_checks_once_and_the_next_is_coalesced(rig) -> None:
+    """Opening two conversations back to back is ONE check, not two.
+
+    The real path, not a counter: the linked agent's ``last_checked_at`` is only
+    written by a check that actually ran, so this fails if the trigger schedules
+    nothing at all as well as if it schedules a second pass.
+    """
+
+    runner, hub, agents, root, *_ = rig
+    row = _pull_agent(agents, hub, root)
+    key = f"agent:{row.id}"
+
+    first = runner.note_session_start()
+    assert isinstance(first, asyncio.Task)
+    await first
+    assert st.StatusStore(root).load()["items"][key]["last_checked_at"]
+
+    # Back to back: the window the FIRST check claimed still covers this one.
+    assert runner.note_session_start() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rig", [Clock()], indirect=True)
+async def test_the_window_expires_and_the_next_session_start_checks_again(rig, monkeypatch) -> None:
+    """The throttle is a window, not a one-shot latch: after it, a start checks.
+
+    ``check_items`` is counted rather than timed, so the assertion is about the
+    trigger and not about how long the fake hub takes.
+    """
+
+    runner, hub, agents, root, *_ = rig
+    clock: Clock = runner._clock  # type: ignore[assignment]
+    _pull_agent(agents, hub, root)
+    calls: list[str] = []
+    real = svc.check_items
+
+    def counting(ctx: Any, **kw: Any) -> Any:
+        calls.append("check")
+        return real(ctx, **kw)
+
+    monkeypatch.setattr(svc, "check_items", counting)
+
+    await runner.note_session_start()
+    assert len(calls) == 1
+    assert runner.note_session_start() is None  # inside the window
+    assert len(calls) == 1
+
+    clock.now += SESSION_START_CHECK_THROTTLE_S
+    later = runner.note_session_start()
+    assert later is not None
+    await later
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_tick_starts_the_session_window_too(rig) -> None:
+    """A check is a check: the timer having just looked is enough to skip one."""
+
+    runner, *_ = rig
+    await runner.tick(reason="startup")
+    assert runner.note_session_start() is None
+
+
+@pytest.mark.asyncio
+async def test_a_session_start_is_fire_and_forget_and_never_raises(rig, monkeypatch) -> None:
+    """A hub that is down costs the create nothing: nothing runs inline, nothing raises.
+
+    The check runs in an executor thread behind the runner's lock, so a broken
+    hub surface is the realistic failure -- and the task must absorb it. The
+    assertion that ``calls`` is empty the instant ``note_session_start`` returns
+    is what proves the work was SCHEDULED rather than awaited: ``create_task``
+    never runs the coroutine before control returns to the loop.
+    """
+
+    runner, *_ = rig
+    calls: list[str] = []
+
+    def boom(*_a: Any, **_kw: Any) -> Any:
+        calls.append("check")
+        raise RuntimeError("hub unreachable")
+
+    monkeypatch.setattr(svc, "check_items", boom)
+
+    task = runner.note_session_start()
+    assert task is not None
+    assert calls == [], "the check must not run on the caller's stack"
+    await task  # would raise if the trigger did not swallow the failure
+    assert task.exception() is None
+    assert calls == ["check"]
+
+    # The failed attempt still claims the window: a hub that is down must not
+    # turn every subsequent session start into another attempt.
+    assert runner.note_session_start() is None

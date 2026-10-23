@@ -5123,7 +5123,12 @@ SETTINGS: tuple[Setting, ...] = (
         section="hub",
         label=_t(_ws.hub_check_interval_min_label()),
         kind=Kind.INT,
-        default=60,
+        # The literal restates ``hub_sync.settings.DEFAULT_CHECK_INTERVAL_MIN``;
+        # ``_consumer_defaults`` in tests/unit/test_settings_io.py pins the two
+        # together. Conditional checks made an unchanged tick cheap, so the
+        # default is a quarter-hour rather than an hour -- see that constant for
+        # the reasoning.
+        default=15,
         minimum=5,
         maximum=1440,
         help=_t(_ws.hub_check_interval_min_help()),
