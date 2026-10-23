@@ -53,8 +53,8 @@ evidence for both.
 | 2.11 | Plan / todo list | ✅ | ✅ | UI run panel + plan chip; TUI `widgets/todo_panel.py` |
 | 2.12 | Running subagents and background jobs roster | ✅ | ✅ | UI run panel; TUI `widgets/subagent_panel.py`, `widgets/subagent_view.py`, status counters |
 | 2.13 | Armed wakes and monitors, with next-due/health | ✅ | ✅ | UI composer chips + run panel; TUI `widgets/wake_panel.py` |
-| 2.14 | Create, edit and cancel wakes/schedules | ✅ | ✅ | UI `features/schedules/*`; TUI `/schedule` + `widgets/schedule_view.py` (delivered 2026-10-22; replaces the agent-tool workaround) |
-| 2.15 | Code-request ledger: PR/MR state, CI, agent/design/QA/UX review rounds, freshness | ✅ | ✅ | UI `features/code-review/*` right pane; TUI `/review` + `widgets/review_view.py` (delivered 2026-10-22; read-only, opens the forge page) |
+| 2.14 | Create, edit and cancel wakes/schedules | ✅ | ✅ | UI `features/schedules/*`; TUI `/schedule` + `widgets/schedule_view.py` (delivered before this 2026-10-22 audit; replaces the agent-tool workaround) |
+| 2.15 | Code-request ledger: PR/MR state, CI, agent/design/QA/UX review rounds, freshness | ✅ | ✅ | UI `features/code-review/*` right pane; TUI `/review` + `widgets/review_view.py` (delivered before this 2026-10-22 audit; read-only, opens the forge page) |
 
 ## 3. Skills, memory and harness import
 
@@ -121,7 +121,7 @@ evidence for both.
 |---|---|---|---|---|
 | 8.1 | Completion notifications and unread marks | ✅ | ✅ | UI native notifications + attention; TUI notifier app, `/notifications`, terminal marks |
 | 8.2 | Armed wake/monitor list with due time and delivery health | ✅ | ✅ | UI composer chips/run panel; TUI `wake_panel.py` |
-| 8.3 | Create/edit/cancel a wake from the app | ✅ | ✅ | UI schedules page/form; TUI `/schedule` create/edit/cancel (`widgets/schedule_view.py`) |
+| 8.3 | Create/edit/cancel a wake from the app | ✅ | ✅ | UI schedules page/form; TUI `/schedule` create/edit/cancel (`widgets/schedule_view.py`; delivered before this audit) |
 | 8.4 | Schedules page grouped by conversation, including legacy agent schedules | ✅ | ◐ | UI `features/schedules/components/schedules-page.tsx`; TUI `/schedule` covers the current conversation only (`widgets/schedule_view.py`), not the machine-wide legacy `agent_state.schedules` page |
 
 ## 9. Ask flows
@@ -175,7 +175,7 @@ set clusters into three kinds:
 
 1. **Bounded direct surfaces** — the user profile (5.11). The underlying
    profile data exists; only the page is absent. The code-request ledger
-   (2.15) was delivered in the 2026-10-22 slice; 8.4 remains partial because
+   (2.15) was delivered before this 2026-10-22 audit; 8.4 remains partial because
    `/schedule` is current-conversation only, not the machine-wide legacy page.
 2. **Large desktop surfaces that need a terminal design and a client for a
    backend API** — the agent hub marketplace, skills library and public teams
@@ -186,7 +186,7 @@ set clusters into three kinds:
 
 The larger, more actionable group is the 12 **partial** rows: the capability
 exists only by asking the agent to use a tool, or as a read-only/stripped-down
-surface. The first six slices below target that group.
+surface. The remaining slices below target that group.
 
 ## 14. Prioritised slice plan
 
@@ -203,7 +203,7 @@ P3's per-member model/effort override editing remains desktop-only.
 | Order | Slice | Gap closed | Why this rank | Risk |
 |---|---|---|---|---|
 | P0 | `/review` — code-request ledger page — **delivered** | 2.15 | No direct TUI surface; backend ledger and `service.view_rows` already exist; read-only; high value to a developer operator | Low: read-only, no protocol change |
-| P1 | `/schedule` — wake list/create/edit/cancel — **delivered; 8.4 remains partial** | 2.14, 8.3, 8.4 | No direct TUI surface; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround. The machine-wide legacy schedules page (8.4) remains absent | Medium: mutation, form validation, date/duration parsing |
+| P1 | `/schedule` — wake list/create/edit/cancel — **delivered; 8.4 remains partial** | 2.14, 8.3 (8.4 partial) | No direct TUI surface; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround. The machine-wide legacy schedules page (8.4) remains absent | Medium: mutation, form validation, date/duration parsing |
 | P2 | Project parity completion: edit project, add/remove milestone — **delivered** | 10.3, 10.5 | Closes the last project gaps; store APIs already exist; TUI already has the page and form patterns | Low–medium |
 | P3 | Agent and team authoring forms — **delivered; per-member overrides remain desktop-only** | 4.2, 4.4 | Removes the agent-mediated workaround; desktop has the full field set to mirror; TUI already has `/agent` and `/team` surfaces | Medium: forms and validation |
 | P4a | Read-only text/code/markdown file preview — **delivered** | 2.3a, 6.2a | `/view` and supported callouts share a bounded local read-only viewer; richer rendering and editing are not included | Medium: file-type routing, bounded rendering |
