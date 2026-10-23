@@ -234,6 +234,86 @@ except Exception:
 persist()
 """
 
+#: The local-address decoder every guest script that asks "is the action
+#: server listening" shares. THE PORT ALONE IS NOT THE ANSWER, and that is the
+#: measured defect this constant exists to close: ``/proc/net/tcp`` prints the
+#: local address beside the port, and a listener bound to ``127.0.0.1`` (or to
+#: ``::1``) answers every probe the guest can make while the host's
+#: ``http://<public_ip>:5000`` path gets ECONNREFUSED -- a TCP RST from the
+#: guest kernel, because no socket matches the address the packet arrived on.
+#: Reproduced in a rig: a loopback-only listener refuses a connect on the
+#: machine's own address with errno 61 while the watchdog's ``answers()``
+#: returns True, and a ``::1``-only listener does the same through the v6
+#: fallback. The 2026-10 arm lost 10 of 20 episodes (4 refused, probe wedges
+#: and transport timeouts on the rest), every one of them reported as
+#: "serving" by the port-only checks. The address is what separates "the
+#: server is serving" from "the server is serving where the harness cannot
+#: reach it".
+#:
+#: ``/proc/net/tcp`` prints IPv4 as one 32-bit word in HOST byte order
+#: (``0100007F`` is 127.0.0.1) and IPv6 as four such words. ``loopback`` is
+#: unreachable from the host path by definition; ``wildcard`` and
+#: ``addressed`` are kept apart because only ``wildcard`` is reachable on
+#: every guest interface -- AWS maps the public address onto the primary
+#: private one, so an ``addressed`` bind is reachable only when it names that
+#: primary address, which this decoder cannot know. It is recorded, not
+#: refused, so a healthy server bound to its private address is never
+#: discarded as broken.
+LISTENER_BIND_SOURCE = r'''
+def bind_kind(local, family):
+    # The bytes are printed in HOST byte order, so the decode depends on the
+    # guest's endianness -- x86_64 on every AMI this runs on. ``sys.byteorder``
+    # is read at call time; the default exists because a harness shim (and an
+    # embedded interpreter) need not expose it, and little-endian is what the
+    # guest image is.
+    try:
+        raw = bytes.fromhex(local)
+    except ValueError:
+        return 'unknown'
+    width = 4 if family == 4 else 16
+    if family not in (4, 6) or len(raw) != width:
+        return 'unknown'
+    words = [raw[index:index + 4] for index in range(0, width, 4)]
+    if getattr(sys, 'byteorder', 'little') == 'little':
+        words = [word[::-1] for word in words]
+    address = b''.join(words)
+    if family == 4:
+        if address == b'\x00' * 4:
+            return 'wildcard'
+        return 'loopback' if address[0] == 127 else 'addressed'
+    if address == b'\x00' * 16:
+        return 'wildcard'
+    return 'loopback' if address == b'\x00' * 15 + b'\x01' else 'addressed'
+
+def listener_kinds(port):
+    """The bind kinds among LISTEN sockets on ``port``, plus readability.
+
+    An unreadable /proc is reported as ``readable=False`` rather than as "no
+    listener": it is evidence of nothing, and a caller must not turn it into
+    either a health claim or a refusal.
+    """
+    kinds = set()
+    readable = False
+    for name, family in (('/proc/net/tcp', 4), ('/proc/net/tcp6', 6)):
+        try:
+            lines = pathlib.Path(name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        readable = True
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4 or fields[3] != '0A':
+                continue
+            try:
+                local, port_hex = fields[1].rsplit(':', 1)
+                if int(port_hex, 16) != port:
+                    continue
+            except (IndexError, ValueError):
+                continue
+            kinds.add(bind_kind(local, family))
+    return kinds, readable
+'''
+
 #: The guest-local recovery path. Runs as its own service in its own cgroup, so
 #: it is still alive when the target unit is ``failed`` and the host has no
 #: transport to dispatch a restart through.
@@ -253,6 +333,14 @@ persist()
 #:                                -> NONE, whatever the probe said; observed as
 #:                                   ``unresponsive``/``no-listener`` only
 #:   any state, listener that answers -> none; observed as ``serving``
+#:   any state, listener answers on LOOPBACK ONLY
+#:                                -> none; observed as ``loopback-only``. The
+#:                                   host posts to the public address, so this
+#:                                   bind serves nobody the harness can reach;
+#:                                   a restart cannot change an env-derived
+#:                                   bind, and killing a server that still
+#:                                   serves the guest's own state would
+#:                                   destroy the episode for nothing
 #:   a state systemd will not report -> none; observed as ``unknown``
 #:
 #: ``ActiveState`` IS THE ONLY DESTRUCTIVE GATE, AND IT MUST BE. ``failed`` or
@@ -319,7 +407,7 @@ persist()
 #:
 #: FAIL-OPEN. A defect here must never fail an episode: every cycle is caught,
 #: the loop continues, and a record it cannot write is simply missing evidence.
-WATCHDOG_SOURCE = r"""
+WATCHDOG_SOURCE = LISTENER_BIND_SOURCE + r"""
 import json, pathlib, socket, subprocess, sys, time
 
 unit, port, record_path, restart_script, result_path = (
@@ -352,8 +440,10 @@ TRIGGERS = ('failed', 'inactive', 'unresponsive')
 #: an older watchdog still seeds; the cycle only ever issues ``verified-restart``.
 ACTIONS = ('reset-failed+start', 'verified-restart')
 OUTCOMES = ('started', 'start-failed', 'reset-failed-error', 'no-effect',
-            'restarted', 'restart-failed', 'throttled', 'capped')
-OBSERVATIONS = ('none', 'serving', 'no-listener', 'unresponsive', 'unknown')
+            'restarted', 'unreachable-listener', 'restart-failed', 'throttled',
+            'capped')
+OBSERVATIONS = ('none', 'serving', 'loopback-only', 'no-listener', 'unresponsive',
+               'unknown')
 
 absent_since = None
 #: The throttle compares against the last DISPATCH's clock value, not the
@@ -374,21 +464,12 @@ def run(*args):
     subprocess.check_output(args, text=True, timeout=5)
 
 def listening():
-    for name in ('/proc/net/tcp', '/proc/net/tcp6'):
-        try:
-            lines = pathlib.Path(name).read_text().splitlines()[1:]
-        except OSError:
-            continue
-        for line in lines:
-            fields = line.split()
-            if len(fields) < 4 or fields[3] != '0A':
-                continue
-            try:
-                if int(fields[1].rsplit(':', 1)[1], 16) == port:
-                    return True
-            except (IndexError, ValueError):
-                continue
-    return False
+    # The bind KINDS, never a boolean: a listener the host path cannot reach
+    # (loopback only) is not a serving action server, and this is the one place
+    # the guest can tell the difference. An unreadable /proc reads as no
+    # listener, exactly as before.
+    kinds, readable = listener_kinds(port)
+    return kinds if readable else set()
 
 def answers():
     # A LISTEN socket is not a serving server, and an exit code is not proof of
@@ -468,7 +549,7 @@ def seed():
                 'action': action, 'outcome': outcome}])[-EVENT_CAP:]
             if age < WINDOW_S:
                 recent.append(stamp / 1000000.0)
-                if outcome == 'no-effect':
+                if outcome in ('no-effect', 'unreachable-listener'):
                     ineffective.append(stamp / 1000000.0)
     recent.sort()
     ineffective.sort()
@@ -621,6 +702,12 @@ def restart_status(verdict, token):
         return 'restart-failed'
     if not postdated(owners, new_main, new_main_start, kill_ticks):
         return 'restart-failed'
+    binds = verdict.get('post_restart_bind')
+    if isinstance(binds, list) and binds and set(binds) <= {'loopback'}:
+        # A fresh listener that only loopback can reach is not a revival: the
+        # host posts to the public address, and this outcome names that bind
+        # instead of letting the next action discover it as a transport fault.
+        return 'unreachable-listener'
     if not receipt_reconciles(verdict.get('receipt')):
         return 'restart-failed'
     return 'restarted'
@@ -653,7 +740,12 @@ def intervene(now, trigger):
     # scan, reset-failed, the generation rebase, kill, start, verification --
     # so the reset accounting cannot drift from the start that needs it.
     outcome = verified_restart()
-    if outcome == 'no-effect':
+    if outcome in ('no-effect', 'unreachable-listener'):
+        # Neither produced a server the harness can use: 'no-effect' left
+        # nothing listening, 'unreachable-listener' left a listener only the
+        # guest can reach. Both count against the ineffective cap -- two of
+        # them and the watchdog stops, instead of killing a working-ish server
+        # every interval for an hour to reproduce the same bind.
         ineffective.append(now)
     event = {'us': monotonic_us(), 'trigger': trigger,
              'action': 'verified-restart', 'outcome': outcome}
@@ -687,11 +779,21 @@ def cycle():
     if state['capped'] != capped:
         state['capped'] = capped
         persist()
-    if listening():
+    kinds = listening()
+    if kinds:
         absent_since = None
         if answers():
             # A serving port is the whole healthy-path shortcut: no unit query,
-            # no verb, not even a state read.
+            # no verb, not even a state read. But a listener bound to LOOPBACK
+            # ONLY serves nobody but the guest: the host posts to this server
+            # on the instance's public address, so that bind is a path failure
+            # the guest can see and must name. It is observed, never repaired --
+            # a restart cannot change a bind that comes from the unit's
+            # environment, and killing a server that still serves the guest's
+            # own state would destroy the episode for nothing.
+            if kinds <= {'loopback'}:
+                observe('loopback-only')
+                return
             observe('serving')
             return
         observe('unresponsive')
@@ -897,8 +999,20 @@ path = pathlib.Path('/etc/systemd/system') / (unit + '.d') / '90-lop-supervisor.
 hook = '+/usr/bin/python3 ' + str(capture) + ' ' + unit
 # No ExecStart replacement or process signals. KillMode=process prevents
 # systemd from killing the desktop applications a server command spawned.
+#
+# THE BIND IS PINNED, because it is the one launch property the host path
+# depends on and it is env-derived in the AMI's server: the pinned OSWorld-V2
+# release (xlang-ai/osworld-server @ a3cc3f0c, src/server.py) reads
+# ``OSWORLD_SERVER_HOST`` with a 0.0.0.0 default and hands it to uvicorn. A
+# restart therefore binds exactly what the unit's environment says, so an
+# image-level EnvironmentFile or drop-in naming a loopback address would make
+# every systemd restart unbind the host path while the guest's own probes keep
+# answering -- the measured split. Pinning the wildcard here is not an
+# ExecStart rewrite (the argument vector is untouched) and is inert on a
+# server version that never reads the name.
 content = ('[Unit]\nStartLimitIntervalSec=3600\nStartLimitBurst=3\n'
            '[Service]\nRestart=always\nRestartSec=1\nKillMode=process\n'
+           'Environment="OSWORLD_SERVER_HOST=0.0.0.0"\n'
            'ExecStopPost=' + hook + '\n')
 watchdog_path = pathlib.Path('/etc/systemd/system') / 'lop-action-watchdog.service'
 watchdog_script = root / 'watchdog.py'
@@ -1108,7 +1222,7 @@ print(json.dumps({'unit': unit, 'installed': True,
 #: own executor and response channel. The service writes the verdict to
 #: ``RESTART_RESULT_PATH`` and the host reads it from a later command once the
 #: action server answers again.
-RESTART_SOURCE = r"""
+RESTART_SOURCE = LISTENER_BIND_SOURCE + r"""
 import errno, json, os, pathlib, re, subprocess, sys, time
 
 # ``python3 -c <source> a b c`` gives sys.argv == ['-c', 'a', 'b', 'c']:
@@ -1319,6 +1433,10 @@ start_limit_cleared = True
 kill_ticks = 0
 post = []
 post_complete = False
+# The listener's bind kinds, initialised with the other post-restart
+# observations: a pre scan that cannot be completed returns to the payload
+# before any address is read, and an unread set must never read as a bind.
+post_kinds = set()
 owner_records = []
 detail_complete = False
 new_main = 0
@@ -1404,12 +1522,22 @@ if pre_complete:
         # pid would report the stale holder as the outcome while a genuine
         # new listener was still binding. Only a postdating descendant of the
         # new MainPID ends the poll early; anything else keeps waiting.
+        # A fresh listener is not enough: it must also be one the HOST can
+        # reach. A bind to loopback only answers every probe this guest can
+        # make and refuses every request the harness sends, so accepting it
+        # here would report a revival that the next action cannot use. The
+        # kinds are read from /proc, never asserted by text.
+        fresh_kinds, _ = listener_kinds(PORT)
         if (post_complete and post and new_main > 0 and
                 new_main_start >= kill_ticks and
-                all(acceptable(pid, new_main, new_main_start) for pid in post)):
+                all(acceptable(pid, new_main, new_main_start) for pid in post)
+                and not (fresh_kinds and fresh_kinds <= {'loopback'})):
             break
         time.sleep(0.1)
     owner_records, detail_complete = describe(post[:8])
+    # The listener's addresses at the END of the wait, for the payload: the
+    # in-loop read decided acceptance, this one is what the host records.
+    post_kinds, _ = listener_kinds(PORT)
     try:
         new_main = main_pid()
     except Exception:
@@ -1444,6 +1572,11 @@ payload = {
     'post_restart_count': len(post),
     'post_scan_complete': post_complete and detail_complete,
     'post_restart_owners': owner_records,
+    # Which addresses the post-restart listener bound, as raw /proc evidence:
+    # ['wildcard'], ['addressed'], ['loopback'] or a mix of families. The host
+    # derives the verdict from it; an empty list means no readable listener,
+    # never "loopback" and never "wildcard".
+    'post_restart_bind': sorted(post_kinds),
     'new_main_pid': new_main,
     'new_main_start_ticks': new_main_start,
     'receipt': receipt,
@@ -2407,6 +2540,7 @@ _WATCHDOG_OUTCOMES = frozenset(
         "reset-failed-error",
         "no-effect",
         "restarted",
+        "unreachable-listener",
         "restart-failed",
         "throttled",
         "capped",
@@ -2415,7 +2549,9 @@ _WATCHDOG_OUTCOMES = frozenset(
 #: Observations are NOT attempts: a state the watchdog cannot repair is
 #: recorded here without spending the cap, so a dead-but-blocked server is
 #: distinguishable from a healthy one instead of both reading ``attempts: 0``.
-_WATCHDOG_OBSERVATIONS = frozenset({"none", "serving", "no-listener", "unresponsive", "unknown"})
+_WATCHDOG_OBSERVATIONS = frozenset(
+    {"none", "serving", "loopback-only", "no-listener", "unresponsive", "unknown"}
+)
 #: ``_watchdog_count`` gates counters; ``_watchdog_ticks`` gates the monotonic
 #: stamps, whose natural range is microseconds since boot (a long-lived guest
 #: reaches 1e11), so they cannot share the counter bound.
@@ -2522,6 +2658,7 @@ RESTART_STATUSES = frozenset(
     {
         "verified",
         "stale_listener",
+        "unreachable_listener",
         "verification_timeout",
         "incomplete_scan",
         "receipt_unavailable",
@@ -2535,6 +2672,10 @@ RESTART_STATUSES = frozenset(
 #: the same sentence. Never guest text.
 RESTART_CAUSES = {
     "stale_listener": "post-restart listener predates the restart",
+    "unreachable_listener": (
+        "post-restart listener is bound to loopback only, which the host path "
+        "cannot reach"
+    ),
     "verification_timeout": "no listener appeared before the verification deadline",
     "incomplete_scan": "socket owner scan was incomplete",
     "receipt_unavailable": "post-restart receipt could not be reconciled",
@@ -2551,6 +2692,11 @@ def restart_cause(status: str) -> str:
 #: capped, and a pre-cap count above the cap makes the scan incomplete. An
 #: incomplete set cannot prove anything about the holders it did not see.
 RESTART_OWNER_CAP = 8
+
+#: The bind kinds the guest's /proc decoder emits. Fixed vocabulary: the host
+#: re-derives every claim from them, and a word outside this set fails the
+#: record rather than being silently trusted or silently dropped.
+RESTART_BINDS = frozenset({"wildcard", "addressed", "loopback", "unknown"})
 
 
 def is_restart_payload(value: object) -> bool:
@@ -2607,6 +2753,7 @@ def empty_restart(status: str = "command_failed") -> dict[str, Any]:
         "pre_restart_pids": [],
         "post_restart_pids": [],
         "post_restart_owners": [],
+        "post_restart_bind": [],
         "post_restart_owner": None,
         "kill_uptime_ticks": 0,
         "new_main_pid": None,
@@ -2615,6 +2762,27 @@ def empty_restart(status: str = "command_failed") -> dict[str, Any]:
         "fresh": False,
         "latest_restart": None,
     }
+
+
+def _restart_binds(value: object) -> list[str]:
+    """The post-restart listener's bind kinds, whitelisted and de-duplicated.
+
+    Absent is ``[]`` (an older producer, or a guest that could not read
+    /proc): unknown is NOT loopback, so an unreadable guest can never turn
+    into a refusal. Only a non-empty set that is entirely ``loopback`` fails
+    the restart, which is the one bind the host path is guaranteed to miss.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("invalid restart bind list")
+    binds: list[str] = []
+    for item in value:
+        if type(item) is not str or item not in RESTART_BINDS:
+            raise ValueError("invalid restart bind kind")
+        if item not in binds:
+            binds.append(item)
+    return binds
 
 
 def _restart_pids(value: object) -> list[int]:
@@ -2681,6 +2849,7 @@ def restart_record(output: str) -> dict[str, Any]:
     pre = _restart_pids(value.get("pre_restart_pids"))
     post = _restart_pids(value.get("post_restart_pids"))
     owners = _restart_owners(value.get("post_restart_owners"))
+    binds = _restart_binds(value.get("post_restart_bind"))
     pre_count = value.get("pre_restart_count")
     post_count = value.get("post_restart_count")
     if type(pre_count) is not int or pre_count < len(pre):
@@ -2718,12 +2887,19 @@ def restart_record(output: str) -> dict[str, Any]:
         if incomplete
         else listener_postdates_restart(owners, new_main, new_main_start, kill_ticks)
     )
+    # A fresh listener is only a revival if the host can reach it. The rig
+    # measured the split this refuses: a loopback-only bind answers the guest
+    # and refuses the host with errno 61. Reported as its own status so the
+    # evidence names the bind instead of the next action reading it as a blip.
+    unreachable = bool(binds) and set(binds) <= {"loopback"}
     if incomplete:
         status = "incomplete_scan"
     elif not post:
         status = "verification_timeout"
     elif not fresh:
         status = "stale_listener"
+    elif unreachable:
+        status = "unreachable_listener"
     elif not reconciled:
         status = "receipt_unavailable"
     else:
@@ -2741,6 +2917,7 @@ def restart_record(output: str) -> dict[str, Any]:
         "pre_restart_pids": pre,
         "post_restart_pids": post,
         "post_restart_owners": owners,
+        "post_restart_bind": binds,
         "post_restart_owner": owner,
         "kill_uptime_ticks": kill_ticks,
         "new_main_pid": new_main or None,

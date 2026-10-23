@@ -190,6 +190,10 @@ def test_install_is_idempotent_and_cannot_restart_or_kill_desktop(tmp_path: Path
     assert "Restart=always\nRestartSec=1\n" in policy
     assert "StartLimitBurst=3" in policy and "StartLimitIntervalSec=3600" in policy
     assert "KillMode=process" in policy
+    # The AMI's server takes its bind from this variable (xlang-ai/osworld-server
+    # src/server.py hands it to uvicorn); pinning it keeps every systemd restart
+    # on the wildcard, the only bind the host's public-address path can reach.
+    assert 'Environment="OSWORLD_SERVER_HOST=0.0.0.0"' in policy
     assert (
         "ExecStopPost=+/usr/bin/python3 "
         + str(tmp_path / "var/lib/lop-action-supervisor/capture.py")
@@ -2522,8 +2526,15 @@ def test_layout_record_caps_every_list() -> None:
     assert record["other_socket_owners_share_unit_cgroup"] is None
 
 
-def _write_listeners(proc: Path, inodes_by_pid: dict[int, int]) -> None:
-    """Point each pid's fd at its own listening socket and publish the inodes."""
+def _write_listeners(
+    proc: Path, inodes_by_pid: dict[int, int], *, bind: str = "00000000"
+) -> None:
+    """Point each pid's fd at its own listening socket and publish the inodes.
+
+    ``bind`` is the /proc local-address word, host byte order: the default is
+    the wildcard every earlier test assumed, and ``0100007F`` is the loopback
+    bind a restart must never accept as host-reachable.
+    """
     for pid, inode in inodes_by_pid.items():
         directory = proc / str(pid) / "fd"
         directory.mkdir(parents=True, exist_ok=True)
@@ -2535,7 +2546,7 @@ def _write_listeners(proc: Path, inodes_by_pid: dict[int, int]) -> None:
     net.mkdir(exist_ok=True)
     lines = ["  sl  local_address rem_address   st"]
     for inode in inodes_by_pid.values():
-        lines.append(f"   0: 00000000:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 {inode}")
+        lines.append(f"   0: {bind}:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 {inode}")
     (net / "tcp").write_text("\n".join(lines) + "\n")
     (net / "tcp6").write_text("  sl\n")
 
@@ -2970,8 +2981,10 @@ def _installer_receipt() -> dict[str, Any]:
     }
 
 
-def _serve(proc: Path, pid: int, inode: int, ppid: int, start_ticks: int) -> None:
-    _write_listeners(proc, {pid: inode})
+def _serve(
+    proc: Path, pid: int, inode: int, ppid: int, start_ticks: int, *, bind: str = "00000000"
+) -> None:
+    _write_listeners(proc, {pid: inode}, bind=bind)
     _write_stat(proc, pid, ppid, start_ticks)
 
 
@@ -3901,6 +3914,8 @@ def _execute_watchdog(
     restart_effect: str = "success",
     v6: bool = False,
     reachable_host: str = "127.0.0.1",
+    bind_address: str = "00000000",
+    restart_bind: str = "00000000",
     clock_start: float = 0.0,
     target_unit: str = "action-server.service",
     probe_log: list[tuple[str, int, float]] | None = None,
@@ -3942,7 +3957,7 @@ def _execute_watchdog(
         net = tmp_path / "proc/net"
         net.mkdir(parents=True, exist_ok=True)
         header = "  sl  local_address rem_address   st\n"
-        row = "   0: 00000000:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 4242\n"
+        row = f"   0: {bind_address}:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 4242\n"
         if v6:
             (net / "tcp").write_text(header)
             (net / "tcp6").write_text(header + row)
@@ -3989,6 +4004,7 @@ def _execute_watchdog(
                 tmp_path / ("producer-%d" % token),
                 token=producer_token,
                 effect=restart_effect,
+                bind=restart_bind,
             )
             result_path.write_text(json.dumps(payload))
             return ""
@@ -4056,6 +4072,7 @@ def _real_restart_verdict(
     effect: str = "success",
     unit: str = "action-server.service",
     unit_failed: bool = True,
+    bind: str = "00000000",
 ) -> dict[str, Any]:
     """Produce the REAL RESTART_SOURCE document for the watchdog to consume.
 
@@ -4080,7 +4097,9 @@ def _real_restart_verdict(
             else None
         ),
         on_start=(
-            (lambda proc: _serve(proc, 9100, 4343, 1, 101000)) if effect == "success" else None
+            (lambda proc: _serve(proc, 9100, 4343, 1, 101000, bind=bind))
+            if effect == "success"
+            else None
         ),
         reset_ok=effect != "refused-reset",
         unit_failed=unit_failed,
@@ -5129,3 +5148,99 @@ async def test_a_corrupt_watchdog_record_never_changes_a_recovery_outcome(
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["recovered"] is True
         assert evidence["watchdog"]["status"] == "unparseable"
+
+
+def test_the_bind_decoder_reads_proc_net_addresses_per_family() -> None:
+    """The rig's split, decoded: 127.0.0.1 and ::1 are not "listening".
+
+    /proc prints the local address in host byte order, one 32-bit word for v4
+    and four for v6, so the decode is endianness-aware rather than spelled
+    out; a big-endian guest must not read its loopback as a public address.
+    """
+    namespace: dict[str, Any] = {"sys": sys}
+    exec(guest_supervisor.LISTENER_BIND_SOURCE, namespace)
+    bind_kind = namespace["bind_kind"]
+    assert bind_kind("00000000", 4) == "wildcard"
+    assert bind_kind("0100007F", 4) == "loopback"
+    assert bind_kind("0A051FAC", 4) == "addressed"
+    assert bind_kind("00000000000000000000000000000000", 6) == "wildcard"
+    assert bind_kind("00000000000000000000000001000000", 6) == "loopback"
+    assert bind_kind("0000000000000000FFFF00000A051FAC", 6) == "addressed"
+    assert bind_kind("not-hex", 4) == "unknown"
+
+
+def test_a_restart_whose_listener_loopback_alone_can_reach_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A fresh, answering, loopback-only listener is NOT a revival.
+
+    This is the measured production split at the seat that declares the guest
+    ready: the host posts to the instance's public address, a 127.0.0.1 bind
+    refuses it with errno 61, and every guest-side probe still answers.
+    """
+    payload, _, _ = _execute_restart_script(
+        tmp_path,
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000, bind="0100007F"),
+    )
+    assert payload["post_restart_pids"] == [9100]
+    assert payload["post_restart_bind"] == ["loopback"]
+    record = guest_supervisor.restart_record(json.dumps(payload))
+    assert record["status"] == "unreachable_listener"
+    assert record["post_restart_bind"] == ["loopback"]
+    assert record["fresh"] is True
+    assert "loopback" in guest_supervisor.restart_cause(record["status"])
+
+
+def test_a_restart_whose_listener_binds_the_wildcard_is_verified(tmp_path: Path) -> None:
+    payload, _, _ = _execute_restart_script(
+        tmp_path,
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000),
+    )
+    assert payload["post_restart_bind"] == ["wildcard"]
+    assert guest_supervisor.restart_record(json.dumps(payload))["status"] == "verified"
+
+
+def test_the_watchdog_names_a_loopback_only_listener_and_never_restarts_it(
+    tmp_path: Path,
+) -> None:
+    """Observed, never repaired: a restart cannot change an env-derived bind.
+
+    The 2026-10 arm's four refused episodes reported ``serving`` here, because
+    the port listened and the loopback probe answered. The record must say
+    which address the listener bound, and the watchdog must not spend an
+    attempt killing a server that still serves the guest's own state.
+    """
+    record, calls, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["active", "active"],
+        listening=[True, True],
+        answering=[True, True],
+        cycles=2,
+        bind_address="0100007F",
+    )
+    assert record["last_observation"] == "loopback-only"
+    assert record["attempts"] == 0 and record["intervened"] is False
+    assert not [call for call in calls if call[0] == "systemctl" and call[1] in {"start", "kill"}]
+
+
+def test_a_repair_that_only_loopback_can_reach_is_not_a_revival(tmp_path: Path) -> None:
+    """The guest's own verdict word, produced and consumed for real.
+
+    ``restart_status`` is the watchdog's mirror of the host rule; this drives
+    it end-to-end (the REAL RESTART_SOURCE writes the verdict file, the REAL
+    watchdog reads it) so the two copies cannot drift into disagreeing about a
+    loopback bind. It also counts as ineffective: two such repairs and the
+    watchdog stops instead of re-killing a server for the same environment.
+    """
+    record, calls, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["failed"],
+        listening=[False],
+        cycles=1,
+        restart_bind="0100007F",
+    )
+    assert len(_dispatches(calls)) == 1
+    assert record["last_outcome"] == "unreachable-listener"
+    assert record["intervened"] is True
