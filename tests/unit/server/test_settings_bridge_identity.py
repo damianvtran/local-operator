@@ -22,7 +22,7 @@ from local_operator.server.routes import settings
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import Boundary
 from local_operator.team_bridge.store import Store
-from tests.unit.team_bridge.test_client import _ok
+from tests.unit.team_bridge.test_client import FakeRow, FakeStore, _ok
 from tests.unit.team_bridge.test_cos_name import _echoing
 from tests.unit.team_bridge.test_discipline import (
     _committed_owner,
@@ -33,22 +33,35 @@ from tests.unit.team_bridge.test_discipline import (
 pytestmark = pytest.mark.asyncio
 
 
-def _rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, payload: dict[str, Any] | None = None):
+def _rig(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    payload: dict[str, Any] | None = None,
+    store: FakeStore | None = None,
+):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "fixture-desktop")
     manager = ConfigManager(tmp_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["team_bridge.session"], "sess_old")
     aida_state.write_state(tmp_path, {"session_id": "sess_aida"})
     _, owner = _committed_owner(tmp_path, session="sess_old")
     counter = _Counter(lambda request: _ok(payload if payload is not None else _echoing(None)))
-    discipline = _discipline(counter, tmp_path)
+    discipline = _discipline(counter, tmp_path, store=store)
     monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
     monkeypatch.setattr(tb_client, "get_status_discipline", lambda root: discipline)
     app = FastAPI()
     app.include_router(settings.router)
     app.dependency_overrides[settings.get_config_manager] = lambda: manager
-    return manager, owner, counter, discipline, httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://ui.test",
-        headers={"Authorization": "Bearer fixture-desktop"},
+    return (
+        manager,
+        owner,
+        counter,
+        discipline,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://ui.test",
+            headers={"Authorization": "Bearer fixture-desktop"},
+        ),
     )
 
 
@@ -65,12 +78,15 @@ async def test_warm_cache_ui_designation_reconciles_before_reply(tmp_path, monke
     assert Store(tmp_path).designated_session_for(owner) == "sess_aida"
     assert [r.method for r in counter.requests] == ["GET", "GET", "PUT"]
     assert json.loads(counter.requests[-1].content) == {
-        "state": "active", "tenant_id": "tnt_1", "agent_name": "Aida"
+        "state": "active",
+        "tenant_id": "tnt_1",
+        "agent_name": "Aida",
     }
     # The first fresh answer predates the PUT. Do not manufacture a server echo
     # or spend a second GET to make a just-published name appear confirmed.
     check = await discipline.check(Boundary.SURFACE_OPEN)
     assert check.from_cache
+    assert check.payload is not None
     assert check.payload["tenants"][0]["endpoint"]["agent_name"] is None
     assert len(counter.requests) == 3
 
@@ -103,10 +119,20 @@ async def test_rename_reset_clear_and_noop_use_canonical_identity(tmp_path, monk
         assert len(counter.requests) == count
 
 
-@pytest.mark.parametrize("guard", [
-    "paused", "disabled", "ineligible", "unsupported", "old-hub", "unowned",
-    "wrong-account", "wrong-endpoint", "non-aida",
-])
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "paused",
+        "disabled",
+        "ineligible",
+        "unsupported",
+        "old-hub",
+        "unowned",
+        "wrong-account",
+        "wrong-endpoint",
+        "non-aida",
+    ],
+)
 async def test_mutation_preserves_publication_guards(tmp_path, monkeypatch, guard):
     payload = _echoing(None)
     tenant = payload["tenants"][0]
@@ -125,6 +151,7 @@ async def test_mutation_preserves_publication_guards(tmp_path, monkeypatch, guar
         monkeypatch.setattr(Store, "active_owner", lambda self: None)
     elif guard == "wrong-account":
         from dataclasses import replace
+
         monkeypatch.setattr(
             Store, "active_owner", lambda self: replace(owner, account_id="acc_other")
         )
@@ -142,13 +169,16 @@ async def test_failed_settings_write_never_reconciles(tmp_path, monkeypatch, fai
     manager, owner, counter, discipline, ui = _rig(tmp_path, monkeypatch)
     await discipline.check(Boundary.APP_START)
     if failure == "write":
+
         def refuse(*args, **kwargs):
             raise OSError("private-sentinel-never-echo")
+
         monkeypatch.setattr(settings_io, "write_setting", refuse)
     async with ui:
         response = await ui.patch(
             (
-                "/v1/settings/aida.name" if failure == "invalid"
+                "/v1/settings/aida.name"
+                if failure == "invalid"
                 else "/v1/settings/team_bridge.session"
             ),
             json={"value": "" if failure == "invalid" else "sess_aida"},
@@ -186,11 +216,13 @@ async def test_queued_edits_coalesce_latest_without_holding_settings_lock(tmp_pa
     async with ui:
         pending = []
         for key, value in (
-            ("team_bridge.session", "sess_aida"), ("aida.name", "Friday"), ("aida.name", "Saturday")
+            ("team_bridge.session", "sess_aida"),
+            ("aida.name", "Friday"),
+            ("aida.name", "Saturday"),
         ):
-            pending.append(asyncio.create_task(
-                ui.patch(f"/v1/settings/{key}", json={"value": value})
-            ))
+            pending.append(
+                asyncio.create_task(ui.patch(f"/v1/settings/{key}", json={"value": value}))
+            )
             await written[value].wait()
         # No network under the global settings lock: unrelated saves finish
         # while the bridge request is deliberately still blocked.
@@ -239,17 +271,16 @@ async def test_bridge_failure_does_not_fail_persisted_edit(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("change", ["account-switch", "owner-revoked"])
 async def test_authority_changed_during_status_read_never_publishes(tmp_path, monkeypatch, change):
-    from tests.unit.team_bridge.test_client import FakeRow
-
-    manager, owner, counter, discipline, ui = _rig(tmp_path, monkeypatch)
+    # Keep the typed fake at its injection seam instead of reaching through the
+    # client's production AuthStore annotation to mutate test-only attributes.
+    store = FakeStore()
+    manager, owner, counter, discipline, ui = _rig(tmp_path, monkeypatch, store=store)
     await discipline.check(Boundary.APP_START)
 
     def changed_while_awaiting(request):
         assert request.method == "GET"  # any subsequent PUT fails this control
         if change == "account-switch":
-            discipline._client._store.rows = [
-                FakeRow(2, data={"access": "fixture-other", "account_id": "acc_other"})
-            ]
+            store.rows = [FakeRow(2, data={"access": "fixture-other", "account_id": "acc_other"})]
         else:
             monkeypatch.setattr(Store, "active_owner", lambda self: None)
         return counter(request)
@@ -266,7 +297,8 @@ async def test_unauthorized_mutation_never_writes_or_fetches(tmp_path, monkeypat
     await discipline.check(Boundary.APP_START)
     async with ui:
         response = await ui.patch(
-            "/v1/settings/team_bridge.session", json={"value": "sess_aida"},
+            "/v1/settings/team_bridge.session",
+            json={"value": "sess_aida"},
             headers={"Authorization": "invalid"},
         )
     assert response.status_code == 401
