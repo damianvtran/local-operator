@@ -2699,8 +2699,7 @@ RESTART_STATUSES = frozenset(
 RESTART_CAUSES = {
     "stale_listener": "post-restart listener predates the restart",
     "unreachable_listener": (
-        "post-restart listener is bound to loopback only, which the host path "
-        "cannot reach"
+        "post-restart listener is bound to loopback only, which the host path " "cannot reach"
     ),
     "verification_timeout": "no listener appeared before the verification deadline",
     "incomplete_scan": "socket owner scan was incomplete",

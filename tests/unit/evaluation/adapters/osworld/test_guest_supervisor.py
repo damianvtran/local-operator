@@ -2526,9 +2526,7 @@ def test_layout_record_caps_every_list() -> None:
     assert record["other_socket_owners_share_unit_cgroup"] is None
 
 
-def _write_listeners(
-    proc: Path, inodes_by_pid: dict[int, int], *, bind: str = "00000000"
-) -> None:
+def _write_listeners(proc: Path, inodes_by_pid: dict[int, int], *, bind: str = "00000000") -> None:
     """Point each pid's fd at its own listening socket and publish the inodes.
 
     ``bind`` is the /proc local-address word, host byte order: the default is
