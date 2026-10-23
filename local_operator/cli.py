@@ -18022,6 +18022,8 @@ def main() -> int:
                     )
                 degraded_reason = ""
                 paint_first_cwd = ""
+                from local_operator.session import compression
+
                 # PAINT FIRST, ATTACH BEHIND for a live owner whose conversation
                 # is on disk: the cold facade below paints it, and the TUI's eager
                 # engage binds it to that owner after the first paint (the bind
@@ -18044,7 +18046,11 @@ def main() -> int:
                     record is not None
                     and frontend_attach_refusal(record) is None
                     and not (initial_model is not None and (birth_args.hosting or birth_args.model))
-                    and (config_directory / "sessions" / session_id / "transcript.jsonl").is_file()
+                    # ANY physical form: a compressed session still has a
+                    # conversation to paint before the bind lands. The plain name
+                    # here would keep a compressed --resume on the slow dial for a
+                    # session whose history is sitting right beside it.
+                    and compression.has_transcript(config_directory / "sessions" / session_id)
                 ):
                     # The owner's directory, not this terminal's: the band paints
                     # it before the bind lands, and a live conversation's cwd is

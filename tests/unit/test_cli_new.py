@@ -3284,7 +3284,15 @@ def test_resume_onto_a_refused_owner_keeps_the_compatibility_notice(
         "local_operator.session_factory.resolve_hosting_model",
         lambda *a, **k: ("test", "mock"),
     )
-    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    # A REAL ``config_dir`` on the fake manager. The paint-first decision is a
+    # filesystem question, and a MagicMock's auto-created ``config_dir`` answers
+    # it with a truthy mock — which passed while the check was
+    # ``(mock / "sessions" / …).is_file()`` (a mock is truthy) and stopped meaning
+    # anything once the check resolved the path through ``Path()``. The fake owes
+    # the production contract a Path.
+    fake_manager = _fake_config_manager()
+    fake_manager.config_dir = config
+    monkeypatch.setattr("local_operator.cli.ConfigManager", lambda *a, **k: fake_manager)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 

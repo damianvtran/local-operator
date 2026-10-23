@@ -3382,6 +3382,101 @@
       },
       "status": "passed",
       "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 audit had 0 findings; re-checked against the rewritten status vocabulary: 'Radient xác nhận' in submitted and detached, verb-only address (no 'bạn' padding), NFC throughout, oa/uy tone placement correct (thoát, hoàn, khoản are closed syllables). No isolation/containment claim; placeholders, newlines and flags byte-identical. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 2 findings fixed: (1) run_identity_mismatch read 'trả lời cho lần chạy từ xa {answered}', i.e. replying TO a run; it now uses network_mismatch's 'trả về': 'Radient trả về lần chạy từ xa {answered} …'. (2) unreadable_envelope said 'bản lop này' where finished_unknown and status_unknown render build as 'bản dựng'; now 'bản dựng lop này'. NFC throughout, no ASCII apostrophe, 'Khóa idempotency' matches the four existing key_* rows, verb-only address. Rendered 156/207/126 cells; run_identity_mismatch is 3 lines at 80 and 100 columns, en being 195 cells is 2 only by 5 cells at 100. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set). Scoped Round-4 independent re-audit at 6a7dd801d (delta 120494660..6a7dd801d): only the 3 keys that commit added — api_override, api_override_invalid and preview_not_enabled — were re-read against the en source and its sidecar notes; `git diff 120494660..6a7dd801d -- local_operator/i18n/catalogues` confirms nothing else moved (3 ids per locale plus 3 sidecar entries, 33 insertions, 0 deletions). api_override was read for the consequence the sidecar demands: the Radient LOGIN and the requests leave for {host} instead of the default Radient API, and the variable is to be unset unless the reader controls that host — no locale softens it into 'test server' and every locale also says why ({host} is named and the variable is named). {host} appears exactly once and byte-identically in each of the five; api_override_invalid is ONE sentence naming the accepted shape and every refused class; preview_not_enabled says THIS ACCOUNT, YET and preview, and reads as neither an error nor a permanent refusal. NFC, no NBSP (U+00A0) and no ASCII apostrophe anywhere in the three keys. Width in cells against en's 185/233/69: es 230/282/84, fr 212/285/74, hi 154/200/51, ru 218/283/85, vi 213/280/72 — each inside its own guide's growth band, and none of the three carries maxCells. shipped re-eligibility restored: six-locale set (en, fr, es, ru, vi, hi). 0 findings: bạn appears only on the blocking decision (the guide allows it there), 'Hãy bỏ đặt biến này' uses the settled Microsoft vi rendering of unset, 'đã được đặt' carries the because-clause, NFC precomposed forms throughout. 1 MINOR accepted: 'máy chủ đó' renders 'that host' as server — the guide's keep-`host`-English rule is scoped to the OpenRouter cluster, máy chủ is accurate for the destination, and {host} itself stays verbatim."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "session.compression 8-key delta (settings section + switch + age row). Translator job b1a1db1d58c6; independent auditor job 4c7749084e22, a different agent that read only the en source, sidecars, style guides and the produced catalogue. Both runs deepseek/deepseek-flash — independent at agent level, same model family (disclosed). Audit verdict PASS WITH FINDINGS: 0 blocker, 0 major, 1 MINOR (A-es-1: choice.true 'anteriores a' -> 'tras la antigüedad de abajo', the cleanup row's own phrase) and 2 NITs (A-es-2 label -> 'Comprimir las antiguas'; A-ru-1 'читаются обратно' -> 'распаковываются при чтении'), all applied verbatim from the auditor's own suggested wording and re-checked mechanically (keys, cell widths, prefix bytes). Prior acceptance for this namespace carried; no other key touched."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "session.compression 8-key delta (settings section + switch + age row). Translator job b1a1db1d58c6; independent auditor job 4c7749084e22, a different agent that read only the en source, sidecars, style guides and the produced catalogue. Both runs deepseek/deepseek-flash — independent at agent level, same model family (disclosed). Audit verdict PASS WITH FINDINGS: 0 blocker, 0 major, 1 MINOR (A-es-1: choice.true 'anteriores a' -> 'tras la antigüedad de abajo', the cleanup row's own phrase) and 2 NITs (A-es-2 label -> 'Comprimir las antiguas'; A-ru-1 'читаются обратно' -> 'распаковываются при чтении'), all applied verbatim from the auditor's own suggested wording and re-checked mechanically (keys, cell widths, prefix bytes). Prior acceptance for this namespace carried; no other key touched."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "session.compression 8-key delta (settings section + switch + age row). Translator job b1a1db1d58c6; independent auditor job 4c7749084e22, a different agent that read only the en source, sidecars, style guides and the produced catalogue. Both runs deepseek/deepseek-flash — independent at agent level, same model family (disclosed). Audit verdict PASS WITH FINDINGS: 0 blocker, 0 major, 1 MINOR (A-es-1: choice.true 'anteriores a' -> 'tras la antigüedad de abajo', the cleanup row's own phrase) and 2 NITs (A-es-2 label -> 'Comprimir las antiguas'; A-ru-1 'читаются обратно' -> 'распаковываются при чтении'), all applied verbatim from the auditor's own suggested wording and re-checked mechanically (keys, cell widths, prefix bytes). Prior acceptance for this namespace carried; no other key touched."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "session.compression 8-key delta (settings section + switch + age row). Translator job b1a1db1d58c6; independent auditor job 4c7749084e22, a different agent that read only the en source, sidecars, style guides and the produced catalogue. Both runs deepseek/deepseek-flash — independent at agent level, same model family (disclosed). Audit verdict PASS WITH FINDINGS: 0 blocker, 0 major, 1 MINOR (A-es-1: choice.true 'anteriores a' -> 'tras la antigüedad de abajo', the cleanup row's own phrase) and 2 NITs (A-es-2 label -> 'Comprimir las antiguas'; A-ru-1 'читаются обратно' -> 'распаковываются при чтении'), all applied verbatim from the auditor's own suggested wording and re-checked mechanically (keys, cell widths, prefix bytes). Prior acceptance for this namespace carried; no other key touched."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "session.compression 8-key delta (settings section + switch + age row). Translator job b1a1db1d58c6; independent auditor job 4c7749084e22, a different agent that read only the en source, sidecars, style guides and the produced catalogue. Both runs deepseek/deepseek-flash — independent at agent level, same model family (disclosed). Audit verdict PASS WITH FINDINGS: 0 blocker, 0 major, 1 MINOR (A-es-1: choice.true 'anteriores a' -> 'tras la antigüedad de abajo', the cleanup row's own phrase) and 2 NITs (A-es-2 label -> 'Comprimir las antiguas'; A-ru-1 'читаются обратно' -> 'распаковываются при чтении'), all applied verbatim from the auditor's own suggested wording and re-checked mechanically (keys, cell widths, prefix bytes). Prior acceptance for this namespace carried; no other key touched."
     }
   ]
 }

@@ -44,7 +44,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import sync
-from local_operator.session import subagent_ledger
+from local_operator.session import compression, subagent_ledger
 
 # ---------------------------------------------------------------------------
 # The entry types, imported from their owners
@@ -255,7 +255,8 @@ def test_the_measured_store_entries_are_all_classified() -> None:
 # cover is the exact failure that happened: a new constant with a literal value in a
 # module that owns session state.
 _PATH_SUFFIX = re.compile(
-    r"(NAME|FILENAME|DIRNAME|FILE|DIR|SIDECAR|MARKER|RECORD|STEM|PATH|BASENAME|PREFIX|SUFFIX)$"
+    r"(NAMES|NAME|FILENAMES|FILENAME|DIRNAME|FILE|DIR|SIDECAR|MARKER|RECORD|STEM|PATH|"
+    r"BASENAME|PREFIX|SUFFIX)$"
 )
 _UPPER_NAME = re.compile(r"^_?[A-Z][A-Z0-9_]*$")
 #: A path-shaped VALUE: one or more RELATIVE segments — no leading ``/``, and no segment
@@ -319,6 +320,23 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``<config>/network/credentials/<network_id>/``. Machine-local state about "
         "which sign-in this device must recover, beside the placement document, "
         "never an entry of a session directory and never copied to a peer",
+    ),
+    # ---- the transcript compression pass's STORE-LEVEL names ----
+    "local_operator/session/compression.py": (
+        2,
+        "``COMPRESSION_LOG_NAME`` ('.compression-log.jsonl') and "
+        "``LAST_COMPRESSION_NAME`` ('last-compression.json') are the pass's ledger and "
+        "its last-run record, both written at the ``sessions/`` ROOT, not inside a "
+        "session directory, so neither is a copy-set entry. The module's other two "
+        "path-shaped names ARE session entries and are classified in "
+        "``sync.EXCLUDED_ENTRIES``: ``LOCK_NAME`` (the per-device writer lock) and "
+        "``PREVIEW_SIDECAR_NAME`` ('preview.json', the listing cache derived from "
+        "the archive's tail, which the destination rebuilds). Its THIRD path-shaped "
+        "name is computed rather than literal — ``ARCHIVE_FILENAMES`` — so it is "
+        "declared in ``_COMPUTED_PATH_CONSTANTS`` instead, and it is a COPY-SET "
+        "entry: the archive forms ARE the transcript and ``sync.COPY_SET_NAMES`` "
+        "carries both, which is what lets a compressed session be moved at all "
+        "(review round 3, M-1)",
     ),
     "local_operator/team_bridge/connector/lock.py": (
         1,
@@ -1100,15 +1118,77 @@ def _derived_constants(source: str) -> dict[str, str]:
     return found
 
 
-def _unclassified_in_module(source: str, module: str) -> list[str]:
+#: Path-named constants whose VALUE the derivation cannot read: ``module -> {name: why,
+#: and which list carries it}``. A computed name is where a value can hide from a
+#: syntactic guard, and it is exactly where the archive forms hid (review round 3,
+#: M-1: ``ARCHIVE_FILENAMES`` ends in ``FILENAMES`` and is built from the codec table,
+#: so neither half of the derivation saw it). Each entry is a DECLARATION, not an
+#: exemption: ``test_the_transcripts_archive_forms_are_in_the_copy_set`` asks the owner
+#: module for the real values and requires the copy set to carry every one.
+_COMPUTED_PATH_CONSTANTS: dict[str, dict[str, str]] = {
+    "local_operator/session/compression.py": {
+        "ARCHIVE_FILENAMES": (
+            "the transcript's archive forms, COMPUTED from ``ARCHIVE_SUFFIXES``, so no "
+            "literal exists to derive. They ARE the transcript: ``sync.COPY_SET_NAMES`` "
+            "carries both names — a deleting move asks its completeness question "
+            "BEFORE the restore, and an archive no list names refuses the move with a "
+            "sentence whose remedy is deleting the conversation's only copy — and "
+            "``sync.EXCLUDED_ENTRIES`` must never carry them, because excluding the "
+            "transcript would let that move proceed without it if a restore failed. "
+            "``test_the_transcripts_archive_forms_are_in_the_copy_set`` asks the owner "
+            "for the real values and fails if the copy set misses one"
+        ),
+    },
+}
+
+#: The computed-name shape the derivation can still make a candidate: a container of
+#: FILE NAMES (``ARCHIVE_FILENAMES``). Deliberately ONLY this suffix — a computed
+#: singular such as an f-string ``*_NAME`` is ordinary bookkeeping in every module, and
+#: making all of them candidates would turn this guard into a second hand-written
+#: census of the product. A plural container is different: its whole job is to name
+#: files, so it is session-state relevant wherever it lives.
+_FILENAMES_NAME = re.compile(r"^_?[A-Z][A-Z0-9_]*FILENAMES$")
+
+
+def _computed_path_constants(source: str) -> list[str]:
+    """Module-level ``*_FILENAMES`` constants in ``source`` whose value is not a literal.
+
+    The half of the derivation that cannot be syntactic (see
+    ``_COMPUTED_PATH_CONSTANTS``). ``ARCHIVE_FILENAMES`` is built from the codec table,
+    so ``_derived_constants`` — which reads string literals — never saw it; that is the
+    coverage hole this file's docstring warns about, and the one that let a compressed
+    session refuse to move (review round 3, M-1). A candidate here must be declared by
+    name, and the declaration must say which list carries it.
+    """
+    found: list[str] = []
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and _FILENAMES_NAME.match(target.id):
+                found.append(target.id)
+    return found
+
+
+def _unclassified_in_module(source: str, module: str, *, ignore_row: bool = False) -> list[str]:
     """Names in ``source`` that are neither classified nor declared for ``module``.
 
     The whole rule, in one place, so the test below and the probe that mutates a source
-    string exercise the SAME code rather than two spellings of it.
+    string exercise the SAME code rather than two spellings of it. ``ignore_row`` skips
+    the module's own blanket ``_DERIVED_DECLARATIONS`` row and keeps its per-name
+    computed declarations: that is how the row's COUNT is measured, without the row
+    vouching for itself.
     """
-    declared = _DERIVED_DECLARATIONS.get(module)
+    declared = None if ignore_row else _DERIVED_DECLARATIONS.get(module)
     if declared and declared[0] == 0:
         declared = None
+    computed_declared = _COMPUTED_PATH_CONSTANTS.get(module, {})
     out: list[str] = []
     for name, value in sorted(_derived_constants(source).items()):
         if _classified(value):
@@ -1116,6 +1196,10 @@ def _unclassified_in_module(source: str, module: str) -> list[str]:
         if declared:
             continue
         out.append(f"{name}={value!r}")
+    for name in sorted(_computed_path_constants(source)):
+        if name in computed_declared:
+            continue
+        out.append(f"{name}=<computed>")
     return out
 
 
@@ -1164,10 +1248,29 @@ def test_every_path_shaped_constant_is_classified_or_declared() -> None:
         if not path.is_file():
             stale.append(f"{module} (no such module)")
             continue
-        names = _unclassified_in_module(path.read_text(encoding="utf-8"), "")
+        names = _unclassified_in_module(path.read_text(encoding="utf-8"), module, ignore_row=True)
         if len(names) != count:
             stale.append(f"{module} (declares {count}, holds {len(names)}: {', '.join(names)})")
     assert stale == [], f"declarations that no longer describe the source: {stale}"
+    # AND THE COMPUTED DECLARATIONS, the third shape: a path-named constant whose value
+    # is built at runtime is invisible to ``_derived_constants``, so it is declared BY
+    # NAME. A declared name that no longer exists is a stale row, and one that has no
+    # reason is not a statement.
+    stale_computed: list[str] = []
+    for module, declarations in sorted(_COMPUTED_PATH_CONSTANTS.items()):
+        path = Path(__file__).resolve().parents[3] / module
+        if not path.is_file():
+            stale_computed.append(f"{module} (no such module)")
+            continue
+        present = set(_computed_path_constants(path.read_text(encoding="utf-8")))
+        for name, reason in sorted(declarations.items()):
+            if not reason.strip():
+                stale_computed.append(f"{module}:{name} (no reason)")
+            if name not in present:
+                stale_computed.append(f"{module}:{name} (not a computed path constant)")
+    assert (
+        stale_computed == []
+    ), f"computed declarations that no longer describe the source: {stale_computed}"
 
 
 def test_the_derivation_reports_a_new_constant_in_an_owning_module() -> None:
@@ -1221,6 +1324,45 @@ def test_the_derivation_sees_the_spellings_round_3_measured_escaping() -> None:
     # none of the suffixes above is not a candidate (``ACTION_TOOL_NAME`` is a tool).
     for ignored in ('REVIEW_PROBE_ABS_PATH = "/etc/hosts"', 'REVIEW_PROBE_UP_PATH = "../x.json"'):
         assert _unclassified_in_module(pristine + "\n" + ignored + "\n", module) == []
+
+
+def test_the_transcripts_archive_forms_are_in_the_copy_set() -> None:
+    """M-1 / Q-3: every ARCHIVE FORM of the transcript is a COPY-SET name.
+
+    THE HOLE THE DERIVATION COULD NOT SEE. ``compression.ARCHIVE_FILENAMES`` ends in
+    ``FILENAMES`` and its value is computed from the codec table, so the syntactic
+    guard missed it twice; ``COPY_SET_NAMES`` named only ``transcript.jsonl``. A
+    compressed session's body is therefore a file no list accounted for, and
+    ``assert_complete`` — which ``mobility._source_prepare`` calls BEFORE anything
+    restores the transcript — refused the move of every session past
+    ``after_days``, offering to delete the conversation's only copy as the remedy.
+
+    This asks the OWNER for the values instead of trusting a spelling, so a codec
+    added to ``ARCHIVE_SUFFIXES`` fails here until the copy set carries its name. The
+    direction is pinned too: excluding the archive would let a deleting move proceed
+    without the transcript when a restore fails.
+    """
+    archive_names = set(compression.ARCHIVE_FILENAMES)
+    assert archive_names == {"transcript.jsonl.zst", "transcript.jsonl.gz"}
+    assert archive_names <= set(sync.COPY_SET_NAMES), (
+        "a compressed transcript is the copy set's transcript member: every archive "
+        "form must be in sync.COPY_SET_NAMES, missing "
+        f"{sorted(archive_names - set(sync.COPY_SET_NAMES))}"
+    )
+    assert not (archive_names & set(sync.EXCLUDED_ENTRIES)), (
+        "the archive forms must never be excluded: a deleting move may not drop the "
+        "only copy of the transcript"
+    )
+    # AND THE THIRD NAME THE SAME PASS LEAVES BEHIND. A crash during compression parks
+    # the plain journal under ``.transcript.jsonl.quarantine`` (the verified archive is
+    # published first, and ``restore_for_write`` renames it back) — unclassified it
+    # refused that session's move exactly as the archive did.
+    assert compression.QUARANTINE_NAME in sync.EXCLUDED_ENTRIES
+    assert compression.QUARANTINE_NAME not in sync.COPY_SET_NAMES
+    # And the recovery path that makes the exclusion safe is still the restore.
+    assert compression.QUARANTINE_NAME.startswith(".") and compression.QUARANTINE_NAME.endswith(
+        ".quarantine"
+    )
 
 
 # ---------------------------------------------------------------------------

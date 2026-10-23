@@ -969,6 +969,14 @@ export type MessageParams = {
   "wire.settings.session_cleanup_remove_empty.choice.true.description": undefined;
   "wire.settings.session_cleanup_remove_empty.help": undefined;
   "wire.settings.session_cleanup_remove_empty.label": undefined;
+  "wire.settings.session_compression.description": undefined;
+  "wire.settings.session_compression.title": undefined;
+  "wire.settings.session_compression_after_days.help": undefined;
+  "wire.settings.session_compression_after_days.label": undefined;
+  "wire.settings.session_compression_enabled.choice.false.description": undefined;
+  "wire.settings.session_compression_enabled.choice.true.description": undefined;
+  "wire.settings.session_compression_enabled.help": undefined;
+  "wire.settings.session_compression_enabled.label": undefined;
   "wire.settings.session_delegated.description": undefined;
   "wire.settings.session_delegated.title": undefined;
   "wire.settings.session_scratchpad.description": undefined;

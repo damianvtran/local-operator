@@ -755,7 +755,7 @@ def reap_orphan_rows(config_dir: Path | str, *, keep: str = "") -> tuple[str, ..
     unlink here. The entry's other keys ride through ``preserve``, so a ghost
     entry carrying someone else's rows keeps them.
     """
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.wakes import store as wake_store
 
     root = Path(config_dir)
@@ -771,7 +771,9 @@ def reap_orphan_rows(config_dir: Path | str, *, keep: str = "") -> tuple[str, ..
             continue
         if not _librarian_ids(entry):
             continue
-        if (root / "sessions" / session_id / TRANSCRIPT_NAME).is_file():
+        # Same reason as Aida's copy: an archive is a transcript, so this
+        # entry's session exists and its cadence must survive the pass.
+        if compression.has_transcript(root / "sessions" / session_id):
             continue
         kept = [
             row
