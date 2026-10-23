@@ -6413,6 +6413,10 @@ def prepare_images_for_owner(
         stage_images_in_store(root, [send, *extra])
         if image.get("marker") is not None:
             send = {**send, "marker": image["marker"]}
+        if image.get("origin_path"):
+            # The origin path is display metadata, not bytes: it survives the
+            # owner-ingest settle untouched (the digest keys the bytes alone).
+            send = {**send, "origin_path": image["origin_path"]}
         prepared.append(send)
     return prepared
 

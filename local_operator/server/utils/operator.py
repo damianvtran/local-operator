@@ -41,6 +41,7 @@ design points:
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -57,6 +58,7 @@ from local_operator.harness.types import (
     AgentStartEvent,
     ChatRequest,
     CustomMessage,
+    DocumentContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -643,6 +645,89 @@ class ServerExecutor:
 # ---------------------------------------------------------------------------
 
 
+def _legacy_document_blocks(paths: list[str]) -> list["DocumentContent"]:
+    """Turn legacy ``/v1/chat`` attachment PATHS into first-class blocks.
+
+    The same block builder a composer upload produces, minus the digest
+    reference the wire carries: these paths are already local, so the bytes
+    are read here, stored content-addressed once, and handed to the session as
+    ``DocumentContent``. An unreadable path is NOT dropped — it becomes a
+    reference-shaped block whose ``injection`` is ``reference``, so the model
+    is told metadata and where the file was rather than silently losing it
+    (contract amendment 9 / §3 fallback 3).
+    """
+    if not paths:
+        return []
+    import base64 as _base64
+    from pathlib import Path as _Path
+
+    from local_operator.harness.types import DocumentContent
+    from local_operator.providers.documents import (
+        admission_wire,
+        document_form,
+        document_injection,
+    )
+    from local_operator.session.attachments import (
+        MAX_ATTACHMENT_UPLOAD_BYTES,
+        AttachmentStore,
+        sniff_document_mime,
+    )
+
+    # The PROVIDER is not known here (``ModelConfiguration`` is built from the
+    # request and the session's resolved spec exists only after startup), so
+    # the historical label starts from the empty provider: ``document_form``
+    # answers ``None`` and ``document_injection`` says "extracted"/"reference".
+    # That is honest for a legacy envelope, and the serializer re-decides.
+    model = ""
+    store = AttachmentStore()
+    blocks: list[DocumentContent] = []
+    for raw_path in paths:
+        path = _Path(raw_path).expanduser()
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            blocks.append(
+                DocumentContent(
+                    mime_type="application/octet-stream",
+                    filename=path.name or str(path),
+                    path=str(path),
+                    bytes=0,
+                    injection="reference",
+                )
+            )
+            continue
+        if len(raw) > MAX_ATTACHMENT_UPLOAD_BYTES:
+            blocks.append(
+                DocumentContent(
+                    mime_type=sniff_document_mime(b"", path.name),
+                    filename=path.name,
+                    path=str(path),
+                    bytes=len(raw),
+                    injection="reference",
+                )
+            )
+            continue
+        mime_type = sniff_document_mime(raw, path.name)
+        ref = store.put_bytes(raw, mime_type)
+        block = DocumentContent(
+            data=_base64.b64encode(raw).decode("ascii"),
+            mime_type=mime_type,
+            filename=path.name or str(path),
+            path=str(path),
+            bytes=len(raw),
+            digest=ref.digest if ref is not None else None,
+        )
+        # No session spec is available at this layer (the block is built before
+        # ``session.prompt`` is called), so the admission label is computed for
+        # the provider's DEFAULT wire: historical metadata only, re-decided by
+        # the serializer (amendment 6).
+        block.injection = document_injection(
+            block, document_form(model, admission_wire(model), supports_images=True)
+        )
+        blocks.append(block)
+    return blocks
+
+
 class ServerOperator:
     """The ``Operator`` surface the routes and job processors call.
 
@@ -697,9 +782,13 @@ class ServerOperator:
         prompt = user_input
         if additional_instructions:
             prompt = f"{prompt}\n\n## Additional Instructions\n\n{additional_instructions}"
-        if attachments:
-            listing = "\n".join(f"- {path}" for path in attachments)
-            prompt = f"{prompt}\n\n## Attachments\n\n{listing}"
+        # THE ATTACHMENTS NO LONGER BECOME PROSE (contract amendment 9). The
+        # legacy envelope's paths used to be listed under "## Attachments",
+        # which told the model a file existed but gave it no bytes and no
+        # first-class block: a text-only model answered from the filename, and
+        # a native-capable one never saw the document. The blocks are built
+        # below (after the session exists) and ride ``Session.prompt``'s
+        # ``documents`` keyword like any composer send.
 
         # The user's turn is part of the conversation projection regardless of
         # how the engine turn resolves, so record it up front (legacy parity:
@@ -785,7 +874,11 @@ class ServerOperator:
         try:
             if seeded:
                 await session.seed_history(seeded)
-            await session.prompt(prompt)
+            document_blocks = _legacy_document_blocks(attachments)
+            document_fields: dict[str, Any] = {}
+            if document_blocks and "documents" in inspect.signature(session.prompt).parameters:
+                document_fields["documents"] = document_blocks
+            await session.prompt(prompt, **document_fields)
         finally:
             try:
                 unsubscribe()

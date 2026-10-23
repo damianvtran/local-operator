@@ -71,7 +71,7 @@ from local_operator.session.runtime.types import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from local_operator.harness.types import AudioContent, ImageContent
+    from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
 
 from local_operator.harness.approval import (
     AUTHORITY_OPS,
@@ -112,6 +112,7 @@ from local_operator.session.runtime.types import (
     ATTACH_MAX_CLIENTS,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
+    DOCUMENT_ATTACHMENTS_CAPABILITY,
     ENGAGED_ENV,
     EVENT_MUTE_CAPABILITY,
     EVENT_MUTE_DROP_TYPES,
@@ -208,6 +209,10 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
             ImageContent(
                 data=base64.b64encode(payload).decode("ascii"),
                 mime_type=wire_mime,
+                # The origin path is NOT trusted for any read: it is stored so
+                # history can say where the picture came from. The bytes are
+                # the bounded ones, so the path is provenance only.
+                path=str(item.get("origin_path") or "") or None,
             )
         )
     return out
@@ -289,10 +294,77 @@ def audio_blocks(audio: list[dict[str, str]] | None) -> list["AudioContent"]:
     return out
 
 
+def document_blocks(
+    files: list[dict[str, Any]] | None, model: Any = None
+) -> list["DocumentContent"]:
+    """Resolve the wire's file REFERENCES into DocumentContent blocks.
+
+    The ONE deliberate difference from :func:`image_blocks` is the failure
+    contract, and it is the whole point of the ticket that added this: an
+    image entry that cannot be decoded is dropped because a paste that
+    half-decoded should cost that one picture, but a FILE the composer showed
+    as a chip must never vanish — the model would then answer a question
+    about a document it never received. An unresolvable digest, an empty
+    store blob or an unreadable sidecar therefore raises
+    :class:`~local_operator.session.errors.AttachmentMissing` naming the file,
+    and the send is refused (409) before any paid work.
+
+    The MIME is the STORE's (decided from the bytes at upload), never the
+    ref's declared value; ``name``/``path`` are the SEND's provenance and ride
+    the block, because the store sidecar keeps MIME and size only (contract
+    amendment 7).
+
+    ``injection`` is stamped here from the session's CURRENT model as
+    historical metadata (amendment 6): it says how this turn was expected to
+    reach the model. The serializer re-decides from the wire it actually
+    speaks, so a ``/model`` switch after this row is written does not inherit
+    the label.
+    """
+    if not files:
+        return []
+    from local_operator.harness.types import DocumentContent
+    from local_operator.providers.documents import (
+        admission_wire,
+        document_form,
+        document_injection,
+    )
+    from local_operator.session.errors import AttachmentMissing
+
+    provider = str(getattr(model, "provider", "") or "")
+    supports_responses = bool(getattr(model, "supports_responses_api", False))
+    supports_images = bool(getattr(model, "supports_images", True))
+    form = document_form(
+        provider,
+        admission_wire(provider, supports_responses_api=supports_responses),
+        supports_images=supports_images,
+    )
+    store = AttachmentStore()
+    out: list[DocumentContent] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        digest = str(item.get("digest") or "")
+        filename = str(item.get("name") or "") or (digest or "the attached file")
+        resolved = store.get_bytes(digest) if digest else None
+        if resolved is None:
+            raise AttachmentMissing(filename=filename)
+        raw, mime_type = resolved
+        block = DocumentContent(
+            data=base64.b64encode(raw).decode("ascii"),
+            mime_type=mime_type,
+            filename=filename,
+            path=str(item.get("path") or "") or None,
+            bytes=len(raw),
+            digest=digest,
+        )
+        block.injection = document_injection(block, form)
+        out.append(block)
+    return out
+
+
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
-
 #: How long the per-connection sync task waits for the ON-LOOP frontend bind
 #: before falling back to the off-loop one (``_serve_frontend_sync``).
 #:
@@ -1360,6 +1432,27 @@ async def _answer_attachment_kwargs(
     return {"attachments": attachments}
 
 
+def _takes_document_files(handle: Any) -> bool:
+    """Whether ``handle``'s ``prompt`` AND ``steer`` take the ``files`` keyword.
+
+    Same literal-parameter rule as :func:`_takes_input_mode` and for the same
+    reason: ``**kwargs`` would count as accepting while the dispatch only
+    passes a keyword the literal name is present for, so advertising on it
+    would promise carriage the dispatch drops.
+    """
+    for name in ("prompt", "steer"):
+        method = getattr(handle, name, None)
+        if method is None:
+            return False
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        if "files" not in parameters:
+            return False
+    return True
+
+
 def _takes_input_mode(handle: Any) -> bool:
     """Whether ``handle``'s ``prompt`` AND ``steer`` take BOTH carriage keywords.
 
@@ -2304,6 +2397,12 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # DOCUMENTS, on the same gated-on-the-handle rule: the string
+                # is the sender's licence to send ``Prompt.files``, and an
+                # owner whose dispatch would drop the key must not advertise
+                # it — the send is then REFUSED (contract amendment 1), never
+                # forwarded without its files.
+                + ([DOCUMENT_ATTACHMENTS_CAPABILITY] if _takes_document_files(handle) else [])
                 # IMAGES ON A QUEUED-ASK ANSWER, gated on the handle that would
                 # KEEP them for the reason above, and read by senders that
                 # REFUSE (rather than strip) when it is absent: an image is
@@ -6626,8 +6725,10 @@ class RuntimeServer:
             from local_operator.session.errors import (
                 AsideAdoptRefused,
                 AsideUnanswered,
+                AttachmentMissing,
                 AttachmentUnavailable,
                 AudioInputUnsupported,
+                DocumentCarriageUnsupported,
                 ForkRefused,
                 OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
@@ -6640,8 +6741,10 @@ class RuntimeServer:
                 (
                     AsideAdoptRefused,
                     AsideUnanswered,
+                    AttachmentMissing,
                     AttachmentUnavailable,
                     AudioInputUnsupported,
+                    DocumentCarriageUnsupported,
                     ForkRefused,
                     OperatorAuthorityRequired,
                     ProfileRegistryUnavailable,
@@ -6651,6 +6754,13 @@ class RuntimeServer:
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code
+                if isinstance(exc, AttachmentMissing) and exc.filename:
+                    # The refused file's NAME, as its own bounded field: the
+                    # composer showed a chip, and a refusal that says "an
+                    # attached file" makes the user hunt for which one. The far
+                    # side sanitises and caps it again and rebuilds the
+                    # sentence, so no prose crosses.
+                    frame["error_name"] = str(exc.filename)[:200]
                 if isinstance(exc, OperatorAuthorityRequired) and exc.trigger:
                     # A token from a closed set, never text: the far side picks
                     # the sentence that matches the frame it refused (a refused
@@ -7370,6 +7480,19 @@ class RuntimeServer:
             # ``input_mode``/``input_path``, one contract revision later.
             if "audio" in parameters:
                 fields["audio"] = frame.get("audio")
+            requested_files = frame.get("files")
+            if requested_files:
+                # DOCUMENTS ARE A REFUSAL, NEVER A DROP (contract amendment 1).
+                # A handle from before this carriage cannot resolve the
+                # references, so forwarding the text without them would answer
+                # a question the user believes was about the attached file.
+                if "files" not in parameters:
+                    from local_operator.session.errors import (
+                        DocumentCarriageUnsupported,
+                    )
+
+                    raise DocumentCarriageUnsupported()
+                fields["files"] = requested_files
             return await h.prompt(frame["text"], **fields)
         if op == "steer":
             fields = {"images": frame.get("images")}
@@ -7388,6 +7511,18 @@ class RuntimeServer:
             # dropping them at a handle that cannot take the keyword.
             if "audio" in parameters:
                 fields["audio"] = frame.get("audio")
+            requested_files = frame.get("files")
+            if requested_files:
+                # Same refusal contract as the prompt op above: a steer that
+                # names documents on a handle that cannot carry them refuses
+                # the correction rather than applying it without the file.
+                if "files" not in parameters:
+                    from local_operator.session.errors import (
+                        DocumentCarriageUnsupported,
+                    )
+
+                    raise DocumentCarriageUnsupported()
+                fields["files"] = requested_files
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
