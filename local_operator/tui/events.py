@@ -618,8 +618,11 @@ class SupplementProgress(SessionEvent):
     ``(anchor, job, version)`` is its identity.
 
     ``files``/``components`` are the row's shapes (present on decided/done
-    only, empty otherwise); ``error``/``error_type`` mirror the row. The
-    mapping is assembled here, where the wire event is known, and NOT read
+    only, empty otherwise); ``error``/``error_type`` mirror the row. ``sounds``
+    rides the same beats as ``files`` (a generated sound is ready at ``decided``,
+    like a callout), and is kept OUT of ``details()`` when empty so a
+    sound-free beat's mapping stays byte-identical to before the field existed.
+    The mapping is assembled here, where the wire event is known, and NOT read
     from the live payload by the app.
     """
 
@@ -635,6 +638,8 @@ class SupplementProgress(SessionEvent):
         components: list[dict[str, object]] | None = None,
         error: str = "",
         error_type: str = "",
+        sounds: list[dict[str, object]] | None = None,
+        sounds_more: int = 0,
     ) -> None:
         super().__init__()
         self.anchor = anchor
@@ -645,6 +650,8 @@ class SupplementProgress(SessionEvent):
         self.elapsed_s = elapsed_s
         self.files = list(files or [])
         self.components = list(components or [])
+        self.sounds = list(sounds or [])
+        self.sounds_more = int(sounds_more)
         self.error = error
         self.error_type = error_type
 
@@ -665,6 +672,10 @@ class SupplementProgress(SessionEvent):
             "components": list(self.components),
             "error": self.error,
         }
+        if self.sounds:
+            details["sounds"] = list(self.sounds)
+        if self.sounds_more > 0:
+            details["sounds_more"] = self.sounds_more
         return details
 
 
@@ -1341,6 +1352,8 @@ class EventController:
                 list(event.components),
                 event.error,
                 event.error_type,
+                [dict(item) for item in event.sounds],
+                event.sounds_more,
             )
         )
 

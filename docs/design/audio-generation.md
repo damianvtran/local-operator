@@ -124,10 +124,22 @@ lane's; a failed walk records `failed`/None with the documented
 The server contract v1 emits no `waveform` field, so the local default is
 `audiogen.peaks`: decode with **miniaudio 1.71** to 8 kHz mono FLOAT32
 (measured 63.7 ms for a 98 s MP3), 240 even buckets, max-abs per bucket
-clamped 0..1. Peaks are computed **once, at artifact creation**, by
-`cache_media(kind="audio")` and stored as the `<digest>.peaks.json` sidecar of
-the same content-addressed store the bytes live in — never decoded in a
-render loop, and never carried in `AttachmentContent`.
+clamped 0..1. Peaks are computed **once**, by
+`cache_media(kind="audio")` at artifact creation, and stored as the
+`<digest>.peaks.json` sidecar of the same content-addressed store the bytes
+live in — never decoded in a render loop, and never carried in
+`AttachmentContent`.
+
+The Library's waveform route is the one place "once" is not "at creation":
+an indexed path asset (a user file, not a generated attachment) has no
+sidecar, so its first `GET /v1/desktop/library/assets/{asset_id}/waveform`
+decodes it once and caches `{version,bars,peaks}` under
+`config/cache/library/peaks/<asset-id>-<mtime>.json` — the thumbnail cache's
+invalidation key. That decode runs in the same bounded child process and
+under the same single decode slot as legacy repair (8 MiB input cap, 10 s
+deadline, one at a time); a slot that cannot be had or a decode that fails
+is an ordinary 404, never fabricated silence. Digest assets read the sidecar,
+so no generated sound is decoded by a request at all.
 
 The decoder is a **base runtime dependency**, so bare installed generations
 write sidecars too; `local-operator[audio]` remains a compatibility alias.

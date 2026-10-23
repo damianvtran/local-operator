@@ -697,7 +697,7 @@ class SupplementRunner:
             datasets=tuple(datasets),
             user_text=user_text,
             answer_text=answer_text,
-            sounds=tuple(sounds[:3]),
+            sounds=tuple(sounds),
         )
         self._remember(inputs)
         previous = self._task
@@ -1124,9 +1124,15 @@ class SupplementRunner:
                     else []
                 ),
                 sounds=(
-                    [dict(item) for item in (details.get("sounds") or [])][:3]
+                    [dict(item) for item in (details.get("sounds") or [])]
                     if state in ("decided", "done")
                     else []
+                ),
+                # The row's disclosure travels with the list it describes: a live
+                # viewer would otherwise paint the bound's cut as a complete list
+                # until a cold open read the journal.
+                sounds_more=(
+                    int(details.get("sounds_more") or 0) if state in ("decided", "done") else 0
                 ),
                 model=str(details.get("model", "") or ""),
                 model_source=str(details.get("model_source", "") or ""),

@@ -248,7 +248,7 @@ def snapshot_message(
         payload = getattr(message, "provider_payload", None)
         details = payload.get("details") if isinstance(payload, Mapping) else None
         raw = details.get("artifacts") if isinstance(details, Mapping) else None
-        for item in raw[:3] if isinstance(raw, (list, tuple)) else ():
+        for item in raw if isinstance(raw, (list, tuple)) else ():
             if not isinstance(item, Mapping) or item.get("kind") != "audio":
                 continue
             if not is_digest(item.get("digest")):
@@ -286,8 +286,11 @@ def snapshot_message(
 def turn_sounds(items: Iterable[TurnItem]) -> list["SupplementSound"]:
     """Reuse current-turn result artifacts: generated audio has no filesystem candidate.
 
-    Deduplicate continuation snapshots by digest and cap the entire turn, not just
-    each result. Never inspect answer text or walk an unrelated attachment inventory.
+    EVERY audio artifact of the turn, in generation order. Deduplicate continuation
+    snapshots by digest: a continuation re-reports the same tool result, and identical
+    bytes are one sound, so coalescing by digest is dedupe -- not a cap. There is no
+    count bound here; the row writer owns the single pathological bound (``SOUNDS_MAX``)
+    and discloses it. Never inspect answer text or walk an unrelated attachment inventory.
     """
     sounds: list[SupplementSound] = []
     seen: set[str] = set()
@@ -310,8 +313,6 @@ def turn_sounds(items: Iterable[TurnItem]) -> list["SupplementSound"]:
                     duration_s=float(artifact["duration_s"]),
                 )
             )
-            if len(sounds) == 3:
-                return sounds
     return sounds
 
 
