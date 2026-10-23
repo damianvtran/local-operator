@@ -128,6 +128,18 @@ class RecordingClient:
         )
         return self.sent_result
 
+    async def conversation_react(self, conversation_id, message_id, emoji, **kwargs):
+        self.calls.append(
+            {
+                "method": "conversation_react",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "emoji": emoji,
+                **kwargs,
+            }
+        )
+        return {"message_id": message_id, "reactions": []}
+
     async def conversation_messages(
         self,
         conversation_id: str,
@@ -472,3 +484,84 @@ async def test_a_whitespace_human_endpoint_is_absent_not_wired() -> None:
     members = client.calls[0]["body"]["members"]
     human = next(member for member in members if member["account_id"] == "acc_2")
     assert "endpoint_id" not in human
+
+
+@pytest.mark.asyncio
+async def test_react_is_an_agent_write_with_runtime_identity():
+    client = RecordingClient()
+    runtime = _runtime(client)
+    result = await execute_bridge(
+        runtime,
+        {
+            "op": "react",
+            "channel_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "✅",
+        },
+    )
+    assert result["ok"] is True
+    assert BRIDGE_UNTRUSTED_CLAUSE in result["content"]
+    assert client.calls == [
+        {
+            "method": "conversation_react",
+            "conversation_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "✅",
+            "active": True,
+            "tenant_id": TENANT,
+            "actor_endpoint_id": "bep_1",
+        }
+    ]
+    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    assert tool is not None
+    assert tool.call_approval_tier is not None
+    assert tool.call_approval_tier({"op": "react"}) == "write"
+    result = await execute_bridge(
+        runtime,
+        {
+            "op": "react",
+            "channel_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "✅",
+            "remove": True,
+        },
+    )
+    assert result["ok"] is True
+    assert client.calls[-1]["active"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_id,emoji", [("../other", "✅"), ("bcmsg_abcd1234", "😀" * 33)])
+async def test_react_bad_args_never_dispatch(message_id, emoji):
+    client = RecordingClient()
+    result = await execute_bridge(
+        _runtime(client),
+        {"op": "react", "channel_id": "bcv_abcd1234", "message_id": message_id, "emoji": emoji},
+    )
+    assert result["ok"] is False
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_react_paused_admission_refuses_before_write(monkeypatch):
+    client = RecordingClient()
+    reads = []
+
+    def refuse(runtime, *, is_read=False):
+        reads.append(is_read)
+        return {"code": "bridge_paused", "error": "paused"}
+
+    monkeypatch.setattr(host_mod, "admission_refusal", refuse)
+    monkeypatch.setattr(host_mod, "admit_soon", lambda runtime: None)
+    result = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "react",
+            "channel_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "✅",
+        },
+    )
+    assert result["code"] == "bridge_paused"
+    assert reads == [False], "react never uses the read-shaped admission exception"
+    assert client.calls == []

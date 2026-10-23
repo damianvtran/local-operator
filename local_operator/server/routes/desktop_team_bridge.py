@@ -56,6 +56,7 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
@@ -1151,6 +1152,31 @@ class ConversationAdmitIn(_Strict):
     body_hash: str = Field(min_length=1, max_length=128)
 
 
+class ConversationReactIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+
+
+#: The hub's reaction-key byte bound (agent-server §10.2: NFC, <=128 UTF-8
+#: bytes, one fully-qualified RGI sequence). Only the BOUND is mirrored here,
+#: as a cheap pre-flight: the RGI allowlist is the hub's, and keeping a second
+#: copy in the runtime would be a second opinion that drifts with Unicode.
+_REACTION_EMOJI_MAX_BYTES = 128
+
+
+def _require_reaction_emoji(emoji: str) -> str:
+    """Refuse an empty or over-long reaction key before any upstream I/O.
+
+    The value is percent-encoded with no safe characters by the client, so it
+    can never reshape the upstream path; this guard only stops obviously
+    non-emoji input (text, pasted paragraphs) from costing a hub round trip.
+    """
+
+    key = unicodedata.normalize("NFC", emoji)
+    if not key or len(key.encode("utf-8")) > _REACTION_EMOJI_MAX_BYTES:
+        _raise_read("invalid_request")
+    return key
+
+
 def _conversation_client(config_manager: ConfigManager):
     """The transport, imported INSIDE the handler (the httpx boot rule)."""
 
@@ -1593,6 +1619,79 @@ async def conversation_admit(
                 body_hash=body.body_hash,
                 tenant_id=body.tenant_id,
                 endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_add(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    body: ConversationReactIn | None = None,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Add the signed-in person's reaction; idempotent upstream.
+
+    The desktop reacts as the HUMAN only: an agent reaction goes through the
+    agent's own ``bridge`` tool (``react``), which carries the actor endpoint
+    from the runtime and is screened like every agent write. There is no
+    ``actor_endpoint_id`` on this body, so the renderer cannot act as an agent.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _refuse_write_scope(request)
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id,
+                message_id,
+                key,
+                active=True,
+                tenant_id=body.tenant_id if body else None,
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_remove(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None, max_length=128),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Remove the signed-in person's reaction; removing an unset one is a no-op.
+
+    ``tenant_id`` is a query parameter here (not a body) because a DELETE body
+    is not reliably carried by every client and proxy; the hub accepts both.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if set(request.query_params) - {"tenant_id"}:
+        _raise_read("invalid_request")
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id, message_id, key, active=False, tenant_id=tenant_id
             )
         )
     )
