@@ -15,6 +15,7 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -212,7 +213,7 @@ def test_a_peer_owned_session_refuses_documents_before_the_frame() -> None:
     from local_operator.session.attached import AttachedSession
 
     session = object.__new__(AttachedSession)
-    session._owner = SimpleNamespace(placement=SimpleNamespace(is_local=False))
+    cast(Any, session)._owner = SimpleNamespace(placement=SimpleNamespace(is_local=False))
     with pytest.raises(RemoteDocumentUnsupported):
         import asyncio
 
@@ -234,7 +235,7 @@ def test_a_handle_without_the_files_keyword_refuses_an_attachment_bearing_frame(
             return "queued"
 
     server = object.__new__(RuntimeServer)
-    server._handle = OldHandle()
+    cast(Any, server)._handle = OldHandle()
     import asyncio
 
     with pytest.raises(DocumentCarriageUnsupported):
@@ -619,31 +620,32 @@ async def test_the_viewer_door_sends_file_references_on_the_frame() -> None:
         _document_attachments_supported = True
 
         def __init__(self) -> None:
-            self.frames: list[tuple[str, dict]] = []
+            self.frames: list[tuple[str, dict[str, Any]]] = []
 
         async def request_ack_with_duplicate(self, op, **fields):
             self.frames.append((op, fields))
             return ("admitted", False)
 
     session = object.__new__(AttachedSession)
-    session._client = FakeClient()
+    client = FakeClient()
+    cast(Any, session)._client = client
 
     async def _bound() -> None:
         return None
 
-    session._ensure_bound = _bound  # type: ignore[method-assign]
+    cast(Any, session)._ensure_bound = _bound
     reference = {"digest": "a" * 32, "name": "a.pdf", "bytes": 1}
     await session.admit_prompt("read", command_id="c-1", images=[], files=[reference])
-    op, fields = session._client.frames[0]
+    op, fields = client.frames[0]
     assert op == "prompt"
     assert fields["files"] == [reference]
     # No files -> no key at all, so a legacy frame stays byte-identical.
     await session.admit_prompt("hello", command_id="c-2", images=[])
-    assert "files" not in session._client.frames[1][1]
+    assert "files" not in client.frames[1][1]
 
     # An owner that never advertised the capability REFUSES the send rather
     # than accepting the text without the file (contract amendment 1).
-    session._client._document_attachments_supported = False
+    client._document_attachments_supported = False
     with pytest.raises(DocumentCarriageUnsupported):
         await session.admit_prompt("read", command_id="c-3", images=[], files=[reference])
 
@@ -899,7 +901,7 @@ async def test_a_document_turn_measures_and_renders_before_the_provider(
     import asyncio
 
     from local_operator.providers.clients import MockClient
-    from local_operator.providers.context import measure_request
+    from local_operator.providers.context import RequestMeasure, measure_request
     from local_operator.session.runtime.serving import ServingSessionHandle
     from tests.e2e.harness import E2E_ORACLE_MODEL, build_session
 
@@ -907,7 +909,7 @@ async def test_a_document_turn_measures_and_renders_before_the_provider(
     ref = store.put_bytes(raw, "application/pdf")
     assert ref is not None
     seen: dict[str, object] = {}
-    measures: list[object] = []
+    measures: list[RequestMeasure] = []
 
     async def stream(request, api_key=None, oauth_access=None):
         # The real seam: this is what model/configure.py awaits before dispatch.
