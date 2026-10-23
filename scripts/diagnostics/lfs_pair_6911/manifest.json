@@ -1,5 +1,5 @@
 {
-  "base": "29c07f4ad6ebaac8ff12e3c0b7285ab626cfefd9",
+  "base": "3d983ff40ad51bad7f0b0b2848ab140f19d9c398",
   "source_scope": "PAIR-only partial diagnostic, not four-ticket completion",
   "sources": {
     "tests/unit/network/test_relay_e2e.py": "a79494f6e6259dafc09f1dcc8dfd55fa5dea22450c7c6ae6fc36c8408aa454e9",
@@ -8,7 +8,17 @@
     "local_operator/network/audit.py": "f60e3738fe262ba64085f4fe9b7abd53483403f8023e9b71b479dce7a7bc622b",
     "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
     "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
-    "scripts/diagnostics/lfs_pair_6911/probe.py": "7119d2b8a808c0fd55986b0e717e29f6aff612598d2ba7ca32d76feb980615c3",
-    "scripts/diagnostics/lfs_pair_6911/controller.py": "72fecbe9257e58936cc81d9ca7b6613a194343a28e43e1cc3d33399ca16591c0"
-  }
+    "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
+    "tests/unit/network/test_lfs_pair_diag_6911.py": "fe9855a199071309b488106b4c611bf51b2b15d194582f3e3a43caad3528bd9a",
+    "tests/conftest.py": "18766004614a9796f7d9d92336c71316d3bf128115ce0ddfd9b5db171376ac08"
+  },
+  "loaded_sources": [
+    "tests/unit/network/test_lfs_pair_diag_6911.py",
+    "tests/unit/network/test_relay_e2e.py",
+    "tests/unit/network/conftest.py",
+    "tests/conftest.py",
+    "local_operator/network/relay.py",
+    "local_operator/network/audit.py",
+    "scripts/diagnostics/lfs_pair_6911/controller.py"
+  ]
 }
