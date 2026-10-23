@@ -273,7 +273,15 @@ export function SoundPlayer({
 		const fraction = fractionAt(event.clientX);
 		if (fraction === null) return;
 		pressRef.current = { x: event.clientX, moved: false };
-		trackRef.current?.setPointerCapture?.(event.pointerId);
+		try {
+			/* Capture is an optimisation (a finger that leaves the track keeps
+			   seeking), never the gesture itself: a SYNTHETIC pointer event has
+			   no active pointer to capture and throws NotFoundError, which would
+			   otherwise abort the press and lose the seek (qa round 1, Q2). */
+			trackRef.current?.setPointerCapture?.(event.pointerId);
+		} catch {
+			/* Uncapturable pointer: the press still seeks and still ends. */
+		}
 		seekFraction(fraction);
 	};
 
@@ -298,7 +306,11 @@ export function SoundPlayer({
 		const press = pressRef.current;
 		if (press === null) return;
 		pressRef.current = null;
-		trackRef.current?.releasePointerCapture?.(event.pointerId);
+		try {
+			trackRef.current?.releasePointerCapture?.(event.pointerId);
+		} catch {
+			/* Released, or never captured: nothing to undo. */
+		}
 		if (!click || press.moved) {
 			/* A scrub only seeks; starting playback here would make every drag a
 			   play press, which is the gesture contract's one prohibition. */
