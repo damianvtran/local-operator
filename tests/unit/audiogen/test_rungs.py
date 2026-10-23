@@ -474,7 +474,7 @@ async def test_a_busy_submit_retries_with_bounded_backoff_then_succeeds(monkeypa
         )
     assert outcome.generation_id == "req-busy"
     assert attempts["submit"] == 3
-    assert sleeps == [2.0, 4.0], "bounded backoff, in the contract's steps"
+    assert sleeps == [10.0, 20.0], "the ladder's first two steps, over the 45 s hold"
 
 
 @pytest.mark.asyncio
@@ -505,10 +505,57 @@ async def test_an_exhausted_busy_submit_surfaces_as_transient_busy(monkeypatch):
     assert exc.code == "transient", "a busy process is not a balance signal"
     assert exc.status_code == 429
     assert exc.details.get("error_type") == "audio_rate_limited"
-    assert "busy right now" in str(exc)
-    assert sleeps == [2.0, 4.0, 8.0], "four attempts, three waits"
+    # The receipt names the capacity window, not just the provider's sentence:
+    # the previous incident produced "busy right now" per item and could not
+    # say how long the platform had been held.
+    assert "4 attempts over" in str(exc)
+    assert exc.details["attempts"] == 4
+    assert sleeps == [10.0, 20.0, 35.0], "four attempts, three waits"
     # No header dependence: the response carried no Retry-After at all.
     assert audio_rungs.SUBMIT_MAX_ATTEMPTS == 4
+    # 0 + 10 + 30 + 35 = the 65 s that clears the server's 45 s vendor bound.
+    assert sum(sleeps) == 65.0
+
+
+@pytest.mark.asyncio
+async def test_the_capacity_window_is_a_fraction_of_the_batch_budget(monkeypatch):
+    """A fake clock proves the 65 s ladder cannot eat the whole batch budget.
+
+    ``SOUND_BATCH_TIMEOUT_S`` is 225 s and is deliberately NOT raised: the
+    ladder is what absorbs the hold. One exhausted window must leave room for
+    at least two more, or a 3-item resume would spend its entire budget just
+    discovering that capacity is full.
+    """
+    from local_operator.tools import audio_tool
+
+    clock = {"t": 1_000.0}
+    sleeps: list[float] = []
+
+    async def advance(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["t"] += seconds
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", advance)
+    monkeypatch.setattr(audio_rungs, "_submit_clock", lambda: clock["t"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _rate_limited_response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs._submit_with_backoff(
+                client,
+                f"{HUB}/tools/audio/sound-effects",
+                body={"prompt": "click", "duration_s": 0.5},
+                credential="tok",
+            )
+
+    window = caught.value.details["capacity_window_s"]
+    assert window == 65.0
+    assert caught.value.details["attempts"] == 4
+    assert "Audio platform at capacity: 4 attempts over 65 s." in str(caught.value)
+    assert audio_tool.SOUND_BATCH_TIMEOUT_S == 225.0, "the batch bound is unchanged"
+    assert window < audio_tool.SOUND_BATCH_TIMEOUT_S / 3
 
 
 @pytest.mark.asyncio
@@ -652,6 +699,74 @@ async def test_elevenlabs_sound_effect_body_carries_the_required_duration():
     assert outcome.billing_basis == "estimated"
 
 
+@pytest.mark.asyncio
+async def test_elevenlabs_admission_refusal_retries_on_the_shared_ladder(monkeypatch):
+    """BYOK gets the SAME ladder as the hub: a 429 is a refusal, not a verdict.
+
+    A BYOK 429 produces no audio and charges nothing, so retrying is safe — and
+    a resumed batch must not fail an item because a vendor (or a slot on a
+    shared key) was briefly busy. Batch submissions take the jittered arm; the
+    jitter floor is pinned to the hold, so three refusals still clear it.
+    """
+    posts: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        if len(posts) < 4:
+            return _rate_limited_response()
+        return httpx.Response(200, content=b"ID3ok", headers={"content-type": "audio/mpeg"})
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: low)
+    spec = _spec("sound_effect", duration_s=0.5, batch_submission=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        outcome = await audio_rungs.run_elevenlabs(
+            spec, api_key="k", handle=CancelHandle(), emit=None, pause=_fast_pause, client=client
+        )
+    assert len(posts) == 4, "three refusals, then the admitted submit"
+    assert sleeps == [10.0, 20.0, 35.0]
+    assert outcome.assets[0].data == b"ID3ok"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_a_400_is_the_answer_and_is_never_retried(monkeypatch):
+    """Only the admission refusal is retried: a rejected request is final.
+
+    A 400 (``audio_rejected``) means the request itself was wrong. Re-posting it
+    would burn the ladder's 65 s and then fail identically, so it must surface
+    on the first post — the counterpart to the retry test above.
+    """
+    posts: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(400, json={"code": "audio_rejected", "error": "bad duration"})
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    spec = _spec("sound_effect", duration_s=0.5)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs.run_elevenlabs(
+                spec,
+                api_key="k",
+                handle=CancelHandle(),
+                emit=None,
+                pause=_fast_pause,
+                client=client,
+            )
+    assert len(posts) == 1
+    assert sleeps == []
+    assert caught.value.code == "audio_rejected"
+
+
 # ---------------------------------------------------------------------------
 # BYOK — OpenAI
 # ---------------------------------------------------------------------------
@@ -736,13 +851,21 @@ async def test_radient_sha_is_required_well_formed_and_matching(sha):
 
 @pytest.mark.asyncio
 async def test_batch_admission_backoff_is_jittered_and_bounded(monkeypatch):
+    """Jitter may only LENGTHEN: the floor is the documented 65 s window.
+
+    The previous range (0.75-1.0) shortened the wait to as little as 49 s, which
+    is inside a 45 s hold plus the terminal write it has to clear — so a batch
+    worker could retry straight back into the window the ladder exists to
+    outlast. Pinning ``uniform`` to its LOW end proves the floor; the companion
+    test pins the high end.
+    """
     sleeps = []
 
     async def pause(seconds):
         sleeps.append(seconds)
 
     monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
-    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: 0.875)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: low)
     requests = []
 
     def handler(request):
@@ -755,12 +878,38 @@ async def test_batch_admission_backoff_is_jittered_and_bounded(monkeypatch):
                 client,
                 f"{HUB}/tools/audio/sound-effects",
                 body={"prompt": "click", "duration_s": 0.5},
-                credential="synthetic",
+                credential="tok",
                 jitter=True,
             )
     assert caught.value.details["error_type"] == "audio_rate_limited"
     assert len(requests) == 4
-    assert sleeps == [1.75, 3.5, 7.0]
+    assert sleeps == [10.0, 20.0, 35.0], "the jittered floor is the hold, never below it"
+
+
+@pytest.mark.asyncio
+async def test_batch_jitter_can_only_move_a_wait_later(monkeypatch):
+    """The other end of the range: jitter stretches, and the receipt says so."""
+    swallows = []
+
+    async def pause(seconds):
+        swallows.append(seconds)
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: high)
+
+    def handler(request):
+        return _rate_limited_response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError):
+            await audio_rungs._submit_with_backoff(
+                client,
+                f"{HUB}/tools/audio/sound-effects",
+                body={"prompt": "click", "duration_s": 0.5},
+                credential="tok",
+                jitter=True,
+            )
+    assert swallows == pytest.approx([11.5, 23.0, 40.25])
 
 
 def _decodable_wav(seconds: float = 0.5, rate: int = 8000) -> bytes:

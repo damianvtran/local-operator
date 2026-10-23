@@ -60,7 +60,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 from pydantic import SecretStr
@@ -152,9 +152,34 @@ RADIENT_AUDIO_CANCEL_PATH = "/tools/audio/cancel"
 #: is charged, and a burst of retries is what the bound itself is protecting
 #: against — hence the small cap rather than an unbounded loop.
 SUBMIT_MAX_ATTEMPTS = 4
-#: The backoff before each retry (2, 4, 8; a fourth refusal is surfaced).
-#: Capped at 30 s by the contract; the values never reach it.
-SUBMIT_BACKOFF_S = (2.0, 4.0, 8.0, 16.0)
+#: The wait BEFORE each retry: attempts land at 0 / 10 / 30 / 65 s.
+#:
+#: Sized against the server's own hold, not guessed. THE CONTRACT THIS MUST
+#: OUTLAST: the audio server deliberately does NOT abort a running vendor call
+#: when a client cancels (agent-server ``TestRunningCancelDoesNotAbortTheCall``
+#: pins it), so a stopped batch's abandoned in-flight calls keep its
+#: per-account slots until the provider's ``ElevenLabsSpeechTimeout`` — 45 s —
+#: expires. A ladder shorter than that exhausts inside the window it exists to
+#: outlast: the observed incident was 4 attempts over 10.5-14 s (2/4/8 s
+#: jittered DOWN to 0.75-1.0) against a 45 s hold, so a resumed 3-item batch
+#: failed every item on its first submission. 65 s clears the hold plus the
+#: artifact/terminal write, which is the property a batch caller relies on: a
+#: later batch WAITS out work the stop abandoned, and the agent never needs to
+#: know platform slots exist.
+#:
+#: The trade, stated where the constants live: ``SOUND_BATCH_TIMEOUT_S`` stays
+#: 225 s (``tools.audio_tool``). Under sustained capacity a 14-item batch on 2
+#: workers could spend 7 rounds x 65 s on admission alone, while the reported
+#: 3-item resume's worst case is ~65 s plus one generation. Raising the batch
+#: budget instead would let a stuck batch outlive the tool call's own bound, so
+#: the ladder is what gives.
+SUBMIT_BACKOFF_S = (10.0, 20.0, 35.0)
+#: The batch jitter MULTIPLIER. It only ever LENGTHENS a wait: two workers
+#: still desynchronise, but the floor never drops below the hold the ladder is
+#: sized to outlast. A 0.75 floor would shorten a 65 s window to 49 s — inside
+#: the 45 s hold plus the terminal write, which is exactly the race that made a
+#: jittered batch retry back into the window it was waiting out.
+SUBMIT_JITTER = (1.0, 1.15)
 #: The server's fixed sentence for the admission bound (there is no
 #: ``Retry-After`` header to read — the contract says so explicitly).
 AUDIO_RATE_LIMITED_SENTENCE = "Audio generation is busy right now. Wait a moment and try again."
@@ -163,6 +188,11 @@ AUDIO_RATE_LIMITED_SENTENCE = "Audio generation is busy right now. Wait a moment
 #: bind a recorder and never pay the wall clock — the same seam the rung's
 #: ``pause`` uses for its polls.
 _submit_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+#: Injected clock for the ladder's elapsed receipt, module-level for the same
+#: reason as ``_submit_sleep``: a test proves the 65 s window without spending
+#: it. Real runs read the monotonic clock, so the receipt names real seconds.
+_submit_clock: Callable[[], float] = time.monotonic
 
 #: The terminal vocabulary the contract defines. A status outside it is an
 #: unreadable payload (``invalid_response``) rather than an infinite poll loop:
@@ -336,20 +366,36 @@ def _is_admission_refusal(exc: APIError) -> bool:
     return exc.status_code == 429
 
 
-def _rate_limited_error(exc: APIError) -> APIError:
+def _rate_limited_error(exc: APIError, *, attempts: int, elapsed_s: float) -> APIError:
     """The surfaced failure for an exhausted admission retry.
 
     ``reason_class`` (the ``code``) is ``transient``: a busy process is a
     retry-later condition, never a balance or credential signal. The wire's
-    ``error_type`` rides the details so a surface can say which refusal it was,
-    and the message is the server's own sentence when it sent one.
+    ``error_type`` rides the details so a surface can say which refusal it was.
+
+    The receipt NAMES THE CAPACITY WINDOW it waited out — ``4 attempts over
+    65 s`` — and carries the same figures structurally, because the previous
+    incident's receipt (the provider's generic "busy right now" sentence,
+    repeated per item) could not distinguish "capacity held for a minute"
+    from "a permanently broken request". ``elapsed_s`` is real elapsed time
+    from the injected clock, never the ladder's nominal sum.
     """
-    message = str(exc).strip() or AUDIO_RATE_LIMITED_SENTENCE
+    waited = round(elapsed_s, 1)
+    message = f"Audio platform at capacity: {attempts} attempts over {waited:g} s."
+    server_said = str(exc).strip()
+    if server_said and server_said != AUDIO_RATE_LIMITED_SENTENCE and server_said not in message:
+        # A vendor's own words when they say something the canned sentence
+        # does not (e.g. a Retry-After-derived hint); the boilerplate is dropped.
+        message = f"{message} ({server_said})"
     return APIError(
         message,
         status_code=exc.status_code or 429,
         code="transient",
-        details={"error_type": "audio_rate_limited"},
+        details={
+            "error_type": "audio_rate_limited",
+            "attempts": attempts,
+            "capacity_window_s": waited,
+        },
     )
 
 
@@ -382,6 +428,48 @@ def _hub_reason_error(exc: APIError) -> APIError:
     return exc
 
 
+T = TypeVar("T")
+
+
+async def _retrying_admission(submit: Callable[[], Awaitable[T]], *, jitter: bool) -> T:
+    """Run ONE submit under the admission ladder — the only retry policy here.
+
+    Both submit paths (the Radient hub and the BYOK vendors) call this so the
+    server's documented 45 s hold and the vendors' bounds cannot drift into two
+    ladders with two opinions about how long capacity can stay held.
+
+    Why retry this failure and nothing else: an admission refusal leaves no job
+    row and no quote, so a retry cannot double-queue or double-bill — the
+    contract says so explicitly. Every other submit error is the upstream's
+    ANSWER (a rejected parameter, a timeout, a 5xx after the request may have
+    landed) and fails straight through: a blind re-POST there can bill twice.
+
+    ``submit`` is a coroutine FACTORY, not a coroutine: each attempt must issue
+    a fresh request, and an awaited-once coroutine cannot be re-awaited.
+    """
+    started = _submit_clock()
+    last: APIError | None = None
+    attempts = 0
+    for attempt in range(SUBMIT_MAX_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            return await submit()
+        except APIError as exc:
+            if not _is_admission_refusal(exc):
+                raise
+            last = exc
+            if attempts >= SUBMIT_MAX_ATTEMPTS:
+                break
+            delay = SUBMIT_BACKOFF_S[min(attempt, len(SUBMIT_BACKOFF_S) - 1)]
+            if jitter:
+                # Two batch workers may hit the same account cap at once.
+                # Stretch (never shorten) so the retry still clears the hold.
+                delay *= random.uniform(*SUBMIT_JITTER)
+            await _submit_sleep(delay)
+    assert last is not None
+    raise _rate_limited_error(last, attempts=attempts, elapsed_s=_submit_clock() - started)
+
+
 async def _submit_with_backoff(
     client: httpx.AsyncClient,
     url: str,
@@ -390,17 +478,15 @@ async def _submit_with_backoff(
     credential: str,
     jitter: bool = False,
 ) -> dict[str, Any]:
-    """POST the submit, retrying ONLY the admission-bound refusal.
+    """POST the Radient submit, retrying ONLY the admission-bound refusal.
 
-    Why retry this one and nothing else: the contract states a refused submit
-    leaves no job row and no quote, so a retry cannot double-queue or
-    double-bill; every other submit error fails straight through (the comment
-    on ``_request_json`` is the general rule, and this is its one sanctioned
-    exception, spelled by the server). Backoff is bounded and the sleeper is
-    injectable so tests never sleep.
+    The ladder itself lives in ``_retrying_admission`` (shared with the BYOK
+    paths); this wrapper only owns what is Radient-specific: the request, and
+    appending the hub's per-parameter ``details.reason`` to a NON-admission
+    refusal, where it is the actionable text every surface shows.
     """
-    last: APIError | None = None
-    for attempt in range(SUBMIT_MAX_ATTEMPTS):
+
+    async def _once() -> dict[str, Any]:
         try:
             return await _request_json(
                 client,
@@ -413,21 +499,15 @@ async def _submit_with_backoff(
                 json=body,
             )
         except APIError as exc:
-            if not _is_admission_refusal(exc):
-                # The hub's refusal sentence is generic; its per-parameter
-                # reason rides ``details.reason``. Consume it here, at the
-                # source, so the attempt message (and every surface built
-                # from it) carries the actionable text (see the helper).
-                raise _hub_reason_error(exc) from exc
-            last = exc
-            if attempt >= SUBMIT_MAX_ATTEMPTS - 1:
-                break
-            delay = SUBMIT_BACKOFF_S[min(attempt, len(SUBMIT_BACKOFF_S) - 1)]
-            # Two batch workers may hit the same account cap simultaneously.
-            # Desynchronize retries without exceeding the existing bounded ladder.
-            await _submit_sleep(delay * random.uniform(0.75, 1.0) if jitter else delay)
-    assert last is not None
-    raise _rate_limited_error(last)
+            if _is_admission_refusal(exc):
+                raise
+            # The hub's refusal sentence is generic; its per-parameter reason
+            # rides ``details.reason``. Consume it here, at the source, so the
+            # attempt message (and every surface built from it) carries the
+            # actionable text (see the helper).
+            raise _hub_reason_error(exc) from exc
+
+    return await _retrying_admission(_once, jitter=jitter)
 
 
 async def _request_json(
@@ -1105,6 +1185,8 @@ async def run_elevenlabs(
             params=request_params,
             model_label="ElevenLabs",
             api_key=api_key,
+            # Only a batch stretches its waits; a single call keeps its timing.
+            jitter=spec.batch_submission,
         )
 
     estimate = (
@@ -1204,6 +1286,7 @@ async def run_openai(
             params={},
             model_label="OpenAI",
             api_key=api_key,
+            jitter=spec.batch_submission,
         )
 
     estimate = voiceover_estimate("openai", model, len(spec.text))
@@ -1238,39 +1321,55 @@ async def _post_audio(
     params: dict[str, str],
     model_label: str,
     api_key: str,
+    jitter: bool = False,
 ) -> tuple[bytes, str]:
-    """One JSON POST answered with audio bytes, with the shared error shape.
+    """One JSON POST answered with audio bytes, under the SAME admission ladder.
 
     ``timeout=HTTP_TIMEOUT_BYOK_S`` bounds the whole call; the vendor's
     content-type is read off the header (falling back to the frozen contract's
     MP3 type), and every failure is an ``APIError`` the walk classifies.
+
+    Why the ladder reaches BYOK at all: a vendor 429 is a REFUSAL — no audio
+    was produced and nothing was charged — so retrying it is as safe here as
+    on the hub, and a stop-then-resume race (or a shared vendor rate limit)
+    must not fail an item on its first submission. The retry set is deliberately
+    only the admission refusal: timeouts, transport errors and 5xx are NOT
+    retried, because those may have been accepted and a re-POST could bill
+    twice. A vendor that sends ``audio_rate_limited`` as a 4xx code retries
+    too, via the same classifier.
     """
-    try:
-        response = await client.post(
-            url,
-            headers={**headers, "Content-Type": "application/json"},
-            json=payload,
-            params=params,
-            timeout=httpx.Timeout(HTTP_TIMEOUT_BYOK_S),
-        )
-    except httpx.TimeoutException as exc:
-        raise APIError(
-            f"{model_label} timed out after {HTTP_TIMEOUT_BYOK_S:.0f}s.",
-            status_code=None,
-            code="timeout",
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise APIError(
-            f"{model_label} request failed: {exc}", status_code=None, code="network"
-        ) from exc
-    if response.status_code >= 400:
-        raise api_error_from_httpx_response(
-            response, fallback_message=f"{model_label} refused the request", secrets=(api_key,)
-        )
-    content_type = (response.headers.get("content-type") or "").split(";")[0].strip()
-    if not content_type or content_type == "application/octet-stream":
-        content_type = BYOK_MEDIA_TYPE
-    return response.content, content_type
+
+    async def _once() -> tuple[bytes, str]:
+        try:
+            response = await client.post(
+                url,
+                headers={**headers, "Content-Type": "application/json"},
+                json=payload,
+                params=params,
+                timeout=httpx.Timeout(HTTP_TIMEOUT_BYOK_S),
+            )
+        except httpx.TimeoutException as exc:
+            raise APIError(
+                f"{model_label} timed out after {HTTP_TIMEOUT_BYOK_S:.0f}s.",
+                status_code=None,
+                code="timeout",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise APIError(
+                f"{model_label} request failed: {exc}", status_code=None, code="network"
+            ) from exc
+        if response.status_code >= 400:
+            raise api_error_from_httpx_response(
+                response,
+                fallback_message=f"{model_label} refused the request",
+                secrets=(api_key,),
+            )
+        content_type = (response.headers.get("content-type") or "").split(";")[0].strip()
+        if not content_type or content_type == "application/octet-stream":
+            content_type = BYOK_MEDIA_TYPE
+        return response.content, content_type
+
+    return await _retrying_admission(_once, jitter=jitter)
 
 
 # ---------------------------------------------------------------------------
