@@ -38783,8 +38783,8 @@ class OperatorApp(App[None]):
     def _palette_entries(self, *, session_rows: Iterable[Any]) -> list[PaletteEntry]:
         """Every action the ``ctrl+p`` palette offers, in discovery order.
 
-        The SINGLE seam that reads live state, called from the provider's
-        ``startup`` task (off the input path). It derives from the surfaces
+        The SINGLE seam that reads live state, called by the palette provider
+        from its shielded scan task (off the input path). It derives from the surfaces
         that already own each vocabulary rather than carrying a table of its
         own: ``SLASH_COMMANDS`` for commands, ``settings_io.SECTIONS`` for
         settings, the session store for conversations, and the live session's
