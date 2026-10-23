@@ -31,7 +31,17 @@ def compiled_hash():
     return hashlib.sha256(marshal.dumps(run)).hexdigest()
 
 
+STAGE = 'SOURCE'
+
+
+def build_return(identity, native, compiled, loaded, data):
+    # Called only AFTER asyncio.run returns and thread closure is checked.
+    return dict(identity=identity, native_sources=native, compiled_producer=compiled,
+                loaded=loaded, data=data, executor_settled=True, threads_settled=True)
+
+
 def main():
+    global STAGE
     expected = json.loads(os.environ['NATIVE_WORKER_EXPECTED'])
     for p, sha in expected['sources'].items():
         if hashlib.sha256((ROOT / p).read_bytes()).hexdigest() != sha:
@@ -41,6 +51,7 @@ def main():
     for key in ('HOME','LOCAL_OPERATOR_CONFIG_DIR','TMPDIR','LOCAL_OPERATOR_RUNTIME_ROOT'):
         if not Path(os.environ[key]).resolve().is_relative_to(Path(os.environ['NATIVE_WORKER_ROOT']).resolve()):
             raise ValueError('isolation STOP')
+    STAGE = 'NATIVE_IMPORT'
     from scripts.diagnostics.native_worker_6911 import producer
     from tests import worker_code_identity, loop_callback_spans
     from textual import worker, app, dom, timer, _work_decorator
@@ -60,6 +71,7 @@ def main():
     actual_code = hashlib.sha256(marshal.dumps(producer.run.__code__)).hexdigest()
     if actual_code != expected['compiled_producer']:
         raise ValueError('loaded compiled producer STOP')
+    STAGE = 'IDENTITY'
     identity = dict(python=list(sys.version_info[:3]),
         executable_sha256=hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest(),
         pid=os.getpid(), ppid=os.getppid(), pgid=os.getpgrp(), sources=loaded)
@@ -68,11 +80,13 @@ def main():
     validate_identity(identity, parent)
     # asyncio.run returns AFTER App/worker/sampler cleanup AND default executor
     # shutdown. Do not mistake a worker completion event for a physical join.
+    STAGE = 'PRODUCER'
     result = asyncio.run(producer.run(ROOT, RELATIVE))
+    STAGE = 'EXECUTOR'
     if threading.active_count() != 1:
         raise ValueError('owned live Python threads STOP')
-    return dict(identity=identity, native_sources=native_sources(), compiled_producer=actual_code,
-                data=result, threads_settled=True)
+    STAGE = 'COMPLETE'
+    return build_return(identity, native_sources(), actual_code, loaded, result)
 
 
 if __name__ == '__main__':
@@ -80,7 +94,7 @@ if __name__ == '__main__':
         proof = main()
         code = 0
     except BaseException:
-        proof = {'failure': 'NATIVE_PRODUCER_STOP'}
+        proof = {'stage': STAGE}
         code = 1
     raw = json.dumps(proof)
     if len(raw.encode()) > 262144:

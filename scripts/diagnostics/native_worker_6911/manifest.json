@@ -10,8 +10,8 @@
     "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
     "scripts/diagnostics/native_worker_6911/producer.py": "85ea9c21ea52dee5d87024a2d9d9d620aa7f9b821833c13ffba67d8c80b43393",
     "scripts/diagnostics/native_worker_6911/check_quality.py": "5e28800297f7e7ee95f2e66299c39ecb99a5d9e7f5977e3e3cb2bf7d5746eadc",
-    "scripts/diagnostics/native_worker_6911/carrier.py": "c3e29783a119903c0c9f30014f8a0be37238f0b303ecd2d81cff2f2c13f2c1d6",
-    "scripts/diagnostics/native_worker_6911/controller.py": "1626b33a55dfcc56be918df06e2ec3457d6a5b9b4174e81f206b4b01bfab7b09"
+    "scripts/diagnostics/native_worker_6911/carrier.py": "97502c5aad168973666a18ad9c327443e790c47484e8f0d76c1cb8c1a9de84bc",
+    "scripts/diagnostics/native_worker_6911/controller.py": "a9083c81d1855816de26e05cfeffa7e70698944e2c601b0b88bef3f1c055532a"
   },
   "loaded_sources": [
     "tests/worker_code_identity.py",
