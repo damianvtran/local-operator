@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 from scripts.diagnostics.lfs_pair_6911.controller import validate_identity
 from scripts.diagnostics.native_worker_6911.carrier import native_sources
-from scripts.diagnostics.s2_static_6911.controller import project_measurement, serialize_profile, validate_profile
+from scripts.diagnostics.s2_static_6911.controller import project_measurement, serialize_profile, validate_profile, profile_context
 
 NODE = 'tests/unit/test_tui_responsiveness.py::test_s2_send_to_agent_end_keeps_the_loop_under_the_bar'
 ROWS, REPORTS = [], []
@@ -54,7 +54,10 @@ def profile_postcall(profiler,workers,previous,row):
             elif any(x<0 for x in values):negative+=1
         observed.update(nativeCodeCount=native,static_matchCount=matched,bootSeen=boot,negativeCPUcount=negative,invalidCPUcount=invalid,counts_ok=True)
         observed['stage']='SERIALIZE'
-        row['cpu_profile']=serialize_profile(entries,catalog,observed['hookRestored'])
+        context=row['profile_context']
+        context['hook_argument_used']=observed['hookRestored']
+        context['hook_seen_at_serialize']=sys.getprofile() is previous
+        row['cpu_profile']=serialize_profile(entries,catalog,observed['hookRestored'],context)
         observed['serialize_ok']=True
         observed['stage']='PROFILE_VALIDATE'
         validate_profile(row['cpu_profile'],set(catalog.values()))
@@ -65,7 +68,7 @@ def profile_postcall(profiler,workers,previous,row):
         if sys.getprofile() is not previous:
             try:profiler.disable()
             except Exception:pass
-        observed['hookRestored']=sys.getprofile() is previous
+        row['profile_context']['hook_after_cleanup']=sys.getprofile() is previous
 
 
 def pytest_sessionstart(session):
@@ -116,7 +119,7 @@ def pytest_runtest_call(item):
     labels=set(workers.ACTIVE.allowlist.values())
     module=item.module
     row=dict(token=CALLS,identity=identity,native_sources=native,phases=[],summary=None,
-             effective=None,call_pass=False,performance_oracle=False,restored=False,cpu_profile=None,postcall=dict(stage=None,**{k:None for k in ('entry_count','nativeCodeCount','static_matchCount','bootSeen','negativeCPUcount','invalidCPUcount','hookRestored','disable_ok','getstats_ok','catalog_ok','counts_ok','serialize_ok','profile_validate_ok')}))
+             effective=None,call_pass=False,performance_oracle=False,restored=False,cpu_profile=None,profile_context=profile_context(),postcall=dict(stage=None,**{k:None for k in ('entry_count','nativeCodeCount','static_matchCount','bootSeen','negativeCPUcount','invalidCPUcount','hookRestored','disable_ok','getstats_ok','catalog_ok','counts_ok','serialize_ok','profile_validate_ok')}))
     original_stop=module.StallRecorder.stop
     original_begin=module.StallRecorder.begin_noise_window
     original_end=module.StallRecorder.end_noise_window

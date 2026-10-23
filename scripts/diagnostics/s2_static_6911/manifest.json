@@ -11,8 +11,8 @@
     "scripts/diagnostics/native_worker_6911/carrier.py": "144cc6f0493395462b5aa31ee89955e6312143572868e8dfad5e0cb08f19912e",
     "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
     "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
-    "tests/unit/lfs_s2_static_plugin_6911.py": "476106b05cb451e203ddf93ba8b0b2e1f74cc09068bb978f961856ac2aa80e70",
-    "scripts/diagnostics/s2_static_6911/controller.py": "532047fa007c509f69d4470314ebccb397e6535c862e57a81af4363994e13e80"
+    "tests/unit/lfs_s2_static_plugin_6911.py": "92e9fe44a66ce7397d05f52d987577903c70f5f9b483f1a8f7083e82b6bfed51",
+    "scripts/diagnostics/s2_static_6911/controller.py": "0b0c324ef224bd560f8102b05fb5a6ec05c029b2fba5bd3376a664384e40d489"
   },
   "loaded_sources": [
     "tests/unit/test_tui_responsiveness.py",

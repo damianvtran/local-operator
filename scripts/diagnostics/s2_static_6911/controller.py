@@ -40,23 +40,70 @@ def project_measurement(raw, labels):
     return out
 
 
-def serialize_profile(entries,catalog,restored):
+def profile_context():
+    return dict(stage=None,first_guard=None,serialization_completed=None,hook_argument_used=None,hook_seen_at_serialize=None,hook_after_cleanup=None)
+
+
+def safe_profile_context(value,labels):
+    if type(value) is not dict or set(value)!=set(profile_context()):return None
+    if value['stage'] not in (None,'HOOK','OWNENTRY','EDGES'):return None
+    if any(value[k] is not None and type(value[k]) is not bool for k in ('serialization_completed','hook_argument_used','hook_seen_at_serialize','hook_after_cleanup')):return None
+    guard=value['first_guard']
+    if guard is not None:
+        if type(guard) is not dict or set(guard)!={'stage','guard','code_id','parent','child','field','unit','value'}:return None
+        if guard['stage'] not in ('HOOK','OWNENTRY','EDGES') or guard['guard'] not in ('COUNT_TYPE','COUNT_NEGATIVE','RECURSIVE_RELATION','TIME_TYPE','TIME_NONFINITE','TIME_NEGATIVE','HOOK'):return None
+        if guard['field'] not in ('calls','recursive','inline_ms','cumulative_ms','times','hook_argument_used') or guard['unit'] not in ('COUNT','CPU_MS','HOOK_BOOL'):return None
+        for key in ('code_id','parent','child'):
+            if guard[key] is not None and (type(guard[key]) is not str or guard[key] not in labels):return None
+        if guard['stage']=='OWNENTRY' and (guard['code_id'] is None or guard['parent'] is not None or guard['child'] is not None):return None
+        if guard['stage']=='EDGES' and (guard['parent'] is None or guard['child'] is None or guard['code_id']!=guard['child']):return None
+        if guard['stage']=='HOOK' and any(guard[k] is not None for k in ('code_id','parent','child')):return None
+        count=guard['guard'] in ('COUNT_TYPE','COUNT_NEGATIVE','RECURSIVE_RELATION')
+        if guard['guard']=='HOOK':
+            if guard['stage']!='HOOK' or guard['field']!='hook_argument_used' or guard['unit']!='HOOK_BOOL':return None
+        elif guard['stage']=='HOOK' or guard['unit']!=('COUNT' if count else 'CPU_MS') or guard['field'] not in (('calls','recursive') if count else ('inline_ms','cumulative_ms','times')):return None
+        number=guard['value']
+        if number is not None and (type(number) not in (int,float) or not math.isfinite(number)):return None
+        if number is not None and (guard['unit']=='HOOK_BOOL' or (guard['unit']=='COUNT' and type(number) is not int)):return None
+        if guard['guard'] in ('COUNT_TYPE','TIME_TYPE','TIME_NONFINITE','HOOK') and number is not None:return None
+        if guard['guard'] in ('COUNT_NEGATIVE','TIME_NEGATIVE') and (number is None or number>=0):return None
+        if value['serialization_completed'] is True:return None
+    return {k:(dict(value[k]) if k=='first_guard' and value[k] is not None else value[k]) for k in profile_context()}
+
+
+def serialize_profile(entries,catalog,restored,context=None):
     from types import CodeType
     import math
-    if type(restored) is not bool or not restored:raise ValueError('profile hook STOP')
+    def reject(kind,field,value,unit,code_id=None,parent=None):
+        if context is not None and context['first_guard'] is None:
+            number=value if type(value) in (int,float) and math.isfinite(value) and (unit!='COUNT' or type(value) is int) else None
+            context['first_guard']=dict(stage=context['stage'],guard=kind,code_id=code_id,parent=parent,child=code_id if parent is not None else None,field=field,unit=unit,value=number)
+        raise ValueError('profile strict guard STOP')
+    if context is not None:context['stage']='HOOK'
+    if type(restored) is not bool or not restored:reject('HOOK','hook_argument_used',None,'HOOK_BOOL')
     if len(entries)>20000:raise ValueError('profile entry cap STOP')
     def identity(code):
         if type(code) is not CodeType:return ''
         return catalog.get((code.co_filename,code.co_firstlineno,code.co_qualname),'')
-    def measure(entry):
-        values=dict(calls=entry.callcount,recursive=entry.reccallcount,inline_ms=entry.inlinetime*1000,cumulative_ms=entry.totaltime*1000)
-        if any(type(values[k]) is not int or values[k]<0 for k in ('calls','recursive')):raise ValueError('profile count STOP')
-        if any(type(values[k]) not in (int,float) or not math.isfinite(values[k]) or values[k]<0 for k in ('inline_ms','cumulative_ms')):raise ValueError('profile clock STOP')
+    def measure(entry,code_id,parent=None):
+        if context is not None:context['stage']='OWNENTRY' if parent is None else 'EDGES'
+        # Retain the original eager value construction and count-before-clock
+        # guards. Diagnostic records never normalize/clamp measured values.
+        try:values=dict(calls=entry.callcount,recursive=entry.reccallcount,inline_ms=entry.inlinetime*1000,cumulative_ms=entry.totaltime*1000)
+        except (TypeError,OverflowError):reject('TIME_TYPE','times',None,'CPU_MS',code_id,parent)
+        for field in ('calls','recursive'):
+            if type(values[field]) is not int:reject('COUNT_TYPE',field,None,'COUNT',code_id,parent)
+            if values[field]<0:reject('COUNT_NEGATIVE',field,values[field],'COUNT',code_id,parent)
+        for field in ('inline_ms','cumulative_ms'):
+            value=values[field]
+            if type(value) not in (int,float):reject('TIME_TYPE',field,None,'CPU_MS',code_id,parent)
+            if not math.isfinite(value):reject('TIME_NONFINITE',field,None,'CPU_MS',code_id,parent)
+            if value<0:reject('TIME_NEGATIVE',field,value,'CPU_MS',code_id,parent)
         return values
     known=[];unknown=0
     for entry in entries:
         code_id=identity(entry.code)
-        if code_id:known.append((entry,dict(code_id=code_id,**measure(entry))))
+        if code_id:known.append((entry,dict(code_id=code_id,**measure(entry,code_id))))
         else:unknown+=1
     known.sort(key=lambda pair:pair[1]['cumulative_ms'],reverse=True)
     roots=[p for p in known if p[1]['code_id'].endswith(':OperatorApp._boot_session')]
@@ -65,8 +112,9 @@ def serialize_profile(entries,catalog,restored):
     for entry,row in selected:
         for child in entry.calls or ():
             target=identity(child.code)
-            if target in ids:edges.append(dict(parent=row['code_id'],child=target,**measure(child)))
+            if target in ids:edges.append(dict(parent=row['code_id'],child=target,**measure(child,target,row['code_id'])))
     edges.sort(key=lambda row:row['cumulative_ms'],reverse=True)
+    if context is not None:context['serialization_completed']=True
     return dict(scope='ORIGINAL_S2_CALL_APP_ONLY_THREAD_CPU',perturbed=True,hook_restored=restored,unknown_entries=unknown,dropped_rows=max(0,len(known)-len(selected)),rows=[p[1] for p in selected],edges=edges[:20])
 
 
@@ -98,9 +146,11 @@ def qualify(proof, expected):
     if set(proof) != {'rows','reports','guards','exitstatus'} or len(proof['rows']) != 1 or proof['guards']:
         raise ValueError('S2 cardinality/schema STOP')
     row=proof['rows'][0]
-    if set(row) != {'token','identity','native_sources','phases','summary','effective','call_pass','performance_oracle','restored','cpu_profile','postcall'} or row['token'] != 1 or row['restored'] is not True:
+    if set(row) != {'token','identity','native_sources','phases','summary','effective','call_pass','performance_oracle','restored','cpu_profile','postcall','profile_context'} or row['token'] != 1 or row['restored'] is not True:
         raise ValueError('S2 row STOP')
     validate_identity(row['identity'],expected)
+    context=safe_profile_context(row['profile_context'],trusted_labels)
+    if context is None or context['serialization_completed'] is not True or context['first_guard'] is not None or any(context[k] is not True for k in ('hook_argument_used','hook_seen_at_serialize','hook_after_cleanup')):raise ValueError('profile context incomplete STOP')
     post=safe_postcall(row['postcall'])
     if post is None or post['stage']!='PROFILE_VALIDATE' or any(post[k] is not True for k in ('disable_ok','getstats_ok','catalog_ok','counts_ok','serialize_ok','profile_validate_ok','hookRestored')):raise ValueError('postcall incomplete STOP')
     if any(post[k] is None for k in ('entry_count','nativeCodeCount','static_matchCount','negativeCPUcount','invalidCPUcount')) or post['bootSeen'] is not True or not post['static_matchCount']<=post['nativeCodeCount']<=post['entry_count']<=20000:raise ValueError('postcall counts incomplete STOP')
@@ -164,7 +214,7 @@ def safe_available(proof,expected):
     if type(proof) is not dict or type(proof.get('rows')) is not list:return result
     for row in proof['rows'][:1]:
         if type(row) is not dict:continue
-        safe={'postcall':safe_postcall(row.get('postcall')),'recorder':None,'effective':None,'identity':None}
+        safe={'profile_context':safe_profile_context(row.get('profile_context'),globals().get('trusted_labels',set())),'postcall':safe_postcall(row.get('postcall')),'recorder':None,'effective':None,'identity':None}
         for group,keys in (('summary',('worst_cpu_ms','worst_wall_ms','noise_floor_ms','wall_cpu_descheduling_ratio')),('effective',('cpu_ms','wall_ms'))):
             raw=row.get(group)
             if type(raw) is dict:
