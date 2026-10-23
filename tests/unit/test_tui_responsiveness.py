@@ -15,7 +15,6 @@ OperatorApp via run_test.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
 import threading
@@ -28,6 +27,27 @@ import pytest
 
 from local_operator.harness.types import Usage
 from tests.loop_callback_spans import CallbackSpans
+
+
+@pytest.fixture(autouse=True)
+def _s2_static_worker_identity(request):
+    """Arm metadata BEFORE App boot, not when the recorder starts later.
+
+    Scope only the unchanged S2 function. Unsupported worker shapes/custom task
+    factories invalidate attribution quality, never change liveness thresholds.
+    """
+    if request.node.name != "test_s2_send_to_agent_end_keeps_the_loop_under_the_bar":
+        yield
+        return
+    from textual.worker import Worker
+    from tests.worker_code_identity import WorkerCodeIdentity, source_allowlist
+
+    registry = WorkerCodeIdentity(source_allowlist(Path(__file__).resolve().parents[2]))
+    try:
+        registry.install(Worker)
+        yield
+    finally:
+        registry.close()
 
 
 @pytest.fixture
