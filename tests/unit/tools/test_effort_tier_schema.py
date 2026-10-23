@@ -672,8 +672,13 @@ async def test_configuring_a_tier_mid_session_reaches_the_task_schema(config_dir
         # prompt-cache prefix and must not move.
         assert [tool.name for tool in session._tools] == order_before
 
+        # The tier is REMOVED, and a mapping write now merges into the file, so
+        # the removal is declared: an omitted `models` is a preserved disk value,
+        # not a deleted one (PR #2819).
         ConfigManager(config_dir).set_config_value(
-            "subagents", {"model_choice": MODEL_CHOICE_MODEL}
+            "subagents",
+            {"model_choice": MODEL_CHOICE_MODEL},
+            drop={("subagents", "models"): "tier removed mid-session"},
         )
         watcher.poll_now()
         assert _session_effort_enum(session) is None

@@ -391,7 +391,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "directories a session lives UNDER, the same values ``paths.py`` declares",
     ),
     "local_operator/config_watch.py": (1, "the same file, watched"),
-    "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
+    "local_operator/config_migrations.py": (
+        2,
+        "``LEGACY_STAMP_NAME`` ('.migrations') is the marker recording which migrations "
+        "ran, and ``_KEY_INVENTORY_NAME`` ('.config-keys.json') is the per-launch "
+        "inventory of setting paths: both are machine-local config-root machinery "
+        "beside ``config.yml``, written by this device for this device, and neither is "
+        "an entry of a session directory or ever travels with one",
+    ),
     "local_operator/logger.py": (1, "the process log at the store root"),
     "local_operator/tools/harness_import_tool.py": (
         1,
