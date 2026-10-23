@@ -85,12 +85,49 @@ login picks them up at the NEXT session start.
   can price the call, the estimated amount BEFORE the spend.
 - Spend lands in the `audio` channel of the session's cost ledger (and the
   analytics store) as "Generated audio", with the estimate flag preserved.
+- **Length is a spend lever on both sound-effect meters.** Radient bills
+  $0.002 per started second of generated audio (the server quotes and
+  settles it). A stored ElevenLabs key is billed by the vendor at 40 credits
+  per second of requested duration — this tool always supplies `duration_s`,
+  so a 30 s clip is about 1,200 credits. The rates differ; the meter does not.
+  A BYOK voiceover is priced per character instead.
+
+## Writing a sound-effect prompt
+
+Describe the sound you want, not the ones you don't. This endpoint has no
+negative-prompt parameter, and phrasing an exclusion — "no music, no
+voices", "no background noise" — is read as a request for a quieter, weaker
+result rather than as a filter (the vendor's prompting guidance and what
+users report in practice agree on this). Prefer "a single dry click of a
+wooden button" over "a click, no music": the unwanted element is least
+likely to appear when the prompt describes the wanted one precisely and
+never names it.
+
+`duration_s` is required (0.5–30 s) and the clip is generated to fit it.
+Length costs on both meters — Radient per started second, a BYOK key at the
+vendor's 40 credits per second of requested duration — so budget the length
+you actually need (see [Cost, honestly](#cost-honestly)).
+
+## What reaches the vendor
+
+A Radient generation runs on the platform under its retention terms. A BYOK
+generation is a different hop: the text (voiceover) or prompt (sound
+effect) goes to ElevenLabs or OpenAI under the user's own key. ElevenLabs'
+`enable_logging` defaults to TRUE, and turning it off — zero-retention mode
+— is an Enterprise feature; our measured refusal is a 403
+`feature_not_available` on `param=enable_logging`. So a BYOK prompt or
+voiceover text is logged by that vendor unless the user's own account is
+Enterprise, and whatever retention Radient offers does not extend to the
+vendor hop. The tools never send `enable_logging` themselves, and we cannot
+switch it off on the user's behalf — say this plainly rather than implying
+a privacy guarantee for the BYOK route.
 
 ## Limits worth knowing
 
 - Voiceover text: 1–10,000 characters. Sound-effect prompt: 1–600 characters.
 - `duration_s` on a sound effect is REQUIRED (0.5–30 s): there is no
-  auto-duration, and the length is the main cost knob for effects.
+  auto-duration, and length is the main cost lever on both sound-effect
+  meters (see [Cost, honestly](#cost-honestly)).
 - `language` is honoured only by the flash models
   (`radient/voiceover-flash`, `eleven_flash_v2_5`); the multilingual default
   (`radient/voiceover`, `eleven_multilingual_v2`) pronounces whatever it is
@@ -99,9 +136,12 @@ login picks them up at the NEXT session start.
 - There are NO pronunciation dictionaries or phoneme control. For tricky
   names, spell the pronunciation in the text or use `instructions` (honoured
   where the provider takes an instructions field).
-- Output is **MP3 only** (no WAV). Radient serves a signed URL the harness
-  downloads immediately (24 h life — nobody should rely on the URL later);
-  the artifact is the attached copy, not the URL.
+- Output is **MP3 only** (no WAV). 192 kbps where the account's plan allows
+  it, 128 kbps where the plan refuses it: the harness asks for the better
+  format and retries once at 128 on a plan refusal, so a lower-tier key still
+  gets audio rather than a failed generation. Radient serves a signed URL the
+  harness downloads immediately (24 h life — nobody should rely on the URL
+  later); the artifact is the attached copy, not the URL.
 - **The duration is a property of the bytes, not of the provider's response.**
   It is derived at artifact creation from the same decode the waveform peaks
   use (`audiogen.peaks.compute_duration`). A provider that states one
