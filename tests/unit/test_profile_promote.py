@@ -726,3 +726,35 @@ def test_a_nested_alias_collision_names_the_alias_and_a_working_remedy(stacks) -
     stacks["teams"].update_team(inner.id, TeamEditFields(aliases=[]))
     result = stacks["teams"].promote("pod", authorized_by=ORIGIN, agents=stacks["agents"])
     assert "pod" in [row["name"] for row in result.created]
+
+
+def test_a_replace_never_renames_the_team_that_owns_the_nested_name_as_an_alias(stacks) -> None:
+    """A name resolved only through another row's ALIAS must not be replaced.
+
+    `replace` promises to overwrite the row the user named; here the inner name
+    reaches `other` only through its alias, and the nested branch used to rename
+    that row to `inner`, destroying the key its own users know. The top-level
+    path refuses the same rename; this branch now refuses it too (agent review
+    remediation, BLOCKER).
+    """
+
+    _team(stacks["teams"], "inner", manager="manager", members=[])
+    _team(stacks["teams"], "pod", manager="manager", members=["team:inner"])
+    owner = stacks["global_teams"].create_team(
+        TeamEditFields(name="other", manager="manager", aliases=["inner"])
+    )
+
+    with pytest.raises(ValueError) as caught:
+        stacks["teams"].promote("pod", replace=True, authorized_by=ORIGIN, agents=stacks["agents"])
+
+    text = str(caught.value)
+    assert "'inner'" in text and "'other'" in text
+    assert "as an alias" in text
+    assert "/team edit other" in text
+    # The row the user never named keeps BOTH its identity and its name.
+    kept = stacks["global_teams"].get_team_by_name("other")
+    assert kept is not None and kept.id == owner.id
+    assert kept.name == "other"
+    assert kept.aliases == ["inner"]
+    assert all(team.name != "inner" for team in stacks["global_teams"].list_teams())
+    assert stacks["global_teams"].get_team_by_name("pod") is None

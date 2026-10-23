@@ -1017,6 +1017,20 @@ class ScopedTeamRegistry:
             for nested in nested_teams:
                 member_target = validate_team_name(str(nested.name))
                 member_existing = self.global_registry.get_team_by_name(member_target)
+                if member_existing is not None and (
+                    str(member_existing.name).casefold() != member_target.casefold()
+                ):
+                    # This name resolves only through ANOTHER row's alias. A
+                    # confirmed replace would RENAME that row out from under the
+                    # key its own users know — the hazard the top-level target
+                    # refuses, and the nested branch must not be the one path that
+                    # performs it (agent review remediation, BLOCKER). Refused on
+                    # the rehearsal and the confirmed call alike.
+                    raise ValueError(
+                        promote_nested_alias_collision(
+                            source.name, member_target, member_target, str(member_existing.name)
+                        )
+                    )
                 if member_existing is not None and not replace:
                     raise ValueError(promote_member_collision(source.name, "team", member_target))
                 # An alias the account already resolves is NOT a team of this
@@ -1413,23 +1427,40 @@ def promote_member_collision(team: str, kind: str, name: str) -> str:
     )
 
 
-def promote_nested_alias_collision(team: str, member: str, alias: str, owner: str) -> str:
-    """The refusal for a nested team whose ALIAS the account already resolves.
+def promote_nested_alias_collision(team: str, member: str, key: str, owner: str) -> str:
+    """The refusal for a nested team whose key the account already resolves.
 
-    The generic :func:`promote_collision` sentence names the nested team as if
-    the account held it by name, and advises replacing that name. Both halves
-    are false for an alias another row owns: ``replace`` skips only the row
-    whose NAME matches, so the alias collision survives and the same call
-    refuses again. The one remedy that works is changing the alias on one of the
-    two rows, which is what this sentence names.
+    Two shapes reach it. The nested team may CARRY an alias the account already
+    resolves, in which case the generic :func:`promote_collision` sentence names
+    the nested team as if the account held it by name and advises replacing that
+    name — false, because ``replace`` skips only the row whose NAME matches. Or
+    the nested NAME may resolve only through ANOTHER row's alias, in which case a
+    confirmed replace would rename that row out from under the key its own users
+    know (the top-level path refuses exactly that). Both are refusals, and both
+    remedies are an alias edit — the only change that can move the key.
     """
 
+    if key.casefold() == member.casefold():
+        detail = (
+            f"your account's team {owner!r} already answers to {key!r} as an alias, so "
+            f"a copy named {member!r} would leave two rows behind one key"
+        )
+        remedy = (
+            f"Rename or drop that alias on {owner!r} (`/team edit {owner}`), then promote again."
+        )
+    else:
+        detail = (
+            f"your account's team {owner!r} already answers to {key!r}, which this "
+            f"conversation's team {member!r} carries as an alias; copying would make "
+            "that key ambiguous"
+        )
+        remedy = (
+            "Rename or drop that alias on either team "
+            f"(`/team edit {member}` or `/team edit {owner}`), then promote again."
+        )
     return (
-        f"promoting team {team!r} needs its team {member!r}, but your account's team "
-        f"{owner!r} already answers to {alias!r}, which this conversation's team "
-        f"{member!r} carries as an alias; copying would make that key ambiguous, so "
-        "nothing was promoted. Rename or drop that alias on either team "
-        f"(`/team edit {member}` or `/team edit {owner}`), then promote again."
+        f"promoting team {team!r} needs its team {member!r}, but {detail}, so nothing "
+        f"was promoted. {remedy}"
     )
 
 
