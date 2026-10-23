@@ -548,7 +548,13 @@ def test_a_wake_mid_batch_is_not_a_session_id(tmp_path, monkeypatch) -> None:
 
 
 def test_a_wake_during_a_batch_reaches_the_denominator(tmp_path, monkeypatch) -> None:
-    """End to end: recovery's total=0 plus a lost wake left a partial catalog ready."""
+    """QA Q-R4-1: a recovery that swaps the file mid-batch must still finish.
+
+    Recovery drops every derived table AND the checkpoints, so the batch that
+    the pre-recovery reconcile queued is rescanned from scratch. The build was
+    never marked done: every finish check during the scans saw a 0 denominator,
+    and the wake reconcile that restored it did not call the finish check.
+    """
     root = config_root(monkeypatch, tmp_path)
     session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
     session(root, OTHER, write_rows("w2", 2.0, written(root, "other.txt")))
@@ -556,7 +562,7 @@ def test_a_wake_during_a_batch_reaches_the_denominator(tmp_path, monkeypatch) ->
 
     index = indexer.LibraryIndexer(root)
     store = LibraryStore(root)
-    # Recovery's reset: the denominator is gone and the build is "not started".
+    # Recovery's reset, in full: derived rows, checkpoints and counters.
     with store.write() as connection:
         store.set_state(
             connection,
@@ -564,18 +570,29 @@ def test_a_wake_during_a_batch_reaches_the_denominator(tmp_path, monkeypatch) ->
         )
         connection.execute("DELETE FROM idx_occurrences")
         connection.execute("DELETE FROM idx_assets")
+        connection.execute("DELETE FROM idx_sessions")
 
-    index._queue.put(OTHER)
+    index.reconcile()
+    # Nothing has been scanned yet: the catalog must NOT be called done.
+    assert index._queue.qsize() == 2
+    index._maybe_finish_backfill()
+    assert store.state()["backfill_done"] == "0"
+
     first = index._queue.get(timeout=1)
-    index._queue.put(indexer._WAKE)
-    batch, wake = index.coalesce(first)
+    batch, _wake = index.coalesce(first)
+    index._batch_active = True
     index.process_dirty(batch)
+    index._batch_active = False
+    index._queue.put(indexer._WAKE)
+    batch, wake = index.coalesce(index._queue.get(timeout=1))
     assert wake is True
     index.reconcile()
 
     state = indexer.index_state(root)
-    assert state["total"] == 2
-    assert state["backfill_done"] == "0", "journals exist, so the build is not done"
+    assert state["total"] == 2 and state["scanned"] == 2
+    assert state["backfill_done"] == "1"
+    assert state["state"] == "ready"
+    assert len(service.list_assets(root, service.Query())["rows"]) == 2
 
 
 def test_backfill_never_finishes_on_a_reset_denominator(tmp_path, monkeypatch) -> None:
@@ -609,3 +626,20 @@ def test_a_fresh_database_is_wal_after_first_use(tmp_path, monkeypatch) -> None:
     MetadataStore(root).ensure_schema()
     with sqlite3.connect(root / "library" / "library.sqlite3") as raw:
         assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_a_sessions_dir_with_only_housekeeping_files_is_ready(tmp_path, monkeypatch) -> None:
+    """R4-2: a non-session file beside zero journals is a finished empty index."""
+    root = config_root(monkeypatch, tmp_path)
+    sessions = root / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "last_cleanup.json").write_text("{}")
+
+    index = indexer.LibraryIndexer(root)
+    index.reconcile()
+
+    state = indexer.index_state(root)
+    assert state["backfill_done"] == "1", "nothing is scannable, so nothing is owed"
+    assert state["total"] == 0 and state["state"] == "ready"
+    # The idle cadence too: 60 s forever was the visible symptom.
+    assert index._idle_timeout() == indexer.RECONCILE_IDLE_S

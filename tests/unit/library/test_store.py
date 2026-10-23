@@ -867,3 +867,67 @@ def test_a_busy_error_is_typed_but_not_corruption(tmp_path, monkeypatch) -> None
     with pytest.raises(service.LibraryUnavailable):
         service.list_assets(root, service.Query())
     assert recovery_calls == []
+
+
+def test_a_torn_authoritative_table_refuses_rather_than_serving_empty(
+    tmp_path, monkeypatch
+) -> None:
+    """R4-1: DDL never reads rows, so a torn ``assets`` passed the fast path."""
+    from local_operator.library.store import IndexUnavailable
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    store = LibraryStore(root)
+    with store.read() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    page_size = int(sqlite3.connect(store.path).execute("PRAGMA page_size").fetchone()[0])
+    with sqlite3.connect(store.path) as raw:
+        root_page = int(
+            raw.execute("SELECT rootpage FROM sqlite_master WHERE name = 'assets'").fetchone()[0]
+        )
+    with open(store.path, "r+b") as handle:
+        handle.seek((root_page - 1) * page_size)
+        handle.write(b"\xff" * page_size)
+
+    # The metadata cannot be read, so no rebuild can preserve it: refuse.
+    assert store.recover_derived() is False
+    with pytest.raises(IndexUnavailable) as caught:
+        with store.read() as connection:
+            connection.execute("SELECT 1 FROM assets LIMIT 1").fetchone()
+    assert caught.value.corrupt is True
+
+    from local_operator.library import service
+
+    with pytest.raises(service.LibraryUnavailable):
+        service.list_assets(root, service.Query())
+
+
+def test_an_extended_sqlite_result_code_is_classified_by_its_low_byte(tmp_path) -> None:
+    """CPython reports extended codes (a constraint is 2067, not 19)."""
+    from local_operator.library.store import _is_corruption
+
+    corrupt = sqlite3.DatabaseError("database disk image is malformed")
+    corrupt.sqlite_errorcode = 11 | (2 << 8)  # SQLITE_CORRUPT_VTAB-ish extended form
+    assert _is_corruption(corrupt) is True
+
+    constraint = sqlite3.DatabaseError("UNIQUE constraint failed")
+    constraint.sqlite_errorcode = 2067  # SQLITE_CONSTRAINT_UNIQUE
+    assert _is_corruption(constraint) is False
+
+
+def test_a_crashed_rebuild_temp_file_is_collected(tmp_path, monkeypatch) -> None:
+    from local_operator.library.store import DB_DIRNAME, DB_FILENAME
+
+    root = config_root(monkeypatch, tmp_path)
+    library = root / DB_DIRNAME
+    library.mkdir(parents=True, exist_ok=True)
+    stale = library / f"{DB_FILENAME}.rebuild-999999-1234"
+    stale.write_bytes(b"left behind by a crash")
+    live = library / f"{DB_FILENAME}.rebuild-{__import__('os').getpid()}-99"
+    live.write_bytes(b"a rebuild may be alive on another thread")
+
+    LibraryStore(root).ensure_schema()
+
+    assert not stale.exists(), "another process's temp must be collected"
+    assert live.exists(), "this process's in-flight temp must be left alone"
