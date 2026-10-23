@@ -310,6 +310,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "which sign-in this device must recover, beside the placement document, "
         "never an entry of a session directory and never copied to a peer",
     ),
+    # ---- the transcript compression pass's STORE-LEVEL names ----
+    "local_operator/session/compression.py": (
+        2,
+        "``COMPRESSION_LOG_NAME`` ('.compression-log.jsonl') and "
+        "``LAST_COMPRESSION_NAME`` ('last-compression.json') are the pass's ledger and "
+        "its last-run record, both written at the ``sessions/`` ROOT, not inside a "
+        "session directory, so neither is a copy-set entry. The module's third "
+        "path-shaped name, ``LOCK_NAME``, IS a session entry and is classified in "
+        "``sync.EXCLUDED_ENTRIES`` with the reason it must not travel",
+    ),
     "local_operator/team_bridge/connector/lock.py": (
         1,
         "``CONNECTOR_LOCK_NAME`` ('connector.lock'): the machine-wide connector "
