@@ -2313,4 +2313,140 @@ def test_a_context_cut_page_does_not_name_a_next_start(monkeypatch) -> None:
     assert not result.is_error, result.text
     assert "cut to fit the context" in result.text
     assert "pass start=" not in result.text
+<<<<<<< HEAD
     assert "lines 1-50 of 900" in result.text
+=======
+
+
+# --- accessibility locators --------------------------------------------------
+#
+# The measured failure: every id on the target form was framework-generated and
+# nine CSS guesses missed. The element's accessible identity — "a checkbox named
+# Active" — was never in doubt. These tests pin the tool's half: the locator
+# reaches the host unchanged, the answer names what was actually clicked, and a
+# host that predates locators is not left to fail as a CSS syntax error.
+
+
+def _bridge_result(monkeypatch, result: dict[str, Any]) -> list[dict[str, Any]]:
+    sent: list[dict[str, Any]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        sent.append({"action": action, "params": dict(params)})
+        return dict(result), None
+
+    _bridge_only(monkeypatch)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: True)
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    return sent
+
+
+def test_a_locator_reaches_the_host_unchanged(monkeypatch) -> None:
+    sent = _bridge_result(
+        monkeypatch,
+        {
+            "navigated": False,
+            "url": "https://example.test/",
+            "title": "Create App",
+            "resolved": {"by": "locator", "role": "checkbox", "name": "Active", "matched": 1},
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "click", "selector": 'role=checkbox[name="Active"]'},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert sent[-1]["params"]["selector"] == 'role=checkbox[name="Active"]'
+    # The answer names the element that was clicked, not just the locator.
+    assert 'role=checkbox[name="Active"] → checkbox "Active"' in result.text
+
+
+def test_an_ambiguous_locator_says_the_first_match_was_used(monkeypatch) -> None:
+    _bridge_result(
+        monkeypatch,
+        {
+            "navigated": False,
+            "url": "https://example.test/",
+            "title": "Create App",
+            "resolved": {
+                "by": "locator",
+                "role": "radio",
+                "name": "Only on this account",
+                "matched": 3,
+            },
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "click", "selector": 'label="Only on this account"'},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "3 matched, first used" in result.text
+
+
+def test_a_ref_click_keeps_its_existing_copy(monkeypatch) -> None:
+    """The new `resolved` field must not churn the message agents already read."""
+    _bridge_result(monkeypatch, {"navigated": False, "url": "https://example.test/", "title": "T"})
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "click", "selector": "e57"},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert result.text.startswith("Clicked e57 (no navigation).")
+
+
+def test_a_locator_is_refused_where_only_css_makes_sense(monkeypatch) -> None:
+    tool = builtin.build_browser_tool(_ctx())
+    for action in ("snapshot", "read", "scroll"):
+        result = _run(
+            tool,
+            f"t-{action}",
+            {"action": action, "selector": 'role=checkbox[name="Active"]'},
+            _secret_ctx(surface_id="bridge:9:nonce"),
+        )
+        assert result.is_error is True, (action, result.text)
+        assert "role= locators resolve a click/type TARGET" in result.text or (
+            "snapshot takes a CSS selector" in result.text
+        ), (action, result.text)
+
+
+def test_an_old_host_treating_a_locator_as_css_is_explained(monkeypatch) -> None:
+    """The additive-param trap, on the failure path.
+
+    A host that predates locators parses `role=…` as CSS and answers a bare DOM
+    error. Without this sentence the agent sees a syntax failure and starts
+    guessing — the loop the locator exists to end.
+    """
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    class HostThatPredatesLocators:
+        host = "extension"
+
+        async def call(self, action, params):
+            raise BridgeError(ErrorCode.INTERNAL, "DOM Error while querying")
+
+    _result, problem = asyncio.run(
+        builtin._bridge_call(
+            "t1",
+            "click",
+            {"selector": 'role=checkbox[name="Active"]'},
+            surface="bridge:9:nonce",
+            client=HostThatPredatesLocators(),
+        )
+    )
+
+    assert problem is not None and problem.is_error
+    assert "predates accessibility locators" in problem.text
+    assert "snapshot ref" in problem.text
+>>>>>>> eaa7bb97b7 (feat(browser): resolve accessibility locators on click and type)
