@@ -290,49 +290,73 @@ def palette_is_open(app: Any) -> bool:
 class OperatorCommandProvider(Provider):
     """The app's catalogue, as the palette's one provider.
 
-    ``startup`` runs in the provider's own task before any search, so the
-    session-store scan happens off the input path. The catalogue is read ONCE
-    per palette open: the palette is a momentary surface, and re-scanning the
-    store on every keystroke would be a file walk per character typed.
+    THE CATALOGUE LOADS LAZILY, AND THE LOAD SURVIVES CANCELLATION. Textual
+    runs the gather as an exclusive worker: every keystroke cancels the
+    previous gather, and that cancellation propagates through
+    ``Provider._wait_init`` into this provider's init task. A ``startup`` that
+    awaited the session scan therefore died on the first key typed — the
+    framework never retries ``startup``, ``_init_success`` stayed False, and
+    the palette showed neither rows nor the no-match line until it was closed
+    and reopened (QA round 2, Q-2: 0 rows seven seconds after typing on a
+    3000-session store).
+
+    So ``startup`` is the base no-op, and the scan lives in its OWN task that
+    ``asyncio.shield`` keeps alive across gather restarts. A cancelled search
+    leaves ``_entries`` unset; the next search (the one the keystroke started)
+    awaits the same task and fills it. The scan still runs off the event loop,
+    and it still happens once per palette open.
     """
 
     def __init__(self, screen: Any, match_style: Any = None) -> None:
         super().__init__(screen, match_style)
-        self._entries: list[PaletteEntry] = []
         #: Textual's system-command provider, delegated to for its rows. Held
         #: rather than reimplemented: the actions are the framework's and this
         #: app must not grow a second copy of "quit"/"screenshot" any more than
-        #: it may grow a second copy of ``/help``.
-        self._system: Any = None
-
-    async def startup(self) -> None:
+        #: it may grow a second copy of ``/help``. Its startup is a no-op, so
+        #: constructing it here needs no init task.
         from textual.system_commands import SystemCommandsProvider
 
-        self._system = SystemCommandsProvider(self.screen, self.match_style)
-        await self._system.startup()
-        # `OperatorApp` is the only screen stack this provider is registered
-        # on; the cast keeps the import out of this module (app.py imports us).
+        self._system: Any = SystemCommandsProvider(screen, match_style)
+        #: ``None`` until the scan has completed; never a partial list, so a
+        #: cancelled load cannot leave a truncated catalogue behind.
+        self._entries: list[PaletteEntry] | None = None
+        self._scan: asyncio.Task[list[Any]] | None = None
+
+    def _start_scan(self) -> asyncio.Task[list[Any]]:
+        """The one scan task this provider ever creates."""
         app = self.app
-        # The session-store scan is uncapped (see `_palette_session_rows`) and
-        # cold it costs seconds. It runs in a thread so the palette paints and
-        # accepts keys while the rows are gathered; `Provider.startup` is
-        # already awaited off the search path.
-        rows = await asyncio.to_thread(app._palette_session_rows)  # type: ignore[attr-defined]
-        self._entries = app._palette_entries(session_rows=rows)  # type: ignore[attr-defined]
+        self._scan = asyncio.create_task(
+            asyncio.to_thread(app._palette_session_rows)  # type: ignore[attr-defined]
+        )
+        return self._scan
+
+    async def _catalogue(self) -> list[PaletteEntry]:
+        """The catalogue, scanning on first use and resuming after a cancel."""
+        entries = self._entries
+        if entries is None:
+            # `OperatorApp` is the only screen stack this provider is
+            # registered on; the cast keeps the import out of this module
+            # (app.py imports us).
+            app = self.app
+            rows = await asyncio.shield(self._scan or self._start_scan())
+            entries = app._palette_entries(session_rows=rows)  # type: ignore[attr-defined]
+            self._entries = entries
+        return entries
 
     async def shutdown(self) -> None:
-        if self._system is not None:
-            await self._system.shutdown()
-            self._system = None
+        # The thread cannot be killed; cancelling the task only detaches it.
+        # The result is discarded either way — the palette is closing.
+        if self._scan is not None and not self._scan.done():
+            self._scan.cancel()
+        await self._system.shutdown()
 
     def _hit_command(self, entry: PaletteEntry) -> Any:
         return partial(self.app._run_palette_entry, entry)  # type: ignore[attr-defined]
 
     async def discover(self) -> Hits:
-        if self._system is not None:
-            async for hit in self._system.discover():
-                yield hit
-        for entry in self._entries:
+        async for hit in self._system.discover():
+            yield hit
+        for entry in await self._catalogue():
             if not entry.discovery:
                 continue
             yield DiscoveryHit(
@@ -348,11 +372,10 @@ class OperatorCommandProvider(Provider):
             )
 
     async def search(self, query: str) -> Hits:
-        if self._system is not None:
-            async for hit in self._system.search(query):
-                yield hit
+        async for hit in self._system.search(query):
+            yield hit
         matcher = self.matcher(query)
-        for entry, score in rank_entries(self._entries, matcher):
+        for entry, score in rank_entries(await self._catalogue(), matcher):
             yield Hit(
                 score,
                 highlight_label(matcher, entry.label),
