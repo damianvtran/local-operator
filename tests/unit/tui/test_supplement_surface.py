@@ -168,6 +168,23 @@ def test_sound_row_is_text_and_never_claims_a_length_it_does_not_know() -> None:
     )
     assert supplement_mod.sound_row_text({}) == "♪ Generated audio"
     assert len(supplement_mod.sound_rows([_sound(n) for n in range(14)])) == 14
+    assert supplement_mod.sounds_more_text(1) == "1 more sound"
+    assert supplement_mod.sounds_more_text(12) == "12 more sounds"
+
+
+def test_the_sound_bound_discloses_itself_in_the_block() -> None:
+    """A row cut by SOUNDS_MAX says how many it held back.
+
+    Unreachable below 200 sounds today, and that is precisely why the disclosure
+    exists: the only turn that hits the bound is the one where silence would hide
+    generated artifacts.
+    """
+    details = _rows([], sounds=[_sound(0)])
+    details["sounds_more"] = 2
+    assert _painted(_block(details)).plain.splitlines() == [
+        "  ♪ Storm swell 0 · 2.0 s",
+        "  2 more sounds",
+    ]
 
 
 def test_block_more_row_expands_in_place() -> None:
