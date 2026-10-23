@@ -734,7 +734,7 @@
  "wire.settings.session_compression_enabled.choice.false.label": "off",
  "wire.settings.session_compression_enabled.choice.true.description": "compress transcripts older than the age below",
  "wire.settings.session_compression_enabled.choice.true.label": "on",
- "wire.settings.session_compression_enabled.help": "Needs compression on: transcripts idle longer than the age below are stored compressed at launch. Reads decompress automatically.",
+ "wire.settings.session_compression_enabled.help": "Off: transcripts stay plain; compressed sessions stay readable. On: old transcripts compress at launch.",
  "wire.settings.session_compression_enabled.label": "Compress old transcripts",
  "wire.settings.session_delegated.description": "Delegated work: subagent and background-session transcripts and their scratch folders. On by default: they are removed after the age below. Your conversations, sidebar workstreams, anything running, waiting on a wake or monitor, linked to an open project, still in use by an active parent, or holding unpushed or uncommitted git work are kept.",
  "wire.settings.session_delegated.title": "Delegated work",
