@@ -15,7 +15,9 @@ CASE_COUNT = 4
 OUTER_SECONDS = 100
 OUTER_GRACE_SECONDS = 5
 
-MODES = ("s2-original", "s3-split", "s3-held", "synthetic")
+# The cheapest discriminating control (synthetic 200 ms CPU) runs BEFORE the held
+# worker protocol, so a held PROTOCOL defect cannot starve it (run 39960859806).
+MODES = ("s2-original", "s3-split", "synthetic", "s3-held")
 
 
 def judge(row):
@@ -64,7 +66,9 @@ def judge(row):
     if len(clean) != 1:
         raise ValueError("missing cleanup proof STOP; child reap is separate")
     if not clean[0].get("worker_function_completed") or not clean[0].get("task_settled"):
-        raise ValueError("observed incomplete worker function/task STOP")
+        # A held-control completion failure is a diagnostic-protocol defect, not
+        # a product observation; other modes keep the unlabelled STOP.
+        raise ValueError(("HELD PROTOCOL DEFECT: " if mode == "s3-held" else "") + "observed incomplete worker function/task STOP")
     summaries = [r for r in records if r.get("kind") == "recorder"]
     if len(summaries) != 1:
         raise ValueError("missing original recorder STOP")
@@ -94,7 +98,7 @@ def judge(row):
             witnesses = [r for r in records if r.get("kind") == "held_witness"]
             workers = [r for r in records if r.get("kind") == "worker_entry"]
             if len(witnesses) != 1 or not workers or witnesses[0].get("loop_ticks", 0) < 3 or witnesses[0].get("requests", 0) < 1 or any(w["thread"] == witnesses[0]["loop_thread"] for w in workers):
-                raise ValueError("missing real offloaded worker/LOOP witness STOP")
+                raise ValueError("HELD PROTOCOL DEFECT: missing real offloaded worker/LOOP witness STOP")
             if data["call"] != "pass" or row.get("rc") != 0:
                 raise ValueError("held original assertions failed STOP")
     if row.get("rc") not in (0, 1) or (data["call"] == "pass") != (row["rc"] == 0):

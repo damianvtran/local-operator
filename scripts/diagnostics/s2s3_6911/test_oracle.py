@@ -291,5 +291,141 @@ class PluginShape(unittest.TestCase):
         return walk(hook.body)
 
 
+def _extract(name, params, setup, returns):
+    """Compile ONE nested function of the real plugin text in a throwaway closure.
+
+    The plugin is never imported (it needs pytest/App); only this function's own
+    source is executed, against fakes, so the timeline it encodes is exercised.
+    """
+    from pathlib import Path
+    tree = ast.parse(Path("plugin-source.txt").read_text())
+    node = next(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+    body = "\n".join("    " + line for line in ast.unparse(node).splitlines())
+    source = "def _make(%s):\n%s\n%s\n    return %s\n" % (params, "\n".join("    " + l for l in setup.splitlines()), body, returns)
+    namespace = {}
+    return source, namespace
+
+
+class FakeClock:
+    def __init__(self, step):
+        self.now, self.step = 0.0, step
+    def perf_counter(self):
+        return self.now
+
+
+class Flag:
+    def __init__(self, clock=None, at=None):
+        self.value, self.clock, self.at = False, clock, at
+    def set(self):
+        self.value = True
+    def is_set(self):
+        return self.value or (self.clock is not None and self.at is not None and self.clock.now >= self.at)
+
+
+class HeldTimeline(unittest.TestCase):
+    """Observed run 39960859806: witness created at the first pause, worker entered
+    ~1.96 s later (after 3 measured pairs), loop granularity ~22 ms (pause walls)."""
+
+    def run_witness(self, entry_at, step=0.022, need_loop=True):
+        import asyncio, threading
+        import oracle
+        clock = FakeClock(step)
+        class FakeAsyncio:
+            @staticmethod
+            async def sleep(delay):
+                clock.now += clock.step
+        entered, gate, records = Flag(clock, entry_at), Flag(), []
+        source, ns = _extract("held_witness", "asyncio, time, threading, entered, gate, rec, requests, held_record",
+                              "causal_released = False", "held_witness, (lambda: causal_released)")
+        ns.update(ast=ast)
+        exec(source, ns)
+        witness, causal = ns["_make"](FakeAsyncio, clock, threading, entered, gate,
+                                      lambda kind, **v: records.append(dict(kind=kind, **v)), 1, oracle.held_record)
+        try:
+            asyncio.run(witness())
+            error = None
+        except RuntimeError as exc:
+            error = str(exc)
+        return error, records, gate.is_set(), causal()
+
+    def test_witness_survives_observed_late_worker_entry(self):
+        # Entry 1.96 s after creation: the OLD 2 s-from-creation deadline leaves ~2 ticks.
+        error, records, gate_set, _ = self.run_witness(entry_at=1.96)
+        self.assertIsNone(error, "witness expired before the worker had time to be observed")
+        self.assertTrue(gate_set)
+        self.assertGreaterEqual(sum(r["kind"] == "held_loop_tick" for r in records), 3)
+        self.assertEqual(sum(r["kind"] == "held_witness" for r in records), 1)
+
+    def test_witness_still_fails_closed_when_worker_never_enters(self):
+        error, records, gate_set, _ = self.run_witness(entry_at=10 ** 6)
+        self.assertIsNotNone(error)
+        self.assertFalse(gate_set)
+        self.assertFalse(any(r["kind"] == "held_witness" for r in records))
+
+    def test_witness_requires_three_ticks_not_one(self):
+        # A stalled loop (one tick inside the window) must NOT qualify.
+        error, records, gate_set, _ = self.run_witness(entry_at=0.0, step=1.2)
+        self.assertIsNotNone(error)
+        self.assertFalse(gate_set)
+
+    def listing(self, causal, latency=5.0, gate_wait_ok=True):
+        import threading
+        source, ns = _extract("held_listing",
+                              "threading, gate, entered, finished, rec, original_listing",
+                              "active = 0\nlock = threading.Lock()\nloop_thread = 1\ncausal_released = False\n"
+                              "def set_causal():\n    nonlocal causal_released\n    causal_released = True",
+                              "held_listing, set_causal")
+        exec(source, ns)
+        gate, entered, finished, records, seen = threading.Event(), threading.Event(), threading.Event(), [], []
+        def original(self, *a, **k):
+            seen.append(self.latency_s)
+            return [], "ok"
+        listing, set_causal = ns["_make"](threading, gate, entered, finished, lambda kind, **v: records.append(dict(kind=kind, **v)), original)
+        class Slow:
+            latency_s = latency
+        gate.set()  # Released: either causally by the witness, or only by cleanup.
+        if causal:
+            set_causal()
+        try:
+            listing(Slow())
+            error = None
+        except RuntimeError as exc:
+            error = str(exc)
+        return error, seen, records, finished.is_set()
+
+    def test_causal_release_runs_listing_within_completion_wait(self):
+        # completed() waits 3 s; the fixture's 5 s latency must not outlive it.
+        error, seen, records, finished = self.listing(causal=True)
+        self.assertIsNone(error)
+        self.assertEqual(len(seen), 1)
+        self.assertLessEqual(seen[0], 3.0)
+        self.assertTrue(finished)
+        self.assertEqual([r["kind"] for r in records][-1], "worker_function_completed")
+
+    def test_cleanup_only_release_does_not_start_the_long_listing(self):
+        error, seen, records, finished = self.listing(causal=False)
+        self.assertEqual(seen, [], "a non-causal release must not sleep through the 5 s fixture")
+        self.assertIsNotNone(error)
+        self.assertTrue(finished)
+
+    def test_synthetic_control_runs_before_the_held_protocol(self):
+        import oracle
+        self.assertLess(oracle.MODES.index("synthetic"), oracle.MODES.index("s3-held"))
+        self.assertEqual(sorted(oracle.MODES), sorted(("s2-original", "s3-split", "s3-held", "synthetic")))
+
+    def test_held_protocol_defect_is_labelled_not_product(self):
+        import oracle
+        row = Completion("test_shared_producer_protocol_and_wrong_oracles").protocol("s3-held")
+        row["data"]["records"] = [r for r in row["data"]["records"] if r["kind"] != "held_witness"]
+        with self.assertRaisesRegex(ValueError, "^HELD PROTOCOL DEFECT"):
+            oracle.judge(row)
+        # A lifecycle fault in the same mode is NOT relabelled as a protocol defect.
+        row = Completion("test_shared_producer_protocol_and_wrong_oracles").protocol("s3-held")
+        row["reaped"] = False
+        with self.assertRaises(ValueError) as caught:
+            oracle.judge(row)
+        self.assertFalse(str(caught.exception).startswith("HELD PROTOCOL DEFECT"))
+
+
 if __name__ == "__main__":
     unittest.main()
