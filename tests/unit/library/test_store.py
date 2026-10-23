@@ -7,6 +7,7 @@ a fixture that assembled rows the writer would never produce.
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,27 @@ def seed(root: Path, *, rebuild: bool = True) -> None:
 
 def query(root: Path, **kwargs: Any) -> dict[str, Any]:
     return service.list_assets(root, service.Query(**kwargs))
+
+
+def tear_root_page(store) -> None:
+    """Overwrite the root page of ``idx_occurrences`` with 0xff, for real.
+
+    A root-page tear is the shape SQLite cannot DROP: the free-list walk needs
+    the page header that no longer parses. Everything else in the file, the
+    authoritative tables included, stays readable.
+    """
+    with store.read() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    page_size = int(sqlite3.connect(store.path).execute("PRAGMA page_size").fetchone()[0])
+    with sqlite3.connect(store.path) as raw:
+        root_page = int(
+            raw.execute(
+                "SELECT rootpage FROM sqlite_master WHERE name = 'idx_occurrences'"
+            ).fetchone()[0]
+        )
+    with open(store.path, "r+b") as handle:
+        handle.seek((root_page - 1) * page_size)
+        handle.write(b"\xff" * page_size)
 
 
 def test_search_matches_prefixes_across_names_descriptions_tags_and_titles(
@@ -400,8 +422,6 @@ def test_the_schema_is_verified_once_per_process(tmp_path, monkeypatch) -> None:
     if it tried any, the closed connection would raise. The control at the end
     is the same call on an unverified path, which must fail.
     """
-    import sqlite3
-
     from local_operator.library.metadata import MetadataStore
 
     root = config_root(monkeypatch, tmp_path)
@@ -677,6 +697,10 @@ def test_concurrent_readers_survive_repeated_recovery(tmp_path, monkeypatch) -> 
 
     root = config_root(monkeypatch, tmp_path)
     seed(root)
+    # The service starts a live worker on the first read; stop it so the only
+    # writer in this test is the recoverer and the readers cannot be rescued by
+    # a background reconcile that the assertion is not measuring.
+    indexer.reset_for_tests()
     failures: list[BaseException] = []
     answered: list[int] = []
     stop = threading.Event()
@@ -709,3 +733,137 @@ def test_concurrent_readers_survive_repeated_recovery(tmp_path, monkeypatch) -> 
 
     assert not failures, failures[:1]
     assert answered, "the readers must have answered requests"
+    # Discriminating: a recovery that lost the rows would leave the catalog
+    # empty for good, so the rebuilt index must serve rows again.
+    indexer.reset_for_tests()
+    indexer.rebuild_now(root)
+    assert query(root)["total"] == 4
+
+
+def test_a_failed_derived_drop_rebuilds_the_database(tmp_path, monkeypatch) -> None:
+    """QA Q-1: a torn b-tree cannot be DROPped, so the whole file is rebuilt.
+
+    The authoritative tables live in their own btrees and stay readable, so the
+    fallback copies them into a fresh database and swaps it in.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    row = next(r for r in query(root)["rows"] if r["name"] == "notes.md")
+    service.update_asset(root, row["id"], {"name": "Kept"}, actor="user", source="user")
+    tag = MetadataStore(root).create_tag("kept-by-tag")
+    service.set_tags(root, row["id"], [tag["id"]])
+
+    store = LibraryStore(root)
+
+    def cannot_drop(self) -> None:
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(LibraryStore, "_recreate_derived", cannot_drop)
+    assert store.recover_derived() is True
+    monkeypatch.undo()
+
+    stored = MetadataStore(root).asset(row["id"])
+    assert stored is not None and stored["name"] == "Kept"
+    assert any(item["name"] == "kept-by-tag" for item in MetadataStore(root).asset_tags(row["id"]))
+    assert store.state()["backfill_done"] == "0"
+    indexer.rebuild_now(root)
+    frame = query(root)
+    renamed = next(r for r in frame["rows"] if r["id"] == row["id"])
+    assert renamed["name"] == "Kept" and renamed["tags"][0]["name"] == "kept-by-tag"
+
+
+def test_a_real_torn_root_page_recovers(tmp_path, monkeypatch) -> None:
+    """The same case with real page damage, not a patched failure."""
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    row = next(r for r in query(root)["rows"] if r["name"] == "notes.md")
+    service.update_asset(root, row["id"], {"name": "Kept"}, actor="user", source="user")
+    store = LibraryStore(root)
+
+    # Fill idx_occurrences enough to own several pages, then checkpoint so the
+    # damage lands in the main file rather than the WAL.
+    with store.write() as connection:
+        connection.executemany(
+            "INSERT OR REPLACE INTO idx_occurrences(asset_id, session_id, title, origin, "
+            "child_id, label, tool, intent, first_ts, last_ts, first_seq, last_seq, "
+            "touches, highlighted) VALUES(?, ?, ?, 'generated', '', NULL, NULL, NULL, "
+            "1.0, 1.0, NULL, NULL, 1, 0)",
+            [(row["id"], f"{index:012x}", "x" * 400) for index in range(400)],
+        )
+    # Outside the write transaction: a checkpoint needs no open transaction.
+    with store.read() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    tear_root_page(store)
+
+    assert store.recover_derived() is True
+    stored = MetadataStore(root).asset(row["id"])
+    assert stored is not None and stored["name"] == "Kept"
+    indexer.rebuild_now(root)
+    assert query(root)["total"] >= 1
+
+
+def test_two_concurrent_recoveries_swap_the_database_once(tmp_path, monkeypatch) -> None:
+    """The process-wide lock must keep two requests from both rebuilding."""
+    import threading
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    store = LibraryStore(root)
+    tear_root_page(store)
+
+    swaps: list[int] = []
+    original = LibraryStore._swap_in_database
+
+    def counted(self, temp) -> None:
+        swaps.append(1)
+        original(self, temp)
+
+    monkeypatch.setattr(LibraryStore, "_swap_in_database", counted)
+
+    results: list[bool] = []
+
+    def recover() -> None:
+        results.append(LibraryStore(root).recover_derived())
+
+    threads = [threading.Thread(target=recover) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert results == [True, True]
+    assert sum(swaps) == 1, "the second reader must reuse the rebuilt file"
+    indexer.reset_for_tests()
+    indexer.rebuild_now(root)
+    assert query(root)["total"] == 4
+
+
+def test_a_busy_error_is_typed_but_not_corruption(tmp_path, monkeypatch) -> None:
+    """A transient lock must not license throwing a healthy index away."""
+    from local_operator.library.store import IndexUnavailable
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    store = LibraryStore(root)
+    with pytest.raises(IndexUnavailable) as caught:
+        with store.read():
+            raise sqlite3.OperationalError("database is locked")
+    assert caught.value.corrupt is False
+
+    from local_operator.library import service
+
+    monkeypatch.setattr(
+        LibraryStore,
+        "query_page",
+        lambda self, *args, **kwargs: (_ for _ in ()).throw(
+            IndexUnavailable("database is locked", corrupt=False)
+        ),
+    )
+    recovery_calls: list[int] = []
+    monkeypatch.setattr(
+        "local_operator.library.service._recover_index", lambda config: recovery_calls.append(1)
+    )
+    with pytest.raises(service.LibraryUnavailable):
+        service.list_assets(root, service.Query())
+    assert recovery_calls == []
