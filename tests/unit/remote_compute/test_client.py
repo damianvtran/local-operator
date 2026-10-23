@@ -1087,8 +1087,45 @@ def test_every_white_space_code_point_the_server_trims_is_trimmed_here(
 def test_a_given_name_must_be_one_line(given: str) -> None:
     """Q3 — a run name is a single-line label, so an interior control character
     is refused rather than shipped to every surface that lists runs."""
-    with pytest.raises(ValueError, match="a single line"):
+    with pytest.raises(ValueError, match="one line with no control"):
         RunSpec(**_fields(name=given))
+
+
+_REFUSED_INTERIOR = (
+    "\n",
+    "\x00",
+    "\x1c",
+    "\x7f",
+    "\x85",
+    "\u2028",
+    "\u2029",
+    *(chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))),
+)
+
+
+@pytest.mark.parametrize("bad", _REFUSED_INTERIOR)
+@pytest.mark.parametrize(
+    "shape", ["ship {0} the fix", "{0}ship the fix", "ship the fix{0}", "{0}{0}\nship it"]
+)
+def test_a_derived_name_never_carries_a_refused_character(bad: str, shape: str) -> None:
+    """Round-3 MINOR-3: a bare ``--remote`` must never derive a name the explicit
+    check would refuse. The derivation path skips that check, so this pins the
+    invariant it relies on instead of leaving it to two helpers' current shape."""
+    import unicodedata
+
+    from local_operator.remote_compute.request import resolve_run_name
+
+    derived = RunSpec(**_fields(prompt=shape.format(bad), name=None)).to_body()["name"]
+    assert derived
+    assert len(derived.encode("utf-8")) <= MAX_RUN_NAME_BYTES
+    assert not any(
+        unicodedata.category(ch) in {"Cc", "Zl", "Zp"} or ch in _REFUSED_INTERIOR for ch in derived
+    ), repr(derived)
+    # And the explicit check accepts it verbatim, which is the real contract.
+    assert (
+        resolve_run_name(derived, prompt="p", repo_url="https://x/r.git", repo_sha="0" * 40)
+        == derived
+    )
 
 
 @pytest.mark.parametrize("given", ["\U0001f468\u200d\U0001f4bb deploy", "caf\u00e9 \u00b7 review"])

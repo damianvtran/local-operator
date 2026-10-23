@@ -127,22 +127,23 @@ MAX_RUN_NAME_BYTES = 100
 #: the whole prompt. It is reserved from the budget rather than added on top.
 RUN_NAME_TRUNCATION_MARK = "…"
 
+#: Interior characters an explicit run name may not carry (see
+#: ``resolve_run_name``): controls, and the line and paragraph separators.
+_REFUSED_NAME_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+
+#: The bidirectional embedding, override, pop and isolate characters:
+#: LRE/RLE/PDF/LRO/RLO (U+202A-U+202E) and LRI/RLI/FSI/PDI (U+2066-U+2069).
+#: Other ``Cf`` characters (ZWJ in an emoji sequence, for one) are legitimate
+#: in a label and stay allowed.
+_BIDI_CONTROLS = frozenset(
+    chr(code_point) for code_point in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
+)
+
 #: Unicode White_Space, which is exactly the set Go's ``strings.TrimSpace`` —
 #: the server's own trim — removes. PYTHON'S ``str.strip`` IS A WIDER SET: it
 #: follows ``str.isspace``, whose definition adds the file/group/record/unit
 #: separators U+001C-U+001F (bidirectional class ``B``), so it trims characters
 #: the far end keeps.
-#: Interior characters an explicit run name may not carry (see
-#: ``resolve_run_name``): controls, and the line and paragraph separators.
-_REFUSED_NAME_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
-
-#: The bidirectional formatting controls: LRE/RLE/PDF/LRO/RLO (U+202A-U+202E)
-#: and LRI/RLI/FSI/PDI (U+2066-U+2069). Other ``Cf`` characters (ZWJ in an
-#: emoji sequence, for one) are legitimate in a label and stay allowed.
-_BIDI_CONTROLS = frozenset(
-    chr(code_point) for code_point in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
-)
-
 _SERVER_WHITESPACE = (
     frozenset("\t\n\v\f\r \x85\xa0\u1680\u2028\u2029\u202f\u205f\u3000")
     # EN QUAD .. HAIR SPACE: the eleven Zs code points U+2000-U+200A.
@@ -172,9 +173,9 @@ _NON_SPACING_CATEGORIES = frozenset({"Mn", "Me"})
 #: in this class already uses, and the dedicated key belongs to the next
 #: translation wave.
 _BLANK_OR_LONG_NAME = (
-    "a run name must be a single line without control or direction-override "
-    "characters, non-blank and at most "
-    f"{MAX_RUN_NAME_BYTES} bytes of UTF-8; "
+    "a run name must be non-blank, at most "
+    f"{MAX_RUN_NAME_BYTES} bytes of UTF-8, and one line with no control or "
+    "bidirectional formatting characters inside it; "
     "leave --name out and one is taken from the prompt"
 )
 
@@ -303,9 +304,17 @@ def resolve_run_name(
     quietly trimmed or shortened it would be carrying a label the operator did
     not ask for. What it may not be is a name the server refuses, which arrives
     as a 400 after an idempotency key was minted and the work addressed to a
-    host: empty once trimmed, over ``MAX_RUN_NAME_BYTES`` of UTF-8, or more than
-    one line. All three are refused here instead, and share ONE sentence at the
-    surface because they share one remedy — leave ``--name`` out.
+    host: empty once trimmed, or over ``MAX_RUN_NAME_BYTES`` of UTF-8. Both are
+    refused here instead. So is a name the server WOULD accept but that is not
+    a usable one-line label — one carrying, inside it, a control character, a
+    line or paragraph separator, or a bidirectional formatting character (which
+    can make one run's label render as another's). All share ONE sentence at
+    the surface because they share one remedy — leave ``--name`` out.
+
+    A DERIVED name never reaches those checks and does not need to:
+    ``default_run_name`` takes the first of ``splitlines()`` (which already cuts
+    on Zl/Zp) and drops every ``C*`` character, which covers every refused
+    class. ``test_a_derived_name_never_carries_a_refused_character`` pins it.
 
     AN ABSENT NAME IS DERIVED, A BLANK ONE IS REFUSED. Those are different
     requests: leaving the flag out says "name it for me", while

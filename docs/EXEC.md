@@ -102,7 +102,7 @@ lop exec --remote-cancel RUN_ID
 | `--size s\|m\|l` | Compute size (default `m`). |
 | `--max-hours H` | Hours the run may execute before the server stops it (default 2; the server may cap it). |
 | `--budget-usd N` | Spending cap for this run; the server's admission default applies when omitted. |
-| `--name TEXT` | Label carried on the run. Optional: when the flag is absent, one is derived from the prompt (see below). A name you give is sent unchanged, never trimmed or shortened, and one that is blank, more than one line or over 100 bytes of UTF-8 is refused before any request. |
+| `--name TEXT` | Label carried on the run. Optional: when the flag is absent, one is derived from the prompt (see below). A name you give is sent unchanged, never trimmed or shortened, and one that is blank, over 100 bytes of UTF-8, more than one line, or carries a control or bidirectional formatting character inside it is refused before any request. |
 | `--idempotency-key KEY` | Reuse a key instead of minting one, so retrying a submitted run returns that run rather than starting a second. A submission answered with a replay prints one line on stderr saying the key matched an earlier submission and no new run was created, then continues normally. |
 | `--detach` | Print the run id (stdout) and the receipt (stderr), then exit instead of watching. |
 | `--remote-status RUN_ID` | Print one run as JSON on stdout and exit; the network verdict goes to stderr. |
@@ -125,7 +125,9 @@ printable in it (a lone NUL, or only combining marks) falls back to
 A name given with `--name` is carried exactly as typed; this client will not
 shorten a name you chose. It is refused, in one sentence and exit 1 before any
 request, if it is empty or whitespace-only after that same trim, over the bound,
-or more than one line (an interior control character). **A supplied-but-blank
+more than one line (an interior control character or line/paragraph separator),
+or carrying a bidirectional formatting character (U+202A-U+202E, U+2066-U+2069)
+that could make the label render as another's. **A supplied-but-blank
 name is refused rather than replaced by a derived one** — `--name "$VAR"` with
 an empty `VAR` fails instead of quietly naming the run after its prompt, which
 is how you learn the variable was empty.
