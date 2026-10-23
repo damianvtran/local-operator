@@ -13,7 +13,6 @@ from typing import Any
 
 import httpx
 import pytest
-
 from fastapi import FastAPI
 
 from local_operator import settings_io
@@ -25,7 +24,11 @@ from local_operator.team_bridge.client import Boundary
 from local_operator.team_bridge.store import Store
 from tests.unit.team_bridge.test_client import _ok
 from tests.unit.team_bridge.test_cos_name import _echoing
-from tests.unit.team_bridge.test_discipline import _committed_owner, _Counter, _discipline
+from tests.unit.team_bridge.test_discipline import (
+    _committed_owner,
+    _Counter,
+    _discipline,
+)
 
 pytestmark = pytest.mark.asyncio
 
