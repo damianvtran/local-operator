@@ -1,0 +1,30 @@
+{
+  "base": "9f1f593708a071c44cacf1098c070da42b8fd243",
+  "sources": {
+    "tests/unit/test_tui_responsiveness.py": "110e619be5aec16de33a6b20c45583be8d0a56c9d1b83307adf1f714cbd30c5a",
+    "tests/unit/test_worker_code_identity.py": "faa1fe943769f5fb8cbb7313f20437adccab91620a565312222493c1abb3132e",
+    "tests/worker_code_identity.py": "a0188d982df70ca9f0ac724f4aa1d5cd8d73324c70981f38c36c29e610212374",
+    "tests/loop_callback_spans.py": "8ba82012c4a6f8b869e00b9b2afda2ee59bdbe569164b9a244cba69aebf7bfab",
+    "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
+    "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
+    "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
+    "scripts/diagnostics/native_worker_6911/producer.py": "85ea9c21ea52dee5d87024a2d9d9d620aa7f9b821833c13ffba67d8c80b43393",
+    "scripts/diagnostics/native_worker_6911/check_quality.py": "5e28800297f7e7ee95f2e66299c39ecb99a5d9e7f5977e3e3cb2bf7d5746eadc",
+    "scripts/diagnostics/native_worker_6911/carrier.py": "c3e29783a119903c0c9f30014f8a0be37238f0b303ecd2d81cff2f2c13f2c1d6",
+    "scripts/diagnostics/native_worker_6911/controller.py": "1626b33a55dfcc56be918df06e2ec3457d6a5b9b4174e81f206b4b01bfab7b09"
+  },
+  "loaded_sources": [
+    "tests/worker_code_identity.py",
+    "tests/loop_callback_spans.py",
+    "scripts/diagnostics/native_worker_6911/producer.py"
+  ],
+  "native_api": [
+    "textual/worker.py",
+    "textual/app.py",
+    "textual/_work_decorator.py",
+    "textual/dom.py",
+    "textual/timer.py"
+  ],
+  "textual_version": "8.2.8",
+  "historical_equivalence": "NONE; GenericApp control only"
+}
