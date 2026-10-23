@@ -14,9 +14,20 @@
  *   * TIGHTENING (`ask`) is ordinary — it makes the session stricter — so it needs
  *     no proof and works from any surface, including one whose device is not
  *     paired. Refusing it here would wall a phone off from the safe direction.
- *   * LOOSENING (`auto`) is authority-increasing, so it asks the runtime for a
- *     per-action challenge and signs it. The signature is what costs a human
- *     gesture on the MACHINE's key, or on this phone's non-extractable one.
+ *   * LOOSENING (`auto`, and the global `default auto`) is authority-increasing,
+ *     so it asks the runtime for a per-action challenge and signs it. The
+ *     signature is what costs a human gesture on the MACHINE's key, or on this
+ *     phone's non-extractable one.
+ *
+ * THE THIRD CHOICE IS A SCOPE, NOT A THIRD DIRECTION. `default auto` loosens the
+ * machine's GLOBAL default — every session that follows it — rather than this
+ * one. It shares `auto`'s direction and therefore its proof, so it must be
+ * visually subordinate to the two session-scoped choices (this is the scope the
+ * user is least likely to mean by accident, and the one whose blast radius a
+ * glance has to make legible); it is a `quiet` button for that reason, not a
+ * second primary. Its receipt is the runtime's own account of what it applied
+ * (`lib/approval-policy`), because a phone cannot see the set of sessions a
+ * global write reached and must not claim one.
  *
  * THE `slash_result` OP, not `slash`. `slash` is the off-terminal subset
  * (`/goal`, `/compact`) and answers `/approvals` with "terminal-only here"; the
@@ -25,18 +36,14 @@
  * rather than a second one is the point.
  */
 import { useState } from "react";
-import {
-	HttpError,
-	isAuthorityRefusalCode,
-	requestOperatorChallenge,
-	sendCommandWithProof,
-} from "../api";
+import { HttpError, isAuthorityRefusalCode, sendCommandWithProof } from "../api";
 import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
-import { NotPairedError, operatorFieldsFor, storedCertificate } from "../lib/operator-device";
+import { NotPairedError, storedCertificate } from "../lib/operator-device";
+import { globalDefaultReceipt, setApprovalsPolicy } from "../lib/approval-policy";
 import { PairPromptSheet } from "../screens/pair";
 
-type Mode = "ask" | "auto";
+type Mode = "ask" | "auto" | "default auto";
 
 export function GateSheet({
 	open,
@@ -98,7 +105,7 @@ export function GateSheet({
 				onReceipt("");
 				return;
 			}
-			await loosen();
+			await loosen(mode);
 		} catch (failure) {
 			setError(humanizeGateError(failure));
 		} finally {
@@ -106,14 +113,28 @@ export function GateSheet({
 		}
 	}
 
-	async function loosen() {
+	async function loosen(mode: Exclude<Mode, "ask">) {
 		try {
-			await sendLoosened();
+			const receipt = await setApprovalsPolicy(sessionId, mode);
+			if (receipt.refused) {
+				/* A ROUTED SLASH OUTCOME CAN COMPLETE WITHOUT DOING WHAT IT WAS
+				   ASKED (the daemon reports `refused` beside `ok` for exactly that).
+				   Closing on it would put a receipt on the header describing a
+				   change the runtime says did not happen, so the refusal stays in
+				   THIS sheet, in the runtime's own words, with the choices still
+				   there for the reader to take another way. */
+				setError(receipt.detail.trim() || "that was refused — nothing changed");
+				return;
+			}
 			// OUT FIRST, THEN CLOSE: the receipt has to exist somewhere that is not
 			// this sheet before the sheet unmounts (design round 6, D2). The
 			// tightening path keeps its in-sheet notice because it does NOT close,
 			// which is why that one never had this bug.
-			onReceipt("this session's gate is now auto — gated tools run without asking");
+			onReceipt(
+				mode === "auto"
+					? "this session's gate is now auto — gated tools run without asking"
+					: globalDefaultReceipt(receipt),
+			);
 			onClose();
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
@@ -129,39 +150,34 @@ export function GateSheet({
 		}
 	}
 
-	async function sendLoosened() {
-		const challenge = await requestOperatorChallenge(sessionId, {
-			action: "loosen",
-			request_id: "",
-		});
-		const fields = await operatorFieldsFor({
-			action: "loosen",
-			sessionId,
-			requestId: "",
-			challenge: challenge.challenge,
-		});
-		await sendCommandWithProof(sessionId, {
-			op: "slash_result",
-			command: "approvals",
-			args: "auto",
-			images: [],
-			...fields,
-		});
-	}
-
 	return (
 		<>
 			<Sheet open={open} onClose={onClose} title="Approvals in this session">
 				<div className="flex flex-col gap-3 p-3">
 					<p className="text-body-sm text-ink-muted">
 						Ask parks every gated tool call until you answer its card. Auto lets them run
-						without asking for the rest of this session.
+						without asking. The first two choices change <strong>this session</strong> only; the
+						last changes the <strong>default for all sessions</strong> that follow it.
 					</p>
 					<Button disabled={busy !== null} onClick={() => void choose("ask")}>
 						{busy === "ask" ? "…" : "keep asking (ask)"}
 					</Button>
 					<Button disabled={busy !== null} onClick={() => void choose("auto")}>
 						{busy === "auto" ? "…" : "run without asking (auto)"}
+					</Button>
+					{/* THE SCOPE-CHANGING CHOICE, and the reason it is `quiet`: the two
+					    buttons above act on the session in front of the reader, this one
+					    acts on every session that follows the default. Same direction
+					    (`auto`), different blast radius — so it is subordinate in weight
+					    while still a full-height target of its own, and its sentence says
+					    which scope it is BEFORE the tap rather than in a receipt after
+					    it. */}
+					<Button
+						variant="quiet"
+						disabled={busy !== null}
+						onClick={() => void choose("default auto")}
+					>
+						{busy === "default auto" ? "…" : "run without asking in all sessions (default auto)"}
 					</Button>
 					{!paired ? (
 						/* SAID BEFORE THE TAP, not after (design round 6, D4). Both buttons
@@ -172,9 +188,9 @@ export function GateSheet({
 						   honest thing to state; `storedCertificate()` is a synchronous read
 						   this component already has. */
 						<p className="text-meta text-ink-muted">
-							This phone is not paired with that machine, so <strong>run without asking</strong>{" "}
-							will ask you to pair it first. Keeping approvals at <strong>ask</strong> never needs
-							a pairing.
+							This phone is not paired with that machine, so <strong>run without asking</strong> and{" "}
+							<strong>run without asking in all sessions</strong> will ask you to pair it first.
+							Keeping approvals at <strong>ask</strong> never needs a pairing.
 						</p>
 					) : null}
 					{notice ? <p className="text-body-sm text-ink-muted">{notice}</p> : null}
