@@ -203,8 +203,7 @@ async def test_the_ci_line_never_reads_as_passed_without_a_success(
         "ci": {
             "fetched": True,
             "runs": [
-                {"name": f"job-{i}", "status": s, "conclusion": c}
-                for i, (s, c) in enumerate(runs)
+                {"name": f"job-{i}", "status": s, "conclusion": c} for i, (s, c) in enumerate(runs)
             ],
             "total": len(runs),
             "url": None,

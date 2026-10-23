@@ -8,6 +8,8 @@ and GitLab MR, real ETag/304 behaviour) are recorded in the PR body instead.
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -141,7 +143,7 @@ async def test_github_fetch_maps_summary_comments_and_ci() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _github_ci(*runs: tuple[str, str], total: int | None = None) -> dict:
+def _github_ci(*runs: tuple[str, str], total: int | None = None) -> dict[str, Any]:
     """The ``pieces["ci"]`` shape ``_fetch_ci`` stores, from (status, conclusion)."""
     items = [
         {"name": f"job-{i}", "status": run_status, "conclusion": conclusion}
@@ -203,8 +205,7 @@ def test_queued_and_in_progress_checks_are_pending_not_passed() -> None:
     assert ci["status"] == "pending"
     assert ci["skipped"] == 0 and ci["neutral"] == 0
     assert (
-        ci["passed"] + ci["failed"] + ci["skipped"] + ci["neutral"] + ci["pending"]
-        == ci["total"]
+        ci["passed"] + ci["failed"] + ci["skipped"] + ci["neutral"] + ci["pending"] == ci["total"]
     )
 
 
@@ -226,8 +227,7 @@ def test_success_count_excludes_skips_in_a_mixed_run() -> None:
     assert ci["pending"] == 5
     assert ci["status"] == "pending"
     assert (
-        ci["passed"] + ci["failed"] + ci["skipped"] + ci["neutral"] + ci["pending"]
-        == ci["total"]
+        ci["passed"] + ci["failed"] + ci["skipped"] + ci["neutral"] + ci["pending"] == ci["total"]
     )
 
     # The settled version of the same mix: no work in flight, yet not green.
@@ -252,15 +252,11 @@ def test_a_run_with_zero_successes_never_reaches_success() -> None:
     all. Neutral and unclassifiable conclusions get the same treatment, and
     the one genuinely all-success run still passes.
     """
-    all_skipped = github.ADAPTER.ci(
-        _github_ci(("completed", "skipped"), ("completed", "skipped"))
-    )
+    all_skipped = github.ADAPTER.ci(_github_ci(("completed", "skipped"), ("completed", "skipped")))
     assert all_skipped["passed"] == 0
     assert all_skipped["status"] == "skipped"
 
-    all_neutral = github.ADAPTER.ci(
-        _github_ci(("completed", "neutral"), ("completed", "neutral"))
-    )
+    all_neutral = github.ADAPTER.ci(_github_ci(("completed", "neutral"), ("completed", "neutral")))
     assert all_neutral["passed"] == 0
     assert all_neutral["status"] == "neutral"
 
@@ -272,18 +268,14 @@ def test_a_run_with_zero_successes_never_reaches_success() -> None:
     assert unclassified["status"] == "unknown"
 
     # The control: every check concluded success -> the only path to `success`.
-    green = github.ADAPTER.ci(
-        _github_ci(("completed", "success"), ("completed", "success"))
-    )
+    green = github.ADAPTER.ci(_github_ci(("completed", "success"), ("completed", "success")))
     assert green["passed"] == 2 and green["status"] == "success"
 
 
 def test_a_partial_check_run_read_is_never_a_pass() -> None:
     """``total_count`` above the one page read means the unread tail could hold
     the failure that decides the gate, so a partial read cannot be green."""
-    ci = github.ADAPTER.ci(
-        _github_ci(*([("completed", "success")] * 100), total=150)
-    )
+    ci = github.ADAPTER.ci(_github_ci(*([("completed", "success")] * 100), total=150))
     assert ci["passed"] == 100
     assert ci["status"] == "unknown"
 
@@ -314,9 +306,7 @@ def test_a_fetched_but_empty_set_with_a_positive_total_is_unknown() -> None:
     assert ci["passed"] is None, "no runs were read, so no counter may be invented"
 
     # The control: a genuinely empty set still gets its own word.
-    empty = github.ADAPTER.ci(
-        {"ci": {"fetched": True, "runs": [], "total": 0, "url": None}}
-    )
+    empty = github.ADAPTER.ci({"ci": {"fetched": True, "runs": [], "total": 0, "url": None}})
     assert empty["status"] == "none" and empty["total"] == 0
 
 
