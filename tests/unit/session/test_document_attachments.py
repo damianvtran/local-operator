@@ -796,7 +796,6 @@ def test_documents_share_one_request_budget() -> None:
         mime_type="application/pdf",
         filename="a.pdf",
         bytes=len(raw),
-        digest="a" * 32,
     )
     encoded = encoded_document_bytes(block)
     assert 2 * encoded < 1_500  # both would fit a document-only request
@@ -1122,3 +1121,56 @@ def test_the_legacy_chat_path_also_records_the_retained_copy(tmp_path: Path, sto
     assert block.digest is not None
     assert block.path == str(path)
     assert block.stored_path == str(store.path_for(block.digest))
+
+
+def _padded_pdf(decoded_size: int) -> bytes:
+    base = _pdf_raw(pages=1)
+    assert len(base) + 2 <= decoded_size
+    return base + b"\n%" + b"x" * (decoded_size - len(base) - 2)
+
+
+def test_cjk_text_is_charged_by_utf8_bytes_at_the_anthropic_body() -> None:
+    """R3-M1: the provider ceiling counts BYTES, so the reservation must too.
+
+    The old character ruler charged 200,000 CJK chars as 200,000 bytes when
+    the wire carries 600,000, and the 5% pad is calibrated to the ruler's
+    mean, not its worst case. At the real body builder the document must now
+    fall back (or be withheld) so the request stays under Anthropic's 32 MB.
+    """
+    size = 23_643_351  # 4 * ceil(n/3) == 31,524,468 encoded
+    raw = _padded_pdf(size)
+    assert len(raw) == size
+    block = DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="application/pdf",
+        filename="big.pdf",
+        bytes=size,
+        digest="d" * 32,
+    )
+    assert encoded_document_bytes(block) == 31_524_468
+
+    def body_for(text: str) -> dict[str, Any]:
+        request = ChatRequest(
+            model=ModelSpec(
+                provider="anthropic", model_id="claude-sonnet-4-5", context_window=1_000_000
+            ),
+            messages=[Message.user(text, documents=[block])],
+        )
+        return AnthropicClient()._build_body(request)
+
+    def wire_bytes(body: dict[str, Any]) -> int:
+        # httpx sends UTF-8 with ensure_ascii=False (see tokens._WIRE_JSON_ENCODING).
+        return len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+
+    cjk = body_for("字" * 200_000)
+    assert wire_bytes(cjk) <= 32_000_000
+    assert all(part["type"] != "document" for part in cjk["messages"][0]["content"])
+
+    bigger = body_for("字" * 400_000)
+    assert wire_bytes(bigger) <= 32_000_000
+    assert all(part["type"] != "document" for part in bigger["messages"][0]["content"])
+
+    # The ASCII control still takes the native shape and fits.
+    ascii_body = body_for("x" * 200_000)
+    assert wire_bytes(ascii_body) <= 32_000_000
+    assert any(part["type"] == "document" for part in ascii_body["messages"][0]["content"])

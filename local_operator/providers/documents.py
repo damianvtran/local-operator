@@ -70,7 +70,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Sequence
 
-from local_operator.harness.pdf_pages import pdf_page_count
+from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
 from local_operator.harness.types import DocumentContent
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -216,7 +216,7 @@ def _request_room(
         for block in message.content
         if isinstance(block, DocumentContent)
     )
-    other = estimate_wire_bytes(messages) - documents + extra_bytes
+    other = estimate_wire_bytes(messages, utf8_text=True) - documents + extra_bytes
     other += other // 20
     other += min(DOCUMENT_ENVELOPE_ALLOWANCE_BYTES, form.max_bytes // 100)
     room = document_budget(form, other_bytes=other)
@@ -337,6 +337,43 @@ def _decoded(block: "DocumentContent") -> bytes | None:
         return None
 
 
+#: Encoded length per digest. Base64 of a 20 MB PDF costs ~28 ms and the
+#: eligibility walk asks for the same number more than once per body (the
+#: request total and each block). Keyed by the content-addressed digest, so it
+#: cannot go stale; a block without one is decoded each time (below-floor
+#: inline documents are tiny, which is how they avoided the store).
+_ENCODED_LENGTH_CACHE: dict[str, int] = {}
+
+
+def _encoded_length(block: "DocumentContent", raw: bytes | None = None) -> int:
+    """Base64 wire length of ``block``, reusing a digest-keyed answer.
+
+    ``raw`` is the bytes the caller has ALREADY decoded for another question
+    (native eligibility decodes once for the page count); passing it avoids a
+    second decode of the same 20 MB payload.
+    """
+    if block.digest:
+        cached = _ENCODED_LENGTH_CACHE.get(block.digest)
+        if cached is not None:
+            return cached
+    if raw is None:
+        if block.digest and block.bytes > 0:
+            # The store recorded the DECODED length at admission; base64 is a
+            # pure function of it. Trusting the recorded length is safe for a
+            # digest-bearing block because the same row would fail to resolve
+            # if the bytes and the record disagreed.
+            encoded = 4 * ((block.bytes + 2) // 3)
+            _ENCODED_LENGTH_CACHE[block.digest] = encoded
+            return encoded
+        raw = _decoded(block)
+        if raw is None:
+            return 0
+    encoded = 4 * ((len(raw) + 2) // 3)
+    if block.digest:
+        _ENCODED_LENGTH_CACHE[block.digest] = encoded
+    return encoded
+
+
 def encoded_document_bytes(block: "DocumentContent") -> int:
     """The bytes this block occupies ON THE WIRE (base64), not decoded size.
 
@@ -345,10 +382,7 @@ def encoded_document_bytes(block: "DocumentContent") -> int:
     32 MB request cap. Comparing the decoded size — the first version of this
     check did — accepts exactly the payload the provider refuses.
     """
-    raw = _decoded(block)
-    if raw is None:
-        return 0
-    return 4 * ((len(raw) + 2) // 3)
+    return _encoded_length(block)
 
 
 def document_native_ok(
@@ -373,14 +407,14 @@ def document_native_ok(
     """
     if form is None or block.mime_type != "application/pdf":
         return False
-    raw = _decoded(block)
-    if raw is None:
-        return False
-    encoded = encoded_document_bytes(block)
-    if encoded > form.max_bytes:
-        return False
+    raw: bytes | None = None
     if form.max_pages is not None:
-        pages = pdf_page_count(raw, block.digest)
+        cached, pages = known_pdf_page_count(block.digest)
+        if not cached:
+            raw = _decoded(block)
+            if raw is None:
+                return False
+            pages = pdf_page_count(raw, block.digest)
         # An UNCOUNTABLE PDF is not native: if the page structure cannot be
         # read here, a provider's own parser is at least as likely to refuse
         # it, and "send and hope" is exactly what the contract forbids. The
@@ -388,6 +422,9 @@ def document_native_ok(
         # spends a paid request on a shape the provider rejects.
         if pages is None or pages > form.max_pages:
             return False
+    encoded = _encoded_length(block, raw)
+    if encoded > form.max_bytes:
+        return False
     if budget is not None and not budget.take(encoded):
         return False
     return True
