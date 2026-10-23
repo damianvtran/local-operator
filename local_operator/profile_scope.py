@@ -1019,14 +1019,26 @@ class ScopedTeamRegistry:
                 member_existing = self.global_registry.get_team_by_name(member_target)
                 if member_existing is not None and not replace:
                     raise ValueError(promote_member_collision(source.name, "team", member_target))
-                member_conflict = _account_team_keys(
+                # An alias the account already resolves is NOT a team of this
+                # name, and the generic sentence would send the user to replace
+                # `inner` — a name-keyed row — which leaves the alias collision
+                # untouched and reproduces itself (agent review, MINOR-2). The hit
+                # therefore names the KEY: the name key cannot be the one found
+                # here, because the branch above either resolved it or skipped
+                # the row a confirmed replace is about to overwrite.
+                hit = _account_team_key_hit(
                     self.global_registry,
                     member_target,
                     list(nested.aliases or []),
                     skip_id=str(member_existing.id) if member_existing is not None else None,
                 )
-                if member_conflict is not None:
-                    raise ValueError(promote_collision("team", member_target))
+                if hit is not None:
+                    alias, owner = hit
+                    raise ValueError(
+                        promote_nested_alias_collision(
+                            source.name, member_target, alias, str(owner.name)
+                        )
+                    )
                 team_plans.append((nested, member_target, member_existing))
             role_provenance.require_writable(self.config_dir)
 
@@ -1384,6 +1396,12 @@ def promote_member_collision(team: str, kind: str, name: str) -> str:
     reproduces the same refusal on the next attempt (QA round 2, Q-M1). The
     remedy here is the team's own verb, which replaces the team and its
     colliding members in one confirmed call.
+
+    No alternate-name remedy is offered: ``as_name`` renames the TEAM, not its
+    members, and a member's name is the key its rosters and nested teams
+    reference. `/team promote pod as pod2` therefore hits this identical refusal
+    and writes nothing (agent review, MINOR-1), so suggesting a rename here
+    would be a second remedy that cannot happen.
     """
 
     article = "an" if kind == "agent" else "a"
@@ -1391,8 +1409,27 @@ def promote_member_collision(team: str, kind: str, name: str) -> str:
         f"promoting team {team!r} needs its {kind} {name!r}, and your account already "
         f"has {article} {kind} named {name!r}, so copying would overwrite it; nothing "
         f"was promoted. Confirm with `/team promote {team} replace` — that replaces "
-        "the team and its colliding members together — or promote it under another "
-        "name."
+        "the team and its colliding members together."
+    )
+
+
+def promote_nested_alias_collision(team: str, member: str, alias: str, owner: str) -> str:
+    """The refusal for a nested team whose ALIAS the account already resolves.
+
+    The generic :func:`promote_collision` sentence names the nested team as if
+    the account held it by name, and advises replacing that name. Both halves
+    are false for an alias another row owns: ``replace`` skips only the row
+    whose NAME matches, so the alias collision survives and the same call
+    refuses again. The one remedy that works is changing the alias on one of the
+    two rows, which is what this sentence names.
+    """
+
+    return (
+        f"promoting team {team!r} needs its team {member!r}, but your account's team "
+        f"{owner!r} already answers to {alias!r}, which this conversation's team "
+        f"{member!r} carries as an alias; copying would make that key ambiguous, so "
+        "nothing was promoted. Rename or drop that alias on either team "
+        f"(`/team edit {member}` or `/team edit {owner}`), then promote again."
     )
 
 
@@ -1531,6 +1568,24 @@ def _account_agent_key(registry: Any, name: str) -> Any | None:
     return None
 
 
+def _account_team_key_hit(
+    registry: Any, name: str, aliases: list[str], *, skip_id: str | None = None
+) -> tuple[str, Any] | None:
+    """The first candidate KEY the account resolves, with the team it reaches.
+
+    :func:`_account_team_keys` needs only the row, but a refusal must name the
+    exact KEY that collided: a team's alias collision is not a team of that
+    name, and a sentence naming the copied team's name sends the user to a
+    replace that cannot clear an alias another row owns (agent review, MINOR-2).
+    """
+
+    for key in [name, *aliases]:
+        found = registry.get_team_by_name(key)
+        if found is not None and str(found.id) != str(skip_id or ""):
+            return key, found
+    return None
+
+
 def _account_team_keys(
     registry: Any, name: str, aliases: list[str], *, skip_id: str | None = None
 ) -> Any | None:
@@ -1543,11 +1598,8 @@ def _account_team_keys(
     write, so it cannot collide with itself.
     """
 
-    for key in [name, *aliases]:
-        found = registry.get_team_by_name(key)
-        if found is not None and str(found.id) != str(skip_id or ""):
-            return found
-    return None
+    hit = _account_team_key_hit(registry, name, aliases, skip_id=skip_id)
+    return hit[1] if hit is not None else None
 
 
 def _carried_remaining(

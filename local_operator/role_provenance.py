@@ -176,12 +176,19 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def append_promotions(config_dir: str | Path, records: Iterable[Mapping[str, Any]]) -> list[str]:
-    """Append ``records`` as one locked, fsynced batch; return their ids.
+    """Append ``records`` as one locked, atomically published batch; return their ids.
 
-    ALL of the batch's rows land in ONE write call under the lock, so a failure
-    either happens before anything is appended or leaves at most a trailing
-    partial line that :func:`read_promotions` skips. A promotion that rolls back
-    therefore never reports ids for rows it did not durably record.
+    ALL of the batch's rows are written under the provenance lock and published
+    with a single ``os.replace`` of a fully written, fsynced temp file. A reader
+    therefore observes either the previous index or the previous index plus this
+    WHOLE batch — never a truncated or half-appended row from this writer. A
+    failure before the publication leaves the index exactly as it was, which is
+    what lets a promotion roll its definitions back and report that nothing was
+    recorded; ids returned here name rows that are already durable.
+
+    :func:`read_promotions` still skips an unparseable line, because that
+    tolerance is for indexes written by older builds or edited by hand, not for
+    anything this writer can produce.
     """
     prepared = [_record(record) for record in records]
     if not prepared:
