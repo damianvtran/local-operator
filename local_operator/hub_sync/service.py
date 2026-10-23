@@ -50,6 +50,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 
+from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
 from local_operator.config_writer import config_write_lock
 from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import provenance as prov
@@ -76,7 +77,12 @@ from local_operator.hub_sync.settings import HubSyncSettings
 
 logger = logging.getLogger(__name__)
 
-AGENT_INSTRUCTIONS_MAX = 8_000
+#: Cap on an agent's instruction body on the sync path. DERIVED, never restated:
+#: it bounds the same field :data:`agent_profiles.MAX_INSTRUCTIONS_CHARS` bounds,
+#: and a second literal here is how the merge came to refuse a hub update at 8,000
+#: (V5 in ``merge.py``) while every other local surface admitted 10,000 — refused
+#: for a cap nothing else enforced.
+AGENT_INSTRUCTIONS_MAX = MAX_INSTRUCTIONS_CHARS
 TEAM_BRIEF_MAX = 32_768
 TEAM_DESCRIPTION_MAX = 2_000
 TEAM_MANAGER_MAX = 128

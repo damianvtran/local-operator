@@ -2884,10 +2884,16 @@ INSTRUCTION_SET_DOCUMENT_VERSION = 1
 
 #: Caps, mirroring agent-server's validator. Two of them are REUSED rather than
 #: restated, because a second number is how the two sides drift apart:
-#: `MAX_INSTRUCTIONS_CHARS` (the local profile cap and the hub's document cap are
-#: the same bound) and `MAX_AGENT_NAME_CHARS` (the hub's `models.AgentNameMaxChars`,
-#: which the local registry refuses to exceed when it invents a name of its own —
-#: see `_collision_free_name`).
+#: `MAX_INSTRUCTIONS_CHARS` and `MAX_AGENT_NAME_CHARS` (the hub's
+#: `models.AgentNameMaxChars`, which the local registry refuses to exceed when it
+#: invents a name of its own — see `_collision_free_name`).
+#:
+#: The instruction cap is the one place the two sides now DIFFER: this side admits
+#: 10,000 so a real role brief survives, while the hub side still validates a
+#: publication at 8,000 (the bound this constant mirrored until now) — so a body
+#: between the two is accepted locally and refused at publish until agent-server's
+#: validator follows. The asymmetry is deliberate and temporary, and the hub's
+#: number is agent-server's to state, not this file's to mirror.
 INSTRUCTION_SET_DESCRIPTION_MAX_CHARS = 2000
 INSTRUCTION_SET_WHEN_TO_USE_MAX_CHARS = 2000
 INSTRUCTION_SET_TOOLS_MAX_ITEMS = 64
@@ -3174,9 +3180,9 @@ def build_instruction_set_document(
             spelling is sent as the author wrote it: whitespace is the hub's to
             normalise (see :func:`_name_rule`).
         description: What the agent does (1..2000 characters).
-        instructions: The instruction body (1..8000 characters). This is the
-            publication; it is also the only field the hub's reviewer treats as
-            behavioural evidence.
+        instructions: The instruction body (1..:data:`MAX_INSTRUCTIONS_CHARS`
+            characters). This is the publication; it is also the only field the
+            hub's reviewer treats as behavioural evidence.
         kind: ``"role"`` or ``"specialist"``.
         version: The AUTHOR's version of their agent's content, free-form.
         when_to_use: Optional routing text (0..2000 characters).
