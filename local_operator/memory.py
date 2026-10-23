@@ -18,6 +18,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -73,7 +75,19 @@ OWNER_TOKENS = 50000
 WARNING_THRESHOLDS = (90, 80)
 RECALL_TOKENS = 1200
 RECALL_HARD_TOKENS = 2000
+#: Hard cap on the main database file, enforced as ``max_page_count`` in
+#: :meth:`MemoryStore.connection`. Reaching it makes SQLite refuse a write with
+#: SQLITE_FULL instead of growing the file. This is a SEPARATE budget from the
+#: token quotas above: a store can hold token headroom and still be out of bytes,
+#: which is why `lop memory status` reports both and why the refusal names the
+#: byte cap. Raising this (or auto-compacting) is a product decision, not a
+#: repair for a full store.
 MAX_DB_BYTES = 64 * 1024 * 1024
+#: Percent of the byte cap at which `lop memory status` says the store is near
+#: full. The token thresholds warn ONCE on the write that crosses them; this one
+#: is a status-surface warning, because a store at the byte cap refuses the next
+#: write outright — there is no later write to carry the warning.
+STORAGE_WARNING_PERCENT = 90
 MAX_OWNER_OPS = 20000
 MAX_REVISIONS = 128
 #: One confirmed filter-based forget accepts this many facts. The human preview
@@ -503,6 +517,22 @@ def origin_label(fact: dict[str, Any]) -> str:
 
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def format_bytes(value: int) -> str:
+    """Human-readable binary size for the byte cap and its usage.
+
+    Binary units because the cap is a power of two; one decimal so the round
+    64.0 MiB cap reads as the same number in `status`, the refusal and the
+    documentation. Byte-sized values stay integers so a nearly-empty store does
+    not claim to hold "0.0 KiB".
+    """
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{int(size)}B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TiB"
 
 
 #: Total wire budget for the suggestion tail: the WHOLE block, wrapper
@@ -970,8 +1000,92 @@ class MemoryStore:
             ) from exc
         try:
             yield db
+        except sqlite3.OperationalError as exc:
+            # SQLITE_FULL has two causes and only one is this store's own cap:
+            # the host disk can be full too. Translate it only when the cap is
+            # implicated (see _page_cap_refusal); every other failure keeps the
+            # caller's generic store-unavailable path.
+            if self._page_cap_refusal(db, exc):
+                raise MemoryError(self._store_full_message()) from exc
+            raise
         finally:
             db.close()
+
+    def _page_cap_refusal(self, db: sqlite3.Connection, exc: sqlite3.OperationalError) -> bool:
+        """Whether this SQLITE_FULL is the store's page cap rather than a full disk.
+
+        A transaction can need several pages at once, so the refusal can arrive
+        before ``page_count`` has actually reached ``max_page_count`` (measured
+        on a 32-page store: the failed commit left 30 pages allocated). That is
+        why the test is "no room to grow, or within one bounded batch of the
+        limit", not equality.
+
+        When the host filesystem reports less free space than this store's whole
+        cap, the disk itself may be the cause; that case deliberately keeps the
+        generic refusal, because telling an operator whose disk is full to forget
+        facts would be advice for the wrong problem. Everything else is measured
+        through PRAGMAs rather than compared against ``MAX_DB_BYTES`` so an
+        overridden cap and a non-default page size are read as SQLite enforces
+        them.
+        """
+        code = getattr(exc, "sqlite_errorcode", None)
+        if code != sqlite3.SQLITE_FULL and "database or disk is full" not in str(exc):
+            return False
+        try:
+            pages = int(db.execute("PRAGMA page_count").fetchone()[0])
+            cap = int(db.execute("PRAGMA max_page_count").fetchone()[0])
+            free = int(db.execute("PRAGMA freelist_count").fetchone()[0])
+            page_size = int(db.execute("PRAGMA page_size").fetchone()[0])
+            disk_free = shutil.disk_usage(self.root).free
+        except (sqlite3.Error, OSError):
+            return False
+        if disk_free <= MAX_DB_BYTES:
+            return False
+        if pages >= cap and free == 0:
+            return True
+        # MAX_BATCH_BYTES bounds one transaction's payload, so a failed write can
+        # sit that many pages below the limit before SQLite gives up.
+        return cap - pages <= MAX_BATCH_BYTES // page_size
+
+    def _store_full_message(self) -> str:
+        """The one refusal that names the byte cap and every way out of it.
+
+        Generic on purpose for everything else: an unavailable store can be a
+        permissions, disk or FTS problem, and telling that operator to forget
+        facts would be wrong. This message is only reached once the cap is
+        proven, so it can be prescriptive.
+        """
+        return (
+            f"Memory store is full: {self.path} has reached its "
+            f"{format_bytes(MAX_DB_BYTES)} cap, so this write was refused and nothing "
+            "was saved. Inspect usage with `lop memory status`, reclaim space with "
+            "`lop memory forget SCOPE/ID --revision REV --yes`, and compact the file "
+            f"with `sqlite3 {shlex.quote(str(self.path))} 'VACUUM'` — run that VACUUM "
+            "first when the forget is also refused. See guide://memory."
+        )
+
+    def _storage_view(self, db: sqlite3.Connection) -> dict[str, Any]:
+        """Bytes the store holds against the byte cap, measured from its pages.
+
+        WHY ``page_count * page_size`` and not the ``memory.db*`` file sizes: the
+        cap is enforced on the database's page count, while the WAL and SHM
+        siblings have their own journal bound. Summing the files could report
+        more than the cap while a write still succeeds (or miss the state that
+        refuses it); page_count is the number SQLITE_FULL is decided from.
+        ``max_page_count`` is compared for the same reason: it is the enforced
+        limit, including any override.
+        """
+        pages = int(db.execute("PRAGMA page_count").fetchone()[0])
+        page_size = int(db.execute("PRAGMA page_size").fetchone()[0])
+        cap = int(db.execute("PRAGMA max_page_count").fetchone()[0])
+        used = pages * page_size
+        return {
+            "storage_bytes": used,
+            "storage_cap_bytes": MAX_DB_BYTES,
+            "storage_percent": round(100.0 * used / MAX_DB_BYTES, 1) if MAX_DB_BYTES else 0.0,
+            "storage_full": pages >= cap,
+            "database_path": str(self.path),
+        }
 
     def _origin(self, db: sqlite3.Connection) -> str:
         if self.origin:
@@ -2293,6 +2407,11 @@ class MemoryStore:
                 "active_tokens": 0,
                 "ops": 0,
                 "quotas": [],
+                "storage_bytes": 0,
+                "storage_cap_bytes": MAX_DB_BYTES,
+                "storage_percent": 0.0,
+                "storage_full": False,
+                "database_path": str(self.path),
                 "limits": {
                     "global_tokens": GLOBAL_TOKENS,
                     "owner_tokens": OWNER_TOKENS,
@@ -2345,9 +2464,7 @@ class MemoryStore:
                 "ops": count,
                 "quotas": quotas,
                 "next_cursor": rows[-1][0] if len(rows) == limit else None,
-                "storage_bytes": sum(
-                    p.stat().st_size for p in self.root.glob("memory.db*") if p.is_file()
-                ),
+                **self._storage_view(db),
                 "limits": {
                     "global_tokens": GLOBAL_TOKENS,
                     "owner_tokens": OWNER_TOKENS,
