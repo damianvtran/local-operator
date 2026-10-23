@@ -1,5 +1,5 @@
 {
-  "base": "e29143e2351d0f81ebb2d42691b74038942d03b8",
+  "base": "fb757aa3592a426d1dc68ce26c8eef1f50860fb6",
   "loaded_sources": [
     "tests/unit/tui/test_sidebar_repaint.py",
     "tests/unit/tui/lfs_side_plugin_6911.py",
@@ -15,8 +15,8 @@
     "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
     "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
     "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60",
-    "tests/unit/tui/lfs_side_plugin_6911.py": "ba1ad3f2a6a254bcda100ce0d3df592a41b9ec067bb3bdef4d6d114b9c4d52bf",
-    "scripts/diagnostics/lfs_side_6911/controller.py": "f54b537af4a72811ac94f126dbf3465856ee799293c6af91c25304e7be8b5fcd"
+    "tests/unit/tui/lfs_side_plugin_6911.py": "4ff126aaddf22776620d1f322bf4c13f5b25e99c5d05efee0e16f27ec1f04c05",
+    "scripts/diagnostics/lfs_side_6911/controller.py": "e9413de254fbbb198919370ed467f57cf632d82cd6a1f973031f096ae1ca247a"
   },
   "historical95a_byte_match": {
     "tests/unit/tui/test_sidebar_repaint.py": true,

@@ -20,7 +20,7 @@ NODE = "tests/unit/tui/test_sidebar_repaint.py::test_identical_catalog_does_not_
 
 def qualify(proof, expected):
     rows, reports = proof["rows"], proof["reports"]
-    if [r["variant"] for r in rows] != ["baseline", "render"]:
+    if [r["variant"] for r in rows] != ["baseline", "render"] or [r["token"] for r in rows] != [1, 2]:
         raise ValueError("missing/duplicate variant")
     if len(reports) != 6 or [r["phase"] for r in reports] != ["setup", "call", "teardown"] * 2:
         raise ValueError("missing phases")
@@ -80,11 +80,11 @@ def main():
         proof = json.loads(path.read_text())
         result["verdict"] = qualify(proof, expected)
         # Strict structural projection, not wholesale plugin output forwarding.
-        result["rows"] = [{k:r[k] for k in ("variant", "count", "prepare_calls", "renders", "assertion", "call_pass", "restored", "before", "after", "identity")} for r in proof["rows"]]
+        result["rows"] = [{k:r[k] for k in ("variant", "token", "count", "prepare_calls", "renders", "assertion", "call_pass", "restored", "before", "after", "identity")} for r in proof["rows"]]
         shutil.rmtree(work)
     try:
-        child = subprocess.Popen([sys.executable,"-B","-m","pytest",NODE,NODE,
-            "--keep-duplicates","-n0","-q","--tb=no","-o","addopts=",
+        child = subprocess.Popen([sys.executable,"-B","-m","pytest",NODE,
+            "-n0","-q","--tb=no","-o","addopts=",
             "-p","tests.unit.tui.lfs_side_plugin_6911"],cwd=ROOT,env=env,
             stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
         try:
