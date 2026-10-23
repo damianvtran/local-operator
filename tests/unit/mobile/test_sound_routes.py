@@ -4,12 +4,17 @@ WHY THESE THREE ROUTES. A turn's generated sound is a supplement artifact on the
 beat's own ``sounds[]`` (``{attachment, mime, title, duration_s}``), not a message
 block, so ``api_session_attachment``'s ``(entry, kind, i)`` index cannot address it.
 The digest IS the address, exactly as the component document route already says for
-frames. These tests pin the three facts a player depends on:
+frames. These tests pin the facts a player AND the origin depend on:
 
 * audio bytes answer a Range request (phone Safari refuses a full-body 200) with the
   sidecar's own ``Content-Type``, and every miss is a clean 404/400;
-* the peaks sidecar travels verbatim — and an absent one is a 404, NEVER fabricated
-  zeros, because the phone draws its honest flat scrubber from the absence;
+* ONLY ``audio/*`` is served (round-1 review B1): the store is shared with
+  agent-authored ``text/html`` component blobs, so a component digest must never
+  come back as a page at the relay's own origin;
+* authorisation is THREE facts (round-1 review m1): the cookie, a durable local user
+  conversation, AND a ``sounds[]`` entry in one of that conversation's
+  ``supplement_v1`` rows naming the digest. A component reference is not a sound
+  reference, and another session's sound is not this session's to serve;
 * the Library waveform is the SAME service reader the desktop route uses, proxied
   through ``mobile/library.py``'s refusal mapping.
 
@@ -34,6 +39,7 @@ from local_operator.session.attachments import AttachmentStore
 from local_operator.session.transcript import Transcript
 
 SESSION_ID = "soundsession"
+OTHER_SESSION = "othersound"
 #: Enough real bytes to exercise the Range arithmetic; no decoder ever sees them
 #: (the bytes route serves the store verbatim).
 AUDIO = b"ID3\x04\x00\x00\x00\x00\x00\x00" + bytes(range(64))
@@ -45,23 +51,68 @@ def _client() -> TestClient:
     return client
 
 
-@pytest.fixture()
-def session() -> dict[str, Any]:
-    """A durable user conversation plus a digest-addressable audio artifact.
-
-    The directory is written the way a real runtime writes one (a transcript via
-    ``Transcript``), so ``_durable_user_session_dir`` — the route's session gate —
-    resolves it without a stubbed predicate.
-    """
+def _session_dir(session_id: str) -> Any:
+    """A durable user conversation's directory (a transcript, no origin marker)."""
     from local_operator.harness.types import Message
 
-    directory = config_dir() / "sessions" / SESSION_ID
+    directory = config_dir() / "sessions" / session_id
     directory.mkdir(parents=True)
     asyncio.run(Transcript(directory).append_message(Message.assistant("a finished answer")))
+    return directory
 
+
+def _reference_sounds(directory: Any, *digests: str) -> None:
+    """Append one settled ``supplement_v1`` row whose ``sounds[]`` names ``digests``.
+
+    The row shape is the producer's own (``supplements/persistence.build_details``):
+    ``{anchor, job, version, state, files, components, sounds}`` under ``details``.
+    """
+    sounds = [
+        {"attachment": digest, "mime": "audio/mpeg", "title": "clip", "duration_s": 1.5}
+        for digest in digests
+    ]
+    asyncio.run(
+        Transcript(directory).append_custom(
+            "supplement_v1",
+            {
+                "anchor": "b" * 32,
+                "job": "3f9c1a7e5b20",
+                "version": 1,
+                "state": "done",
+                "files": [],
+                "components": [],
+                "sounds": sounds,
+            },
+        )
+    )
+
+
+def _reference_component(directory: Any, digest: str) -> None:
+    """A supplement row whose only attachment reference is a COMPONENT (not a sound)."""
+    asyncio.run(
+        Transcript(directory).append_custom(
+            "supplement_v1",
+            {
+                "anchor": "c" * 32,
+                "job": "9a1b2c3d4e5f",
+                "version": 1,
+                "state": "done",
+                "files": [],
+                "components": [{"attachment": digest, "title": "card", "source": "x"}],
+                "sounds": [],
+            },
+        )
+    )
+
+
+@pytest.fixture()
+def session() -> dict[str, Any]:
+    """A durable user conversation plus a referenced, digest-addressable sound."""
+    directory = _session_dir(SESSION_ID)
     store = AttachmentStore()
     ref = store.put_bytes(AUDIO, "audio/mpeg")
     assert ref is not None
+    _reference_sounds(directory, ref.digest)
     return {"store": store, "digest": ref.digest, "directory": directory}
 
 
@@ -91,11 +142,16 @@ def test_sound_bytes_full_and_ranged(session: dict[str, Any]) -> None:
     assert full.headers["content-type"] == "audio/mpeg"
     assert full.headers["accept-ranges"] == "bytes"
     assert full.headers["cache-control"] == "public, max-age=31536000, immutable"
+    # Round-1 review B1: audio bytes never sniff into another type, and another
+    # origin's page cannot embed them.
+    assert full.headers["x-content-type-options"] == "nosniff"
+    assert full.headers["cross-origin-resource-policy"] == "same-origin"
 
     ranged = client.get(url, params=params, headers={"Range": "bytes=0-9"})
     assert ranged.status_code == 206
     assert ranged.content == AUDIO[:10]
     assert ranged.headers["content-range"] == f"bytes 0-9/{size}"
+    assert ranged.headers["x-content-type-options"] == "nosniff"
 
     tail = client.get(url, params=params, headers={"Range": "bytes=-4"})
     assert tail.status_code == 206
@@ -132,6 +188,75 @@ def test_sound_bytes_misses_and_bad_shapes(session: dict[str, Any]) -> None:
     )
 
 
+def test_sound_bytes_require_a_reference_in_this_session(session: dict[str, Any]) -> None:
+    """The third authorisation fact (round-1 review m1): a digest alone is not enough."""
+    client = _client()
+    store = session["store"]
+    unreferenced = store.put_bytes(AUDIO + b"unreferenced", "audio/mpeg")
+    assert unreferenced is not None
+
+    # Bytes exist, but no supplement row of THIS session names the digest.
+    assert (
+        client.get(
+            f"/api/sessions/{SESSION_ID}/sound", params={"digest": unreferenced.digest}
+        ).status_code
+        == 404
+    )
+
+    # A reference from ANOTHER conversation does not travel.
+    other = _session_dir(OTHER_SESSION)
+    _reference_sounds(other, unreferenced.digest)
+    assert (
+        client.get(
+            f"/api/sessions/{SESSION_ID}/sound", params={"digest": unreferenced.digest}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(f"/api/sessions/{OTHER_SESSION}/sound", params={"digest": unreferenced.digest})
+        .status_code
+        == 200
+    )
+
+
+def test_component_reference_does_not_authorise_audio(session: dict[str, Any]) -> None:
+    """A ``components[]`` attachment is not a ``sounds[]`` attachment.
+
+    The precise reader exists because ``_journal_references_digest`` matches any
+    attachment on a supplement row; that would let a component digest reach the
+    audio family and, before the B1 mime gate, serve a document.
+    """
+    client = _client()
+    store = session["store"]
+    ref = store.put_bytes(AUDIO + b"component", "audio/mpeg")
+    assert ref is not None
+    _reference_component(session["directory"], ref.digest)
+
+    assert (
+        client.get(f"/api/sessions/{SESSION_ID}/sound", params={"digest": ref.digest}).status_code
+        == 404
+    )
+
+
+def test_sound_bytes_refuse_non_audio_sidecars(session: dict[str, Any]) -> None:
+    """B1: an agent-authored ``text/html`` blob must never come back as a page.
+
+    The digest is deliberately REFERENCED as a sound so the refusal under test is
+    the mime gate, not the reference gate.
+    """
+    client = _client()
+    store = session["store"]
+    page = b"<!doctype html><html><body><script>document.title='pwned'</script></body></html>"
+    ref = store.put_bytes(page, "text/html")
+    assert ref is not None
+    _reference_sounds(session["directory"], ref.digest)
+
+    response = client.get(f"/api/sessions/{SESSION_ID}/sound", params={"digest": ref.digest})
+    assert response.status_code == 404
+    assert "text/html" not in response.headers.get("content-type", "")
+    assert b"<script>" not in response.content
+
+
 def test_sound_bytes_default_mime_when_sidecar_states_none(session: dict[str, Any]) -> None:
     """The sidecar's ``application/octet-stream`` is the sentinel for "states none".
 
@@ -141,6 +266,7 @@ def test_sound_bytes_default_mime_when_sidecar_states_none(session: dict[str, An
     client = _client()
     ref = session["store"].put_bytes(b"\x00\x01\x02\x03", "application/octet-stream")
     assert ref is not None
+    _reference_sounds(session["directory"], ref.digest)
 
     response = client.get(f"/api/sessions/{SESSION_ID}/sound", params={"digest": ref.digest})
     assert response.status_code == 200
@@ -161,6 +287,7 @@ def test_session_waveform_sidecar_and_absence(session: dict[str, Any]) -> None:
     # A digest with bytes but NO sidecar is a 404 — never a fabricated flat line.
     bare = session["store"].put_bytes(b"\x00\x01\x02\x03", "audio/mpeg")
     assert bare is not None
+    _reference_sounds(session["directory"], bare.digest)
     absent = client.get(url, params={"digest": bare.digest})
     assert absent.status_code == 404
     assert absent.headers["cache-control"] == "no-store"
@@ -170,6 +297,30 @@ def test_session_waveform_sidecar_and_absence(session: dict[str, Any]) -> None:
         client.get("/api/sessions/not-a-session/waveform", params={"digest": session["digest"]})
         .status_code
         == 404
+    )
+
+
+def test_waveform_requires_the_same_reference(session: dict[str, Any]) -> None:
+    """The peaks family shares the byte route's three facts, not just the cookie."""
+    client = _client()
+    store = session["store"]
+    peaks = [0.25] * 240
+    unreferenced = store.put_bytes(AUDIO + b"wave", "audio/mpeg")
+    assert unreferenced is not None
+    assert store.put_peaks(unreferenced.digest, peaks)
+
+    assert (
+        client.get(
+            f"/api/sessions/{SESSION_ID}/waveform", params={"digest": unreferenced.digest}
+        ).status_code
+        == 404
+    )
+    _reference_sounds(session["directory"], unreferenced.digest)
+    assert (
+        client.get(
+            f"/api/sessions/{SESSION_ID}/waveform", params={"digest": unreferenced.digest}
+        ).status_code
+        == 200
     )
 
 

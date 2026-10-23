@@ -6223,7 +6223,7 @@ def build_app(daemon: MobileDaemon):
         return JSONResponse(await manifest_payload(config_dir(), session_id))
 
     def _ranged_media_response(
-        request: Request, data: bytes, media_type: str, cache: dict[str, str]
+        request: Request, data: bytes, media_type: str, headers: dict[str, str]
     ) -> Response:
         """One media body, honouring a single byte Range.
 
@@ -6244,7 +6244,7 @@ def build_app(daemon: MobileDaemon):
                 headers={
                     "Content-Range": f"bytes */{len(data)}",
                     "Accept-Ranges": "bytes",
-                    **cache,
+                    **headers,
                 },
             )
         if window is not None:
@@ -6256,13 +6256,13 @@ def build_app(daemon: MobileDaemon):
                 headers={
                     "Content-Range": f"bytes {first}-{last}/{len(data)}",
                     "Accept-Ranges": "bytes",
-                    **cache,
+                    **headers,
                 },
             )
         return Response(
             content=data,
             media_type=media_type,
-            headers={"Accept-Ranges": "bytes", **cache},
+            headers={"Accept-Ranges": "bytes", **headers},
         )
 
     async def api_session_image(request: Request) -> Response:
@@ -6343,8 +6343,8 @@ def build_app(daemon: MobileDaemon):
         if found is None:
             return JSONResponse({"error": "no such attachment"}, status_code=404)
         data, mime_type = found
-        cache = {"Cache-Control": "public, max-age=31536000, immutable"}
-        return _ranged_media_response(request, data, mime_type, cache)
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        return _ranged_media_response(request, data, mime_type, headers)
 
     async def api_session_sound(request: Request) -> Response:
         """One supplement sound's audio bytes, keyed by its attachment digest.
@@ -6356,12 +6356,23 @@ def build_app(daemon: MobileDaemon):
         so the digest IS its whole address — the same shape the component document
         route uses, and the shape the desktop plane's sound family uses.
 
-        GATES: the cookie (``gate``), the session existing as a LOCAL USER
+        AUTHORISATION IS THREE FACTS, the document route's own shape (memo §2.7):
+        the cookie (``gate``), the session existing on disk as a LOCAL USER
         conversation (``_durable_user_session_dir`` — a live generation and an ended
         conversation both qualify, because a played-back answer must still play), and
-        the digest resolving in the content-addressed store. Deliberately NOT
-        ``_entry_for_session``: that serves only live generations, which would mute
-        every historical turn's sounds.
+        the digest being REFERENCED by the ``sounds[]`` of a ``supplement_v1`` row in
+        that session's journal (``_journal_references_sound``). The third is what
+        makes a digest alone insufficient: a component digest is also an
+        ``attachment`` on a supplement row, and it must not reach the audio family.
+        Deliberately NOT ``_entry_for_session``: that serves only live generations,
+        which would mute every historical turn's sounds.
+
+        ONLY AUDIO IS SERVED (round-1 review B1). The store is shared with
+        agent-authored ``text/html`` component blobs, and this route's origin is the
+        relay's own — returning one as ``text/html`` would run script with the auth
+        cookie. So a non-``audio/*`` sidecar is the same honest 404 as a missing
+        sound; the type is never sniffed, rewritten or guessed around. Every answer
+        also carries ``nosniff`` and ``same-origin`` (the library route's policy).
 
         RANGE + CACHE mirror the attachment route: phone Safari will not play a
         sound that arrives as a full-body 200, and the bytes are content-addressed so
@@ -6383,7 +6394,14 @@ def build_app(daemon: MobileDaemon):
         def load() -> tuple[bytes, str] | None:
             from local_operator.session.attachments import AttachmentStore
 
-            if _durable_user_session_dir(session_id) is None:
+            directory = _durable_user_session_dir(session_id)
+            if directory is None:
+                return None
+            try:
+                journal = (directory / "transcript.jsonl").read_bytes()
+            except OSError:
+                return None
+            if not _journal_references_sound(journal, digest):
                 return None
             return AttachmentStore().get_bytes(digest)
 
@@ -6393,8 +6411,16 @@ def build_app(daemon: MobileDaemon):
         data, mime_type = found
         if mime_type == "application/octet-stream":
             mime_type = "audio/mpeg"
-        cache = {"Cache-Control": "public, max-age=31536000, immutable"}
-        return _ranged_media_response(request, data, mime_type, cache)
+        if not mime_type.startswith("audio/"):
+            # NEVER a page: a component's text/html blob must not become
+            # executable content at this origin, whatever row references it.
+            return JSONResponse({"error": "no such sound"}, status_code=404)
+        headers = {
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Cross-Origin-Resource-Policy": "same-origin",
+        }
+        return _ranged_media_response(request, data, mime_type, headers)
 
     async def api_session_waveform(request: Request) -> Response:
         """One supplement sound's waveform sidecar, keyed by the same digest.
@@ -6405,6 +6431,13 @@ def build_app(daemon: MobileDaemon):
         ONE sidecar decoder and its bounded legacy repair is not re-implemented
         here. ``no-store``: peaks are cheap to re-ask and a surface that renders a
         waveform must never draw yesterday's bars for a re-generated digest.
+
+        The same three facts authorise it as the byte route: the cookie, a durable
+        local user conversation, and a ``sounds[]`` entry in one of its
+        ``supplement_v1`` rows naming this digest. Waveform data is not secret, but
+        the peaks of another conversation's sound are not this session's to serve,
+        and one authorisation rule for the whole family is easier to keep true than
+        two.
 
         A missing sidecar is a 404, NEVER a fabricated flat line: the phone draws
         its honest flat scrubber from the absence itself, and a zero envelope the
@@ -6428,7 +6461,14 @@ def build_app(daemon: MobileDaemon):
             from local_operator.audiogen.recovery import waveform_payload
             from local_operator.session.attachments import AttachmentStore
 
-            if _durable_user_session_dir(session_id) is None:
+            directory = _durable_user_session_dir(session_id)
+            if directory is None:
+                return None
+            try:
+                journal = (directory / "transcript.jsonl").read_bytes()
+            except OSError:
+                return None
+            if not _journal_references_sound(journal, digest):
                 return None
             return waveform_payload(AttachmentStore(), digest)
 
@@ -6490,6 +6530,50 @@ def build_app(daemon: MobileDaemon):
                 continue
             if any(match == needle for match in _ATTACHMENT_REF.findall(line)):
                 return True
+        return False
+
+    def _journal_references_sound(payload: bytes, digest: str) -> bool:
+        """Whether a ``supplement_v1`` row's ``sounds[]`` names ``digest``.
+
+        THE SOUND ROUTES' THIRD AUTHORISATION FACT, and deliberately a PRECISE
+        reader rather than ``_journal_references_digest`` above: that helper
+        matches any ``attachment`` reference on a supplement row, which includes
+        the COMPONENT document digests. Serving an audio route off a component
+        digest would let the bytes family be reached through a reference that
+        never meant it — the round-1 review's own distinction (B1's sibling).
+
+        Read per row, with the same cheap pre-filter (the marker and the digest
+        must both appear on the line before a parse is worth doing). A beat that
+        has not yet been journaled references nothing yet; the live projection
+        only paints a settled beat, whose row the job writes at settle.
+        """
+        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+        marker = SUPPLEMENT_CUSTOM_TYPE.encode("ascii")
+        needle = digest.encode("ascii")
+        for line in payload.splitlines():
+            if marker not in line or needle not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            row_payload = row.get("payload")
+            if not isinstance(row_payload, dict):
+                continue
+            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                continue
+            details = row_payload.get("details")
+            if not isinstance(details, dict):
+                continue
+            sounds = details.get("sounds")
+            if not isinstance(sounds, list):
+                continue
+            for sound in sounds:
+                if isinstance(sound, dict) and sound.get("attachment") == digest:
+                    return True
         return False
 
     async def api_session_supplement_document(request: Request) -> Response:

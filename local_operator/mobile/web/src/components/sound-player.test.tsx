@@ -63,6 +63,14 @@ describe("sound-player", () => {
 		expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
 	});
 
+	it("cancels the gesture without playing (a cancel is not a click)", () => {
+		render(<SoundPlayer src="/sound?a" peaks={PEAKS} label="clip" durationHint={10} />);
+		fireEvent.pointerDown(track(), { clientX: 25, pointerId: 1 });
+		fireEvent.pointerCancel(track(), { clientX: 25, pointerId: 1 });
+
+		expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+	});
+
 	it("a pause press pauses, and a second press resumes", async () => {
 		render(<SoundPlayer src="/sound?a" peaks={PEAKS} label="clip" durationHint={10} />);
 		const button = screen.getByRole("button");
@@ -83,19 +91,29 @@ describe("sound-player", () => {
 		expect(clock()).toBe("0:00");
 	});
 
-	it("pauses the previously playing sound when a second one starts", async () => {
-		render(
+	it("pauses the previously playing ELEMENT when a second one starts", async () => {
+		const { container } = render(
 			<>
 				<SoundPlayer src="/sound?a" peaks={PEAKS} label="first" durationHint={10} />
 				<SoundPlayer src="/sound?b" peaks={PEAKS} label="second" durationHint={10} />
 			</>,
 		);
+		const [firstAudio, secondAudio] = Array.from(container.querySelectorAll("audio"));
+		/* Instance spies, not the prototype: the contract is that the element
+		   that WAS audible is the one paused, and a prototype-level assertion
+		   cannot tell which element received the call (round-1 review N2). */
+		const firstPause = vi.spyOn(firstAudio, "pause");
+		const secondPause = vi.spyOn(secondAudio, "pause");
 		const [first, second] = screen.getAllByRole("button");
+
 		fireEvent.click(first);
 		await waitFor(() => expect(first.getAttribute("aria-pressed")).toBe("true"));
+		expect(firstPause).not.toHaveBeenCalled();
+
 		fireEvent.click(second);
-		/* The registry pauses the FIRST element before the second plays. */
-		expect(HTMLMediaElement.prototype.pause).toHaveBeenCalled();
+		await waitFor(() => expect(second.getAttribute("aria-pressed")).toBe("true"));
+		expect(firstPause).toHaveBeenCalledTimes(1);
+		expect(secondPause).not.toHaveBeenCalled();
 	});
 
 	it("marks a null peaks list as the flat scrubber, never a fabricated envelope", () => {

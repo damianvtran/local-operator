@@ -106,6 +106,22 @@ describe("library asset card", () => {
 		expect(onOpen).toHaveBeenCalledTimes(1);
 	});
 
+	it("stacks the player above the inset-0 open overlay, not merely beside it", () => {
+		/* `fireEvent` dispatches at the target and never hit-tests, so the click
+		   test above cannot see a stacking regression (round-1 review m2).
+		   These two assertions CAN fail if `z-10` is dropped or the seating
+		   moves after the overlay: the open button must follow the player in
+		   document order AND paint under a real stacking context. */
+		const { container } = render(
+			<AssetCard asset={asset()} onOpen={() => {}} onMenu={() => {}} />,
+		);
+		const seat = container.querySelector("[data-sound-seat]");
+		if (!seat) throw new Error("no sound seat rendered");
+		const open = screen.getByRole("button", { name: "open chime.mp3" });
+		expect(seat.className).toContain("z-10");
+		expect(seat.compareDocumentPosition(open) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
 	it("keeps an image card on the thumbnail path with no player", () => {
 		const { container } = render(
 			<AssetCard
