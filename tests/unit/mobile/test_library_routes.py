@@ -1,8 +1,8 @@
 """``/api/library*`` on the wire: auth, projection, filters, tags, bytes.
 
-The catalog is SYNTHETIC: ``build_catalog`` is replaced with a fixed
-:class:`~local_operator.library.index.Catalog` pointing at files this test
-created, so every assertion here is about the relay's HTTP contract rather
+The catalog is SYNTHETIC: a fixed set of assets is written into the derived
+index tables the service reads (``library/store.py``), pointing at files this
+test created, so every assertion here is about the relay's HTTP contract rather
 than about the scanner (which owns its own suite). The metadata store is the
 real one under the isolated config root, because tags and edits are the
 authoritative half and a fake there would test nothing.
@@ -22,8 +22,8 @@ import pytest
 from starlette.testclient import TestClient
 
 from local_operator.library import identity
-from local_operator.library import index as library_index
-from local_operator.library.index import Asset, Catalog, Occurrence
+from local_operator.library.index import Asset, Occurrence
+from local_operator.library.store import LibraryStore
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
 
@@ -124,24 +124,69 @@ def library(monkeypatch: pytest.MonkeyPatch) -> Any:
         origin="written",
     )
     assets = [image_asset, notes_asset, page_asset, svg_asset]
-    catalog = Catalog(
-        assets=assets,
-        revision=7,
-        state="ready",
-        sessions_total=1,
-        sessions_scanned=1,
-        built_at=1_700_000_200.0,
-    )
-    monkeypatch.setattr(library_index, "build_catalog", lambda *args, **kwargs: catalog)
-    # Content/thumbnail/get read the cached-or-persisted aggregate instead of
-    # building; the synthetic catalog must be injected at both entry points.
-    monkeypatch.setattr(library_index, "catalog_for_read", lambda *args, **kwargs: catalog)
-    # The scanner normally creates these rows as a side effect of indexing; a
-    # synthetic catalog has to do it explicitly or a metadata write has no row
-    # to land on (``update_fields`` returns ``None`` rather than inventing one).
+    # The scanner normally writes these rows as a side effect of indexing. The
+    # synthetic catalog has to do it explicitly: a metadata write with no row to
+    # land on returns ``None`` rather than inventing one, and the service reads
+    # ONLY the derived tables now.
     store = MetadataStore(config_dir())
+    db = LibraryStore(config_dir())
+    db.ensure_schema()
+    rows: list[dict[str, Any]] = []
     for asset in assets:
         store.ensure_asset(asset.id, asset.key, derived_name=asset.derived_name)
+        for occurrence in asset.occurrences:
+            rows.append(
+                {
+                    "asset_id": asset.id,
+                    "key": asset.key,
+                    "session_id": occurrence.session_id,
+                    "title": occurrence.title,
+                    "origin": occurrence.origin,
+                    "child_id": "",
+                    "label": None,
+                    "tool": occurrence.tool,
+                    "intent": None,
+                    "first_ts": occurrence.first_ts,
+                    "last_ts": occurrence.last_ts,
+                    "first_seq": occurrence.first_seq,
+                    "last_seq": occurrence.last_seq,
+                    "touches": 1,
+                    "highlighted": False,
+                    "name": asset.derived_name,
+                    "path": asset.path,
+                    "kind": asset.kind,
+                    "content_type": asset.content_type,
+                    "size_bytes": asset.size_bytes,
+                    "width": None,
+                    "height": None,
+                    "duration_s": None,
+                }
+            )
+
+    # These are HTTP-contract tests over a FIXED set of rows: the background
+    # worker would reconcile the synthetic session against a config that has no
+    # journal for it and prune exactly what the fixture just inserted. The
+    # worker's own suite covers indexing.
+    class _NoWorker:
+        @staticmethod
+        def enqueue_thumbnail(_asset_id: str, _width: int = 480) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "local_operator.library.service.ensure_started", lambda *a, **k: _NoWorker()
+    )
+    with db.write() as connection:
+        db.replace_session_occurrences(connection, SESSION_A, rows)
+        db.recompute_assets(connection, [asset.id for asset in assets])
+        db.record_session(
+            connection,
+            SESSION_A,
+            title="fixture",
+            sig={"size": 1, "mtime": 1.0, "inode": 1},
+            complete=True,
+        )
+        db.set_state(connection, backfill_done="1", sessions_total="1", revision="7")
+        db.bump_revision(connection)
     return {
         "image": image_asset,
         "markdown": notes_asset,
@@ -392,3 +437,18 @@ def test_facets_without_rows(library: dict[str, Any]) -> None:
     assert facets["total"] == 4
     assert "rows" not in facets
     assert facets["counts"]["category"]["document"] == 2
+
+
+def test_an_unreadable_index_is_a_503_not_a_500(library: dict[str, Any], monkeypatch) -> None:
+    """The phone sees the same typed refusal the desktop routes give."""
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    def boom(self, *args, **kwargs):
+        raise IndexUnavailable("file is not a database")
+
+    monkeypatch.setattr(LibraryStore, "asset", boom)
+    monkeypatch.setattr(LibraryStore, "query_page", boom)
+    monkeypatch.setattr(LibraryStore, "recover_derived", lambda self: False)
+    response = _client().get("/api/library/assets")
+    assert response.status_code == 503, response.text
+    assert response.json()["code"] == "library_store_busy"

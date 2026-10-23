@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import stat
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,10 @@ from typing import Any, Final
 
 from local_operator.library import classify, identity
 from local_operator.library import index as library_index
+from local_operator.library import store as library_store
+from local_operator.library.indexer import ensure_started
 from local_operator.library.metadata import FIELD_SOURCES, MetadataStore, TagRefused
+from local_operator.library.store import LibraryStore
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session_files import service as files_service
 from local_operator.session_files.scan import ORIGINS as _SCAN_ORIGINS
@@ -79,6 +83,15 @@ class InvalidFilter(ValueError):
 
 class AssetNotFound(LookupError):
     """No asset with that id is in the catalog."""
+
+
+class LibraryUnavailable(Exception):
+    """The derived index cannot be read, and could not be rebuilt (HTTP 503).
+
+    Distinct from :class:`AssetNotFound`: the asset may well exist, the index
+    just cannot answer yet. A route maps it to the same ``unavailable``
+    envelope it already uses for an unwritable metadata store.
+    """
 
 
 class ContentUnavailable(Exception):
@@ -333,96 +346,9 @@ def _metadata_for(
     return found
 
 
-def _counts(assets: list[library_index.Asset]) -> dict[str, dict[str, int]]:
-    counts: dict[str, dict[str, int]] = {
-        "category": {},
-        "origin_group": {},
-        "kind": {},
-    }
-    for asset in assets:
-        for bucket, value in (
-            ("category", asset.category),
-            ("origin_group", asset.origin_group),
-            ("kind", asset.kind),
-        ):
-            counts[bucket][value] = counts[bucket].get(value, 0) + 1
-    return counts
-
-
 def _is_final(asset: library_index.Asset) -> bool:
-    """The operator's kept set: a highlight, or an artifact the agent produced.
-
-    Mentioned and merely-created scratch files are excluded from the ``final``
-    scope; ``all`` still indexes and serves them.
-    """
-    return asset.highlighted or asset.origin_group == "generated"
-
-
-def _matches(asset: library_index.Asset, row: dict[str, Any], query: Query) -> bool:
-    if query.scope == "final" and not _is_final(asset):
-        return False
-    if query.categories and asset.category not in query.categories:
-        return False
-    if query.kinds and asset.kind not in query.kinds:
-        return False
-    if query.origin_groups and asset.origin_group not in query.origin_groups:
-        return False
-    if query.origins and not query.origins.intersection(asset.origins):
-        return False
-    if query.highlighted is not None and asset.highlighted != query.highlighted:
-        return False
-    if query.favorite is not None and bool(row["favorite"]) != query.favorite:
-        return False
-    if query.organized is not None and bool(row["organized"]) != query.organized:
-        return False
-    session_ids = set(query.session_ids)
-    if query.session:
-        session_ids.add(query.session)
-    if session_ids and not any(
-        occurrence.session_id in session_ids for occurrence in asset.occurrences
-    ):
-        return False
-    if query.tag:
-        tag_ids = {tag["id"] for tag in row["tags"]}
-        if query.tag not in tag_ids:
-            return False
-    if query.q:
-        haystack = " ".join(
-            [
-                row["name"],
-                row["description"],
-                row["derived_name"],
-                row["ref"]["display_path"],
-                " ".join(tag["name"] for tag in row["tags"]),
-                " ".join(occurrence.title for occurrence in asset.occurrences if occurrence.title),
-            ]
-        ).lower()
-        if query.q.lower() not in haystack:
-            return False
-    return True
-
-
-def _sort_key(asset: library_index.Asset, row: dict[str, Any], sort: str) -> Any:
-    """NATURAL ascending keys; ``order=desc`` is the caller's ``reverse``.
-
-    Numeric sorts used to negate here, which made the caller invert booleans
-    twice and is how "oldest first" ends up looking like "newest first". One
-    direction, decided once.
-    """
-    if sort == "name":
-        return row["name"].lower(), asset.id
-    if sort == "kind":
-        return asset.kind, row["name"].lower(), asset.id
-    if sort == "size":
-        return asset.size_bytes or 0, asset.id
-    if sort == "created":
-        return asset.first_ts, asset.id
-    if sort == "modified":
-        return asset.last_ts, asset.id
-    if sort == "organized":
-        organized = row["organized"]
-        return (organized["at"] if organized else 0.0), asset.id
-    return asset.last_ts, asset.id
+    """The operator's kept set; defined beside the index it is written into."""
+    return library_store.is_final(asset)
 
 
 def _cursor(query: Query, revision: int, offset: int) -> str:
@@ -471,6 +397,51 @@ def _scoped_tags(
     return [{**tag, "count": used[tag["id"]]} for tag in tags if tag["id"] in used]
 
 
+#: How long a failed recovery suppresses the next attempt. A persistently
+#: unreadable file (a bad sector, a full disk) would otherwise run DROP/CREATE
+#: on every request, and the recovery itself is the hammer.
+RECOVERY_COOLDOWN_S: Final = 5.0
+#: One bounded wait before the list retries an index it could not read. Long
+#: enough for a concurrent writer's DDL to commit, short enough not to stall a
+#: request that is about to be answered from a rebuilt index anyway.
+INDEX_RETRY_S: Final = 0.05
+
+_RECOVERY_ATTEMPTS: dict[str, float] = {}
+_RECOVERY_LOCK = threading.Lock()
+
+
+def _recover_index(config: Path) -> bool:
+    """One rebuild attempt after a corrupt derived index. Never raises.
+
+    Derived tables are discardable by design; this is the path that makes that
+    true at runtime instead of only in the module docstring. Metadata is
+    untouched, so names and tags survive. ``ensure_started`` then backfills,
+    because recovery resets ``backfill_done``.
+
+    A failed attempt suppresses the next one for :data:`RECOVERY_COOLDOWN_S`:
+    the caller turns that into the typed 503, which is the honest answer while
+    the file is unreadable, and the cooldown is what stops every request from
+    re-running the DDL.
+    """
+    key = str(Path(config).resolve())
+    now = time.monotonic()
+    with _RECOVERY_LOCK:
+        last = _RECOVERY_ATTEMPTS.get(key)
+        if last is not None and now - last < RECOVERY_COOLDOWN_S:
+            return False
+        _RECOVERY_ATTEMPTS[key] = now
+    try:
+        if not LibraryStore(config).recover_derived():
+            return False
+        # Wake it: the worker may be parked on the 6 h idle timeout, and a
+        # rebuilt index would otherwise stay empty until that tick.
+        ensure_started(config).wake()
+        return True
+    except Exception:  # noqa: BLE001 - a failed recovery is a typed refusal
+        logger.warning("library: index recovery failed", exc_info=True)
+        return False
+
+
 def list_assets(
     config_dir: str | Path,
     query: Query,
@@ -479,38 +450,76 @@ def list_assets(
     home: str | None = None,
     budget_s: float | None = library_index.DEFAULT_BUDGET_S,
 ) -> dict[str, Any]:
-    """The whole answer for one list request. Blocking."""
+    """The whole answer for one list request. Blocking.
+
+    ``budget_s`` is accepted and IGNORED: it used to bound a session scan on the
+    request path, and there is no longer a scan here. The parameter stays so a
+    caller written against the old signature keeps working; removing it would
+    turn a build-on-read budget into an ImportError at the call site.
+    """
+    del budget_s
     config = Path(config_dir)
     home = home or str(Path.home())
-    catalog = library_index.build_catalog(config, budget_s=budget_s, home=home)
-    store = MetadataStore(config)
-    all_assets = catalog.assets
-    if query.scope == "final":
-        # Narrow BEFORE any metadata work: a final listing must not materialise
-        # rows (or count/tag) for scratch files the operator never kept. The
-        # catalog still indexes everything, so scope=all and get_asset work.
-        all_assets = [asset for asset in all_assets if _is_final(asset)]
-    # Materialise a row per asset once, in one transaction: metadata writes
-    # (tags, chat, edit history) key on ``assets.asset_id``, and a list request
-    # is the first place most assets are ever seen. BEFORE the revision is read
-    # — the first call creates rows and therefore bumps it, and reading first
-    # would mint a cursor that is stale on the very next page.
-    store.ensure_assets((asset.id, asset.key, asset.derived_name) for asset in all_assets)
-    # The cursor is bound to BOTH halves: the derived catalog (journals) and
-    # the metadata revision (names/descriptions/tags). A metadata edit can move
-    # a row across a page boundary with no journal change, and a revision that
-    # ignored it would let the next page duplicate one row and skip another.
-    revision = catalog.revision + store.metadata_revision()
-    metas = _metadata_for(store, all_assets)
-    tag_map = store.tags_for_assets(asset.id for asset in all_assets)
-    primary_map = store.primary_tags(asset.id for asset in all_assets)
-    chats = store.chats_for_assets(asset.id for asset in all_assets)
+    # TUI and phone callers reach the service without the server lifespan, so
+    # the index has to be able to start from a read. Idempotent and cheap.
+    ensure_started(config)
+    store = LibraryStore(config)
 
-    # Materialise every row's derived metadata once; filters and sorting read
-    # the row, so no filter can disagree with what the page displays.
-    rows: list[tuple[library_index.Asset, dict[str, Any]]] = []
-    for asset in all_assets:
-        metadata = metas.get(asset.id)
+    def attempt() -> dict[str, Any]:
+        return _list(config, store, query, display=display, home=home)
+
+    try:
+        return attempt()
+    except library_store.IndexUnavailable:
+        # A torn page or a table a concurrent recovery is dropping is transient:
+        # one bounded wait, then one retry, before declaring the index unreadable.
+        time.sleep(INDEX_RETRY_S)
+        try:
+            return attempt()
+        except library_store.IndexUnavailable as error:
+            if not getattr(error, "corrupt", True):
+                # A busy lock or an I/O hiccup is not damage: rebuilding here
+                # would DISCARD a healthy index to answer a transient error.
+                # The typed refusal is the honest answer; the caller retries.
+                raise LibraryUnavailable(str(config)) from None
+            # Still unreadable: the derived file is rebuildable by contract. One
+            # recovery, then an empty BUILDING page the indexer repopulates; a
+            # failed recovery is a 503, never a 500.
+            logger.warning("library: derived index unreadable; rebuilding", exc_info=True)
+            if not _recover_index(config):
+                raise LibraryUnavailable(str(config)) from None
+            return empty_listing("building")
+
+
+def _list(
+    config: Path,
+    store: LibraryStore,
+    query: Query,
+    *,
+    display: bool,
+    home: str,
+) -> dict[str, Any]:
+    metadata = MetadataStore(config)
+    # The cursor binds to BOTH halves: journals (the derived index) and the
+    # metadata revision (names/descriptions/tags). A metadata edit moves a row
+    # across a page boundary with no journal change at all.
+    revision = store.revision() + metadata.metadata_revision()
+    offset, reset = (0, False)
+    if query.cursor:
+        offset, reset = _read_cursor(query.cursor, query, revision)
+    assets, total = store.query_page(query, offset=offset, limit=query.limit)
+    page_ids = [asset.id for asset in assets]
+    # Hydration is scoped to the PAGE. Materialising metadata, tags, chats and
+    # occurrences for the whole catalog was what made a warm list take seconds.
+    occurrences = store.occurrences(page_ids)
+    for asset in assets:
+        asset.occurrences = occurrences.get(asset.id, [])
+    metas = store.metadata_rows(page_ids)
+    tag_map = store.page_tags(page_ids)
+    primary_map = store.primary_tags(page_ids)
+    chats = metadata.chats_for_assets(page_ids)
+    rows: list[dict[str, Any]] = []
+    for asset in assets:
         chat = None
         link = chats.get(asset.id)
         if link:
@@ -523,49 +532,35 @@ def list_assets(
                     "updated_at": float(link.get("last_used_at") or 0.0),
                 }
             else:
-                store.clear_chat(asset.id)
-        row = _row(
-            config,
-            asset,
-            metadata,
-            tag_map.get(asset.id, []),
-            primary_map.get(asset.id),
-            chat,
-            display=display,
-            home=home,
+                metadata.clear_chat(asset.id)
+        rows.append(
+            _row(
+                config,
+                asset,
+                metas.get(asset.id),
+                tag_map.get(asset.id, []),
+                primary_map.get(asset.id),
+                chat,
+                display=display,
+                home=home,
+            )
         )
-        rows.append((asset, row))
-
-    filtered = [(asset, row) for asset, row in rows if _matches(asset, row, query)]
-    filtered.sort(
-        key=lambda pair: _sort_key(pair[0], pair[1], query.sort),
-        reverse=query.effective_order == "desc",
-    )
-
-    offset, reset = (0, False)
-    if query.cursor:
-        offset, reset = _read_cursor(query.cursor, query, revision)
-    page = filtered[offset : offset + query.limit]
-    more = offset + query.limit < len(filtered)
+    state, scanned, sessions_total = store.listing_state()
     return {
-        "state": catalog.state,
+        "state": state,
         "revision": revision,
-        "total": len(filtered),
+        "total": total,
         # Counts are wide within the request's scope on purpose: the filter rail
-        # must not empty itself while the user is narrowing a search.
-        "counts": _counts(all_assets),
-        "tags": (
-            _scoped_tags(store.list_tags(), tag_map)
-            if query.scope == "final"
-            else store.list_tags()
+        # must not empty itself while the user is narrowing a search. They come
+        # from ``idx_counts``, which triggers keep exact as rows move.
+        "counts": store.counts(query.scope),
+        "tags": metadata.list_tags() if query.scope != "final" else store.scoped_tags("final"),
+        "rows": rows,
+        "next_cursor": (
+            _cursor(query, revision, offset + query.limit) if offset + query.limit < total else None
         ),
-        "rows": [row for _asset, row in page],
-        "next_cursor": _cursor(query, revision, offset + query.limit) if more else None,
         "cursor_reset": reset,
-        "scan": {
-            "sessions_total": catalog.sessions_total,
-            "sessions_scanned": catalog.sessions_scanned,
-        },
+        "scan": {"sessions_total": sessions_total, "sessions_scanned": scanned},
     }
 
 
@@ -581,15 +576,18 @@ def get_asset(
         raise AssetNotFound(asset_id)
     config = Path(config_dir)
     home = home or str(Path.home())
-    # Read-only lookup: the cached/persisted aggregate is enough, and a get must
-    # not pay a session scan (or an index rewrite) just to name one row.
-    catalog = library_index.catalog_for_read(config)
-    asset = _read_catalog_asset(catalog, asset_id)
-    if asset is None:
-        # Same miss rule as content/thumbnail: a just-indexed asset may not be
-        # in the last index write yet. One bounded refresh, then refuse.
-        catalog = library_index.build_catalog(config, home=home, refresh=True)
-        asset = _read_catalog_asset(catalog, asset_id)
+    # One indexed row, its occurrences, and nothing else. The old miss rule
+    # rebuilt the whole catalog here "in case the index was stale"; the index is
+    # now kept fresh by a watcher, so a miss is a genuinely unknown id.
+    try:
+        asset = LibraryStore(config).asset(asset_id)
+    except library_store.IndexUnavailable as error:
+        # Recover if we can, but do not pretend the row is missing: it is the
+        # index that cannot answer yet. Only DAMAGE licenses a rebuild — a busy
+        # lock or an I/O hiccup must not discard a healthy index (R4-5).
+        if error.corrupt:
+            _recover_index(config)
+        raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
     store = MetadataStore(config)
@@ -623,8 +621,12 @@ def _known_asset(config_dir: Path, asset_id: str) -> library_index.Asset:
     """
     if not identity.is_asset_id(asset_id):
         raise AssetNotFound(asset_id)
-    catalog = library_index.build_catalog(config_dir)
-    asset = next((item for item in catalog.assets if item.id == asset_id), None)
+    try:
+        asset = LibraryStore(config_dir).asset(asset_id)
+    except library_store.IndexUnavailable as error:
+        if error.corrupt:
+            _recover_index(config_dir)
+        raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
     # Writes key on the SQLite row; a detail/list read creates it for most
@@ -767,12 +769,6 @@ class ContentRef:
     modified_at: float = 0.0
 
 
-def _read_catalog_asset(
-    catalog: library_index.Catalog, asset_id: str
-) -> library_index.Asset | None:
-    return next((item for item in catalog.assets if item.id == asset_id), None)
-
-
 def _catalog_asset(config: Path, asset_id: str) -> library_index.Asset:
     """Resolve an id for a content/thumbnail read.
 
@@ -783,9 +779,12 @@ def _catalog_asset(config: Path, asset_id: str) -> library_index.Asset:
     """
     if not identity.is_asset_id(asset_id):
         raise AssetNotFound(asset_id)
-    asset = _read_catalog_asset(library_index.catalog_for_read(config), asset_id)
-    if asset is None:
-        asset = _read_catalog_asset(library_index.build_catalog(config, refresh=True), asset_id)
+    try:
+        asset = LibraryStore(config).asset(asset_id)
+    except library_store.IndexUnavailable as error:
+        if error.corrupt:
+            _recover_index(config)
+        raise LibraryUnavailable(asset_id) from None
     if asset is None:
         raise AssetNotFound(asset_id)
     return asset
@@ -837,59 +836,40 @@ def resolve_content(config_dir: str | Path, asset_id: str) -> ContentRef:
 def thumbnail(config_dir: str | Path, asset_id: str, width: int = THUMB_MAX_WIDTH) -> ContentRef:
     """Best-effort image thumbnail. ``ContentUnavailable`` for non-images.
 
+    NEVER resizes here. A live cached WebP is served; otherwise the ORIGINAL is
+    returned immediately and the indexer's thumbnail thread is asked for a
+    resized copy, which the next render picks up. Resizing inline put Pillow's
+    decode of a 4 MB image on the grid's critical path for every cold tile.
+
     SVG and GIF are served ORIGINAL: rasterising an animated GIF or a vector
     loses the thing the user wants, and both are small enough to render as-is.
     """
     config = Path(config_dir)
-    asset = _catalog_asset(config, asset_id)
+    width = max(1, min(int(width), THUMB_MAX_WIDTH))
+    if not identity.is_asset_id(asset_id):
+        raise AssetNotFound(asset_id)
+    store = LibraryStore(config)
+    try:
+        asset = store.asset(asset_id)
+        live = store.thumb_is_live(asset_id, width)
+    except library_store.IndexUnavailable as error:
+        if error.corrupt:
+            _recover_index(config)
+        raise LibraryUnavailable(asset_id) from None
+    if asset is None:
+        raise AssetNotFound(asset_id)
     if asset.kind != "image":
         raise ContentUnavailable("not_an_image")
-    source = resolve_content(config, asset_id)
-    suffix = source.path.suffix.lower()
-    if suffix in (".svg", ".gif"):
-        return source
-    width = max(1, min(int(width), THUMB_MAX_WIDTH))
-    stamp = int(source.modified_at or 0)
-    cache_dir = config / "cache" / "library" / "thumbs"
-    target = cache_dir / f"{asset.id}-{width}-{stamp}.webp"
-    if target.is_file():
+    if live is not None:
         return ContentRef(
-            path=target,
+            path=live,
             content_type="image/webp",
             name=f"{Path(asset.derived_name or asset.id).stem}.webp",
             digest=asset.digest is not None,
-            modified_at=target.stat().st_mtime,
+            modified_at=live.stat().st_mtime,
         )
-    try:
-        from PIL import Image  # type: ignore[import-not-found]
-    except ImportError:
-        # Pillow is an optional extra. Serving the original is honest and
-        # bounded to a real image; the grid's own sizing does the rest.
-        return source
-    try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        with Image.open(source.path) as image:
-            image.load()
-            if image.width > width:
-                height = max(1, round(image.height * width / image.width))
-                image = image.resize((width, height), Image.Resampling.LANCZOS)
-            if image.mode not in ("RGB", "RGBA"):
-                image = image.convert("RGBA")
-            # Atomic: two list renders can ask for the same thumbnail at once,
-            # and a half-written WebP is a broken image, not a stale one.
-            temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-            image.save(temp, "WEBP", quality=82)
-            os.replace(temp, target)
-    except Exception:  # noqa: BLE001 - a thumbnail is cosmetic; the row still works
-        logger.debug("library: thumbnail failed for %s", asset_id, exc_info=True)
-        return source
-    return ContentRef(
-        path=target,
-        content_type="image/webp",
-        name=f"{Path(asset.derived_name or asset.id).stem}.webp",
-        digest=asset.digest is not None,
-        modified_at=target.stat().st_mtime,
-    )
+    ensure_started(config).enqueue_thumbnail(asset_id, width)
+    return resolve_content(config, asset_id)
 
 
 __all__ = [
@@ -900,6 +880,7 @@ __all__ = [
     "DEFAULT_ORDER",
     "InvalidCursor",
     "InvalidFilter",
+    "LibraryUnavailable",
     "MAX_LIMIT",
     "ORDERS",
     "Query",

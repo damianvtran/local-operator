@@ -76,6 +76,31 @@ CREATE TABLE IF NOT EXISTS edits(
 CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
+
+#: The AUTHORITATIVE tables, in an order where nothing references a table that
+#: has not been created yet. The derived index's whole-database rebuild copies
+#: exactly these; anything not listed here is derived and may be discarded.
+AUTHORITATIVE_TABLES: Final = (
+    "assets",
+    "tags",
+    "asset_tags",
+    "chats",
+    "chat_history",
+    "conventions",
+    "edits",
+    "state",
+)
+
+
+def schema_sql() -> str:
+    """The authoritative schema script, for the index's whole-database rebuild.
+
+    Kept as a function rather than a bare import so the rebuild path reads as
+    "create the metadata schema", not as reaching into a private constant.
+    """
+    return _SCHEMA
+
+
 #: Primary tags live in ``state`` because §3.1 freezes the table set and
 #: ``asset_tags`` has no primary column. One key per asset is the assignment;
 #: deleting/merging the tag clears it. This is the same "small durable fact in
@@ -97,6 +122,16 @@ class TagRefused(MetadataError):
     def __init__(self, code: str, message: str = "") -> None:
         super().__init__(message or code)
         self.code = code
+
+
+def reset_schema_readiness() -> None:
+    """Forget which paths this process has verified.
+
+    Only a test needs this: production never un-learns a schema inside a live
+    process. A test that simulates "the next process meets a future-version
+    store" is exactly that boundary, so it has to say so explicitly.
+    """
+    MetadataStore._ready_paths.clear()
 
 
 def _now() -> float:
@@ -122,15 +157,18 @@ class MetadataStore:
     """
 
     _bootstrap_lock = threading.Lock()
+    #: Paths whose schema this PROCESS has already verified. Class-level, not
+    #: per instance: ``list_assets`` constructs a store per request, and a
+    #: per-instance flag meant ``CREATE TABLE IF NOT EXISTS`` plus a commit ran
+    #: on every list — DDL on the read path, contending with the indexer's
+    #: writer. The schema cannot change under a running process, so one
+    #: verification per resolved path is sound.
+    _ready_paths: set[str] = set()
 
     def __init__(self, config_dir: str | Path) -> None:
         self.config_dir = Path(config_dir)
         self.path = self.config_dir / DB_DIRNAME / DB_FILENAME
-        # Per-instance schema cache. ``CREATE TABLE IF NOT EXISTS`` on every
-        # call serialised concurrent writers behind the bootstrap lock long
-        # enough that an ensure-then-write pair could lose its row; the schema
-        # cannot change under a running process, so checking once is sound.
-        self._ready = False
+        self._key = str(self.path.resolve())
 
     # -- connection / schema -------------------------------------------------
 
@@ -145,7 +183,10 @@ class MetadataStore:
         try:
             connection.row_factory = sqlite3.Row
             try:
-                connection.execute("PRAGMA journal_mode=WAL")
+                # journal_mode is persisted in the file, so it is set once at
+                # bootstrap (``_ensure_schema``), never per connection: asking
+                # for it here takes a write lock and answers "database is
+                # locked" while another connection is writing.
                 connection.execute("PRAGMA busy_timeout=5000")
                 connection.execute("PRAGMA foreign_keys=OFF")
             except sqlite3.DatabaseError as error:
@@ -158,14 +199,27 @@ class MetadataStore:
             except sqlite3.Error:
                 pass
 
+    def ensure_schema(self) -> bool:
+        """Create or verify the authoritative schema; ``False`` when unavailable.
+
+        Public because the derived index (``library/store.py``) attaches
+        triggers to ``assets``/``asset_tags``/``tags`` and must not be the
+        component that first creates them: the authored tables belong here.
+        """
+        with self._connect() as connection:
+            return self._ensure_schema(connection)
+
     def _ensure_schema(self, connection: sqlite3.Connection) -> bool:
         """Create/verify the schema. ``False`` means "serve an empty catalog"."""
-        if self._ready:
+        if self._key in self._ready_paths:
             return True
         with self._bootstrap_lock:
-            if self._ready:
+            if self._key in self._ready_paths:
                 return True
             try:
+                # Bootstrap only, outside any transaction: WAL is a database
+                # property, and a dead connection belongs in the typed refusal.
+                connection.execute("PRAGMA journal_mode=WAL")
                 connection.executescript(_SCHEMA)
                 connection.execute(
                     "INSERT OR IGNORE INTO state(key, value) VALUES('metadata_revision', '0')"
@@ -192,7 +246,7 @@ class MetadataStore:
                 # even when it inserts nothing; leaving it open makes the next
                 # BEGIN IMMEDIATE fail as "transaction within a transaction".
                 connection.commit()
-                self._ready = True
+                self._ready_paths.add(self._key)
                 return True
             except MetadataUnavailable:
                 return False
