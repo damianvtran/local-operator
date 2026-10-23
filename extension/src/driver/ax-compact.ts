@@ -47,8 +47,14 @@ export interface SnapshotRef {
  * and then click a ref it saw three calls ago.
  */
 export interface CompactOptions {
-  /** Render only the subtree rooted at this AX node's backend DOM node. */
-  rootBackendNodeId?: number;
+  /** Render only the subtree rooted at this AX node's backend DOM node.
+   *
+   * `| undefined` is explicit: the extension's tsconfig sets
+   * `exactOptionalPropertyTypes`, under which passing `{ rootBackendNodeId }`
+   * with an undefined value is a TYPE ERROR (TS2379) — and `snapshot.ts` passes
+   * exactly that shape. The runtime always stripped it; `pnpm typecheck` did
+   * not, which is how this reached review round 1 as a red workflow. */
+  rootBackendNodeId?: number | undefined;
 }
 
 export interface CompactResult {
@@ -78,13 +84,20 @@ function stateSuffix(node: AXNode): string {
   // as the STRING "true". Comparing against `true` alone printed [collapsed]
   // correctly and silently dropped every [checked] — the marker that matters
   // most on a form whose dangerous default is a ticked box.
+  //
+  // The markers ACCUMULATE (review round 1, R1-8): a checked AND disabled
+  // control printed only [checked], which reads as clickable, and a tri-state
+  // `mixed` printed nothing at all.
   const truthy = (value: unknown): boolean => value === true || value === "true";
   const falsy = (value: unknown): boolean => value === false || value === "false";
   const property = (name: string) => node.properties?.find((entry) => entry.name === name)?.value.value;
-  if (falsy(property("expanded"))) return " [collapsed]";
-  if (truthy(property("checked"))) return " [checked]";
-  if (truthy(property("disabled"))) return " [disabled]";
-  return "";
+  const markers: string[] = [];
+  if (falsy(property("expanded"))) markers.push("collapsed");
+  const checked = property("checked");
+  if (truthy(checked)) markers.push("checked");
+  else if (checked === "mixed") markers.push("mixed");
+  if (truthy(property("disabled"))) markers.push("disabled");
+  return markers.length ? ` [${markers.join("] [")}]` : "";
 }
 
 export function compactAX(nodes: AXNode[], epoch: number, options: CompactOptions = {}): CompactResult {
@@ -92,6 +105,24 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
   const refs: Record<string, SnapshotRef> = {};
   const lines: string[] = [];
   let sequence = 0;
+  /* The scoped walk is the WHOLE walk, and that is the fix for a wrong-target
+   * click rather than a nicety (agent review round 1, R1-1).
+   *
+   * Refs used to be minted only for the nodes a scoped snapshot emitted, so
+   * `e1` inside `selector="#webhook-section"` named a different node than `e1`
+   * in the unscoped snapshot of the same page — at the SAME epoch, which
+   * `input.ts` treats as "still valid". A click on the remembered `e1` then hit
+   * the wrong element with no error. Minting in full-tree DFS order and merely
+   * SUPPRESSING the out-of-scope lines makes a scoped snapshot's names a subset
+   * of the unscoped ones: `e57` means one node for the surface's whole epoch,
+   * whichever call produced it.
+   *
+   * `scopeAt` is the absolute depth at which the scope node was entered; it is
+   * saved and restored around each child list so leaving the subtree leaves the
+   * scope. Depth printed is rebased to the scope root (the tree reads like a
+   * small page, not a fragment indented 17 levels deep). */
+  const scopeId = options.rootBackendNodeId;
+  let scopeAt: number | null = null;
   // Guard against cyclic or duplicated childIds in a malformed AX payload:
   // the walk trusts protocol data, and without this a cycle would recurse
   // forever inside the extension's service worker (review round 1, MINOR-1).
@@ -99,6 +130,16 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
   function visit(node: AXNode, depth: number): void {
     if (visited.has(node.nodeId)) return;
     visited.add(node.nodeId);
+    // Enter the scope BEFORE the ignored check: a scope can name an aria-hidden
+    // container, and the subtree underneath is still where the caller asked to
+    // look (its children are transparent, not excluded).
+    const savedScope = scopeAt;
+    if (scopeAt === null && scopeId !== undefined && node.backendDOMNodeId === scopeId) {
+      scopeAt = depth;
+    }
+    // No scope requested => every node is inside; with a scope, only the
+    // subtree at or below the scope node.
+    const inside = scopeId === undefined || (scopeAt !== null && depth >= scopeAt);
     // An ignored node is excluded from the accessible tree but its subtree is
     // NOT: Chrome wraps every real page in ignored generic containers (html and
     // body surface as role "none", ignored: true) sitting directly under the
@@ -117,6 +158,7 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
         const found = byId.get(child);
         if (found) visit(found, depth);
       }
+      scopeAt = savedScope;
       return;
     }
     const role = String(node.role?.value ?? "");
@@ -129,28 +171,31 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
         ref = `e${++sequence}`;
         refs[ref] = { backendNodeId: node.backendDOMNodeId, epoch };
       }
-      lines.push(`${"  ".repeat(depth)}- ${role || "node"}${name ? ` ${JSON.stringify(name)}` : ""}${ref ? ` [${ref}]` : ""}${stateSuffix(node)}`);
+      // Ref minted above REGARDLESS of scope (see the note at the top): the
+      // table must describe the whole page so a ref name is stable.
+      if (inside) {
+        const shown = depth - (scopeAt ?? 0);
+        lines.push(`${"  ".repeat(shown)}- ${role || "node"}${name ? ` ${JSON.stringify(name)}` : ""}${ref ? ` [${ref}]` : ""}${stateSuffix(node)}`);
+      }
     }
     for (const child of node.childIds ?? []) {
       const found = byId.get(child);
       if (found) visit(found, interesting ? depth + 1 : depth);
     }
+    scopeAt = savedScope;
   }
   // The scope's already-resolved backend id, matched against the tree the host
   // just read. Absent means the element exists in the DOM but contributes no
   // accessible node (hidden, aria-hidden, display:none): the host answers a
   // typed element_not_found rather than pretending the empty result is the tree.
   const scopedRoot =
-    options.rootBackendNodeId === undefined
-      ? undefined
-      : nodes.find((node) => node.backendDOMNodeId === options.rootBackendNodeId);
-  if (options.rootBackendNodeId !== undefined) {
-    if (scopedRoot) visit(scopedRoot, 0);
-    return { snapshot: lines.join("\n"), refs, totalLines: lines.length, scoped: Boolean(scopedRoot) };
+    scopeId === undefined ? undefined : nodes.find((node) => node.backendDOMNodeId === scopeId);
+  if (scopeId !== undefined && scopedRoot === undefined) {
+    return { snapshot: "", refs, totalLines: 0, scoped: false };
   }
   const childIds = new Set(nodes.flatMap((node) => node.childIds ?? []));
   for (const root of nodes.filter((node) => !childIds.has(node.nodeId))) visit(root, 0);
-  return { snapshot: lines.join("\n"), refs, totalLines: lines.length, scoped: false };
+  return { snapshot: lines.join("\n"), refs, totalLines: lines.length, scoped: scopeId !== undefined };
 }
 
 /** The result of one page of a snapshot, and the numbers a footer needs. */

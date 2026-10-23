@@ -10,6 +10,11 @@ __pycache__/
 .DS_Store
 dist/
 node_modules/
+# …and the symlink form, which the trailing slash does NOT match: a checked-out
+# `extension/node_modules -> ../somewhere` was committed by a lane that linked
+# its dependency tree, and every other checkout then owned a path that resolves
+# to nothing. Ignoring the bare name covers both shapes.
+node_modules
 # pnpm's content-addressable store. Normally it lives once under ~/Library or
 # ~/.local/share and never appears here — but pnpm hard-links from the store
 # into node_modules, and hard links cannot cross filesystems, so a checkout on

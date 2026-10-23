@@ -44,6 +44,11 @@ def _with_surface(surface_id: str = "surface:3") -> ToolContext:
     return ctx
 
 
+async def _async(value):
+    """A coroutine that resolves to ``value`` — for stubbing an async call."""
+    return value
+
+
 class FakeCmux:
     """Stand-in for the ``cmux`` CLI, routed by argv.
 
@@ -2199,3 +2204,103 @@ def test_a_host_reporting_zero_matches_is_not_read_as_every_line_matching(monkey
     assert not result.is_error, result.text
     assert "0 of 461 lines matched 'Active'" in result.text
     assert "start is past the end" not in result.text
+
+
+# --- remediation round 1 -----------------------------------------------------
+#
+# Each of these pins a review finding from round 1, and each fails on the head
+# that was reviewed.
+
+
+def test_cmux_snapshot_windows_the_tree_it_was_handed(monkeypatch) -> None:
+    """R1-1: the degrade-to-local-windowing claim must be true for cmux too.
+
+    cmux has no window flags, so `start`/`limit`/`search` have to be applied to
+    the text the CLI returned. Before this, `start=2` re-returned page one
+    forever and `search` filtered nothing — a claim in the PR that the code did
+    not implement.
+    """
+    fake = FakeCmux()
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(
+        builtin,
+        "_run_cmux",
+        lambda argv, timeout=30.0: _async((0, "\n".join(f"- row {n}" for n in range(1, 6)))),
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "start": 2, "limit": 2},
+        _with_surface("surface:3"),
+    )
+
+    assert not result.is_error, result.text
+    assert "- row 2" in result.text and "- row 3" in result.text
+    assert "- row 1" not in result.text and "- row 4" not in result.text
+    assert "lines 2-3 of 5" in result.text
+    assert "pass start=4" in result.text
+
+    filtered = _run(
+        tool,
+        "t2",
+        {"action": "snapshot", "search": "row 5"},
+        _with_surface("surface:3"),
+    )
+    assert not filtered.is_error, filtered.text
+    assert "- row 5" in filtered.text
+    assert "- row 1" not in filtered.text
+    assert "matching 'row 5'" in filtered.text
+    del fake
+
+
+def test_a_start_past_the_end_never_prints_an_inverted_range(monkeypatch) -> None:
+    """R1-5: `lines 500-499 of 203` was honest in its clause and wrong in its numbers."""
+    _snapshot_bridge(
+        monkeypatch,
+        {
+            "snapshot": "- row",
+            "total_lines": 203,
+            "matched_lines": 203,
+            "returned_lines": 0,
+            "start": 500,
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "start": 500},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "lines 500-499" not in result.text
+    assert "start=500 is past the end of 203 lines" in result.text
+
+
+def test_a_context_cut_page_does_not_name_a_next_start(monkeypatch) -> None:
+    """R1-6: following `start + returned` after a character cut skips whole lines."""
+    lines = [f"- textbox \"Field {n}\"" for n in range(1, 900)]
+    _snapshot_bridge(
+        monkeypatch,
+        {
+            "snapshot": "\n".join(lines),
+            "total_lines": len(lines),
+            "matched_lines": len(lines),
+            "returned_lines": len(lines),
+            "start": 1,
+            "limit": 900,
+        },
+    )
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "snapshot", "limit": 900},
+        _secret_ctx(surface_id="bridge:9:nonce"),
+    )
+
+    assert not result.is_error, result.text
+    assert "cut to fit the context" in result.text
+    assert "pass start=" not in result.text

@@ -20768,27 +20768,38 @@ def _snapshot_footer(
             else "the accessibility tree is empty"
         )
     elif matched < total or returned < matched:
-        shown_end = start + returned - 1 if returned else start - 1
-        where = f"lines {start}-{shown_end} of {matched}"
-        if search.strip():
-            where += f" matching {search.strip()!r}"
-        elif matched < total:
-            where += f" ({total} in the tree)"
-        if returned and start + returned <= matched:
-            where += (
-                f"; pass start={start + returned} for the next page, or narrow with "
-                "selector= or search="
+        if returned == 0:
+            # `lines 500-499 of 203` is an inverted range dressed as arithmetic
+            # (agent review round 1, R1-5): the clause was honest, the numbers
+            # were not. Say only what is true.
+            notes.append(
+                f"start={start} is past the end of {matched} line"
+                f"{'' if matched == 1 else 's'}"
+                + (f" matching {search.strip()!r}" if search.strip() else "")
+                + "; re-run with a smaller start"
             )
-        elif returned == 0:
-            where += "; start is past the end — re-run with a smaller start"
-        notes.append(where)
+        else:
+            shown_end = start + returned - 1
+            where = f"lines {start}-{shown_end} of {matched}"
+            if search.strip():
+                where += f" matching {search.strip()!r}"
+            elif matched < total:
+                where += f" ({total} in the tree)"
+            if not truncated and start + returned <= matched:
+                where += (
+                    f"; pass start={start + returned} for the next page, or narrow with "
+                    "selector= or search="
+                )
+            notes.append(where)
     elif search.strip():
         notes.append(f"{matched} of {total} lines matched {search.strip()!r}")
     if truncated and matched:
         # The page was cut by the model-facing character ceiling AFTER the line
         # window was applied, so the line numbers above describe a page whose
         # tail is missing. Name the remedy rather than letting the cut look like
-        # the end of the tree.
+        # the end of the tree — and never name a next `start` in this case
+        # (agent review round 1, R1-6): the lines the cut removed are whole
+        # lines, so following `start + returned` would skip them.
         notes.append(
             "this page was also cut to fit the context; pass a smaller limit= "
             "to get whole lines"
@@ -25421,11 +25432,36 @@ async def _execute_browser(
         code, out = await _run_cmux(argv)
         if code != 0:
             return _error(tool_call_id, "browser", f"cmux snapshot failed: {out}")
+        # cmux has no window of its own, so the SAME start/limit/search the
+        # bridge path forwards must be applied here, or the claim "cmux degrades
+        # to local windowing with the same semantics" is false and `start=51`
+        # silently re-returns page one forever (agent review round 1, R1-1).
+        text, total, matched, returned = _window_snapshot_lines(
+            out,
+            search=params.search or "",
+            start=params.start or 1,
+            limit=params.limit or 0,
+        )
+        body = truncate_output(text, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)"
+        truncated = len(body) >= BROWSER_TEXT_LIMIT_CHARS
+        footer = _snapshot_footer(
+            total=total,
+            matched=matched,
+            returned=returned,
+            start=params.start or 1,
+            search=params.search or "",
+            scope=params.selector.strip(),
+            # cmux has no scope flag of its own; `--selector` narrows the tree
+            # the CLI walks, so a scoped cmux read is scoped in the host.
+            scoped=bool(params.selector.strip()),
+            host_ignored_scope=False,
+            truncated=truncated,
+        )
         return _text(
             tool_call_id,
             "browser",
-            truncate_output(out, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)",
-            details={"surface_id": surface},
+            f"{body}\n\n{footer}" if footer else body,
+            details={"surface_id": surface, "total_lines": total},
         )
     if action == "click":
         return await _browser_click(tool_call_id, surface, params.selector)
