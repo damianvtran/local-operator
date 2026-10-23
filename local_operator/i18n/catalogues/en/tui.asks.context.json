@@ -21,7 +21,7 @@
     "role": "ask dismiss chooser, key hints",
     "tone": "plain, instructional",
     "maxCells": 40,
-    "note": "The key-hint row at the foot of the ask list's dismiss chooser: Enter sends the highlighted reason, Esc goes back to the list without dismissing. Key names (enter, esc) are kept as the terminal spells them and joined with the middle dot separator the terminal's other hint rows use; keep that separator. This row is dropped whole on a terminal too narrow for it, so it must stay one short line."
+    "note": "The key-hint row at the foot of the ask list's dismiss chooser: Enter sends the highlighted reason, Esc goes back to the list without dismissing. Key names (enter, esc) are kept as the terminal spells them and joined with the middle dot separator the terminal's other hint rows use; keep that separator. Esc is named 'cancel' rather than 'back' because the key closes the chooser in place (elsewhere Esc collapses the whole surface), so one word must not name two exits. This row is dropped whole on a terminal too narrow for it, so it must stay one short line."
   },
   "tui.asks.dismiss.moot": {
     "role": "ask dismiss chooser, option label",
@@ -40,5 +40,23 @@
     "tone": "plain, instructional",
     "maxCells": 60,
     "note": "The heading of the ask list's dismiss chooser: a line the operator reaches by pressing x on an OPEN ask, asking them to pick why the ask is going away. The code then joins the ask's own question after this heading with a middle dot separator (drawn by the code, not part of this value), so do not end the heading with punctuation or a separator. No exclamation mark; it names the act, it does not celebrate it."
+  },
+  "tui.asks.dismiss.notice_moot": {
+    "role": "ask list toast, dismissal receipt",
+    "tone": "plain, factual",
+    "maxCells": 44,
+    "note": "The one-line acknowledgement shown after the operator dismisses an open ask with the 'No longer needed' reason. It reports what the queue recorded, in the past tense: the ask is gone from the list and the agent was told it no longer matters. No exclamation mark, no 'success' or checkmark wording; it is a receipt, not praise. WIDTH: 44 cells, the widest receipt any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole line on its own, not a label."
+  },
+  "tui.asks.dismiss.notice_answered_in_chat": {
+    "role": "ask list toast, dismissal receipt",
+    "tone": "plain, factual",
+    "maxCells": 44,
+    "note": "The one-line acknowledgement shown after the operator dismisses an open ask with the 'Answered in chat' reason. It reports what the queue recorded: the ask is gone and the agent was told the answer is already in the conversation. It must not read as 'your answer was sent' — nothing was sent, and that distinction is the whole point of the two reasons. WIDTH: 44 cells, the widest receipt any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole line on its own, not a label."
+  },
+  "tui.asks.dismiss.fleet_gone": {
+    "role": "ask list toast, refusal",
+    "tone": "plain, explanatory",
+    "maxCells": 60,
+    "note": "The refusal shown in the all-conversations ask list when a dismissal finds the ask missing from THAT other conversation's log (a swept or reset store). The list's rows belong to other conversations by design, so this sentence must not claim the ask is absent from 'this session' — it is absent from the conversation the row named. It is a TOAST FRAGMENT like the queue's other refusals: lower-case opening, no trailing recovery clause (the row stays on screen and the key can be pressed again, so the surface already shows the way back)."
   }
 }

@@ -1,7 +1,13 @@
 {
   "relay.ask.context.messages": "{count, plural, one {# сообщение от вас после этого вопроса (последнее в {time})} few {# сообщения от вас после этого вопроса (последнее в {time})} many {# сообщений от вас после этого вопроса (последнее в {time})} other {# сообщения от вас после этого вопроса (последнее в {time})}}",
   "relay.ask.dismiss.answered_in_chat": "Ответ дан в чате",
+  "relay.ask.dismiss.answered_in_chat_note": "вы уже ответили в чате",
   "relay.ask.dismiss.cancel": "отмена",
   "relay.ask.dismiss.moot": "Больше не нужно",
-  "relay.ask.dismiss.open": "убрать…"
+  "relay.ask.dismiss.moot_note": "агент больше не будет ждать ответа",
+  "relay.ask.dismiss.open": "убрать…",
+  "relay.ask.dismiss.receipt": "Убрано — ответ не отправлен",
+  "relay.ask.dismiss.receipt_answered_in_chat": "Убрано — ответ дан в чате",
+  "relay.ask.dismiss.receipt_moot": "Убрано — больше не нужно",
+  "relay.ask.dismiss.title": "Убрать этот вопрос"
 }

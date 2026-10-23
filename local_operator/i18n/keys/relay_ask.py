@@ -18,6 +18,10 @@ def dismiss_answered_in_chat() -> Msg:
     return Msg("relay.ask.dismiss.answered_in_chat", {})
 
 
+def dismiss_answered_in_chat_note() -> Msg:
+    return Msg("relay.ask.dismiss.answered_in_chat_note", {})
+
+
 def dismiss_cancel() -> Msg:
     return Msg("relay.ask.dismiss.cancel", {})
 
@@ -26,5 +30,25 @@ def dismiss_moot() -> Msg:
     return Msg("relay.ask.dismiss.moot", {})
 
 
+def dismiss_moot_note() -> Msg:
+    return Msg("relay.ask.dismiss.moot_note", {})
+
+
 def dismiss_open() -> Msg:
     return Msg("relay.ask.dismiss.open", {})
+
+
+def dismiss_receipt() -> Msg:
+    return Msg("relay.ask.dismiss.receipt", {})
+
+
+def dismiss_receipt_answered_in_chat() -> Msg:
+    return Msg("relay.ask.dismiss.receipt_answered_in_chat", {})
+
+
+def dismiss_receipt_moot() -> Msg:
+    return Msg("relay.ask.dismiss.receipt_moot", {})
+
+
+def dismiss_title() -> Msg:
+    return Msg("relay.ask.dismiss.title", {})

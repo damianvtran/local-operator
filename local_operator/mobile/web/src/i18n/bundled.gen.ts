@@ -21,9 +21,15 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, stri
   "relay.ask": {
     "relay.ask.context.messages": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
     "relay.ask.dismiss.answered_in_chat": "Answered in chat",
+    "relay.ask.dismiss.answered_in_chat_note": "you already replied in the conversation",
     "relay.ask.dismiss.cancel": "cancel",
     "relay.ask.dismiss.moot": "No longer needed",
-    "relay.ask.dismiss.open": "close\u2026",
+    "relay.ask.dismiss.moot_note": "stop waiting on it",
+    "relay.ask.dismiss.open": "dismiss\u2026",
+    "relay.ask.dismiss.receipt": "Dismissed \u2014 no reply sent",
+    "relay.ask.dismiss.receipt_answered_in_chat": "Dismissed \u2014 answered in chat",
+    "relay.ask.dismiss.receipt_moot": "Dismissed \u2014 no longer needed",
+    "relay.ask.dismiss.title": "Dismiss this ask",
   },
   "relay.library": {
     "relay.library.count": "{count, plural, one {# asset} other {# assets}}",
