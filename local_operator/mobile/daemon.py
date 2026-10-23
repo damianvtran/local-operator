@@ -43,7 +43,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Protocol
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -6462,16 +6462,17 @@ def build_app(daemon: MobileDaemon):
             return _sound_response(JSONResponse({"error": "bad digest"}, status_code=400))
 
         def load() -> tuple[bytes, str] | None:
+            from local_operator.session import compression
             from local_operator.session.attachments import AttachmentStore
 
             directory = _durable_user_session_dir(session_id)
             if directory is None:
                 return None
             try:
-                journal = (directory / "transcript.jsonl").read_bytes()
-            except OSError:
+                referenced = _journal_references_sound(compression.iter_lines(directory), digest)
+            except (OSError, compression.ArchiveError):
                 return None
-            if not _journal_references_sound(journal, digest):
+            if not referenced:
                 return None
             return AttachmentStore().get_bytes(digest)
 
@@ -6527,16 +6528,17 @@ def build_app(daemon: MobileDaemon):
 
         def load() -> dict[str, Any] | None:
             from local_operator.audiogen.recovery import waveform_payload
+            from local_operator.session import compression
             from local_operator.session.attachments import AttachmentStore
 
             directory = _durable_user_session_dir(session_id)
             if directory is None:
                 return None
             try:
-                journal = (directory / "transcript.jsonl").read_bytes()
-            except OSError:
+                referenced = _journal_references_sound(compression.iter_lines(directory), digest)
+            except (OSError, compression.ArchiveError):
                 return None
-            if not _journal_references_sound(journal, digest):
+            if not referenced:
                 return None
             return waveform_payload(AttachmentStore(), digest)
 
@@ -6615,7 +6617,7 @@ def build_app(daemon: MobileDaemon):
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         return response
 
-    def _journal_references_sound(payload: bytes, digest: str) -> bool:
+    def _journal_references_sound(lines: Iterable[str], digest: str) -> bool:
         """Whether a ``supplement_v1`` row's ``sounds[]`` names ``digest``.
 
         THE SOUND ROUTES' THIRD AUTHORISATION FACT, and deliberately a PRECISE
@@ -6625,6 +6627,13 @@ def build_app(daemon: MobileDaemon):
         digest would let the bytes family be reached through a reference that
         never meant it — the round-1 review's own distinction (B1's sibling).
 
+        Lines, not bytes: after #2798 a settled transcript may be archived, so
+        every caller passes ``session.compression.iter_lines(directory)``. A
+        plain ``transcript.jsonl`` probe would read a compressed session as
+        "no reference" and 404 its own sounds — the guard
+        ``test_no_plain_name_probe_outside_the_resolver`` exists for exactly
+        this.
+
         Read per row, with the same cheap pre-filter (the marker and the digest
         must both appear on the line before a parse is worth doing). A beat that
         has not yet been journaled references nothing yet; the live projection
@@ -6632,10 +6641,9 @@ def build_app(daemon: MobileDaemon):
         """
         from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
-        marker = SUPPLEMENT_CUSTOM_TYPE.encode("ascii")
-        needle = digest.encode("ascii")
-        for line in payload.splitlines():
-            if marker not in line or needle not in line:
+        marker = SUPPLEMENT_CUSTOM_TYPE
+        for line in lines:
+            if marker not in line or digest not in line:
                 continue
             try:
                 row = json.loads(line)

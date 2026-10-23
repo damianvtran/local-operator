@@ -39,6 +39,7 @@ from local_operator.session.transcript import Transcript
 
 SESSION_ID = "soundsession"
 OTHER_SESSION = "othersound"
+ARCHIVED_SESSION = "archivedsound"
 LIB_SESSION = "4e92693767fa"
 #: Enough real bytes to exercise the Range arithmetic; no decoder ever sees them
 #: (the bytes route serves the store verbatim).
@@ -224,6 +225,42 @@ def test_sound_bytes_require_a_reference_in_this_session(session: dict[str, Any]
         ).status_code
         == 200
     )
+
+
+def test_sound_bytes_read_a_reference_from_a_compressed_transcript() -> None:
+    """#2798: a settled session's journal may be an archive, not the plain name.
+
+    The reference check is an authorisation gate, so reading only
+    ``transcript.jsonl`` would 404 a compressed conversation's own sounds — and
+    a plain-name probe is exactly what the archive-aware guard forbids. The
+    route reads through ``compression.iter_lines``; this proves the reference is
+    still found after the transcript moves to ``.gz``.
+    """
+    from local_operator.session import compression
+
+    directory = _session_dir(ARCHIVED_SESSION)
+    store = AttachmentStore()
+    ref = store.put_bytes(AUDIO + b"archived", "audio/mpeg")
+    assert ref is not None
+    _reference_sounds(directory, ref.digest)
+    assert store.put_peaks(ref.digest, [0.25] * 240)
+
+    outcome = compression.compress_session(directory, codec="gzip")
+    assert outcome.compressed
+    assert compression.archive_path(directory) is not None
+    # The plain name is GONE: a plain-path reader would answer 404 here.
+    assert not (directory / "transcript.jsonl").exists()
+
+    client = _client()
+    full = client.get(f"/api/sessions/{ARCHIVED_SESSION}/sound", params={"digest": ref.digest})
+    assert full.status_code == 200
+    assert full.content == AUDIO + b"archived"
+
+    waveform = client.get(
+        f"/api/sessions/{ARCHIVED_SESSION}/waveform", params={"digest": ref.digest}
+    )
+    assert waveform.status_code == 200
+    assert waveform.json()["bars"] == 240
 
 
 def test_component_reference_does_not_authorise_audio(session: dict[str, Any]) -> None:
