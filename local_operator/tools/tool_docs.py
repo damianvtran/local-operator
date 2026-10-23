@@ -260,9 +260,15 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="open", blurb="Start a surface at a URL."),
             ToolDocOp(op="goto", blurb="Navigate the session's existing surface."),
             ToolDocOp(op="read", blurb="The page's text."),
-            ToolDocOp(op="snapshot", blurb="Accessibility tree with click refs."),
+            ToolDocOp(
+                op="snapshot",
+                blurb=(
+                    "Accessibility tree with click refs; selector= scopes it, "
+                    "start=/limit=/search= page or filter it."
+                ),
+            ),
             ToolDocOp(op="screenshot", blurb="Capture the page to a file."),
-            ToolDocOp(op="click", blurb="Click a selector or snapshot ref."),
+            ToolDocOp(op="click", blurb="Click a selector, snapshot ref, or a11y locator."),
             ToolDocOp(
                 op="type",
                 blurb="Type text, or a stored secret via 'secret_ref', into a field.",
@@ -284,6 +290,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="ancestors",
                 blurb="The chain from the element up to <html> (depth <= 16, default 12).",
             ),
+            ToolDocOp(
+                op="query",
+                blurb="Read-only DOM query: CSS in, element descriptors out.",
+            ),
             ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
             ToolDocOp(
                 op="inspect_ownership",
@@ -304,27 +314,21 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="close", blurb="End YOUR tab."),
         ),
         notes=(
-            "Moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
-            "- 'scroll', 'logs', 'tabs' and the geometry reads "
-            "('styles'/'hit_test'/'ancestors') need a non-cmux host (cmux says "
-            "so).\n"
-            "- On a non-cmux host, 'download' saves what the page offers into "
-            "this session's private download directory, and 'upload' attaches "
-            "local files to a page's file input.\n"
-            "- The geometry reads answer with numbers, not pictures, and are "
-            "bounded at the source: 'styles' reports up to 5 matches of a "
-            "selector (rect + computed styles + the element's inline `--*` "
-            "tokens); 'hit_test' the element stack at viewport (x, y) pixels, "
-            "topmost first; 'ancestors' the chain from an element up to and "
-            "including `<html>`, with the clip/layout style set. A selector "
-            "that matches nothing is the typed element-not-found, never an "
-            "empty success.\n"
+            "- 'scroll', 'logs', 'tabs' and the geometry reads need a non-cmux "
+            "host (cmux says so).\n"
+            "- 'download' saves what the page offers into this session's "
+            "private directory; 'upload' attaches local files to a file input "
+            "(both non-cmux).\n"
+            "- The geometry reads answer numbers, not pictures, bounded at the "
+            "source: 'styles' up to 5 matches (rect + computed styles + inline "
+            "`--*` tokens); 'hit_test' the stack at (x, y), topmost first; "
+            "'ancestors' the chain up to `<html>`. A selector matching nothing "
+            "is the typed element-not-found, never an empty success.\n"
             "- Tab ownership: 'tabs' lists every agent-driven tab including "
             "other sessions' (handles are redacted), and a redacted handle is "
             "not yours to drive.\n"
-            "- The full playbook — hosts, setup, per-site approvals, what each "
-            "error means — is ``guide://browser``."
+            "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
     # -- console ------------------------------------------------------------
