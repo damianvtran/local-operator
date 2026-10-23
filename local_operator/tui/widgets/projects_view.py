@@ -618,6 +618,11 @@ class ProjectsView(Vertical):
         self._updated_at: float | None = None
         #: The footer's one-sentence notice (refusals, pops) — UX round 1.
         self._notice: str | None = None
+        #: How many stored rows the registry PAGE left out of ``_views``. The
+        #: store is capped by recency (``projects._MAX_ROWS``), and a page that
+        #: quietly painted a subset would let a dormant project read as gone;
+        #: the list's existing overflow row states the total not shown.
+        self._hidden_rows: int = 0
         # Quick-send state (P5a): the open picker card and the target compose
         # is addressed to.
         self._send_card: SendTargetCard | None = None
@@ -757,6 +762,7 @@ class ProjectsView(Vertical):
         associated: frozenset[str] | None = None,
         own_session: str | None = None,
         read_only: bool | None = None,
+        hidden_rows: int = 0,
     ) -> None:
         """Point the page at a fresh composition and paint it.
 
@@ -777,6 +783,11 @@ class ProjectsView(Vertical):
         """
         if read_only is not None:
             self._read_only = bool(read_only)
+        # NOT sticky (unlike ``read_only``): the count describes the store the
+        # views came from, so a load that states none is claiming a whole page.
+        # Every app load passes it, read from the SAME registry read that
+        # composed ``views``.
+        self._hidden_rows = max(0, int(hidden_rows))
         # A recompose answers whatever the last notice said; `_resync_detail`
         # below may set its own (the vanished-project pop, UX round 1, U5).
         # The read-only sentence is the page's STANDING state, so it is
@@ -943,6 +954,7 @@ class ProjectsView(Vertical):
             self._views,
             cursor=self._cursor if self._views else None,
             associated=self._associated,
+            hidden=self._hidden_rows,
             style_for=resolver,
         )
 

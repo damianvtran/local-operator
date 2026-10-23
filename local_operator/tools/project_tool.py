@@ -451,6 +451,29 @@ def _project_edit(params: ProjectParams, *, creating: bool) -> ProjectEdit:
     return ProjectEdit(**payload)
 
 
+def _page_note(registry: ProjectRegistry) -> str:
+    """The sentence a PARTIAL listing carries, or ``""`` when the page is whole.
+
+    The store's snapshot is a recency PAGE over the store, not a visibility
+    boundary (see ``projects._MAX_ROWS``): a listing that hides rows must say
+    so, or "not in this list" reads as "does not exist" for a project
+    ``op='show'`` still resolves — the ordinal-502 incident, where the model was
+    told a valid row did not exist. ONE copy here, so the receipt cannot drift
+    from the registry's own counts.
+    """
+    on_disk = registry.rows_on_disk
+    loaded = registry.rows_loaded
+    hidden = on_disk - loaded
+    if hidden <= 0:
+        return ""
+    noun = "row is" if hidden == 1 else "rows are"
+    return (
+        f"showing the {loaded} most recently active of {on_disk} stored projects "
+        f"— {hidden} dormant {noun} not listed here; op='show' name='<name>' "
+        "still finds any project."
+    )
+
+
 async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult:
     registry = _registry(context)
     if registry is None:
@@ -473,6 +496,11 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
         _row(project, window=stale_after_s(registry.config_dir), context=context)
         for project in projects
     )
+    note = _page_note(registry)
+    if note:
+        # Before the hint: the reader must learn the set is partial while
+        # reading the rows, not after the sentence that ends the receipt.
+        body += f"\n\n{note}"
     body += "\n\nop='show' name='<name>' has the full record plus its sessions."
     text, spill = spill_truncate(body, "project", context)
     return _text(tool_call_id, "project", text, details=spill or None)

@@ -597,6 +597,12 @@ def _read_project_rows() -> list[Any]:
         root = str(registry.config_dir)
     except Exception:  # noqa: BLE001
         root = ""
+    # This set is the registry's recency PAGE (``projects._MAX_ROWS``), not the
+    # whole store: the ink may lag or LIMIT the names it offers, and that is
+    # safe because it can never change what the MODEL receives — the submit
+    # path resolves through ``get_project_by_name``, which falls through to the
+    # store's own file scan and is therefore unbounded. A dormant row can be
+    # absent from this snapshot while remaining fully addressable.
     _project_names_cache = (
         root,
         frozenset(project.name.casefold() for project in projects),

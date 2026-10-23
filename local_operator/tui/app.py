@@ -20954,6 +20954,24 @@ class OperatorApp(App[None]):
         self._mark_missing_attachments(views)
         return views
 
+    def _projects_page_hidden_rows(self) -> int:
+        """Stored rows the registry PAGE left out of the composed views.
+
+        The store loads its most recently active rows only (``projects._MAX_ROWS``);
+        the page cannot paint what the registry never loaded, and it must not
+        stay silent about it — a dormant project would read as deleted. The
+        list's existing overflow row states the total not shown.
+
+        MUST be read AFTER :meth:`_projects_payload` in the same call: the
+        payload's ``list_projects()`` is the read that refreshes the snapshot,
+        and these counters describe THAT load. Python evaluates keyword
+        arguments left to right, and every load site lists ``views=`` first.
+        """
+        registry = self._project_registry()
+        if registry is None:
+            return 0
+        return max(0, registry.rows_on_disk - registry.rows_loaded)
+
     @staticmethod
     def _mark_missing_attachments(views: list[Any]) -> None:
         """Flag attachments whose copy is gone, at COMPOSITION time (spec §7.4).
@@ -38728,6 +38746,7 @@ class OperatorApp(App[None]):
                 # entry (agent review r1 MINOR 2 / QA r1 Q3).
                 self._projects_view.load(
                     views=self._projects_payload(),
+                    hidden_rows=self._projects_page_hidden_rows(),
                     highlight=highlight,
                     view=view,
                     associated=associated if associated is not None else frozenset(),
@@ -38764,6 +38783,7 @@ class OperatorApp(App[None]):
 
         page.load(
             views=payload,
+            hidden_rows=self._projects_page_hidden_rows(),
             highlight=highlight,
             view=view,
             associated=associated if associated is not None else frozenset(),
@@ -38872,6 +38892,7 @@ class OperatorApp(App[None]):
 
         view.load(
             views=self._projects_payload(),
+            hidden_rows=self._projects_page_hidden_rows(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
             read_only=self._projects_read_only(),
@@ -39123,6 +39144,7 @@ class OperatorApp(App[None]):
 
         view.load(
             views=self._projects_payload(),
+            hidden_rows=self._projects_page_hidden_rows(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
             read_only=self._projects_read_only(),
@@ -39723,6 +39745,7 @@ class OperatorApp(App[None]):
             return
         view.load(
             views=self._projects_payload(),
+            hidden_rows=self._projects_page_hidden_rows(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
             read_only=self._projects_read_only(),
@@ -39773,6 +39796,7 @@ class OperatorApp(App[None]):
             return
         view.load(
             views=self._projects_payload(),
+            hidden_rows=self._projects_page_hidden_rows(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
             read_only=self._projects_read_only(),
@@ -39824,6 +39848,7 @@ class OperatorApp(App[None]):
             return
         view.load(
             views=self._projects_payload(),
+            hidden_rows=self._projects_page_hidden_rows(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
             read_only=self._projects_read_only(),
@@ -39862,6 +39887,7 @@ class OperatorApp(App[None]):
             return
         view.load(
             views=self._projects_payload(),
+            hidden_rows=self._projects_page_hidden_rows(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
             read_only=self._projects_read_only(),

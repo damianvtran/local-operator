@@ -543,6 +543,7 @@ def render_project_list(
     cursor: int | None = None,
     associated: frozenset[str] | None = None,
     now: float | None = None,
+    hidden: int = 0,
     style_for: StyleFor | None = None,
 ) -> RenderResult:
     """One line per project; the selected row carries the cursor marker.
@@ -553,6 +554,12 @@ def render_project_list(
     marker set the board and the timeline read. With teams present the rows
     group under painted section headers (S6d parity); without them this is
     byte-identical to the shipped flat canvas.
+
+    ``hidden`` is how many stored rows the registry PAGE left out of ``views``
+    entirely (the store is capped by recency, ``projects._MAX_ROWS``). It is
+    added to this renderer's own ``PROJECTS_MAX`` cut in ONE overflow row: a
+    reader needs the total not shown, and two rows saying "+N" would invite
+    the reader to add them up for a number neither line knows.
     """
     resolver = _styles(style_for)
     mine = associated or frozenset()
@@ -581,10 +588,15 @@ def render_project_list(
             lines.append(_section_header_text(label, len(indexes), fill_width, resolver))
             lines.extend(rows[index] for index in indexes)
             bands.append((start, len(lines), label))
-    if len(views) > PROJECTS_MAX:
+    not_shown = max(0, len(views) - PROJECTS_MAX) + max(0, int(hidden))
+    if not_shown and views:
+        # Guarded on ``views``: an EMPTY page paints the empty-store sentence,
+        # and "+N more not shown" beside "no projects yet" would claim rows the
+        # canvas is not hiding (that pairing is an unreadable store, not a
+        # truncated one — the app's own load failure reaches here as []).
         lines.append(
             Text(
-                _t(_x.render_more_not_shown_indent(count=str(len(views) - PROJECTS_MAX))),
+                _t(_x.render_more_not_shown_indent(count=str(not_shown))),
                 style=resolver("dim"),
             )
         )
