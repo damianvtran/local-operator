@@ -6451,12 +6451,17 @@ def build_app(daemon: MobileDaemon):
             directory = _durable_user_session_dir(session_id)
             if directory is None:
                 return None
+            # Imported BEFORE the try it is caught in: the except clause names
+            # ``compression.ArchiveError``, so an import failure inside the block
+            # would make the handler itself raise ``NameError`` (pyright's
+            # ``reportPossiblyUnboundVariable`` caught exactly that).
+            from local_operator.session import compression
+
             try:
                 # Stream through the codec and keep only the rows that can be
                 # the reference being authorised: a whole-file ``read_bytes`` is
                 # both unbounded and wrong for an archive (compressed bytes are
                 # not JSONL).
-                from local_operator.session import compression
                 from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
                 payload = b"\n".join(
