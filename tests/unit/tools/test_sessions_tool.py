@@ -530,6 +530,39 @@ async def test_list_reports_live_rows_and_details_carry_the_published_row(root: 
 
 
 @pytest.mark.asyncio
+async def test_list_marks_the_callers_own_row_and_only_that_row(root: Path) -> None:
+    """Self-identity: the caller's own row says ``(this session)``, in text.
+
+    The incident: an agent read its own live row as a DIFFERENT session working
+    the same topic, then spawned a duplicate. The marker is a text addend —
+    ``details['rows']`` hands back the published dicts untouched (an existing
+    test pins their key order, and no consumer should have to strip a display
+    word out of machine data).
+    """
+    from local_operator.info.collect import session_rows
+
+    _session(root, "aaaa11112222", "other-work")
+    record = _publish_record(root, REQUESTER_ID, "the caller")
+    try:
+        result = await execute_sessions(
+            "t", {"op": "list", "include_stored": True}, None, None, _context(root)
+        )
+        assert not result.is_error, result.text
+        lines = result.text.splitlines()
+        own_line = next(line for line in lines if REQUESTER_ID in line)
+        other_line = next(line for line in lines if "aaaa11112222" in line)
+        assert "(this session)" in own_line, result.text
+        assert "(this session)" not in other_line, result.text
+
+        rows = (result.details or {})["rows"]
+        assert all("(this session)" not in str(row) for row in rows), rows
+        published = {row["session_id"]: row for row in session_rows(root, include_stored=True)}
+        assert [list(row) for row in rows] == [list(published[row["session_id"]]) for row in rows]
+    finally:
+        registry.unpublish(record.pid, root)
+
+
+@pytest.mark.asyncio
 async def test_list_include_stored_appends_stored_rows_as_stored(root: Path) -> None:
     _session(root, "aaaa11112222", "stored-one")
     result = await execute_sessions(
@@ -607,6 +640,38 @@ async def test_info_reports_origin_visibility_and_opener(root: Path) -> None:
     assert details["session_dir"] == str(directory)
     assert details["transcript_path"] == str(directory / "transcript.jsonl")
     assert "origin: agent-workstream" in result.text
+
+
+@pytest.mark.asyncio
+async def test_info_says_plainly_when_the_target_is_the_callers_own_session(root: Path) -> None:
+    """``info`` on the caller's own id says so in words, and says nothing on a peer.
+
+    A matching id and a matching title are still inferable as two facts rather
+    than one identity, which is how the incident happened; the sentence removes
+    the inference. The negative arm is load-bearing: `sessions` is a tool for
+    OTHER sessions, so a self sentence on every row would be noise that trains
+    the model to ignore it.
+    """
+    _session(root, REQUESTER_ID, "my own run")
+    record = _publish_record(root, REQUESTER_ID, "my own run")
+    other_id = "ffff00001111"
+    _session(root, other_id, "someone else")
+    try:
+        own = await execute_sessions(
+            "t", {"op": "info", "target": REQUESTER_ID}, None, None, _context(root)
+        )
+        assert not own.is_error, own.text
+        assert (
+            "This is YOUR session — the one you are running in. It is not a duplicate." in own.text
+        ), own.text
+
+        other = await execute_sessions(
+            "t", {"op": "info", "target": other_id}, None, None, _context(root)
+        )
+        assert not other.is_error, other.text
+        assert "This is YOUR session" not in other.text, other.text
+    finally:
+        registry.unpublish(record.pid, root)
 
 
 @pytest.mark.asyncio
@@ -718,6 +783,27 @@ async def test_list_query_uses_the_store_search(root: Path) -> None:
     assert "the shard report" in result.text
     assert "session aaaa11112222" in result.text
     assert "locates sessions, not positions" in result.text
+
+
+@pytest.mark.asyncio
+async def test_list_query_marks_the_callers_own_row(root: Path) -> None:
+    """The ``query=`` view marks the same way as the plain listing.
+
+    ``query`` is the other way an agent finds a session by name; leaving it
+    unmarked would make it the one view where its own session is again
+    indistinguishable from a peer whose title matches the same topic.
+    """
+    _session(root, REQUESTER_ID, "the caller's shard work")
+    _session(root, "eeee99990000", "shard work elsewhere")
+    result = await execute_sessions(
+        "t", {"op": "list", "query": "shard"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    lines = result.text.splitlines()
+    own_line = next(line for line in lines if REQUESTER_ID in line)
+    other_line = next(line for line in lines if "eeee99990000" in line)
+    assert "(this session)" in own_line, result.text
+    assert "(this session)" not in other_line, result.text
 
 
 # --- stop -------------------------------------------------------------------

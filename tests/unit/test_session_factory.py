@@ -3083,6 +3083,60 @@ async def test_one_attachment_transition_journals_exactly_one_row(tmp_config_dir
 
 
 @pytest.mark.asyncio
+async def test_the_env_block_carries_the_session_id_and_never_the_name(
+    tmp_config_dir: Path,
+) -> None:
+    """Self-identity rides the byte-stable prefix: the ID, never the NAME.
+
+    The incident: an agent could not recognise its own row in the
+    ``sessions`` listing, read it as a peer on the same topic, and spawned a
+    duplicate. The id now sits in the env block, which the model reads every
+    turn. The name is deliberately absent — auto-naming and user renames would
+    otherwise anchor a stale name for the run or force a stable-prefix rebuild
+    on every rename (see ``_env_details``).
+
+    Stability is the other half: two prepares hand back byte-identical blocks,
+    write ONE ``system_prefix`` entry, and journal no ``[session-state]``
+    environment delta — the id is captured once, so it cannot reprice the
+    cached prefix mid-session.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.resume import write_session_title
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        session_id = session._transcript.directory.name
+        title = "a name the stable prefix must never carry"
+        # A real rename, through the writer the listings read — the point is
+        # that the prefix does not follow it, whatever route the name takes.
+        write_session_title(session._transcript.directory, title, user_set=True, past_names=[])
+
+        first = await session._prepare_system_blocks()
+        env = first[2]
+        assert f"Session ID: {session_id}" in env
+        assert title not in env
+
+        second = await session._prepare_system_blocks()
+        assert second[2] == env, "the env block moved between two prepares"
+
+        prefixes = [
+            entry
+            for entry in session._transcript.entries()
+            if str(entry.payload.get("custom_type", "")) == "system_prefix"
+        ]
+        assert len(prefixes) == 1, "a second prefix epoch was persisted"
+        assert _session_state_rows(session) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
     tmp_config_dir: Path,
 ) -> None:
