@@ -160,7 +160,7 @@ class _RecordingSession(FakeSession):
         self.declined.append((ask_id, by))
         return {"ok": True}
 
-    def dismiss_ask(self, ask_id, *, by="unknown"):
+    def dismiss_ask(self, ask_id, *, by="unknown", reason=None):
         return {"ok": True}
 
 
@@ -441,10 +441,17 @@ async def test_the_header_hints_follow_the_view():
     lapsed = AskQueueList(ask_rows([_row("a1", status="timed_out")]))
     # `enter view` opens its read-only card (#2481 UX U1).
     assert lapsed.header_hints() == ("x dismiss", "enter view", "esc collapse")
-    # An OPEN row cannot be dismissed (dismiss is offered on a timed-out ask
-    # alone), so that key is not advertised over it.
+    # An OPEN row can be dismissed since R5 (SA-D4 removed the live refusal), so
+    # `x dismiss` is advertised over it as well — it opens the two-choice reason
+    # card rather than dismissing at once.
     opened = AskQueueList(ask_rows([_row("a1")]))
-    assert "x dismiss" not in opened.header_hints()
+    assert "x dismiss" in opened.header_hints()
+    assert opened.header_hints() == (
+        "enter answer",
+        "d decline",
+        "x dismiss",
+        "esc collapse",
+    )
 
 
 async def test_the_primary_hint_outlives_the_irreversible_one():
@@ -502,9 +509,17 @@ async def test_the_segments_are_one_painted_line_and_never_split_a_hint():
         painted = listing.header_text(width)
         assert "\n" not in painted
         assert cell_len(painted) <= width, (width, painted)
-        for hint in listing.HEADER_HINTS:
-            if hint.split()[-1] in painted:
-                assert hint in painted, (width, hint)
+        # A hint is painted WHOLE or not at all. Probed by removing every live
+        # hint and then looking for a leftover piece of one: hints now share
+        # words (`x dismiss` / `enter dismiss`), so a single word proves nothing
+        # — but a word left over after the whole ones are removed is a hint cut
+        # mid-phrase, which is what this cell exists to catch.
+        live = listing.header_hints()
+        residue = painted
+        for hint in live:
+            residue = residue.replace(hint, "")
+        for hint in live:
+            assert hint.split()[-1] not in residue, (width, hint, painted)
 
 
 # -- the filter, through the real app ----------------------------------------
@@ -769,8 +784,10 @@ class _FakeAttachClient:
         self._record["decline"] = (ask_id, by)
         return "ok"
 
-    async def ask_dismiss(self, ask_id, *, by=""):
-        self._record["dismiss"] = (ask_id, by)
+    async def ask_dismiss(self, ask_id, *, by="", reason=None):
+        # `reason` (R5) is the chooser's word, and a `None` here is the lapsed
+        # row's one-key door — recorded either way so a test can tell them apart.
+        self._record["dismiss"] = (ask_id, by, reason)
         return "ok"
 
     def close(self) -> None:
@@ -950,7 +967,9 @@ async def test_a_fleet_dismiss_takes_the_no_boot_path(enabled, isolated_index, m
 
     calls: list[tuple[str, str, str]] = []
 
-    async def spy(config_dir, session_id, ask_id, *, by="", now_ms=None):  # noqa: ANN001
+    async def spy(
+        config_dir, session_id, ask_id, *, by="", reason=None, now_ms=None
+    ):  # noqa: ANN001
         calls.append((session_id, ask_id, by))
         return {"ok": True}
 
@@ -969,6 +988,63 @@ async def test_a_fleet_dismiss_takes_the_no_boot_path(enabled, isolated_index, m
     assert record == {}
 
 
+async def test_a_fleet_dismiss_forwards_the_operator_reason(enabled, isolated_index, monkeypatch):
+    """R5: the chooser's word rides the LIVE door too.
+
+    The fleet list is where a stale ask is most often noticed (it is the queue of
+    conversations you are not sitting in), so the two-choice card's reason has to
+    survive the engage seam — the queue records it, and the agent acts on it.
+    """
+    from local_operator.asks import dismiss as dismiss_module
+
+    async def live_owner(
+        config_dir, session_id, ask_id, *, by="", reason=None, now_ms=None
+    ):  # noqa: ANN001
+        # The cold door's own answer when a runtime DOES own the ask: the worker
+        # then takes the live arm, which is the door this test is about.
+        return {"ok": False, "code": "ask_owner_present"}
+
+    monkeypatch.setattr(dismiss_module, "dismiss_cold", live_owner)
+    record: dict[str, Any] = {}
+    _patch_engage(monkeypatch, record)
+    _seed(isolated_index, "s-other", [_row("b1")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        row = ask_rows([_row("b1", session_id="s-other")])[0]
+        await app._fleet_ask_worker(row, "dismiss", None, "answered_in_chat")
+    assert record["engage"] == ("s-other", "AskErrand", "b1")
+    assert record["dismiss"] == ("b1", "terminal", "answered_in_chat")
+
+
+async def test_a_cold_fleet_dismiss_forwards_the_reason_and_boots_nothing(
+    enabled, isolated_index, monkeypatch
+):
+    """The no-boot door records the same word (§14 + R5): the surface decides WHY,
+    and which door the row happened to take is not the operator's concern."""
+    from local_operator.asks import dismiss as dismiss_module
+
+    calls: list[tuple[str, str, str, str | None]] = []
+
+    async def spy(
+        config_dir, session_id, ask_id, *, by="", reason=None, now_ms=None
+    ):  # noqa: ANN001
+        calls.append((session_id, ask_id, by, reason))
+        return {"ok": True}
+
+    monkeypatch.setattr(dismiss_module, "dismiss_cold", spy)
+    record: dict[str, Any] = {}
+    _patch_engage(monkeypatch, record)
+    _seed(isolated_index, "s-other", [_row("b2")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        row = ask_rows([_row("b2", session_id="s-other")])[0]
+        await app._fleet_ask_worker(row, "dismiss", None, "moot")
+    assert calls == [("s-other", "b2", "terminal", "moot")]
+    assert record == {}
+
+
 async def test_a_refused_fleet_dismiss_says_so_in_the_asks_own_words(
     enabled, isolated_index, monkeypatch
 ):
@@ -977,7 +1053,9 @@ async def test_a_refused_fleet_dismiss_says_so_in_the_asks_own_words(
     swallowed into a silent row."""
     from local_operator.asks import dismiss as dismiss_module
 
-    async def refuse(config_dir, session_id, ask_id, *, by="", now_ms=None):  # noqa: ANN001
+    async def refuse(
+        config_dir, session_id, ask_id, *, by="", reason=None, now_ms=None
+    ):  # noqa: ANN001
         return {"ok": False, "error": "only a timed-out ask can be dismissed; it is still open."}
 
     monkeypatch.setattr(dismiss_module, "dismiss_cold", refuse)
@@ -1009,7 +1087,9 @@ async def test_an_unexpected_fleet_dismiss_failure_is_worded_as_a_dismissal(
     """
     from local_operator.asks import dismiss as dismiss_module
 
-    async def boom(config_dir, session_id, ask_id, *, by="", now_ms=None):  # noqa: ANN001
+    async def boom(
+        config_dir, session_id, ask_id, *, by="", reason=None, now_ms=None
+    ):  # noqa: ANN001
         # The empty-message shape this branch is about — a write error with no
         # sentence of its own is exactly what D2 measured.
         raise RuntimeError("")

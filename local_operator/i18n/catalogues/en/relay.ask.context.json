@@ -1,0 +1,32 @@
+{
+  "relay.ask.context.messages": {
+    "role": "phone ask card, context line",
+    "tone": "plain, factual",
+    "maxCells": 60,
+    "note": "The line under an OPEN ask's state line on the phone, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the card draws no line at all for 0 or when an older runtime sends no count) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. It wraps onto more than one line on a narrow phone, so short words and a natural break after 'asked' are welcome."
+  },
+  "relay.ask.dismiss.answered_in_chat": {
+    "role": "phone ask card, dismiss reason button",
+    "tone": "plain, decisive",
+    "maxCells": 34,
+    "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the operator already answered the question by typing in the conversation, so the agent should read their messages and treat the ask as settled (sent as reason=answered_in_chat). A reason, not a command; no exclamation mark. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented."
+  },
+  "relay.ask.dismiss.cancel": {
+    "role": "phone ask card, dismiss cancel button",
+    "tone": "plain, instructional",
+    "maxCells": 12,
+    "note": "The quiet button that puts the reason buttons away again on an OPEN ask's card, sending nothing. Lower-case like the card's other quiet controls; no exclamation mark."
+  },
+  "relay.ask.dismiss.moot": {
+    "role": "phone ask card, dismiss reason button",
+    "tone": "plain, decisive",
+    "maxCells": 34,
+    "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the question no longer matters to the operator (the work moved on, someone else decided), so the agent should drop it (sent as reason=moot). A reason, not a command, and it must not read as an approval or a refusal of the question. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented."
+  },
+  "relay.ask.dismiss.open": {
+    "role": "phone ask card, dismiss control label",
+    "tone": "plain, quiet",
+    "maxCells": 12,
+    "note": "The quiet control on an OPEN ask's card on the phone that reveals the two reasons for closing it. It closes the QUESTION, not the screen: keep the trailing ellipsis glyph (…), which is the card's own convention for 'this opens a choice', and keep it lower-case and brief. Nothing is sent until a reason is chosen."
+  }
+}

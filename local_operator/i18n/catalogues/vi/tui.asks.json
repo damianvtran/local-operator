@@ -1,0 +1,9 @@
+{
+  "tui.asks.context.messages": "{count, plural, other {# tin nhắn từ bạn kể từ khi câu hỏi này được đặt (gần nhất {time})}}",
+  "tui.asks.dismiss.answered_in_chat": "Đã trả lời trong cuộc trò chuyện",
+  "tui.asks.dismiss.answered_in_chat_note": "bạn đã trả lời trong cuộc trò chuyện",
+  "tui.asks.dismiss.hint": "enter bỏ qua · esc quay lại",
+  "tui.asks.dismiss.moot": "Không còn cần nữa",
+  "tui.asks.dismiss.moot_note": "thôi chờ câu trả lời",
+  "tui.asks.dismiss.title": "Bỏ qua câu hỏi này"
+}

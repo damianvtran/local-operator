@@ -1,0 +1,9 @@
+{
+  "tui.asks.context.messages": "{count, plural, one {# mensaje tuyo desde que se hizo esta pregunta (último {time})} many {# de mensajes tuyos desde que se hizo esta pregunta (último {time})} other {# mensajes tuyos desde que se hizo esta pregunta (último {time})}}",
+  "tui.asks.dismiss.answered_in_chat": "Respondido en la conversación",
+  "tui.asks.dismiss.answered_in_chat_note": "ya respondiste en la conversación",
+  "tui.asks.dismiss.hint": "enter descartar · esc volver",
+  "tui.asks.dismiss.moot": "Ya no hace falta",
+  "tui.asks.dismiss.moot_note": "deja de esperar respuesta",
+  "tui.asks.dismiss.title": "Descartar esta pregunta"
+}

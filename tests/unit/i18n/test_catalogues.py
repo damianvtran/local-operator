@@ -167,13 +167,19 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # tag slice adds `relay.session.tags` on the same terms: one audited
     # namespace with its own fresh ledger row. The remote-compute wave (S3e)
     # adds `cli.exec_remote_help` and `wire.remote_compute`, each carried only
-    # once its independent audit row passed against the current en bytes. P5
-    # adds `tui.palette` on the same terms: a 7-key namespace whose fresh,
-    # independently audited ledger row is what lets the locale carry it.
+    # once its independent audit row passed against the current en bytes.
+    # The R5 stale-ask wave (2026-10-23) adds the two ask-surface namespaces,
+    # `relay.ask` and `tui.asks`, on the same terms: independently audited
+    # (round 1 raised 12 findings, round 2 passed all seven locales), one fresh
+    # ledger row each against the current en bytes. P5 adds `tui.palette` on
+    # the same terms: a 7-key namespace whose fresh, independently audited
+    # ledger row is what lets the locale carry it.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
+        "relay.ask",
         "relay.session.tags",
+        "tui.asks",
         "tui.authoring",
         "tui.palette",
         "tui.projects_edit",

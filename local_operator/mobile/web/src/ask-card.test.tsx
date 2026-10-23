@@ -198,7 +198,12 @@ describe("AskCard", () => {
 		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
 		expect(screen.getByText("Queued — the agent is continuing; deadline passed")).toBeTruthy();
 		expect(screen.queryByText(/^Timed out —/)).toBeNull();
-		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
+		/* R5: an OPEN ask has a door of its own — the quiet `close…`, which asks
+		   WHY before anything is sent. What it must NOT offer is the lapsed row's
+		   one-tap dismissal, which says "send no reply" over an ask the agent is
+		   still owed an answer to. */
+		expect(screen.getByRole("button", { name: /^close…$/ })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
 	});
 
 	it("offers no controls on a settled ask, and no error register on an expired one", () => {
@@ -222,11 +227,10 @@ describe("AskCard", () => {
 		);
 		unmount();
 		vi.clearAllMocks();
-		/* DISMISS IS A `timed_out` ACTION (agent review round 1, R1): the queue
-		   accepts no other status, so the control is offered only where it can
-		   land. The open-ask assertion below is the regression guard — the button
-		   used to be rendered on an open ask, where every tap collected a
-		   refusal sentence that was false about the row under it. */
+		/* THE ONE-TAP DISMISS IS THE LAPSED ROW'S (agent review round 1, R1, kept
+		   by R5): the button says "send no reply", which is true only once the
+		   agent has walked past the deadline. An OPEN ask's door is `close…` plus
+		   a reason, exercised in its own cases below. */
 		renderCard(ask({ status: "timed_out" }));
 		expandLapsed();
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
@@ -235,13 +239,113 @@ describe("AskCard", () => {
 		);
 	});
 
-	it("offers dismiss only on a timed-out ask", () => {
+	it("offers the one-tap dismissal on a timed-out ask and the reason row on an open one", () => {
 		const { unmount } = renderCard(ask());
-		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
+		expect(screen.getByRole("button", { name: /^close…$/ })).toBeTruthy();
 		unmount();
 		renderCard(ask({ status: "timed_out" }));
 		expandLapsed();
 		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /^close…$/ })).toBeNull();
+	});
+
+	it("closes an open ask with a reason, and sends nothing until one is chosen", async () => {
+		/* R5 (design §15's amended D6): an open ask can be put away from the phone.
+		   The tap that REVEALS the reasons is not the dismissal — a reason the
+		   operator did not choose is not one they gave — and the two reasons are
+		   what the agent acts on (`moot` closes the question, `answered_in_chat`
+		   tells it the answer is already in the conversation). */
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^close…$/ }));
+		expect(sendCommand).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed$/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", {
+				op: "ask_dismiss",
+				ask_id: "ask-1",
+				reason: "moot",
+			}),
+		);
+	});
+
+	it("sends answered_in_chat when the operator says they replied in chat", async () => {
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^close…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat$/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", {
+				op: "ask_dismiss",
+				ask_id: "ask-1",
+				reason: "answered_in_chat",
+			}),
+		);
+	});
+
+	it("puts the reasons away again on cancel, sending nothing", () => {
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^close…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^cancel$/ }));
+		expect(screen.queryByRole("button", { name: /^No longer needed$/ })).toBeNull();
+		expect(screen.getByRole("button", { name: /^close…$/ })).toBeTruthy();
+		expect(sendCommand).not.toHaveBeenCalled();
+	});
+
+	it("shows a relay or bridge refusal beside the reasons it answered", async () => {
+		/* A relay's open ask is dismissed at its origin, and the queue says so in
+		   its own sentence. That sentence belongs beside the reason the operator
+		   pressed (D5's rule), and the controls come back so the card is not a
+		   dead end. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new Error("this ask was asked by a relayed conversation — dismiss it there."),
+		);
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^close…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed$/ }));
+		const sentence = await screen.findByText(/dismiss it there/);
+		const reason = screen.getByRole("button", { name: /^No longer needed$/ });
+		expect(
+			reason.compareDocumentPosition(sentence) & Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
+		expect((reason as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it("draws the stale-ask context line from the wire pair, and only when it can", () => {
+		/* SA-D7: "3 messages from you since this was asked (last 19:36)". ABSENCE
+		   IS THE CONTRACT — an older runtime sends no field, and a zero says the ask
+		   is newer than every message — so the card draws NOTHING in either case
+		   rather than a zero the reader would have to disbelieve. */
+		const at = new Date(2026, 9, 23, 19, 36, 0).getTime();
+		const { unmount } = renderCard(
+			ask({ user_messages_since: 3, last_user_message_at: at }),
+		);
+		const line = screen.getByTestId("ask-context");
+		expect(line.textContent).toBe("3 messages from you since this was asked (last 19:36)");
+		unmount();
+
+		renderCard(ask({ user_messages_since: 1, last_user_message_at: at }));
+		expect(screen.getByTestId("ask-context").textContent).toBe(
+			"1 message from you since this was asked (last 19:36)",
+		);
+	});
+
+	it("draws no context line for an absent count, a zero, or a settled ask", () => {
+		const at = new Date(2026, 9, 23, 19, 36, 0).getTime();
+		const cases = [
+			/* an older runtime: neither field */
+			ask(),
+			/* the ask is newer than every message */
+			ask({ user_messages_since: 0, last_user_message_at: at }),
+			/* half a pair: no clock to state */
+			ask({ user_messages_since: 3 }),
+			/* settled: no wait left to be stale */
+			ask({ status: "answered", delivered: true, user_messages_since: 3, last_user_message_at: at }),
+		];
+		for (const row of cases) {
+			const { unmount } = renderCard(row);
+			expect(screen.queryByTestId("ask-context")).toBeNull();
+			unmount();
+		}
 	});
 
 	it("keeps the answer draft across an unmount — collapse and return keeps it", async () => {

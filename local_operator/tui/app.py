@@ -28717,7 +28717,12 @@ class OperatorApp(App[None]):
         self._mount_ask_list(highlight=row.ask_id, scope=SCOPE_FLEET)
 
     def _run_fleet_ask_op(
-        self, row: AskRow, op: str, *, answers: dict[str, list[str]] | None = None
+        self,
+        row: AskRow,
+        op: str,
+        *,
+        answers: dict[str, list[str]] | None = None,
+        reason: str | None = None,
     ) -> None:
         """Send ``op`` for ``row``, in a worker (A7).
 
@@ -28740,7 +28745,7 @@ class OperatorApp(App[None]):
             return
         self._mark_ask_in_flight(row.ask_id, True)
         self.run_worker(
-            self._fleet_ask_worker(row, op, answers),
+            self._fleet_ask_worker(row, op, answers, reason),
             group=f"ask-fleet-{row.ask_id}",
             exclusive=True,
         )
@@ -28766,7 +28771,11 @@ class OperatorApp(App[None]):
             listing.set_in_flight(ask_id, active)
 
     async def _fleet_ask_worker(
-        self, row: AskRow, op: str, answers: dict[str, list[str]] | None
+        self,
+        row: AskRow,
+        op: str,
+        answers: dict[str, list[str]] | None,
+        reason: str | None = None,
     ) -> None:
         """The engage-and-dial, off the UI thread's critical path (A7).
 
@@ -28788,7 +28797,7 @@ class OperatorApp(App[None]):
         try:
             if op == "dismiss":
                 outcome = await dismiss_cold(
-                    config_dir(), row.session_id, row.ask_id, by="terminal"
+                    config_dir(), row.session_id, row.ask_id, by="terminal", reason=reason
                 )
                 if outcome.get("ok"):
                     settled_cold = True
@@ -28817,7 +28826,7 @@ class OperatorApp(App[None]):
                     elif op == "decline":
                         await client.ask_decline(row.ask_id, by="terminal")
                     else:
-                        await client.ask_dismiss(row.ask_id, by="terminal")
+                        await client.ask_dismiss(row.ask_id, by="terminal", reason=reason)
                 finally:
                     client.close()
         except Exception as exc:  # noqa: BLE001 — the refusal is the message
@@ -29287,17 +29296,25 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — no toast in this harness; still say it
             self._system_notice(text, "warning")
 
-    def _dismiss_ask(self, ask_id: str) -> None:
-        """Take a TIMED-OUT ask out of the view.
+    def _dismiss_ask(self, ask_id: str, *, reason: str | None = None) -> None:
+        """Put an OPEN or TIMED-OUT ask away from the view.
 
-        The dismissal's own act asks the model nothing and buys no turn; what it can
-        still OWE is the deadline notice the ask never got (fork A, §14), which the
-        next run's reconcile delivers in its dismissed wording. Its twin in
-        ``asks/queue.py`` and ``serving.py`` says the same thing for the same reason.
+        ``reason`` is the operator's word for WHY, chosen in the list's two-choice
+        card (R5); ``None`` is the lapsed row's one-key door, where the queue
+        records its own default — the agent had already walked past that deadline,
+        so nothing turns on the operator naming a reason (design §14).
+
+        An OPEN ask is dismissed on every live state (SA-D4): mid-turn its
+        response row rides the steering queue to the running turn's next
+        boundary, and an idle session holds it durably with no turn. The
+        dismissal's own act asks the model nothing and buys no turn; what it can
+        still OWE is the deadline notice the ask never got, which the next run's
+        reconcile delivers in its dismissed wording. Its twin in ``asks/queue.py``
+        and ``serving.py`` says the same thing for the same reason.
         """
         fleet_row = self._fleet_row_for(ask_id)
         if fleet_row is not None and self._fleet_answer_starts_here(fleet_row):
-            self._run_fleet_ask_op(fleet_row, "dismiss")
+            self._run_fleet_ask_op(fleet_row, "dismiss", reason=reason)
             return
         session = self._queued_ask_session()
         reader: Any = getattr(session, "dismiss_ask", None)
@@ -29312,7 +29329,7 @@ class OperatorApp(App[None]):
         # had landed. Snapshots clear it when the row leaves (`_sync_ask_surface`).
         self._ask_dismiss_in_flight.add(ask_id)
         self._mark_ask_in_flight(ask_id, True)
-        outcome: Any = reader(ask_id, by="terminal")
+        outcome: Any = reader(ask_id, by="terminal", reason=reason)
         self._handle_ask_outcome(outcome, toast=True, clear_in_flight=ask_id)
 
     def on_ask_bar_toggled(self, message: AskBar.Toggled) -> None:
@@ -29354,7 +29371,9 @@ class OperatorApp(App[None]):
 
     def on_ask_queue_list_dismiss(self, message: AskQueueList.Dismiss) -> None:
         message.stop()
-        self._dismiss_ask(message.ask_id)
+        # The list owns the two-choice card, so a reason arrives set for an OPEN
+        # ask and unset for a lapsed one; both end in the same door.
+        self._dismiss_ask(message.ask_id, reason=message.reason)
 
     def _notify_mobile_title(self, name: str) -> None:
         """Push a title (generated, renamed, or provisional) to the phone.
