@@ -1,0 +1,24 @@
+{
+  "base": "6dd1af9d7340702746ec34f7eb2d98b0ce9ad602",
+  "shipping_parent": "9f1f593708a071c44cacf1098c070da42b8fd243",
+  "snapshot": {
+    "tests/worker_code_identity.py": "a0188d982df70ca9f0ac724f4aa1d5cd8d73324c70981f38c36c29e610212374",
+    "tests/unit/test_worker_code_identity.py": "faa1fe943769f5fb8cbb7313f20437adccab91620a565312222493c1abb3132e",
+    "tests/unit/test_tui_responsiveness.py": "110e619be5aec16de33a6b20c45583be8d0a56c9d1b83307adf1f714cbd30c5a",
+    "tests/loop_callback_spans.py": "8ba82012c4a6f8b869e00b9b2afda2ee59bdbe569164b9a244cba69aebf7bfab",
+    "pyproject.toml": "9976b60f1dc1678a116b18fba8e152536c3c56a774230ae1777f8a911a2a27c9",
+    ".flake8": "edea2ca3148657dfe3d2e17eaefb94fc2f5922e6b6bb7cc6b680bb19f5f26f6d"
+  },
+  "tools": {
+    "black": "26.1.0",
+    "isort": "5.13.2",
+    "flake8": "7.4.1"
+  },
+  "helper": "BYTE6dd canonicalPAIR",
+  "source_deliverable_not_runtime_payload": true,
+  "sources": {
+    "scripts/diagnostics/format_snapshot_6911/worker.py": "78865e415b35f3e1cbb5f3719546b323f35094db71a7f16045cb6aea19a37c6d",
+    "scripts/diagnostics/format_snapshot_6911/controller.py": "7a42a0454a56498a8a261f9cb1cbeaecf2806ab32b5e121445e5dcd2d9feae83",
+    "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e"
+  }
+}

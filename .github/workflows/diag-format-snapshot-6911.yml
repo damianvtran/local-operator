@@ -1,0 +1,45 @@
+name: Owned public snapshot formatting 6911
+on:
+  push:
+    branches: [diag/format-public-snapshot-6911]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  format:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Pinned static tools only
+        timeout-minutes: 2
+        run: python -m pip install black==26.1.0 isort==5.13.2 flake8==7.4.1
+      - name: Format only owned public copies and verify
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/format-owned-6911"
+          out="$RUNNER_TEMP/format-delivery-6911"
+          python -B scripts/run_bounded.py --timeout 220 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.format_snapshot_6911.controller "$work" "$out"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: public-format-patch-6911-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/format-delivery-6911/format.patch
+            ${{ runner.temp }}/format-delivery-6911/format.json
+          retention-days: 3
+      - name: Remove delivered local outputs after artifact handoff
+        if: always()
+        shell: bash
+        run: |
+          python -B - <<'PY_CLEAN'
+          import os, pathlib, shutil
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'format-delivery-6911'
+          if out.is_dir() and not out.is_symlink(): shutil.rmtree(out)
+          PY_CLEAN
