@@ -208,12 +208,16 @@ def ci_clause(ci: Mapping[str, Any] | None) -> CiClause | None:
         return CiClause(_t(_kt.ci_running()), "muted")
     if status == "pending":
         return CiClause(_t(_kt.ci_pending()), "muted")
-    if status == "unknown":
-        return CiClause(_t(_kt.ci_no_checks()), "muted")
+    # THE COUNTS BEFORE THE UNKNOWN WORD: ``unknown`` means "this build cannot
+    # classify the set", and a set that was READ must still show what was read.
+    # A partial read (over 100 checks, one page fetched) arrives as ``unknown``
+    # with real counters, and "No checks yet" would deny the checks that ran.
     if total is not None and total > 0 and passed is not None:
         return CiClause(
             _t(_kt.ci_passed_count(passed=str(int(passed)), total=str(int(total)))), "plain"
         )
+    if status == "unknown":
+        return CiClause(_t(_kt.ci_no_checks()), "muted")
     if status == "success":
         return CiClause(_t(_kt.ci_passed_status()), "plain")
     # A settled run this build cannot classify: claim nothing.

@@ -288,6 +288,38 @@ def test_a_partial_check_run_read_is_never_a_pass() -> None:
     assert ci["status"] == "unknown"
 
 
+def test_a_partial_read_stays_unknown_when_page_one_carries_a_skip() -> None:
+    """Review round 1, F1: ``skipped`` used to outrank the partial-read flag, so
+    a page that happened to carry one skip reported a settled non-pass word and
+    dropped the incomplete-read signal entirely -- permanent for any repo with
+    more than 100 checks."""
+    ci = github.ADAPTER.ci(
+        _github_ci(
+            ("completed", "skipped"),
+            *([("completed", "success")] * 99),
+            total=150,
+        )
+    )
+    assert ci["passed"] == 99 and ci["skipped"] == 1
+    assert ci["status"] == "unknown", "an incomplete read is not a settled state"
+
+
+def test_a_fetched_but_empty_set_with_a_positive_total_is_unknown() -> None:
+    """Review round 1, F3: ``runs: []`` with ``total_count: 9`` is an
+    inconsistent read, not the definitive \"no checks ran\" the ``none`` word
+    claims."""
+    ci = github.ADAPTER.ci({"ci": {"fetched": True, "runs": [], "total": 9, "url": None}})
+    assert ci["status"] == "unknown"
+    assert ci["total"] == 9
+    assert ci["passed"] is None, "no runs were read, so no counter may be invented"
+
+    # The control: a genuinely empty set still gets its own word.
+    empty = github.ADAPTER.ci(
+        {"ci": {"fetched": True, "runs": [], "total": 0, "url": None}}
+    )
+    assert empty["status"] == "none" and empty["total"] == 0
+
+
 @pytest.mark.asyncio
 async def test_github_conditional_request_revalidates_with_304() -> None:
     calls: list[httpx.Request] = []
