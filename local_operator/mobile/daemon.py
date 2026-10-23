@@ -2472,7 +2472,6 @@ def _pin_opening_user_message(projection: SessionProjection, record: SessionReco
         return
     try:
         from local_operator.paths import config_dir
-
         from local_operator.session import compression
 
         path = compression.transcript_for_read(config_dir() / "sessions" / record.session_id)

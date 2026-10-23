@@ -236,7 +236,7 @@ def test_the_allow_list_names_only_live_sites() -> None:
 # Self-test: the guard must fail the build on a NEW probe, and pass a resolver
 # ---------------------------------------------------------------------------
 
-_FLAGGED_FIXTURE = '''
+_FLAGGED_FIXTURE = """
 from pathlib import Path
 
 TRANSCRIPT_NAME = "transcript.jsonl"
@@ -244,9 +244,9 @@ TRANSCRIPT_NAME = "transcript.jsonl"
 
 def wants_to_know(directory: Path) -> bool:
     return (directory / TRANSCRIPT_NAME).is_file()
-'''
+"""
 
-_BOUND_FIXTURE = '''
+_BOUND_FIXTURE = """
 from pathlib import Path
 
 TRANSCRIPT_NAME = "transcript.jsonl"
@@ -255,9 +255,9 @@ TRANSCRIPT_NAME = "transcript.jsonl"
 def also_wants_to_know(directory: Path) -> bytes:
     transcript = directory / TRANSCRIPT_NAME
     return transcript.read_bytes()
-'''
+"""
 
-_PASSING_FIXTURE = '''
+_PASSING_FIXTURE = """
 from pathlib import Path
 
 from local_operator.session import compression
@@ -279,7 +279,7 @@ def writes_a_plain_file(directory: Path) -> None:
     # brittleness this one exists to avoid) — such a site goes on the allow-list
     # with its reason, exactly as fork.py's does.
     (directory / "transcript.jsonl").write_bytes(b"")
-'''
+"""
 
 
 def test_the_guard_flags_a_direct_probe() -> None:
@@ -309,7 +309,7 @@ def test_a_creation_open_is_flagged_and_excused_by_the_allow_list() -> None:
         _ALLOWED.update(saved)
 
 
-_CREATION_FIXTURE = '''
+_CREATION_FIXTURE = """
 from pathlib import Path
 
 TRANSCRIPT_NAME = "transcript.jsonl"
@@ -317,7 +317,7 @@ TRANSCRIPT_NAME = "transcript.jsonl"
 
 def creates_the_plain_file(directory: Path) -> None:
     (directory / TRANSCRIPT_NAME).open("wb").close()
-'''
+"""
 
 
 def test_the_allow_list_excuses_a_named_site_and_nothing_else() -> None:

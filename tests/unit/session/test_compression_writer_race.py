@@ -25,8 +25,8 @@ import gzip
 import json
 import os
 import subprocess
-import time
 import sys
+import time
 from pathlib import Path
 
 import pytest

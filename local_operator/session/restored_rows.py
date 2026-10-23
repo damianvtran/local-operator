@@ -47,10 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.incidents import CUT_OFF_CAUSES
-from local_operator.session.transcript import (
-    ENTRY_MESSAGE,
-    TranscriptEntry,
-)
+from local_operator.session.transcript import ENTRY_MESSAGE, TranscriptEntry
 
 #: Outcomes a roster RECORD can carry that already settle a child's state. Any
 #: other value (``None``, or a token a newer runtime invented) means "the
