@@ -3681,7 +3681,8 @@ def _make_system_blocks_provider(
     so the wire block keeps the PARENT's ``Session ID`` line (and the parent's
     provider cache still hits), while the fork's own id reaches the same
     request as a ``[session-state] ## Environment`` delta. That residual is
-    deliberate and pinned by ``test_a_fork_keeps_the_parent_id_in_its_prefix``:
+    deliberate and pinned by
+    ``test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own``:
     until the next prefix epoch the authoritative block names the parent while
     ``sessions`` marks the fork's own row, and the state record is the newer
     authority — it is in context before the first model call.
