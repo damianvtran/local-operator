@@ -550,14 +550,162 @@ def check_catalogues() -> list[str]:
                     problems.append(f"{locale}/{namespace}: {key}: {exc}")
                     continue
                 want = msg_runtime.message_arguments(expected[key])
-                if got != want:
+                problem = _arguments_problem(
+                    want,
+                    got,
+                    translated_source=translated[key],
+                    locale=locale,
+                    plural=plural,
+                )
+                if problem is not None:
                     problems.append(
-                        f"{locale}/{namespace}: {key}: arguments {got!r} != en's {want!r}"
+                        f"{locale}/{namespace}: {key}: arguments {got!r} != en's "
+                        f"{want!r}: {problem}"
                     )
                 _check_plural_categories(
                     problems, locale, namespace, key, translated[key], plural, locale
                 )
     return problems
+
+
+def arguments_match(
+    source: tuple[tuple[str, str], ...],
+    translated: tuple[tuple[str, str], ...],
+    *,
+    translated_source: str | None = None,
+    locale: str | None = None,
+    plural: dict[str, Any] | None = None,
+) -> bool:
+    """Whether a translation keeps en's arguments (name, order and VALUE).
+
+    Kinds must be identical with ONE deliberate exception: a locale may render
+    an en ``number`` as an ICU ``plural`` over the same argument — but ONLY
+    when that upgrade is lossless (see :func:`_arguments_problem`): the
+    translation's plural must carry every CLDR category of the locale, every
+    branch must render the count, and no branch may be empty. Without those,
+    the upgrade is a hole: a plural missing ``one`` cannot render count 1, and
+    a branch without ``#``/``{count, number}`` silently drops the number.
+
+    WHY (Urdu/Hindi duration units, 2026-10-20): en writes the countdown unit
+    as a bare number — ``{count, number} h`` — because English's ``h`` does not
+    inflect. A language whose counted noun DOES inflect has no invariant form
+    to put there: Urdu needs ``1 گھنٹہ`` / ``3 گھنٹے`` and Hindi ``1 घंटा`` /
+    ``3 घंटे``. Without the upgrade the key is wrong on nearly every render
+    (the hours arm covers 1-47), and the wrongness is invisible to every
+    mechanical check — the "5 минута" class. The upgrade preserves the
+    argument's name, position and number VALUE; it only adds grammar.
+
+    The reverse is NOT allowed: an en plural rendered as a bare number drops
+    branches and loses the inflection, which is the defect this exists to
+    catch. Every other kind change (``simple``/``number``/``date``/``select``)
+    stays a hard failure — a translator must not change what a value IS.
+
+    ``translated_source``/``locale``/``plural`` are required to judge an
+    upgrade; omitting them fails CLOSED rather than skipping the guard. The
+    tuple-only signature stays for callers comparing already-validated shapes;
+    :func:`check_catalogues` and the parity test pass the context.
+    """
+    return (
+        _arguments_problem(
+            source,
+            translated,
+            translated_source=translated_source,
+            locale=locale,
+            plural=plural,
+        )
+        is None
+    )
+
+
+def _arguments_problem(
+    source: tuple[tuple[str, str], ...],
+    translated: tuple[tuple[str, str], ...],
+    *,
+    translated_source: str | None,
+    locale: str | None,
+    plural: dict[str, Any] | None,
+) -> str | None:
+    """Why ``translated`` breaks en's argument contract, or ``None``.
+
+    Returning the reason rather than a bool keeps the checker's diagnostics
+    specific: a reordered argument, a changed kind and a lossy ``number ->
+    plural`` upgrade are different defects and must not read as one generic
+    mismatch.
+    """
+    if len(source) != len(translated):
+        return f"en has {len(source)} argument(s), translation has {len(translated)}"
+    for index, ((source_name, source_kind), (translated_name, translated_kind)) in enumerate(
+        zip(source, translated), start=1
+    ):
+        if source_name != translated_name:
+            return (
+                f"argument {index} is {translated_name!r}, en's is {source_name!r} "
+                "(renamed or reordered)"
+            )
+        if source_kind == translated_kind:
+            continue
+        if source_kind == "number" and translated_kind == "plural":
+            # Fail closed: a caller that cannot supply the message text and the
+            # locale's CLDR table cannot prove the upgrade is lossless.
+            if translated_source is None or locale is None or plural is None:
+                return (
+                    f"argument {translated_name!r} upgrades number -> plural without "
+                    "the source/locale/plural table needed to validate the upgrade"
+                )
+            problem = _number_upgrade_problem(translated_source, translated_name, locale, plural)
+            if problem is not None:
+                return problem
+            continue
+        return f"argument {translated_name!r} changed kind {source_kind!r} -> {translated_kind!r}"
+    return None
+
+
+def _number_upgrade_problem(
+    translated_source: str,
+    argument: str,
+    locale: str,
+    plural: dict[str, Any],
+) -> str | None:
+    """Why a ``number -> plural`` upgrade is lossy, or ``None`` when sound.
+
+    Three conditions, each a distinct real failure:
+
+    1. The literal selectors cover the locale's FULL CLDR category set. A
+       Russian plural with only ``other`` cannot render 1/2/5 correctly; a
+       locale with only ``other`` (vi) is satisfied by that one category.
+    2. Every branch renders the plural's value (``#`` or ``{arg, number}``).
+       A branch without it silently drops the number from the sentence.
+    3. No branch body is empty. ``other {}`` renders as nothing for every
+       count outside the defined branches; it is a valueless branch and must
+       never be accepted as grammar.
+    """
+    known = set(plural["locales"].get(locale, {}).get("categories", []))
+    occurrences = [
+        occurrence
+        for occurrence in msg_runtime.plural_arguments(translated_source)
+        if occurrence.argument == argument
+    ]
+    if not occurrences:
+        return f"plural argument {argument!r} not found in the translation"
+    for occurrence in occurrences:
+        selectors = {
+            branch.selector for branch in occurrence.branches if not branch.selector.startswith("=")
+        }
+        missing = sorted(known - selectors)
+        if missing:
+            return (
+                f"plural {argument!r} is missing locale categories {missing} "
+                f"(has {sorted(selectors)})"
+            )
+        for branch in occurrence.branches:
+            if branch.empty:
+                return f"plural {argument!r} branch {branch.selector!r} is empty"
+            if not branch.renders_value:
+                return (
+                    f"plural {argument!r} branch {branch.selector!r} does not "
+                    f"render the value (`#` or `{{{argument}, number}}`)"
+                )
+    return None
 
 
 def _check_plural_categories(

@@ -34,6 +34,7 @@ import {
 import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
 import { NotPairedError, operatorFieldsFor, storedCertificate } from "../lib/operator-device";
+import { messageRuntime } from "../store";
 import { PairPromptSheet } from "../screens/pair";
 
 type Mode = "ask" | "auto";
@@ -87,7 +88,7 @@ export function GateSheet({
 					args: "ask",
 					images: [],
 				});
-				setNotice("keeping approvals at ask in this session");
+				setNotice(messageRuntime.t("relay.asks.gate.notice_ask"));
 				/* AND THE LOOSENING RECEIPT GOES (UX round 8, U8-3). It lives on the
 				   header, above this sheet, and it reports a STATE ("the gate is now
 				   auto — gated tools run without asking"); a tighten from this very
@@ -113,16 +114,14 @@ export function GateSheet({
 			// this sheet before the sheet unmounts (design round 6, D2). The
 			// tightening path keeps its in-sheet notice because it does NOT close,
 			// which is why that one never had this bug.
-			onReceipt("this session's gate is now auto — gated tools run without asking");
+			onReceipt(messageRuntime.t("relay.asks.gate.notice_auto"));
 			onClose();
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
 				/* The remedy the refusal copy names, one tap away rather than a
 				   sentence telling the reader to go and find a terminal. */
 				setPairPrompt(true);
-				setError(
-					"This phone is not paired with that machine yet — pair it once and it can give this consent itself.",
-				);
+				setError(messageRuntime.t("relay.asks.gate.not_paired_error"));
 				return;
 			}
 			setError(humanizeGateError(failure));
@@ -151,17 +150,16 @@ export function GateSheet({
 
 	return (
 		<>
-			<Sheet open={open} onClose={onClose} title="Approvals in this session">
+			<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.asks.gate.title")}>
 				<div className="flex flex-col gap-3 p-3">
 					<p className="text-body-sm text-ink-muted">
-						Ask parks every gated tool call until you answer its card. Auto lets them run
-						without asking for the rest of this session.
+						{messageRuntime.t("relay.asks.gate.body")}
 					</p>
 					<Button disabled={busy !== null} onClick={() => void choose("ask")}>
-						{busy === "ask" ? "…" : "keep asking (ask)"}
+						{busy === "ask" ? "…" : messageRuntime.t("relay.asks.gate.keep_asking")}
 					</Button>
 					<Button disabled={busy !== null} onClick={() => void choose("auto")}>
-						{busy === "auto" ? "…" : "run without asking (auto)"}
+						{busy === "auto" ? "…" : messageRuntime.t("relay.asks.gate.run_without")}
 					</Button>
 					{!paired ? (
 						/* SAID BEFORE THE TAP, not after (design round 6, D4). Both buttons
@@ -172,9 +170,11 @@ export function GateSheet({
 						   honest thing to state; `storedCertificate()` is a synchronous read
 						   this component already has. */
 						<p className="text-meta text-ink-muted">
-							This phone is not paired with that machine, so <strong>run without asking</strong>{" "}
-							will ask you to pair it first. Keeping approvals at <strong>ask</strong> never needs
-							a pairing.
+							{messageRuntime.t("relay.asks.gate.unpaired_before")}{" "}
+							<strong>{messageRuntime.t("relay.asks.gate.unpaired_run_label")}</strong>{" "}
+							{messageRuntime.t("relay.asks.gate.unpaired_middle")}{" "}
+							<strong>{messageRuntime.t("relay.asks.gate.unpaired_ask_label")}</strong>{" "}
+							{messageRuntime.t("relay.asks.gate.unpaired_after")}
 						</p>
 					) : null}
 					{notice ? <p className="text-body-sm text-ink-muted">{notice}</p> : null}
@@ -208,15 +208,15 @@ export function humanizeGateError(error: unknown): string {
 			   must not reword a refusal it does not own), but the one step that is
 			   actually left is knowable here and nowhere else: the machine refused a
 			   signature from a device that believed it was paired. */
-			return `${error.message} (This phone's signature was refused — on that machine, \`lop operator devices\` shows whether this device is revoked or expired.)`;
+			return messageRuntime.t("relay.asks.gate.operator_refused", { message: error.message });
 		}
 	}
 	const message = String((error as Error)?.message ?? error);
 	if (message.includes("504") || message.toLowerCase().includes("did not answer")) {
-		return "The session didn’t respond in time — try again.";
+		return messageRuntime.t("relay.asks.error.session_timeout");
 	}
 	if (message.includes("409") || message.toLowerCase().includes("not connected")) {
-		return "The session went away — reopen it from the session list.";
+		return messageRuntime.t("relay.asks.error.session_gone_list");
 	}
 	return message;
 }

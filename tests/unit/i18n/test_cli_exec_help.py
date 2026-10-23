@@ -183,6 +183,9 @@ def test_bootstrap_kill_switch_and_eligibility(tmp_path, monkeypatch):
     assert helper.help_locale() == "en"
 
 
+# Help follows the ELIGIBLE (shipped) set, never the prompt preference. Urdu's
+# relay.asks wave shipped, so `ur` now renders help; the security-held `zh-CN`
+# is what keeps the two sets apart here.
 @pytest.mark.parametrize(
     "tag, expected",
     [
@@ -191,7 +194,7 @@ def test_bootstrap_kill_switch_and_eligibility(tmp_path, monkeypatch):
         ("ru", "ru"),
         ("vi", "vi"),
         ("hi", "hi"),
-        ("ur", "en"),
+        ("ur", "ur"),
         ("zh-CN", "en"),
         ("unknown", "en"),
     ],

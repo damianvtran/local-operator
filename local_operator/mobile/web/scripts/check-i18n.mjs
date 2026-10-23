@@ -6,7 +6,14 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ENFORCED = ["src/i18n/runtime.ts", "src/i18n/wire-cache.ts", "src/store.ts", "src/main.tsx", "src/screens/session-list.tsx", "src/screens/session-view.tsx", "src/screens/past-sessions.tsx", "src/components/directory-sheet.tsx", "src/components/model-sheet.tsx"];
+export const ENFORCED = ["src/i18n/runtime.ts", "src/i18n/wire-cache.ts", "src/store.ts", "src/main.tsx", "src/screens/session-list.tsx", "src/screens/session-view.tsx", "src/screens/past-sessions.tsx", "src/components/directory-sheet.tsx", "src/components/model-sheet.tsx", "src/components/ask-card.tsx", "src/components/ask-dock.tsx", "src/components/ask-row.tsx", "src/components/asks-sheet.tsx", "src/components/gate-sheet.tsx", "src/components/pending-card.tsx", "src/components/ui/disclosure.tsx", "src/lib/asks.ts"];
+/** Generated from the en catalogues themselves, never hand-authored copy.
+ *  Counting its values is double counting: the same sentence is extracted from
+ *  an app file (which lowers that file's debt) and re-counted here as a bundle
+ *  property whose key happens to end in `.title`/`.label`/`.placeholder` (which
+ *  raises advisory). Extraction therefore INCREASED the number this gate
+ *  reports, which is the one behaviour a ratchet must never have. */
+export const GENERATED_SOURCES = new Set(["src/i18n/bundled.gen.ts"]);
 export const NONTRANSLATABLE = [{
 	path: "src/i18n/wire-cache.ts", sink: "new:Error", text: "catalogue response limit",
 	reason: "Internal payload bound caught by loader; never surfaced as user copy.",
@@ -106,6 +113,7 @@ export function checkTree(root, baseline) {
 	const failures = []; let advisory = 0; const seen = new Set();
 	for (const path of files(join(root, "src"))) {
 		const name = relative(root, path).replaceAll("\\", "/");
+		if (GENERATED_SOURCES.has(name)) continue;
 		seen.add(name);
 		const actual = fingerprints(scanSource(readFileSync(path, "utf8"), name));
 		if (!ENFORCED.includes(name)) { advisory += Object.values(actual).reduce((a, b) => a + b, 0); continue; }
