@@ -346,6 +346,25 @@ def _dotted(path: "tuple[str, ...] | list[str]") -> str:
     return ".".join(path)
 
 
+def _covered_by_drop(path: "tuple[str, ...]", drops: "Mapping[tuple[str, ...], str]") -> bool:
+    """Whether ``path`` — or any ancestor of it — is declared retired.
+
+    A declaration retires a SUBTREE, not just the exact path. Every deletion the
+    product performs is expressed by removing a key from a mapping it then writes
+    whole (``/settings`` removing ``subagents.models.hi``, the hub's revert removing
+    ``hub.links.<id>``), and the natural declaration names the removed entry, not
+    each of its children. Matching only the exact leaf meant a declared parent
+    suppressed nothing: the children were copied back, the emptied parent was
+    recreated around them, and the write reported a removal it had not performed
+    (review round 1, B1/Q6).
+
+    Checking every PREFIX is what makes both spellings work: declaring
+    ``("keymap", "quick_send")`` covers that leaf, declaring ``("keymap",)`` covers
+    everything beneath it.
+    """
+    return any(path[:end] in drops for end in range(1, len(path) + 1))
+
+
 def _leaf_paths(value: Any, prefix: "tuple[str, ...]" = ()) -> "list[tuple[str, ...]]":
     """Every addressable leaf under ``value``, as path tuples.
 
@@ -360,7 +379,15 @@ def _leaf_paths(value: Any, prefix: "tuple[str, ...]" = ()) -> "list[tuple[str, 
     ``retry.fallbackChains.default`` did not, so a top-level inventory would have
     reported nothing at all.
     """
-    if isinstance(value, Mapping) and value:
+    if isinstance(value, Mapping):
+        if not value:
+            # An EMPTY mapping is NOT a leaf, even nested: it holds no setting, so
+            # it is nothing to record and nothing a write must account for.
+            # `_leaf_values` takes the same view — the two are read side by side
+            # (the inventory compares paths, the refusal compares values), and a
+            # third caller copying whichever it found first would inherit a
+            # disagreement about what "a setting" is (review round 1, n1).
+            return []
         leaves: "list[tuple[str, ...]]" = []
         for key, child in value.items():
             leaves.extend(_leaf_paths(child, (*prefix, str(key))))
@@ -379,11 +406,18 @@ def _leaf_values(values: Mapping[str, Any]) -> "dict[tuple[str, ...], Any]":
     leaves: "dict[tuple[str, ...], Any]" = {}
     for key, child in values.items():
         path = (str(key),)
-        if isinstance(child, Mapping) and child:
-            for sub, value in _leaf_values(child).items():
-                leaves[(*path, *sub)] = value
-        else:
-            leaves[path] = child
+        if isinstance(child, Mapping):
+            # An EMPTY mapping is not a leaf, deliberately: it holds no setting, so
+            # it is neither something lost nor something a write must account for.
+            # `_leaf_paths` takes the same view — the two are read side by side
+            # (the refusal compares values, the inventory compares paths), and a
+            # third caller copying whichever it found first would be a silent
+            # disagreement about what "a setting" is.
+            if child:
+                for sub, value in _leaf_values(child).items():
+                    leaves[(*path, *sub)] = value
+            continue
+        leaves[path] = child
     return leaves
 
 
@@ -419,6 +453,21 @@ def _path_present(values: Mapping[str, Any], path: "tuple[str, ...]") -> bool:
     return True
 
 
+def _declared_path_existed(
+    values: Mapping[str, Any], drops: "Mapping[tuple[str, ...], str]"
+) -> bool:
+    """Whether any declared retirement names something the disk actually holds.
+
+    A write that DECLARES a removal it did not perform (the cleanup migration names
+    ceilings an already-migrated file no longer has) must not disturb the startup
+    inventory: nothing changed, so the next launch's key set is the same one.
+    """
+    for path in drops:
+        if _path_present(values, path):
+            return True
+    return any(_covered_by_drop(leaf, drops) for leaf in _leaf_paths(values))
+
+
 def _carry_through_unmodelled(
     payload: Dict[str, Any],
     disk: Mapping[str, Any],
@@ -452,9 +501,23 @@ def _carry_through_unmodelled(
     """
     for key, disk_value in disk.items():
         path = (*prefix, str(key))
-        if path in drops:
+        if _covered_by_drop(path, drops):
             continue
         if key not in payload:
+            if isinstance(disk_value, Mapping) and disk_value:
+                # A missing parent is copied LEAF-WISE, so declared descendants are
+                # skipped inside it. Copying the subtree wholesale is what let a
+                # declared removal come back, and is the same defect one level up.
+                carried: Dict[str, Any] = {}
+                _carry_through_unmodelled(
+                    carried, disk_value, drops=drops, prefix=path, preserved=preserved
+                )
+                if carried:
+                    payload[key] = carried
+                # An EMPTY `carried` means every child was retired: the parent is
+                # not recreated, or the removal would leave `keymap: {}` behind
+                # after the user reset the last key in it.
+                continue
             payload[key] = deepcopy(disk_value)
             preserved.extend(_leaf_paths(disk_value, path))
             continue
@@ -1015,9 +1078,12 @@ class ConfigWriteRefused(RuntimeError):
     (or to declare the retirement), not to retype the argument. ``settings_io``'s
     ``ConfigUnreadableError`` draws the same distinction from the other side.
 
-    ``code`` follows ``ConfigWriteLockTimeout.code`` / ``ConfigWriteLockError.code``:
-    the server route and the CLI panel report a refused write by a stable name,
-    and a message string is not a contract.
+    ``code`` follows ``ConfigWriteLockTimeout.code`` / ``ConfigWriteLockError.code``
+    so a caller can branch on the KIND of refusal without matching a message.
+    No surface maps it yet: ``PATCH /v1/config`` catches this with the rest of
+    ``Exception`` and answers its generic 500 with the text appended, and the CLI
+    prints the message. The attribute is the handle for whoever wires that up; it
+    is not a contract anything honours today.
 
     THE CASE IT EXISTS FOR (2026-10-23). A manager that never read ``config.yml``
     — constructed while the file was missing, or when it held nothing — writes
@@ -1334,7 +1400,7 @@ class ConfigManager:
                 differing = [
                     path
                     for path in _differing_paths(payload_values, disk_values)
-                    if path not in drops
+                    if not _covered_by_drop(path, drops)
                 ]
                 if differing:
                     raise ConfigWriteRefused(
@@ -1413,6 +1479,18 @@ class ConfigManager:
             except OSError:
                 pass
             raise
+
+        if drops and _declared_path_existed(disk_values or {}, drops):
+            # A removal THIS BUILD performed must not be reported next launch as "a
+            # writer outside this build removed them" — and because the shrink
+            # report deliberately does not re-baseline on a hit, it would otherwise
+            # repeat on every `lop` verb forever, advising a restore that would undo
+            # the user's own choice (review round 1, M2). The inventory has those
+            # paths subtracted, after the replace, so it describes the file that
+            # now exists without adopting any gap this write did not cause.
+            from local_operator.config_migrations import record_config_key_inventory
+
+            record_config_key_inventory(self.config_dir, list(drops))
 
         # This manager's snapshot is now what the file holds (the payload, plus
         # everything preserved into it), so a LATER write through the same manager
@@ -1554,13 +1632,18 @@ class ConfigManager:
 
     @serialized_config_write
     def reset_to_defaults(self) -> None:
-        """Reset configuration to default values.
+        """Reset ``values`` to the shipped defaults.
 
-        Every top-level key currently on disk is DECLARED removed, with the reason
-        that says so. Without the declaration, ``_write_config``'s preservation
-        would copy every one of them straight back — the reset would report success
-        and change nothing but the defaults, which is the failure mode the whole
-        drop mechanism exists to make impossible.
+        Every leaf under ``values`` that the defaults do not carry — unknown
+        top-level keys and nested user keys alike — is DECLARED removed, with the
+        reason that says so. Without the declaration, ``_write_config``'s
+        preservation would copy them straight back: the reset would report success
+        and keep the operator's settings, the failure mode the whole drop mechanism
+        exists to make impossible.
+
+        Keys BESIDE ``values`` (a hand-written ``network:`` block) are not settings
+        and are not touched: the document-level carry-through keeps them exactly as
+        it did before preservation existed, and ``drop`` cannot express them.
         """
         # A COPY, for the reason `_fresh_default_config` exists: adopting the
         # module-level object made the next `set_config_value` a write into the

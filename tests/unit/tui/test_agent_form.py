@@ -386,7 +386,14 @@ async def test_removed_tier_noop_and_label_edit_preserve_historical_pin(tmp_path
         creating=True,
         scope="global",
     )
-    config.set_config_value("subagents", {"models": {}, "model_choice": "operator"})
+    # "No tiers configured" is a DELETION now: a mapping write merges into the file
+    # (PR #2819), so the emptied subtree is declared rather than implied by
+    # `models: {}` — which the write treats as "keep what is on disk".
+    config.set_config_value(
+        "subagents",
+        {"model_choice": "operator"},
+        drop={("subagents", "models"): "no tiers configured for this test"},
+    )
     async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)
         page = await open_form(app, pilot, "/agent edit historic")
