@@ -64,24 +64,30 @@ import base64
 import binascii
 import hashlib
 import io
+import json
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Sequence
+
+from local_operator.harness.pdf_pages import pdf_page_count
+from local_operator.harness.types import DocumentContent
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from local_operator.harness.types import DocumentContent
+    from local_operator.harness.types import ChatRequest, Message
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "DOCUMENT_FORMS",
-    "DOCUMENT_REQUEST_HEADROOM_BYTES",
     "DocumentBudget",
     "DocumentForm",
     "admission_wire",
     "document_form",
     "document_injection",
+    "document_budget",
+    "document_budget_for_messages",
+    "document_budget_for_request",
     "document_native_ok",
     "extract_document_text",
     "fallback_document_text",
@@ -101,12 +107,6 @@ MAX_FALLBACK_CHARS = 400_000
 #: bound: text has no page structure to count, and the notice names the cut.
 MAX_FALLBACK_TEXT_CHARS = 400_000
 
-#: A PDF's page count costs a parse of the xref table. Cached per digest for
-#: the life of the process: the bytes are content-addressed, so the answer
-#: cannot change for a digest, and a session resends its history on every
-#: turn.
-_PAGE_COUNT_CACHE: dict[str, int | None] = {}
-
 #: Anthropic documents are capped at 600 pages, but only 100 when the request's
 #: context window is under 1M tokens (its PDF page states both). A model whose
 #: window is unknown is treated as SMALL: the conservative direction is the
@@ -114,12 +114,11 @@ _PAGE_COUNT_CACHE: dict[str, int | None] = {}
 ANTHROPIC_LARGE_CONTEXT_WINDOW = 1_000_000
 ANTHROPIC_SMALL_CONTEXT_MAX_PAGES = 100
 
-#: Reserved out of a request-scoped limit for everything that is not a
-#: document: text, images, tool schemas and the JSON envelope. 1 MiB is a
-#: stated allowance, not a measurement — the session's own wire-byte budget
-#: keeps the whole request smaller than this in practice, and the point here
-#: is that documents never claim the provider's entire ceiling.
-DOCUMENT_REQUEST_HEADROOM_BYTES = 1_048_576
+#: Floor for the JSON envelope (roles, keys, part wrappers) that the byte
+#: estimator does not model. It is scaled to 1% of the row's limit, capped at
+#: this value: a 32 MB ceiling buys 64 KiB of slack, a tiny test form buys
+#: almost none, and neither invents a share of the budget.
+DOCUMENT_ENVELOPE_ALLOWANCE_BYTES = 65_536
 
 
 @dataclass(frozen=True)
@@ -180,11 +179,71 @@ class DocumentBudget:
         return True
 
 
-def document_budget(form: DocumentForm | None) -> DocumentBudget | None:
-    """A fresh per-request budget for ``form``, or ``None`` without a row."""
+def document_budget(form: DocumentForm | None, *, other_bytes: int = 0) -> DocumentBudget | None:
+    """Document room in a request that spends ``other_bytes`` on everything else.
+
+    ``other_bytes`` is the measured non-document wire payload (text, images,
+    audio, tool arguments, system blocks and tool schemas). Subtracting it is
+    the whole point: a 23 MB PDF encoding to ~30.7 MB fits Anthropic's 32 MB
+    ceiling ALONE, but not beside a megabyte of conversation text (agent
+    review round 2, minor 2). ``max(0, ...)`` is the floor — when the rest of
+    the body already fills the request, documents extract or reference rather
+    than push it over.
+    """
     if form is None:
         return None
-    return DocumentBudget(max(0, form.max_bytes - DOCUMENT_REQUEST_HEADROOM_BYTES))
+    return DocumentBudget(max(0, form.max_bytes - other_bytes))
+
+
+def _request_room(
+    form: DocumentForm, messages: "Sequence[Message]", extra_bytes: int = 0
+) -> DocumentBudget:
+    """``form``'s document room after the body's non-document payload.
+
+    ``compaction.tokens.estimate_wire_bytes`` sizes text, image/audio base64
+    and tool-call arguments; it is documented to UNDER-count the real wire by
+    a measured mean of 2.4%, so the figure is scaled up 5% and given the
+    envelope allowance. Both directions are stated: an over-estimate makes a
+    document extract that could have gone native (cheap, still correct), an
+    under-estimate sends a payload the provider refuses (the failure this
+    class of fix exists to prevent).
+    """
+    from local_operator.compaction.tokens import estimate_wire_bytes
+
+    documents = sum(
+        encoded_document_bytes(block)
+        for message in messages
+        for block in message.content
+        if isinstance(block, DocumentContent)
+    )
+    other = estimate_wire_bytes(messages) - documents + extra_bytes
+    other += other // 20
+    other += min(DOCUMENT_ENVELOPE_ALLOWANCE_BYTES, form.max_bytes // 100)
+    room = document_budget(form, other_bytes=other)
+    assert room is not None  # form is not None, by the guard above
+    return room
+
+
+def document_budget_for_messages(
+    form: DocumentForm | None, messages: "Sequence[Message]"
+) -> DocumentBudget | None:
+    """Budget for a body built from ``messages`` alone (no request context)."""
+    if form is None:
+        return None
+    return _request_room(form, messages)
+
+
+def document_budget_for_request(
+    form: DocumentForm | None, request: "ChatRequest"
+) -> DocumentBudget | None:
+    """Budget for THIS request: messages plus system blocks, schemas, envelope."""
+    if form is None:
+        return None
+    extra = sum(len(block) for block in request.system_blocks)
+    extra += sum(
+        len(tool.name) + len(json.dumps(tool.parameters, sort_keys=True)) for tool in request.tools
+    )
+    return _request_room(form, request.messages, extra)
 
 
 #: MIME prefixes/suffixes the fallback can read as text. PDF is handled by
@@ -269,29 +328,6 @@ def admission_wire(provider: str, *, supports_responses_api: bool = False) -> st
     if provider == "openai" and supports_responses_api:
         return "openai-responses"
     return "openai-chat"
-
-
-def pdf_page_count(raw: bytes, digest: str | None = None) -> int | None:
-    """Pages in a PDF, or ``None`` when the document cannot be parsed.
-
-    ``None`` is not an error: a scanned/encrypted/corrupt PDF still has bytes
-    and can still be sent to a provider that accepts PDFs (Anthropic,
-    Google). It only means the page LIMIT cannot be checked, which is why the
-    delivery decision treats an unknown count as "inside" for providers whose
-    only meaningful limit is bytes, and extraction announces its own bound.
-    """
-    key = digest or hashlib.sha256(raw).hexdigest()[:32]
-    if key in _PAGE_COUNT_CACHE:
-        return _PAGE_COUNT_CACHE[key]
-    try:
-        from pypdf import PdfReader  # lazy: only a document turn pays for it
-
-        count: int | None = len(PdfReader(io.BytesIO(raw), strict=False).pages)
-    except Exception:  # noqa: BLE001 — an unparseable PDF is a normal document
-        logger.debug("document: page count unavailable", exc_info=True)
-        count = None
-    _PAGE_COUNT_CACHE[key] = count
-    return count
 
 
 def _decoded(block: "DocumentContent") -> bytes | None:
