@@ -1492,6 +1492,38 @@ def test_a_default_shaped_subtree_write_keeps_nested_user_values(tmp_path: Path)
     assert values["retry"]["fallbackChains"]["default"][0] == "openai/gpt-5"
     assert values["subagents"]["models"]["hi"] == "openai/gpt-5"
     assert values["web_search"]["providers"] == ["exa"]
+    # The migration leg builds and writes its own manager; the process-wide
+    # defaults must STILL be untouched after it.
+    assert DEFAULT_CONFIG.values["retry"]["fallbackChains"] == {}
+    assert DEFAULT_CONFIG.values["subagents"] == {}
+
+
+def test_a_write_does_not_mutate_the_mappings_it_was_handed(tmp_path: Path) -> None:
+    """The write owns its payload's `values` only after copying it.
+
+    Preservation merges in place, so a caller that passes a mapping it does not
+    exclusively own — a shallow copy of the shipped defaults, a dict shared with
+    another object — would have the FILE's settings merged into that object. This
+    is the mechanism behind the CI failure that followed round 1: the merge landed
+    in `DEFAULT_CONFIG`, and a later manager built on an empty config dir inherited
+    a cascade nobody had stored. The caller's own nested dict is asserted by
+    IDENTITY: it must still be the empty dict it was, while the file it produced
+    carries the preserved chain.
+    """
+    path = _write_incident_config(tmp_path)
+    manager = ConfigManager(tmp_path)
+
+    retry: dict[str, Any] = {}
+    payload = vars(manager.config)
+    payload["values"]["retry"] = retry
+
+    manager._write_config(payload)
+
+    assert retry == {}, "the caller's mapping was merged into"
+    assert payload["values"]["retry"]["fallbackChains"] == {
+        "default": ["openai/gpt-5", "openrouter/deepseek/deepseek-chat"]
+    }
+    assert _disk_values(path)["retry"]["fallbackChains"]["default"][0] == "openai/gpt-5"
 
 
 def test_a_manager_that_never_read_the_file_cannot_write_defaults_over_it(

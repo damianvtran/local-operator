@@ -1365,6 +1365,17 @@ class ConfigManager:
         # stop being carried at the next write.
         disk_document = _read_config_document(self.config_file)
         document: Dict[str, Any] = dict(config)
+        # THE PAYLOAD'S `values` IS COPIED, not adopted. Preservation below merges
+        # into it in place, and this method does not own the caller's nested
+        # mappings: a caller may pass a shallow copy of the shipped defaults
+        # (`dict(DEFAULT_CONFIG.values["retry"])`), and merging into that wrote the
+        # file's chains into the process-wide `DEFAULT_CONFIG` — the next manager
+        # built on an empty config dir then inherited a cascade nobody had stored
+        # (review round 1 follow-up; caught by CI). The copy is handed back to the
+        # caller at the end so its snapshot still agrees with the file.
+        borrowed_values = document.get("values")
+        if isinstance(borrowed_values, dict):
+            document["values"] = deepcopy(borrowed_values)
         if disk_document is not None:
             for key, value in disk_document.items():
                 if key not in _MODELLED_TOP_LEVEL:
@@ -1491,6 +1502,13 @@ class ConfigManager:
             from local_operator.config_migrations import record_config_key_inventory
 
             record_config_key_inventory(self.config_dir, list(drops))
+
+        # The caller's config dict takes the merged `values` mapping, so its
+        # snapshot is what the file holds (the payload, plus everything preserved
+        # into it). A dict-level assignment only: the mappings the caller handed in
+        # are never rewritten, which is the point of the copy above.
+        if isinstance(config.get("values"), dict):
+            config["values"] = document["values"]
 
         # This manager's snapshot is now what the file holds (the payload, plus
         # everything preserved into it), so a LATER write through the same manager
