@@ -77,6 +77,123 @@ def qualify(proof, expected):
     return 'GENERIC_NATIVE_PRODUCER_QUALIFIED_NOT_S2_OR_PRODUCT_EXONERATION'
 
 
+def partial_proof(proof):
+    out = {'stage':'UNKNOWN','rows':[], 'reports':[]}
+    if type(proof) is not dict:
+        return out
+    stages = {'SOURCE','NATIVE_IMPORT','IDENTITY','PRODUCER','EXECUTOR','COMPLETE'}
+    if type(proof.get('stage')) is str and proof['stage'] in stages:
+        out['stage'] = proof['stage']
+    rows, reports = proof.get('rows'), proof.get('reports')
+    if type(rows) is list:
+        out['row_count_capped'] = min(len(rows), 3)
+        for row in rows[:2]:
+            if type(row) is not dict: continue
+            safe = {}
+            for k, v in row.items():
+                if k in ('mode',) and v in ('baseline','fresh'): safe[k] = v
+                elif k in ('token','pair_calls','move_calls') and type(v) is int and 0 <= v <= 2: safe[k] = v
+                elif k in ('dial_attempted','dial_ok','new_generation','selected_new','correlated','selected_alive','selected_closing','request_seen','reply_seen','first_ok','first_unreachable','call_pass','restored','first_assertion') and type(v) is bool: safe[k] = v
+            out['rows'].append(safe)
+    if type(reports) is list:
+        out['report_count_capped'] = min(len(reports), 7)
+        for report in reports[:6]:
+            if type(report) is dict and report.get('phase') in ('setup','call','teardown') and report.get('outcome') in ('passed','failed','skipped'):
+                out['reports'].append({'phase':report['phase'],'outcome':report['outcome']})
+    guards = proof.get('guards')
+    if type(guards) is list:
+        out['guards'] = [g for g in guards[:8] if type(g) is str and g in ('DIAL','SELECTION','CORRELATION','REQUEST','FIXTURE','ROW')]
+    if type(proof.get('data')) is dict:
+        data = proof['data']
+        out['native_counts'] = {k:min(len(data[k]),258) for k in ('rows','windows') if type(data.get(k)) is list}
+        out['native_flags'] = {k:data[k] for k in ('ready','trailing','restored','cancel_seen','error_seen') if type(data.get(k)) is bool}
+    return out
+
+
+def finalize_proof(work, result, expected, settled=True, reader=None, deleter=None):
+    # ONLY the reviewed common lifecycle may invoke this with settled=True.
+    # Proof rejection and actual filesystem deletion are independent outcomes.
+    result['full_proof_qualified'] = False
+    result['proof_stage'] = 'UNKNOWN'
+    result['root_deletion'] = 'NOT_ATTEMPTED'
+    if not settled:
+        result['proof_stage'] = 'UNSETTLED'
+        return
+    try:
+        try:
+            if reader is None:
+                path = work / 'proof.json'
+                if not path.exists():
+                    result['proof_stage'] = 'MISSING_PROOF'
+                    return
+                if path.stat().st_size > 262144:
+                    result['proof_stage'] = 'OVERCAP'
+                    return
+                proof = json.loads(path.read_text())
+            else:
+                proof = reader()
+            result['partial'] = partial_proof(proof)
+            result['proof_stage'] = 'QUALIFICATION'
+            verdict = qualify(proof, expected)
+            result['verdict'] = verdict
+            result['producer'] = proof['data']
+            result['identity'] = proof['identity']
+            result['full_proof_qualified'] = True
+            result['proof_stage'] = 'QUALIFIED'
+        except (ValueError, KeyError, TypeError, IndexError, OSError):
+            if result['proof_stage'] == 'UNKNOWN': result['proof_stage'] = 'MALFORMED_PROOF'
+    finally:
+        result['root_deletion'] = 'FAILED'
+        (deleter or (lambda: shutil.rmtree(work)))()
+        result['root_deletion'] = 'REMOVED'
+
+
+def build_env(work, expected):
+    env = dict(PATH=os.environ["PATH"], HOME=str(work), TMPDIR=str(work),
+        XDG_CONFIG_HOME=str(work / "config"), XDG_CACHE_HOME=str(work / "cache"),
+        XDG_DATA_HOME=str(work / "data"), XDG_RUNTIME_DIR=str(work / "runtime"),
+        LOCAL_OPERATOR_CONFIG_DIR=str(work / "config"), LOCAL_OPERATOR_RUNTIME_ROOT=str(work / "runtime"), PYTHONPATH=str(ROOT),
+        PYTHONDONTWRITEBYTECODE="1", PYTEST_ADDOPTS="", TERM="xterm-256color",
+        NATIVE_WORKER_ROOT=str(work), NATIVE_WORKER_PROOF=str(work / "proof.json"),
+        NATIVE_WORKER_EXPECTED=json.dumps(expected))
+    (work / 'runtime').mkdir(exist_ok=True)
+    return env
+
+
+def style_main(tool):
+    if tool not in ('black','isort','flake8'):
+        raise SystemExit(2)
+    files = ['tests/unit/test_tui_responsiveness.py','tests/unit/test_worker_code_identity.py',
+             'tests/worker_code_identity.py','tests/loop_callback_spans.py']
+    options = {'black':['--check'], 'isort':['--check-only'], 'flake8':['--jobs','1']}[tool]
+    known, pgid = {}, os.getpgrp()
+    def observe(): return owned(known, pgid)
+    def kill_owned():
+        for pid, facts in observe().items():
+            fresh = table().get(pid)
+            if fresh and fresh['start'] == facts['start']: os.kill(pid, 9)
+    child = subprocess.Popen([sys.executable,'-B','-m',tool]+options+files,
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    okay = False
+    try:
+        deadline, total = time.monotonic()+20, 0
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                if time.monotonic() >= deadline: raise ValueError('style time STOP')
+                observe()
+                for key, _ in selector.select(0.05):
+                    chunk = os.read(key.fileobj.fileno(),16384)
+                    if not chunk: selector.unregister(key.fileobj)
+                    total += len(chunk)
+                    if total > 262144: raise ValueError('style output STOP')
+        okay = True
+    finally:
+        settled = finish_owned(child, observe, kill_owned, lambda: None)
+    rc = settled['rc'] if okay and not settled['errors'] else 1
+    raise SystemExit(rc if rc is not None and rc >= 0 else 1)
+
+
 def main():
     manifest = json.loads((HERE / "manifest.json").read_text())
     for label, sha in manifest["sources"].items():
@@ -95,13 +212,7 @@ def main():
     expected = dict(identity=expected, sources=manifest['sources'], native_sources=native_sources(),
         compiled_producer=compiled_hash(), labels=list(source_allowlist(ROOT,
         ('scripts/diagnostics/native_worker_6911/producer.py',)).values()))
-    env = dict(PATH=os.environ["PATH"], HOME=str(work), TMPDIR=str(work),
-        XDG_CONFIG_HOME=str(work / "config"), XDG_CACHE_HOME=str(work / "cache"),
-        XDG_DATA_HOME=str(work / "data"), XDG_RUNTIME_DIR=str(work / "runtime"),
-        LOCAL_OPERATOR_CONFIG_DIR=str(work / "config"), PYTHONPATH=str(ROOT),
-        PYTHONDONTWRITEBYTECODE="1", PYTEST_ADDOPTS="", TERM="xterm-256color",
-        NATIVE_WORKER_ROOT=str(work), NATIVE_WORKER_PROOF=str(work / "proof.json"),
-        NATIVE_WORKER_EXPECTED=json.dumps(expected))
+    env = build_env(work, expected)
     result, lifecycle = dict(qualified=False), {}
     def observe():return owned(known, pgid)
     def kill_owned():
@@ -109,14 +220,8 @@ def main():
             fresh = table().get(pid)
             if fresh and fresh["start"] == facts["start"]:os.kill(pid, 9)
     def remove():
-        path = work / "proof.json"
-        if path.stat().st_size > 262144:raise ValueError("proof cap")
-        proof = json.loads(path.read_text())
-        result["verdict"] = qualify(proof, expected)
-        # Strict structural projection, not wholesale plugin output forwarding.
-        result['producer'] = proof['data']
-        result['identity'] = proof['identity']
-        shutil.rmtree(work)
+        finalize_proof(work, result, expected)
+
     try:
         child = subprocess.Popen([sys.executable,"-B","-m","scripts.diagnostics.native_worker_6911.carrier"],cwd=ROOT,env=env,
             stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
@@ -136,7 +241,7 @@ def main():
                         if total>262144:raise RuntimeError("output STOP")
         finally:
             lifecycle=finish_owned(child,observe,kill_owned,remove)
-        result["qualified"]=not lifecycle["errors"] and lifecycle["synthetic_root_removed"] and lifecycle["rc"] == 0
+        result["qualified"]=result.get("full_proof_qualified") is True and not lifecycle["errors"] and lifecycle["synthetic_root_removed"] and lifecycle["rc"] == 0
     except Exception:
         result["qualified"]=False
     finally:
@@ -145,4 +250,8 @@ def main():
     raise SystemExit(0 if result["qualified"] else 1)
 
 
-if __name__=="__main__":main()
+if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--style':
+        style_main(sys.argv[2])
+    else:
+        main()
