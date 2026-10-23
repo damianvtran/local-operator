@@ -1,0 +1,23 @@
+{
+  "base": "80b8d9fcffbc11c6eac681c6b8fb4d116bffc5f3",
+  "component_only": true,
+  "producer": "scripts/diagnostics/native_profiler_primitive_6911/producer.py",
+  "sources": {
+    "scripts/diagnostics/native_profiler_primitive_6911/producer.py": "b8fa9be0da0e1baa4d16e6623454228cdaf0d739b85bc94e608e137705e500e6"
+  },
+  "schema_version": 1,
+  "python_family": [
+    3,
+    12
+  ],
+  "runtime_bindings": [
+    "producer",
+    "cprofile",
+    "lsprof",
+    "executable"
+  ],
+  "reference_source": "https://raw.githubusercontent.com/python/cpython/v3.12.12/Modules/_lsprof.c",
+  "reference_is_runtime_build_proof": false,
+  "controller_required": true,
+  "application_authorized": false
+}
