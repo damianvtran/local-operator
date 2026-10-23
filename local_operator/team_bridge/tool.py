@@ -68,7 +68,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
-from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
+from local_operator.harness.types import AgentTool, Content, TextContent, ToolContext, ToolResult
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
@@ -638,7 +638,7 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                     note = str(getter() or "")
                 except Exception:  # noqa: BLE001 — advice only, never a failure
                     note = ""
-            blocks = [TextContent(text=content)]
+            blocks: list[Content] = [TextContent(text=content)]
             if note:
                 if peer_receipt:
                     # Preserve existing advice without appending prose to the

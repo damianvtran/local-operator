@@ -9,7 +9,7 @@ from typing import cast
 import httpx
 import pytest
 
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import TextContent, ToolContext
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
 from local_operator.team_bridge.client import TeamBridgeClient
@@ -363,9 +363,12 @@ async def test_legacy_send_receipt_exposes_only_server_acceptance(
         "execution_confirmed": False,
     }
     assert result.is_error is not True
+    assert result.details is not None
+    assert isinstance(result.content[0], TextContent)
     assert json.loads(result.content[0].text) == result.details
     if advisory:
         assert len(result.content) == 2
+        assert isinstance(result.content[1], TextContent)
         assert result.content[1].text == f"[bridge guidance — advisory]\n{advisory}"
     else:
         assert len(result.content) == 1
@@ -550,6 +553,7 @@ async def test_malformed_legacy_receipt_stays_pending_until_frozen_replay_confir
     replay_result = await tool.execute("synthetic-replay-call", args, None, None, context)
     confirmed = replay_result.details
     assert replay_result.is_error is False
+    assert isinstance(replay_result.content[0], TextContent)
     assert json.loads(replay_result.content[0].text) == confirmed
     assert confirmed == {
         "ok": True,
