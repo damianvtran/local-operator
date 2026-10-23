@@ -2,6 +2,8 @@
 import hashlib
 import cProfile
 import json
+import math
+from types import CodeType
 import os
 from pathlib import Path
 import sys
@@ -10,12 +12,60 @@ from unittest.mock import patch
 import pytest
 from scripts.diagnostics.lfs_pair_6911.controller import validate_identity
 from scripts.diagnostics.native_worker_6911.carrier import native_sources
-from scripts.diagnostics.s2_static_6911.controller import project_measurement, serialize_profile
+from scripts.diagnostics.s2_static_6911.controller import project_measurement, serialize_profile, validate_profile
 
 NODE = 'tests/unit/test_tui_responsiveness.py::test_s2_send_to_agent_end_keeps_the_loop_under_the_bar'
 ROWS, REPORTS = [], []
 CALLS = 0
 SESSION = None
+
+
+POSTCALL_STAGES=('POSTCALL_DISABLE','GETSTATS','CATALOG','COUNTS','SERIALIZE','PROFILE_VALIDATE')
+
+
+def profile_postcall(profiler,workers,previous,row):
+    observed=row['postcall']
+    try:
+        observed['stage']='POSTCALL_DISABLE'
+        profiler.disable()
+        observed['disable_ok']=True
+        observed['hookRestored']=sys.getprofile() is previous
+        observed['stage']='GETSTATS'
+        entries=profiler.getstats()
+        observed['getstats_ok']=True
+        if type(entries) not in (list,tuple):raise ValueError('profile entries STOP')
+        if len(entries)<=1000000:observed['entry_count']=len(entries)
+        observed['stage']='CATALOG'
+        catalog=workers.ACTIVE.allowlist
+        if type(catalog) is not dict:raise ValueError('profile catalog STOP')
+        observed['catalog_ok']=True
+        observed['stage']='COUNTS'
+        if len(entries)>20000:raise ValueError('profile cap STOP')
+        native=matched=negative=invalid=0;boot=False
+        for entry in entries:
+            code=entry.code
+            if type(code) is CodeType:
+                native+=1
+                label=catalog.get((code.co_filename,code.co_firstlineno,code.co_qualname),'')
+                if label:matched+=1
+                if label.endswith(':OperatorApp._boot_session'):boot=True
+            values=(entry.inlinetime,entry.totaltime)
+            if any(type(x) not in (int,float) or not math.isfinite(x) for x in values):invalid+=1
+            elif any(x<0 for x in values):negative+=1
+        observed.update(nativeCodeCount=native,static_matchCount=matched,bootSeen=boot,negativeCPUcount=negative,invalidCPUcount=invalid,counts_ok=True)
+        observed['stage']='SERIALIZE'
+        row['cpu_profile']=serialize_profile(entries,catalog,observed['hookRestored'])
+        observed['serialize_ok']=True
+        observed['stage']='PROFILE_VALIDATE'
+        validate_profile(row['cpu_profile'],set(catalog.values()))
+        observed['profile_validate_ok']=True
+    finally:
+        # Cleanup retry never changes the last observed operation stage. Preserve
+        # the original call exception; no raw profiler exception is exported.
+        if sys.getprofile() is not previous:
+            try:profiler.disable()
+            except Exception:pass
+        observed['hookRestored']=sys.getprofile() is previous
 
 
 def pytest_sessionstart(session):
@@ -66,7 +116,7 @@ def pytest_runtest_call(item):
     labels=set(workers.ACTIVE.allowlist.values())
     module=item.module
     row=dict(token=CALLS,identity=identity,native_sources=native,phases=[],summary=None,
-             effective=None,call_pass=False,performance_oracle=False,restored=False,cpu_profile=None)
+             effective=None,call_pass=False,performance_oracle=False,restored=False,cpu_profile=None,postcall=dict(stage=None,**{k:None for k in ('entry_count','nativeCodeCount','static_matchCount','bootSeen','negativeCPUcount','invalidCPUcount','hookRestored','disable_ok','getstats_ok','catalog_ok','counts_ok','serialize_ok','profile_validate_ok')}))
     original_stop=module.StallRecorder.stop
     original_begin=module.StallRecorder.begin_noise_window
     original_end=module.StallRecorder.end_noise_window
@@ -112,8 +162,9 @@ def pytest_runtest_call(item):
     finally:
         try:
             if profiler is not None:
-                profiler.disable()
-                row['cpu_profile']=serialize_profile(profiler.getstats(),workers.ACTIVE.allowlist,sys.getprofile() is previous)
+                try:profile_postcall(profiler,workers,previous,row)
+                except Exception:
+                    if row['call_pass']:raise RuntimeError('profile postcall STOP') from None
         finally:
             row['restored']=all((module.StallRecorder.stop is original_stop,module.StallRecorder.begin_noise_window is original_begin,module.StallRecorder.end_noise_window is original_end,module.StallRecorder.assert_no_stall_loaded is original_bar))
             ROWS.append(row)

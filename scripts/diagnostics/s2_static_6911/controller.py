@@ -98,9 +98,12 @@ def qualify(proof, expected):
     if set(proof) != {'rows','reports','guards','exitstatus'} or len(proof['rows']) != 1 or proof['guards']:
         raise ValueError('S2 cardinality/schema STOP')
     row=proof['rows'][0]
-    if set(row) != {'token','identity','native_sources','phases','summary','effective','call_pass','performance_oracle','restored','cpu_profile'} or row['token'] != 1 or row['restored'] is not True:
+    if set(row) != {'token','identity','native_sources','phases','summary','effective','call_pass','performance_oracle','restored','cpu_profile','postcall'} or row['token'] != 1 or row['restored'] is not True:
         raise ValueError('S2 row STOP')
     validate_identity(row['identity'],expected)
+    post=safe_postcall(row['postcall'])
+    if post is None or post['stage']!='PROFILE_VALIDATE' or any(post[k] is not True for k in ('disable_ok','getstats_ok','catalog_ok','counts_ok','serialize_ok','profile_validate_ok','hookRestored')):raise ValueError('postcall incomplete STOP')
+    if any(post[k] is None for k in ('entry_count','nativeCodeCount','static_matchCount','negativeCPUcount','invalidCPUcount')) or post['bootSeen'] is not True or not post['static_matchCount']<=post['nativeCodeCount']<=post['entry_count']<=20000:raise ValueError('postcall counts incomplete STOP')
     validate_profile(row['cpu_profile'],trusted_labels)
     if row['native_sources'] != expected_native: raise ValueError('Textual native source STOP')
     if type(row['call_pass']) is not bool or type(row['performance_oracle']) is not bool:
@@ -143,6 +146,36 @@ def qualify(proof, expected):
                     if span['gc_generation'] not in (None,0,1,2):raise ValueError('GC generation STOP')
                     numeric(span['cpu_ms']);numeric(span['wall_ms'])
     return 'ORIGINAL_S2_OBSERVED_ATTRIBUTION_PARTIAL_UNKNOWN' if not quality['qualified'] else 'ORIGINAL_S2_OBSERVED_NOT_EXONERATION'
+
+
+def safe_postcall(value):
+    if type(value) is not dict:return None
+    counts=('entry_count','nativeCodeCount','static_matchCount','negativeCPUcount','invalidCPUcount')
+    flags=('bootSeen','hookRestored','disable_ok','getstats_ok','catalog_ok','counts_ok','serialize_ok','profile_validate_ok')
+    if set(value)!=set(counts)|set(flags)|{'stage'}:return None
+    if value['stage'] not in (None,'POSTCALL_DISABLE','GETSTATS','CATALOG','COUNTS','SERIALIZE','PROFILE_VALIDATE'):return None
+    if any(value[k] is not None and (type(value[k]) is not int or not 0<=value[k]<=1000000) for k in counts):return None
+    if any(value[k] is not None and type(value[k]) is not bool for k in flags):return None
+    return {k:value[k] for k in ('stage',*counts,*flags)}
+
+
+def safe_available(proof,expected):
+    result={'rows':[]}
+    if type(proof) is not dict or type(proof.get('rows')) is not list:return result
+    for row in proof['rows'][:1]:
+        if type(row) is not dict:continue
+        safe={'postcall':safe_postcall(row.get('postcall')),'recorder':None,'effective':None,'identity':None}
+        for group,keys in (('summary',('worst_cpu_ms','worst_wall_ms','noise_floor_ms','wall_cpu_descheduling_ratio')),('effective',('cpu_ms','wall_ms'))):
+            raw=row.get(group)
+            if type(raw) is dict:
+                values={k:raw.get(k) for k in keys}
+                if all(v is None or (type(v) in (int,float) and math.isfinite(v) and v>=0) for v in values.values()):safe['recorder' if group=='summary' else 'effective']=values
+        try:
+            validate_identity(row.get('identity'),expected)
+            safe['identity']=row['identity']
+        except (ValueError,TypeError):pass
+        result['rows'].append(safe)
+    return result
 
 
 def partial_proof(proof):
@@ -206,6 +239,7 @@ def finalize_proof(work, result, expected, settled=True, reader=None, deleter=No
             else:
                 proof = reader()
             result['partial'] = partial_proof(proof)
+            result['available'] = safe_available(proof,expected)
             result['proof_stage'] = 'QUALIFICATION'
             verdict = qualify(proof, expected)
             result['verdict'] = verdict
