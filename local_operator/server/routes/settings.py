@@ -9,6 +9,7 @@ edits retain their established semantics.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -34,6 +35,55 @@ router = APIRouter(tags=["Settings"], dependencies=[Depends(require_desktop)])
 # The underlying manager writes a whole YAML snapshot. Serialize this server's
 # read/merge/write operations, not just the final rename, to preserve siblings.
 _write_lock = asyncio.Lock()
+logger = logging.getLogger(__name__)
+# This budget includes waiting for an already-running status read. Saving a local
+# setting must not be hostage to an unreachable bridge (whose HTTP timeout is
+# intentionally longer). Cancellation leaves ordinary fresh-boundary retry intact.
+_IDENTITY_RECONCILE_TIMEOUT_S = 5.0
+_IDENTITY_KEYS = frozenset({"team_bridge.session", "aida.name"})
+
+
+def _bridge_identity(manager: ConfigManager, key: str) -> tuple[str, str | None] | None:
+    """The effective bridge identity, not raw input or arbitrary session titles.
+
+    Poll the directory-scoped watcher's last-good snapshot, rather than trusting
+    a long-lived route manager's pre-write cache. This is local IO only; shared
+    settings_io and watchers deliberately gain no network side effects.
+    """
+
+    if key not in _IDENTITY_KEYS:
+        return None
+    from local_operator.config_watch import process_watcher
+    from local_operator.team_bridge.cos_name import cos_display_name
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    watcher = process_watcher(manager.config_dir)
+    watcher.poll_now()
+    return (
+        TeamBridgeSettings.from_values(watcher.values).session,
+        cos_display_name(manager.config_dir),
+    )
+
+
+async def _reconcile_bridge_identity(manager: ConfigManager) -> None:
+    """Best-effort UI-only mutation boundary AFTER persistence and outside its lock.
+
+    The response acknowledges the local edit, never a remote identity echo. A
+    refusal/timeout must not misreport a successful settings write as failed.
+    Log safe categories only: HTTP exception prose can contain private values.
+    """
+
+    from local_operator.team_bridge.client import get_status_discipline
+
+    try:
+        check = await asyncio.wait_for(
+            get_status_discipline(manager.config_dir).reconcile_identity_mutation(),
+            timeout=_IDENTITY_RECONCILE_TIMEOUT_S,
+        )
+        if check.error is not None:
+            logger.warning("team_bridge: identity reconciliation deferred (status unavailable)")
+    except Exception as exc:  # noqa: BLE001 - the local setting has already been saved
+        logger.warning("team_bridge: identity reconciliation deferred (%s)", type(exc).__name__)
 
 
 class SettingEdit(BaseModel):
@@ -250,6 +300,7 @@ async def edit_setting(
     if _private_endpoint(edit.value):
         raise HTTPException(422, _we.inline_credentials().envelope())
     async with _write_lock:
+        before = _bridge_identity(manager, key)
         try:
             if setting.kind is settings_io.Kind.CASCADE:
                 _write_cascade(manager, edit)
@@ -268,13 +319,18 @@ async def edit_setting(
             raise HTTPException(
                 503, _ap.error_write_failed().envelope(code="setting_write_failed")
             ) from None
-        return CRUDResponse(status=200, message="Setting saved.", result=_view(manager, setting))
+        changed_identity = before != _bridge_identity(manager, key)
+        result = _view(manager, setting)
+    if changed_identity:
+        await _reconcile_bridge_identity(manager)
+    return CRUDResponse(status=200, message="Setting saved.", result=result)
 
 
 @router.post("/v1/settings/{key}/reset", response_model=CRUDResponse[SettingView])
 async def reset_setting(key: str, manager: ConfigManager = Depends(get_config_manager)):
     setting = _setting(key)
     async with _write_lock:
+        before = _bridge_identity(manager, key)
         try:
             settings_io.reset_setting(manager, setting)
         except settings_io.ConfigUnreadableError:
@@ -288,4 +344,8 @@ async def reset_setting(key: str, manager: ConfigManager = Depends(get_config_ma
             raise HTTPException(
                 503, _ap.error_write_failed().envelope(code="setting_write_failed")
             ) from None
-        return CRUDResponse(status=200, message="Setting reset.", result=_view(manager, setting))
+        changed_identity = before != _bridge_identity(manager, key)
+        result = _view(manager, setting)
+    if changed_identity:
+        await _reconcile_bridge_identity(manager)
+    return CRUDResponse(status=200, message="Setting reset.", result=result)
