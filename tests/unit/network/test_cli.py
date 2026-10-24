@@ -613,6 +613,7 @@ def test_show_marks_a_nameless_member_without_borrowing_another_members_name(
 ) -> None:
     named_id = "d_" + "1" * 32
     nameless_id = "d_" + "2" * 32
+    literal_id = "d_" + "3" * 32
     out = _show_with_members(
         root,
         monkeypatch,
@@ -620,12 +621,16 @@ def test_show_marks_a_nameless_member_without_borrowing_another_members_name(
         [
             types.MemberRecord(device_id=named_id, name="laptop"),
             types.MemberRecord(device_id=nameless_id, name=""),
+            types.MemberRecord(device_id=literal_id, name=resume.UNNAMED_DEVICE),
         ],
     )
 
     row = next(line for line in out.splitlines() if nameless_id in line)
-    assert f"{nameless_id}  {resume.UNNAMED_DEVICE}" in row, row
+    assert f"{nameless_id}  ({resume.UNNAMED_DEVICE})" in row, row
     assert "laptop" not in row, row
+    literal_row = next(line for line in out.splitlines() if literal_id in line)
+    assert f"{literal_id}  {resume.UNNAMED_DEVICE}  drive" in literal_row, literal_row
+    assert f"({resume.UNNAMED_DEVICE})" not in literal_row, literal_row
 
 
 def test_show_keeps_same_named_members_distinguishable_by_full_device_id(

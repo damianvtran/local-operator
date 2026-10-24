@@ -1528,7 +1528,8 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
         # Names are unauthenticated labels, so the full device id stays in its own
         # leading column; putting the variable-length name after it keeps duplicate
         # or crafted names from hiding the only field that distinguishes members.
-        name = str(member.get("name") or "").strip() or UNNAMED_DEVICE
+        # Parentheses make the fallback visibly absent metadata, not a literal name.
+        name = str(member.get("name") or "").strip() or f"({UNNAMED_DEVICE})"
         lines.append(
             f"  {mark:7} {member['device_id']}  {name}  {member['role']:5}  "
             f"{', '.join(member['capabilities'])}{suspect}"
