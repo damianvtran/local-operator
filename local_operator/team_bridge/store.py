@@ -2143,6 +2143,43 @@ class Store:
                 ).fetchone()
             )
 
+    def pending_body_reservation_for(
+        self, owner: OwnerSnapshot, designated_session: str, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """The OLDEST pending reservation this session is designated to serve.
+
+        WHY read-only and never creating: this is the eligibility check the
+        Session runs before it attaches a request transform. A check that
+        could create or migrate the store would turn "is there anything to
+        claim" into a write, and an absent store must mean no frame rather
+        than a new file (the fail-closed law ``_connect_readonly`` enforces).
+
+        Oldest-first is FIFO: a message admitted earlier must not starve
+        behind a newer one. A ``pending`` row qualifies, and so does a claim
+        whose lease EXPIRED — otherwise a turn that died mid-flight would strand
+        its message forever, and the CAS's reclaim arm could never be reached
+        through this reader. A live claim belongs to another turn and is
+        excluded; a completed or retired row owes nothing.
+        """
+
+        moment = time.time() if now is None else float(now)
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            return self._reservation(
+                conn.execute(
+                    "SELECT * FROM body_reservations WHERE owner_key = ? "
+                    "AND designated_session = ? AND (state = 'pending' OR "
+                    "(state = 'claimed' AND claim_expires_at IS NOT NULL "
+                    "AND claim_expires_at < ?)) "
+                    "ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                    (_owner_key(owner), designated_session, moment),
+                ).fetchone()
+            )
+
     def claim_body_reservation(
         self,
         owner: OwnerSnapshot,

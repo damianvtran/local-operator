@@ -1708,6 +1708,21 @@ def _collect_tool_call_delta(state: dict[int, dict[str, Any]], event: Any) -> No
         entry["arg_parts"].append(event.argument_delta)
 
 
+def _last_stop_reason(event: AgentEndEvent) -> str | None:
+    """The terminal ``stop_reason`` of the turn's own last assistant message.
+
+    Read from the end event's messages rather than from the context: a turn
+    that FAILED may have persisted a partial tail, and the verdict must
+    describe what the provider said about the request it answered.
+    """
+
+    for message in reversed(list(getattr(event, "messages", None) or [])):
+        value = getattr(message, "stop_reason", None)
+        if value:
+            return str(value)
+    return None
+
+
 def _assemble_aside_tool_calls(state: dict[int, dict[str, Any]]) -> list[ToolCall]:
     """The calls the wire carried, in ``index`` order, as the provider sent them.
 
@@ -4294,6 +4309,16 @@ class Session:
         # whether the run continues, `_logical_generation` remembers which
         # agent_start the eventual end belongs to. Both are None outside a run.
         self._held_end: AgentEndEvent | None = None
+        #: This turn's claim on a pending conversation BODY, if any. ``None``
+        #: means the turn is an ordinary one; the transform is attached only
+        # when ``_open_pending_body_turn`` actually won a reservation, so a
+        # session with nothing pending never pays for the per-call gate.
+        self._pending_body_turn: Any | None = None
+        #: The turn's terminal verdict, captured where the loop's agent_end is
+        #: handled. Settlement runs in the ``finally``, after ``_flush_held_end``
+        #: has already released that event, so the verdict must be captured
+        #: here rather than re-read there.
+        self._pending_body_verdict: tuple[str | None, str | None, bool] | None = None
         #: How the last logical turn ended, published on the canonical snapshot
         #: as ``last_turn_outcome``. A viewer that dropped mid-turn and rebinds
         #: after the turn settled cannot recover this from ``live_events``
@@ -17199,6 +17224,133 @@ class Session:
             self._turn_settled_event.clear()
             await self._turn_settled_event.wait()
 
+    def _pending_body_budget(self) -> Any:
+        """This turn's measured capacity for one whole body frame.
+
+        The number comes from the model spec's window minus the output reserve
+        and the tokens the provider last reported, and it is labelled with that
+        provenance rather than passed as a bare int: the recorded size-ledger
+        gap means nobody can audit an unlabelled budget. The 4-bytes-per-token
+        factor is a CONSERVATIVE approximation, stated here because it is an
+        approximation — a frame that does not fit is refused, so erring low
+        costs a retry, never a truncated message.
+        """
+
+        from local_operator.team_bridge.request_body import BodyBudget
+
+        window = int(getattr(self._model, "context_window", 0) or 0)
+        reserve = int(getattr(self._model, "max_output_tokens", 0) or 0)
+        used = int(self._context_tokens_hint or 0)
+        available = max(0, window - reserve - used) * 4
+        return BodyBudget(
+            available_bytes=available,
+            measured_from=(
+                "model_spec.context_window minus max_output_tokens " "and reported context tokens"
+            ),
+        )
+
+    async def _fetch_pending_body(self, conversation_id: str, message_id: str) -> Any:
+        """Fetch one reserved message's body through the bridge's own authority.
+
+        The SAME endpoint/member/consent/joined-seq route the connector used,
+        with the owner-pinned credential the runtime already holds — no second
+        access path and no person-only fallback. A missing route or a refusal
+        reads as "not now" and leaves the row pending.
+        """
+
+        from local_operator.team_bridge.pending_turn import FetchedBody
+
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None:
+            return None
+        try:
+            access = await runtime.client.current_access()
+            fetched = await runtime.client.conversation_body(
+                conversation_id,
+                message_id,
+                tenant_id=runtime.tenant_id,
+                endpoint_id=getattr(runtime.owner, "endpoint_id", None),
+                access=access,
+            )
+        except Exception:  # noqa: BLE001 — closed outcome, never an echo
+            return None
+        if not isinstance(fetched, Mapping) or fetched.get("message_id") != message_id:
+            return None
+        body = fetched.get("body")
+        body_hash = fetched.get("body_hash")
+        if not isinstance(body, str) or not isinstance(body_hash, str):
+            return None
+        name = fetched.get("conversation_name")
+        sender = fetched.get("sender_label")
+        return FetchedBody(
+            body=body,
+            body_sha256=body_hash,
+            conversation_label=name if isinstance(name, str) else "",
+            sender_label=sender if isinstance(sender, str) else "",
+        )
+
+    async def _open_pending_body_turn(self) -> None:
+        """Claim this session's oldest pending BODY for the turn about to run.
+
+        ONLY a session the bridge runtime already admitted reaches here (owner
+        pinned, generation live, designated, consenting — all inside
+        ``bridge_runtime_for_session``), and only when a read-only check finds a
+        ``pending`` row for THIS session. Anything else leaves
+        ``transform_context`` unset, so an ordinary turn pays nothing and no
+        other session's row is ever served.
+        """
+
+        self._pending_body_turn = None
+        self._pending_body_verdict = None
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None:
+            return
+        try:
+            from local_operator.team_bridge.pending_turn import PendingTurn
+
+            turn = PendingTurn(runtime.owner, runtime.session_id, config_dir=runtime.config_dir)
+            won = await turn.open(
+                budget=self._pending_body_budget(), fetch=self._fetch_pending_body
+            )
+        except Exception:  # noqa: BLE001 — an ordinary request is the fallback
+            logger.debug("bridge: pending body unavailable", exc_info=True)
+            return
+        if won:
+            self._pending_body_turn = turn
+
+    def _settle_pending_body(self) -> None:
+        """Complete or release the turn's reservation, once, at the finally.
+
+        WHY here and not ``_persist_progress``: the tool loop calls that per
+        batch, so a gate inside it would fire at every mid-turn boundary and
+        complete a reservation for a turn that is still running (S-22). This is
+        the one place per turn where the verdict and the durability write are
+        both known.
+        """
+
+        turn = self._pending_body_turn
+        if turn is None:
+            return
+        error, stop_reason, aborted = self._pending_body_verdict or (None, None, False)
+        entry_id = None
+        for message in reversed(list(self._context.messages)):
+            if getattr(message, "attribution", "") == "assistant" and getattr(message, "id", ""):
+                entry_id = str(message.id)
+                break
+        try:
+            outcome = turn.settle(
+                entry_id=entry_id,
+                error=error,
+                stop_reason=stop_reason,
+                aborted=aborted,
+            )
+            logger.debug("bridge: body reservation settlement=%s", outcome)
+        except Exception:  # noqa: BLE001 — settlement never fails a turn
+            logger.debug("bridge: body settlement failed", exc_info=True)
+        finally:
+            self._pending_body_turn = None
+            self._pending_body_verdict = None
+
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
         held = self._held_end
@@ -17497,7 +17649,17 @@ class Session:
 
                 return witness()
 
+            await self._open_pending_body_turn()
             config = LoopConfig(
+                # The conversation BODY goes in HERE and nowhere else: the loop
+                # calls this once per PHYSICAL request, so a turn that makes
+                # several calls gets the same cached bytes every time (the
+                # per-call invariant lives in ``PendingTurn.for_call``).
+                transform_context=(
+                    self._pending_body_turn.transform
+                    if self._pending_body_turn is not None
+                    else None
+                ),
                 capture_prepared_write=(
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),
@@ -17652,6 +17814,16 @@ class Session:
                         self._turn_items.extend(snapped)
                     except Exception:  # noqa: BLE001 — an instrument never fails a turn
                         logger.debug("supplement snapshot failed", exc_info=True)
+                    if self._pending_body_turn is not None and event.type == "agent_end":
+                        # Capture the terminal verdict HERE: settlement runs in
+                        # the ``finally`` after ``_flush_held_end`` released the
+                        # event, and re-deriving it there would mean trusting a
+                        # second source for the same fact (S-11/S-18).
+                        self._pending_body_verdict = (
+                            event.error,
+                            _last_stop_reason(event),
+                            bool(event.aborted),
+                        )
                     if event.aborted or event.error:
                         # A failed or interrupted run is a real boundary: never
                         # hold it behind a compaction that may not happen. The
@@ -17823,6 +17995,7 @@ class Session:
             # write that fails must not replace the original exception (which
             # is what the caller and the incident journal need to see).
             await self._persist_progress(self._context.messages)
+            self._settle_pending_body()
             # …and the notices that turn queued are DISCARDED rather than flushed. What
             # that means depends on how the turn ended, and there are three cases:
             #
