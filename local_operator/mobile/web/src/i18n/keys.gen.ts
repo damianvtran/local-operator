@@ -209,6 +209,7 @@ export type MessageParams = {
   "wire.errors.desktop.desktop_refusal": { "error": string };
   "wire.errors.desktop.effort_levels_missing": { "model": string };
   "wire.errors.desktop.effort_not_in_levels": { "model": string; "levels": string; "effort": string };
+  "wire.errors.desktop.fast_mode_unsupported": { "model": string };
   "wire.errors.desktop.feed_subscriber_limit": undefined;
   "wire.errors.desktop.feed_subscription_unknown": undefined;
   "wire.errors.desktop.force_requires_confirm_replace": undefined;

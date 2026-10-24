@@ -122,6 +122,42 @@ def test_hosting_rule_waived() -> bool:
     return bool((os.environ.get(ENV_ALLOW_TEST_HOSTING_NOTIFY) or "").strip())
 
 
+def fast_dial_from_row(stored: bool | None, spec: Any) -> bool | None:
+    """The speed dial a journal row states for ``spec``, ``None`` when silent.
+
+    ONE implementation for the two readers that must agree — the owner's restore
+    (``Session._restore_selected_model``) and the runtime-less cold frame
+    (``cold_model.resolve_saved_model``). A second copy is how the frame a
+    reopened pane paints and the spec the first turn sends come to disagree,
+    which is the reported defect (ui#1266) rather than a hypothetical.
+
+    Three answers, and the third is why this is not a ``bool``:
+
+    * ``True`` — the row recorded the dial ON and the route sells the tier;
+    * ``False`` — the row recorded it OFF, OR the route cannot serve it (the
+      clamp below). A row is a SNAPSHOT of a live dial, so an OFF is a DECISION
+      and a restore must CLEAR a spec that arrived switched on: the create path
+      can hand one over (``DraftModel.fast_mode``, ui#1265), and a restore that
+      only ever ORs ``True`` brings a conversation the user turned off back on
+      premium pricing at the next reopen;
+    * ``None`` — the row predates the field (every row written before the dial
+      was journalled) and says NOTHING. Reading absence as OFF would silently
+      disable fast mode on every conversation older than the fix; reading it as
+      ON would arm a premium tier nobody chose. The caller leaves the incoming
+      spec's own answer alone.
+
+    The clamp is the conjunction the failover carry uses
+    (``providers.failover.spec_for_target``) and the OPPOSITE failure mode from
+    the OFF edge: a row that says ``fast`` on a route that does not sell the
+    tier puts the speed key on a request the provider 400s — the turn the
+    restore exists to open. Both halves are read from the spec that will
+    actually serve, never from the pair the row names.
+    """
+    if stored is None:
+        return None
+    return bool(stored) and bool(getattr(spec, "supports_fast_mode", False))
+
+
 @dataclass(frozen=True)
 class StoredModelSelection:
     provider: str
@@ -132,13 +168,28 @@ class StoredModelSelection:
     # This is the conversation's birth selector, not the pair configured while
     # constructing a resumed owner. Existing /effort journalling depends on it.
     boot_selector: str | None = None
+    #: The FAST dial the row recorded, or ``None`` on a row that has no opinion.
+    #:
+    #: ``None`` is "no evidence", never "off". Every row written before the dial
+    #: was journalled carries it, and reading those as a decision to keep the
+    #: dial off would silently disable fast mode on every conversation that
+    #: predates the fix — the same defect one layer down. ``False`` is a real
+    #: snapshot (the user turned it off), so the two spellings cannot collapse.
+    fast: bool | None = None
 
     @property
     def selector(self) -> str:
         return f"{self.provider}/{self.model_id}"
 
 
-def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot: Any = None):
+def _selection(
+    selector: Any,
+    effort: Any,
+    *,
+    authoritative: bool = False,
+    boot: Any = None,
+    fast: Any = None,
+):
     if not isinstance(selector, str) or "/" not in selector:
         return None
     provider, model_id = selector.split("/", 1)
@@ -183,6 +234,10 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
         boot_selector=(
             boot if isinstance(boot, str) and "/" in boot and all(boot.split("/", 1)) else None
         ),
+        # Only a real boolean is evidence. A hand-edited row spelling ``"yes"``
+        # says nothing this reader may act on, and the wire's own gate
+        # (``supports_fast_mode``) is what decides whether it may ever be sent.
+        fast=fast if isinstance(fast, bool) else None,
     )
 
 
@@ -203,6 +258,7 @@ def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSe
                 details.get("effort"),
                 authoritative=version == SELECTION_VERSION,
                 boot=details.get("boot"),
+                fast=details.get("fast"),
             )
             if selected is not None:
                 if selected.authoritative:
@@ -360,6 +416,7 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
                     details.get("effort"),
                     authoritative=True,
                     boot=details.get("boot"),
+                    fast=details.get("fast"),
                 )
                 if selected is not None:
                     return replace(selected, recovered=unusable)

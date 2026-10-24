@@ -6964,17 +6964,27 @@ class AttachedSession:
             and not self._model_selection_override
             and (
                 self._birth_model is None
-                # Compared as the TRIPLE: the level is part of the sample. A
-                # successor seeded from a pair-only record is constructed with no
-                # ``LOP_MOBILE_CHILD_EFFORT`` and silently drops to its own
-                # resolved level (review round 1, R2) — so a level-only change on
-                # an attached owner refreshes the sample too.
+                # Compared as the QUADRUPLE: the level and the speed dial are
+                # both part of the sample. A successor seeded from a pair-only
+                # record is constructed with no ``LOP_MOBILE_CHILD_EFFORT`` and
+                # silently drops to its own resolved level (review round 1, R2),
+                # and one seeded from a sample that predates the dial is born at
+                # standard speed -- so a level-only OR a fast-only change on an
+                # attached owner refreshes the sample too. The dial's half is
+                # ui#1266 arriving through owner replacement: the retirable owner
+                # reports the tier, and its successor has to open on it.
                 or (
                     self._birth_model.provider,
                     self._birth_model.model_id,
                     self._birth_model.reasoning_effort,
+                    bool(self._birth_model.fast_mode),
                 )
-                != (selected.provider, selected.model_id, selected.reasoning_effort)
+                != (
+                    selected.provider,
+                    selected.model_id,
+                    selected.reasoning_effort,
+                    bool(selected.fast_mode),
+                )
             )
             and get_provider_definition(selected.provider) is not None
         ):
@@ -6985,6 +6995,10 @@ class AttachedSession:
                 provider=selected.provider,
                 model_id=selected.model_id,
                 reasoning_effort=selected.reasoning_effort,
+                # Clamped on the route's own answer, as every other reader of the
+                # dial is: a sample that claims a tier this model does not sell
+                # is one no spawn may be born on.
+                fast_mode=bool(selected.fast_mode and selected.supports_fast_mode),
             )
         if changed_fields is None or "jobs" in changed_fields:
             self.jobs.replace(state.jobs)

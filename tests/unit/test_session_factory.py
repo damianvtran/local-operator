@@ -919,6 +919,64 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
 
 
 @pytest.mark.asyncio
+async def test_a_birth_fast_is_the_constructed_specs_dial(tmp_config_dir: Path) -> None:
+    """The chosen SPEED reaches the spec this session is BUILT on.
+
+    The desktop create path (ui#1265) can birth a conversation on fast, and the
+    dial travels the same channel as ``birth_effort``: the view's spawn
+    environment (``launch._spawn_runtime`` -> ``LOP_MOBILE_CHILD_FAST``) into
+    ``spawn_owned_session`` and then into this factory. Construction rather than
+    a later switch is the point — the owner's first frontend snapshot, its first
+    provider call and the selection row it journals at admission then agree with
+    the chip the user set before the conversation existed.
+
+    Two controls. A caller that names no dial gets today's spec (every caller
+    before this field, the CLI, the TUI). And a dial asked of a route that does
+    not SELL the tier is CLAMPED to off rather than raising: a stored choice may
+    outlive the catalogue that offered it, and the refusal belongs to the moment
+    the user picks (the create/preview 422), never to a launch that would then
+    fail to open the conversation.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n" "values:\n" "  hosting: anthropic\n" "  model_name: claude-opus-5\n"
+    )
+    chosen = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5", birth_fast=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert chosen.model.supports_fast_mode is True, "the registry must sell this tier"
+        assert chosen.model.fast_mode is True
+    finally:
+        await chosen.dispose()
+
+    default = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5"),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert default.model.fast_mode is False, "a caller that names no dial keeps today's spec"
+    finally:
+        await default.dispose()
+
+    clamped = await create_session(
+        _args(hosting="deepseek", model="deepseek-flash", birth_fast=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert clamped.model.supports_fast_mode is False
+        assert clamped.model.fast_mode is False, "no tier, no dial — and no failed launch"
+    finally:
+        await clamped.dispose()
+
+
+@pytest.mark.asyncio
 async def test_dict_compaction_config_flows_through_prompt(
     tmp_config_dir: Path,
 ) -> None:
