@@ -1736,6 +1736,52 @@ def test_the_goal_block_is_withheld_once_the_goal_is_done() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_the_open_asks_reminder_is_a_section_of_its_own() -> None:
+    """SA-D3: an authoritative tail section, rendered only when something is open.
+
+    Three properties the delta machinery depends on, each cheapest to pin here:
+    the argument is the ONLY way the section appears (``""`` is byte-identical
+    to a tree without this feature, which is what keeps the start-context budget
+    unchanged); the marker sits exactly where the renderer appends it; and the
+    section is NOT advisory — a reminder may never be suppressed as "already
+    visible", because the settle advice IS the state.
+    """
+    from local_operator.prompts_api import (
+        ADVISORY_TAIL_SECTIONS,
+        STATE_SECTION_HEADINGS,
+        build_system_blocks,
+    )
+
+    without = build_system_blocks(TOOLS, SKILLS, ENV, DATE, interactive=True, channel=CHANNEL_NONE)
+    empty = build_system_blocks(
+        TOOLS, SKILLS, ENV, DATE, interactive=True, channel=CHANNEL_NONE, open_asks=""
+    )
+    assert empty[3] == without[3]
+    assert "<open-asks>" not in empty[3]
+
+    body = (
+        'As of the user\'s message at 17:42 EDT:\n- a-b782 — asked 17:42 EDT, 1 question: "Ship?"'
+    )
+    tail = build_system_blocks(
+        TOOLS,
+        SKILLS,
+        ENV,
+        DATE,
+        interactive=True,
+        channel=CHANNEL_NONE,
+        open_asks=body,
+        credentials=["FOO"],
+    )[3]
+    assert tail.index("<open-asks>") > tail.index("<interactivity>")
+    assert tail.index("<open-asks>") < tail.index("<session-credentials>")
+    section = f"<open-asks>\n{body}\n</open-asks>"
+    assert section in tail
+    assert split_tail_sections(tail)["open_asks"] == section
+
+    assert STATE_SECTION_HEADINGS["open_asks"] == "Open asks"
+    assert "open_asks" not in ADVISORY_TAIL_SECTIONS
+
+
 def test_tail_splits_into_sections_built_by_the_real_renderer() -> None:
     """The fold's invariant — ``assemble(split(text)) == text`` — over the real
     composition, exhaustive over which pieces are present.
@@ -1752,6 +1798,19 @@ def test_tail_splits_into_sections_built_by_the_real_renderer() -> None:
         ({"agent_brief": "role"}, {"knowledge", "agent"}),
         ({"interactive": True, "channel": CHANNEL_NONE}, {"knowledge", "interactivity"}),
         ({"credentials": ["FOO"]}, {"knowledge", "credentials"}),
+        ({"open_asks": "<open-asks>\n- a-1\n</open-asks>"}, {"knowledge", "open_asks"}),
+        (
+            {
+                "interactive": True,
+                "channel": CHANNEL_NONE,
+                "open_asks": "<open-asks>\n- a-1\n</open-asks>",
+            },
+            {"knowledge", "interactivity", "open_asks"},
+        ),
+        (
+            {"open_asks": "<open-asks>\n- a-1\n</open-asks>", "credentials": ["FOO"]},
+            {"knowledge", "open_asks", "credentials"},
+        ),
         ({"goal": "ship it", "team_brief": "brief"}, {"knowledge", "goal", "team"}),
         (
             {"team_brief": "brief", "interactive": True, "channel": CHANNEL_NONE},
@@ -1768,9 +1827,18 @@ def test_tail_splits_into_sections_built_by_the_real_renderer() -> None:
                 "agent_brief": "role",
                 "interactive": True,
                 "channel": CHANNEL_NONE,
+                "open_asks": "<open-asks>\n- a-1\n</open-asks>",
                 "credentials": ["FOO"],
             },
-            {"knowledge", "goal", "team", "agent", "interactivity", "credentials"},
+            {
+                "knowledge",
+                "goal",
+                "team",
+                "agent",
+                "interactivity",
+                "open_asks",
+                "credentials",
+            },
         ),
     ]
     for kwargs, expected in cases:

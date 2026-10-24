@@ -154,6 +154,17 @@ def test_ci_pending_count_and_status() -> None:
     assert pending is not None and pending.text == "CI pending"
 
 
+def test_ci_unknown_with_read_counts_shows_them_rather_than_denying_them() -> None:
+    """A partial read (over 100 checks, one page fetched) arrives as ``unknown``
+    carrying real counters. "No checks yet" would deny checks that ran, so the
+    counts win when they exist (review round 1, F2; QA Q2)."""
+    clause = review.ci_clause(
+        {"status": "unknown", "total": 150, "passed": 99, "failed": 0, "pending": 0}
+    )
+    assert clause is not None
+    assert (clause.text, clause.tone) == ("99/150 passed", "plain")
+
+
 def test_ci_absent_or_unclassifiable_claims_nothing() -> None:
     assert review.ci_clause(None) is None
     assert review.ci_clause({"status": "queued"}) is None

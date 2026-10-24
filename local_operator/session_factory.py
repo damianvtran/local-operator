@@ -3789,6 +3789,15 @@ def _make_system_blocks_provider(
         interactive = goal_state.interactivity() if goal_state is not None else None
         can_ask = goal_state.can_ask() if goal_state is not None else None
         channel = None if can_ask is None else (CHANNEL_ASK if can_ask else CHANNEL_NONE)
+        # The open-asks reminder (design §16/SA-D3), rendered by the session off
+        # its own live queue. Read HERE, per provider step, because that is the
+        # only cadence at which an ask raised or settled mid-turn can reach the
+        # next request. ``None`` is the reminder's third state — this host has no
+        # queue and cannot answer — and it renders NOTHING, exactly like the known
+        # empty ``""``; the difference is decided in ``Session._system_state_delta``
+        # (unknown must not ship as a removal), because only that layer can see the
+        # section the model is already reading (QA round 1, Q2).
+        open_asks = goal_state.open_asks() if goal_state is not None else None
         key = (
             knowledge_block,
             date_str,
@@ -3801,6 +3810,7 @@ def _make_system_blocks_provider(
             model_label,
             interactive,
             channel,
+            open_asks or "",
             tuple((tool.name, tool.description) for tool in tools),
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
@@ -3831,6 +3841,7 @@ def _make_system_blocks_provider(
             # tri-state note above and ``GoalState.interactivity``.
             interactive=interactive,
             channel=channel,
+            open_asks=open_asks or "",
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )
@@ -4493,6 +4504,12 @@ async def _prepare(
         resolve_birth
     )
     yolo = bool(getattr(args, "yolo", False))
+    # The BIRTH SPEED DIAL (ui#1265): its viewer's choice for a conversation that
+    # did not exist yet, read exactly as ``birth_effort`` above is. A separate
+    # name because no CLI flag sets it -- only a viewer can pick a tier before a
+    # session exists -- so every other caller (the CLI, the TUI, ``exec``) leaves
+    # the attribute off and is constructed on the bytes it always was.
+    birth_fast = bool(getattr(args, "birth_fast", False))
 
     transcript_dir, agent_id, is_new = _transcript_dir_and_agent_id(agent, args, agent_registry)
 
@@ -4644,6 +4661,16 @@ async def _prepare(
         )
     )
     spec = model_configuration.spec
+    # THE BIRTH DIAL, clamped on the route's own ``supports_fast_mode`` -- the
+    # same conjunction the journal restore (``model_selection.fast_dial_from_row``)
+    # and the spawn environment (``launch._spawn_runtime``) apply, and for the
+    # same reason: a stored pick can outlive the catalogue that offered it, and
+    # putting the speed key on a request the provider refuses would fail the very
+    # turn this construction exists to open. CLAMPED rather than raised because
+    # the refusal belongs to the moment the user picks (the create/preview 422);
+    # by the time a birth record reaches here it is a decision already taken.
+    if birth_fast and spec.supports_fast_mode:
+        spec = spec.model_copy(update={"fast_mode": True})
 
     # ONE CONSTRUCTION SITE, and ``build_auth_store`` returns the very same
     # ``AuthStore`` on a device that borrows nothing — no network, no placement, or

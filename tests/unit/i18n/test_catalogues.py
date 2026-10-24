@@ -168,11 +168,26 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # namespace with its own fresh ledger row. The remote-compute wave (S3e)
     # adds `cli.exec_remote_help` and `wire.remote_compute`, each carried only
     # once its independent audit row passed against the current en bytes.
+    # The R5 stale-ask wave (2026-10-23) adds the two ask-surface namespaces,
+    # `relay.ask` and `tui.asks`, on the same terms: independently audited
+    # (round 1 raised 12 findings, round 2 passed all seven locales), one fresh
+    # ledger row each against the current en bytes. P5 adds `tui.palette` on
+    # the same terms: a 7-key namespace whose fresh, independently audited
+    # ledger row is what lets the locale carry it. The fast-mode fix adds
+    # `tui.notices` and `wire.errors.desktop`: Hindi had no file for either
+    # namespace, so the refusal notices fell back to English; now each carries
+    # a 30-key / 84-key catalogue with its own audited ledger row (see
+    # i18n/ledger.json), which is the same condition every namespace above was
+    # admitted on.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
+        "relay.ask",
         "relay.session.tags",
+        "tui.asks",
         "tui.authoring",
+        "tui.notices",
+        "tui.palette",
         "tui.projects_edit",
         "tui.review",
         "tui.schedule",
@@ -183,6 +198,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "tui.viewer",
         "tui.welcome",
         "wire.errors",
+        "wire.errors.desktop",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",

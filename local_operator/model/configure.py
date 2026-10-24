@@ -1288,11 +1288,16 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # same normalisation the rest of this function runs on, so an alias
         # spelling of a provider cannot silently lose the dial.
         #
-        # Only the AVAILABILITY is seeded. `fast_mode` stays False until the
-        # user turns it on, and that asymmetry is deliberate: fast mode is
-        # billed at a premium (Anthropic and OpenAI both charge roughly double),
-        # so it is the one dial that must never arrive switched on by
-        # inference. `/fast` is an explicit, session-scoped opt-in.
+        # Only the AVAILABILITY is seeded. `fast_mode` starts False on every
+        # freshly built spec and is carried by the CONVERSATION, never by
+        # inference: fast mode is billed at a premium (Anthropic and OpenAI both
+        # charge roughly double), so it is the one dial that must never arrive
+        # switched on because a table happened to name the model. `/fast` is an
+        # explicit opt-in, and it is now durable within its scope — the
+        # `selected_model` journal row stores the dial beside the model and its
+        # level, so a reopen restores the operator's choice
+        # (`damianvtran/local-operator-ui#1266`) while a NEW conversation still
+        # starts at standard speed.
         supports_fast_mode=supports_fast_mode(canonical, model_name),
         display_name=resolved_name,
     )
@@ -4750,12 +4755,17 @@ class SessionStreamFn:
         # it, and the fixed text is kept short (design D7): with Anthropic's
         # measured message the line is 129 cells, inside the 140-cell notice
         # budget at the 150-cell reference frame.
-        await self._notice(
-            f"fast mode: refused by {selector} — {message.strip().rstrip('.')}; "
-            "switched off, serving at standard speed",
-            "warning",
-        )
         if self._fast_refused_handler is None:
+            # NO SESSION TO TELL: a bare stream fn (a subagent's, a harness's)
+            # speaks for itself. With a handler installed the OWNING SESSION is
+            # the narrator, because it is the only side that knows whether a
+            # dial actually moved — and two lines for one refusal is its own
+            # defect. See ``Session._on_fast_refused``.
+            await self._notice(
+                f"fast mode: refused by {selector} — {message.strip().rstrip('.')}; "
+                "switched off, serving at standard speed",
+                "warning",
+            )
             return
         result = self._fast_refused_handler(selector, message)
         if inspect.isawaitable(result):

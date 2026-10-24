@@ -218,6 +218,11 @@ def test_cold_dismiss_boots_nothing_and_reopen_delivers(headless_tui_env: Path) 
         entry = ask_store.read_entry(headless_tui_env, SESSION)
         assert entry is not None
         assert entry["asks"][0]["status"] == ask_store.STATUS_DISMISSED
+        # §17 case 2, and this PR's regression pin: a TIMED-OUT ask's dismissal
+        # still removes the row. It is stamped at/after the deadline, so the
+        # receipt rule does not keep it — putting a lapsed ask away still works.
+        assert entry["asks"][0]["dismissed_reason"] == ask_store.DISMISS_REASON_DEFAULT
+        assert ask_store.session_asks(headless_tui_env, SESSION) == []
 
         # (3) THE NOTICE WAITS, and a real reopen is what delivers it.
         async def reopen() -> str:
@@ -435,6 +440,16 @@ def test_cold_open_ask_dismiss_boots_nothing_and_next_boot_delivers(
         entry = ask_store.read_entry(headless_tui_env, SESSION)
         assert entry is not None
         assert entry["asks"][0]["status"] == ask_store.STATUS_DISMISSED
+        # SA-D8 (design §17): the cold door is the row's only writer, so the WHEN
+        # and WHY ride this index entry — and the reader a stopped conversation is
+        # served through shows the settled receipt, stamped with the moment of the
+        # tap, not with a later reconcile.
+        assert entry["asks"][0]["dismissed_at"] == events[-1]["at"]
+        assert entry["asks"][0]["dismissed_reason"] == "answered_in_chat"
+        (shown,) = ask_store.session_asks(headless_tui_env, SESSION)
+        assert shown["ask_id"] == ASK_ID
+        assert shown["status"] == ask_store.STATUS_DISMISSED
+        assert shown["dismissed_reason"] == "answered_in_chat"
 
         async def reopen() -> str:
             engaged, detail = await engage_session_client(config_dir(), SESSION, WarmErrand())

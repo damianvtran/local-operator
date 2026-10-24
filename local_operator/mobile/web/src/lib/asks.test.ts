@@ -10,6 +10,7 @@ import {
 	answeredBySurface,
 	askStateLine,
 	blockingPending,
+	dismissedReasonKey,
 	dockAsk,
 	durationLabel,
 	headAsk,
@@ -36,6 +37,32 @@ function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 		...patch,
 	};
 }
+
+describe("dismissedReasonKey", () => {
+	it("names the operator's own reason for a dismissed row", () => {
+		/* SA-D8 (design §17): a pre-deadline dismissal keeps a settled row, and the
+		   row says WHY. The keys are the receipt's own (#2841), so one act keeps one
+		   wording on the phone. */
+		expect(dismissedReasonKey(ask({ status: "dismissed", dismissed_reason: "moot" }))).toBe(
+			"relay.ask.dismiss.receipt_moot",
+		);
+		expect(
+			dismissedReasonKey(ask({ status: "dismissed", dismissed_reason: "answered_in_chat" })),
+		).toBe("relay.ask.dismiss.receipt_answered_in_chat");
+	});
+
+	it("says nothing for a row that is not dismissed, or recorded no reason", () => {
+		/* An older runtime sent no reason, and a legacy dismissal is hidden by the
+		   daemon — neither may be given a sentence it never recorded, so the card
+		   keeps its ordinary state line. */
+		expect(dismissedReasonKey(ask({ status: "open", dismissed_reason: "moot" }))).toBe(undefined);
+		expect(dismissedReasonKey(ask({ status: "dismissed" }))).toBe(undefined);
+		expect(dismissedReasonKey(ask({ status: "dismissed", dismissed_reason: "other" }))).toBe(
+			undefined,
+		);
+		expect(dismissedReasonKey(null)).toBe(undefined);
+	});
+});
 
 describe("askStateLine", () => {
 	it("states the open ask as queued, with a locally rendered countdown", () => {

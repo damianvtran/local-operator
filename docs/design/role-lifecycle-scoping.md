@@ -393,8 +393,8 @@ confirmation, as `/project delete` and `/delete` use it; no new picker and no mo
 **The tool surfaces ship REFUSAL-ONLY (S4 decision D1).** `agent op='promote'` and
 `team op='promote'` exist and go through the durable-write seam with
 `operation="promote"`, and no host installs a consent producer in this slice — so today
-every tool-issued promotion is refused, naming the desktop action and the TUI verb as the
-way forward. Promotion is a user act on a user surface; installing an intent-specific
+every tool-issued promotion is refused, naming the TUI promote verb as the way
+forward. Promotion is a user act on a user surface; installing an intent-specific
 confirmation producer remains the S2 deferral and is not smuggled in here.
 
 ### 3.7 Prompt and recommender guidance
@@ -418,13 +418,22 @@ Changes:
 - `local_operator/guides/teams/GUIDE.md`: replace "Never create a team ad-hoc for a one-off
   task" with the ladder — a one-off team is allowed **as a session team**; the durable bar
   for a global team is unchanged.
-- Recommender: `_registered_agent_hints` indexes the session composite (session rows
-  included, with the owning `agent_dir`); the index is built at session construction, so a
-  role created mid-session is findable through `agent list` but not through the semantic
-  hint until the next session — same limitation global rows already have, to be stated.
-- Delivery-guide pilot: a fresh-agent scripted pilot exercising "niche task → ephemeral",
-  "user says make it available → promote", and "reuse an existing role instead of creating"
-  before the policy text ships.
+- Recommender (unchanged by S5): `_registered_agent_hints` indexes role/specialist metadata over
+  the session composite (session rows included, with the owning `agent_dir`), but it never
+  names a role and records no hit. A match is reduced to a boolean that appends the
+  `agents` guide to the prompt hint; `tests/unit/guides/test_guides.py` asserts that names and
+  descriptions never reach that block. The index is built at session construction, so a
+  role created mid-session is findable through `agent list` but absent from the semantic
+  hint until the next session (the same limitation global rows already have; teams are
+  not indexed at all). Picker clutter and reuse cannot be measured from this index; the
+  S5 pilot measures the policy from transcripts instead.
+- Delivery-guide pilot (shipped with S5): a scripted fresh-session pilot exercising "niche
+  task → ephemeral", "user says make it available → promote", "reuse an existing role
+  instead of creating" and a no-durability negative, plus a read-only transcript analyzer.
+  It measures four scenarios (three positive and a negative control); it cannot measure
+  live-model compliance, production reuse or picker clutter — no `op`/`scope` telemetry
+  exists, and user-surface promotion bypasses agent-tool receipts. The PR states those
+  limits.
 
 ## 4. Serial slice plan
 
@@ -573,6 +582,9 @@ first S2 head got wrong, folded in here as the contract now:
   and results retained in the session scratchpad, referenced from the PR; `docs/design`
   finalized.
 - Gate: fresh-agent pilot evidence (delivery guide §"Evidence and pilots").
+- **Delivered in this slice's PR:** four scripted scenarios (reuse, ephemeral,
+  promote-on-request, no-durability negative) and the read-only analyzer; the actual
+  transcript facts and the list of what the pilot cannot measure are in the PR body.
 
 ## 5. Acceptance checks
 

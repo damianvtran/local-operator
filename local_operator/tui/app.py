@@ -132,6 +132,7 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
@@ -231,6 +232,13 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.command_palette import (
+    OperatorCommandPalette,
+    OperatorCommandProvider,
+    PaletteEntry,
+    build_palette_entries,
+    palette_is_open,
+)
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
@@ -383,6 +391,7 @@ from local_operator.tui.widgets.ask_queue import (
     SCOPE_FLEET,
     SCOPE_SESSION,
     STATUS_OPEN,
+    STATUS_TIMED_OUT,
     AskBar,
     AskQueueList,
     AskRow,
@@ -530,6 +539,7 @@ from local_operator.tui.widgets.toast import (
     _NETWORK_MARKER,
     TOAST_DEFAULT_MS,
     TOAST_FAILURE_MS,
+    TOAST_RECEIPT_MS,
     Toast,
     format_mcp_startup,
 )
@@ -582,11 +592,31 @@ _t = tr("tui.app")
 #: terminal's conversation labels and sidebar grouping, and it has no desktop
 #: counterpart to keep translated in step.
 _t_tags = tr("tui.tags")
+#: The queued-ask surfaces' own namespace (R5). Read through the binding at every
+#: use site, never copied: a language move re-materialises the catalogue.
+_t_asks = tr("tui.asks")
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
 TAG_APPLIED_MARK = "[x]"
 TAG_UNAPPLIED_MARK = "[ ]"
+
+
+def dismiss_receipt(reason: str | None) -> str:
+    """The one-line receipt for an ACCEPTED dismissal (UX round 1, U2).
+
+    ``reason`` is the operator's own word from the chooser. ``None`` is the
+    lapsed row's one-key door: the queue records its own ``moot`` default there,
+    but that is a RECORD, not something the operator said — so the receipt states
+    the door's own fact ("no reply sent") rather than adopting the default as
+    their reason (design round 2, D8 = agent review round 2, n1), and it is the
+    same sentence the phone shows for the same act.
+    """
+    if reason == "answered_in_chat":
+        return _t_asks(_ask_keys.dismiss_notice_answered_in_chat())
+    if reason == "moot":
+        return _t_asks(_ask_keys.dismiss_notice_moot())
+    return _t_asks(_ask_keys.dismiss_notice_no_reply())
 
 
 def _tag_header(applied: int, total: int) -> str:
@@ -4676,6 +4706,15 @@ class OperatorApp(App[None]):
 
     TITLE = "Local Operator"
     CSS_PATH = "local_operator.tcss"
+
+    #: Textual's palette gathers providers from here. The framework's system
+    #: actions are NOT dropped — ``OperatorCommandProvider`` delegates to
+    #: ``SystemCommandsProvider`` and yields its rows first — but registering
+    #: one provider instead of several is what makes the discovery order
+    #: deterministic: ``App.COMMANDS`` is a set and each provider's discovery
+    #: hits all score 0, so their relative order would otherwise follow
+    #: per-process set iteration. See ``local_operator/tui/command_palette.py``.
+    COMMANDS = {OperatorCommandProvider}
 
     #: How long a second click still counts as part of the same chain.
     #:
@@ -21199,9 +21238,14 @@ class OperatorApp(App[None]):
         # ONE leading `=` only, the grammar every other seam runs (agent review
         # round 2, NIT-2): ``lstrip`` stripped all of them, so ``/team ==clear``
         # detached here and reported an unknown name everywhere else.
-        if matched.startswith("="):
+        # The escape is captured BEFORE the strip: a leading `=` means
+        # "literal name, never a verb", so `/team =clear` must reach a team
+        # literally named clear instead of detaching (command-palette round 2,
+        # NIT). Doubling still addresses a name whose own spelling starts `=`.
+        escaped = matched.startswith("=")
+        if escaped:
             matched = matched[1:]
-        if arg and matched.casefold() in ("clear", "none") and not tail.strip():
+        if arg and not escaped and matched.casefold() in ("clear", "none") and not tail.strip():
             text, style = self._team_detach_receipt()
             if style == "warning":
                 self._system_notice(text, style)
@@ -21910,14 +21954,15 @@ class OperatorApp(App[None]):
         name, _, request = arg.partition(" ")
         name = name.strip()
         request = request.strip()
-        # The `=` escape (see the subcommand comment above). The strip runs
-        # BEFORE the clear/none check below, so `/agent =none` DETACHES — it
-        # does not reach a profile literally named `none` (the old comment
-        # claimed otherwise; review round 5, behaviour intended). A name whose
-        # own spelling starts with `=` is reached by DOUBLING the escape
-        # (`/agent ==none` → the profile `=none`), and the bare words
-        # clear/none stay reserved by the detach verb.
-        if name.startswith("="):
+        # The `=` escape (see the subcommand comment above): a leading `=`
+        # means "literal name, never a verb", so it is captured BEFORE the
+        # strip and suppresses the clear/none detach below — `/agent =none`
+        # attaches a profile literally named `none` (command-palette round 2,
+        # NIT). A name whose own spelling starts with `=` is reached by
+        # DOUBLING the escape (`/agent ==none` → the profile `=none`), and the
+        # bare words clear/none stay reserved by the detach verb.
+        literal_name = name.startswith("=")
+        if literal_name:
             name = name[1:]
         # ``clear``/``none`` are the DETACH verb, not a name to look up — the
         # mirror of ``/goal`` with no text clearing the objective. A real agent
@@ -21926,7 +21971,7 @@ class OperatorApp(App[None]):
         # alternative (a name silently un-clearable) is worse. Only the bare
         # verb detaches; ``/agent clear <anything>`` is a mistyped attach and
         # falls through to normal resolution, which reports the unknown name.
-        if name.lower() in ("clear", "none") and not request:
+        if not literal_name and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 # Same silent-skip shape as the team attach above, and the same
@@ -27603,11 +27648,29 @@ class OperatorApp(App[None]):
             self._paint_sidebar_asks()
             return
         self._ask_rows = list(rows)
-        # A session-scope `x` holds its row in flight until the frame drops it
-        # (`_dismiss_ask`); THIS is that frame. Only those marks are swept here —
-        # never a fleet op's, which `_fleet_ask_worker` ends itself (M1).
-        present_ids = {row.ask_id for row in self._ask_rows}
-        for ask_id in [i for i in self._ask_dismiss_in_flight if i not in present_ids]:
+        # A session-scope `x` holds its row in flight until the row stops being a
+        # thing the gesture can act on: ABSENT from this frame (the old sweep —
+        # the row left the queue), or PRESENT, SETTLED and NOT LAPSED (SA-D8) —
+        # `present[i].settled and present[i].status != STATUS_TIMED_OUT` below.
+        # The second arm is load-bearing now: a dismissal taken before the ask's
+        # deadline KEEPS its row as a settled receipt (§17), so waiting for the
+        # frame to drop it means the `…` mark never goes away — a busy glyph on
+        # a row that is finished, and one id held for the life of the session.
+        #
+        # A LAPSED (`timed_out`) ROW IS EXEMPT WHATEVER ITS SETTLEDNESS: it is
+        # already unanswerable when its one-key dismissal starts, so "no longer
+        # answerable" would clear the mark on the very next frame and re-open the
+        # door for a second send (review round 2, m4). Its mark ends the way it
+        # always did — the dismissal hides the row and the next frame drops it.
+        #
+        # Only these marks are swept here — never a fleet op's, which
+        # `_fleet_ask_worker` ends itself (M1).
+        present = {row.ask_id: row for row in self._ask_rows}
+        for ask_id in [
+            i
+            for i in self._ask_dismiss_in_flight
+            if i not in present or (present[i].settled and present[i].status != STATUS_TIMED_OUT)
+        ]:
             self._ask_dismiss_in_flight.discard(ask_id)
             self._mark_ask_in_flight(ask_id, False)
         self._refresh_ask_secret_notice()
@@ -28695,7 +28758,12 @@ class OperatorApp(App[None]):
         self._mount_ask_list(highlight=row.ask_id, scope=SCOPE_FLEET)
 
     def _run_fleet_ask_op(
-        self, row: AskRow, op: str, *, answers: dict[str, list[str]] | None = None
+        self,
+        row: AskRow,
+        op: str,
+        *,
+        answers: dict[str, list[str]] | None = None,
+        reason: str | None = None,
     ) -> None:
         """Send ``op`` for ``row``, in a worker (A7).
 
@@ -28718,7 +28786,7 @@ class OperatorApp(App[None]):
             return
         self._mark_ask_in_flight(row.ask_id, True)
         self.run_worker(
-            self._fleet_ask_worker(row, op, answers),
+            self._fleet_ask_worker(row, op, answers, reason),
             group=f"ask-fleet-{row.ask_id}",
             exclusive=True,
         )
@@ -28744,7 +28812,11 @@ class OperatorApp(App[None]):
             listing.set_in_flight(ask_id, active)
 
     async def _fleet_ask_worker(
-        self, row: AskRow, op: str, answers: dict[str, list[str]] | None
+        self,
+        row: AskRow,
+        op: str,
+        answers: dict[str, list[str]] | None,
+        reason: str | None = None,
     ) -> None:
         """The engage-and-dial, off the UI thread's critical path (A7).
 
@@ -28757,6 +28829,7 @@ class OperatorApp(App[None]):
         owner is the thing that settles the ask.
         """
         from local_operator.asks.dismiss import dismiss_cold
+        from local_operator.asks.render import NOT_IN_QUEUE
         from local_operator.mobile.attach_client import engage_session_client
         from local_operator.paths import config_dir
         from local_operator.session.runtime.launch import AskErrand
@@ -28766,7 +28839,7 @@ class OperatorApp(App[None]):
         try:
             if op == "dismiss":
                 outcome = await dismiss_cold(
-                    config_dir(), row.session_id, row.ask_id, by="terminal"
+                    config_dir(), row.session_id, row.ask_id, by="terminal", reason=reason
                 )
                 if outcome.get("ok"):
                     settled_cold = True
@@ -28795,7 +28868,7 @@ class OperatorApp(App[None]):
                     elif op == "decline":
                         await client.ask_decline(row.ask_id, by="terminal")
                     else:
-                        await client.ask_dismiss(row.ask_id, by="terminal")
+                        await client.ask_dismiss(row.ask_id, by="terminal", reason=reason)
                 finally:
                     client.close()
         except Exception as exc:  # noqa: BLE001 — the refusal is the message
@@ -28809,6 +28882,12 @@ class OperatorApp(App[None]):
             # whole promise is that nothing is sent.
             if op == "dismiss":
                 failed = str(exc) or "the dismissal could not be recorded."
+                if failed == NOT_IN_QUEUE:
+                    # THE ROW IS ANOTHER CONVERSATION'S BY CONSTRUCTION (UX round
+                    # 1, U5): on this list "it may belong to another session"
+                    # contradicts the screen it is printed on, so the honest fact
+                    # is about the log the row named.
+                    failed = _t_asks(_ask_keys.dismiss_fleet_gone())
                 logger.warning("could not record a fleet dismissal", exc_info=True)
             else:
                 failed = str(exc) or "the answer could not be delivered."
@@ -28818,10 +28897,13 @@ class OperatorApp(App[None]):
             await self._reload_fleet_rows()
         if failed:
             self._ask_gesture_refusal(failed)
-        elif self._ask_scope == SCOPE_FLEET:
-            # Hand the user back to the fleet list — the queue is a place, and
-            # the answered row has left it.
-            self._mount_ask_list(scope=SCOPE_FLEET)
+        else:
+            if op == "dismiss":
+                self._ask_gesture_notice(dismiss_receipt(reason))
+            if self._ask_scope == SCOPE_FLEET:
+                # Hand the user back to the fleet list — the queue is a place, and
+                # the answered row has left it.
+                self._mount_ask_list(scope=SCOPE_FLEET)
 
     def _mount_ask_list(
         self, highlight: str | None = None, *, scope: str | None = None, passive: bool = False
@@ -29194,7 +29276,12 @@ class OperatorApp(App[None]):
         self._handle_ask_outcome(outcome, toast=True)
 
     def _handle_ask_outcome(
-        self, outcome: Any, *, toast: bool, clear_in_flight: str | None = None
+        self,
+        outcome: Any,
+        *,
+        toast: bool,
+        clear_in_flight: str | None = None,
+        notice: str = "",
     ) -> None:
         """Report a queued-ask op's verdict, whether it arrived sync or on the wire.
 
@@ -29213,15 +29300,22 @@ class OperatorApp(App[None]):
         """
         if inspect.isawaitable(outcome):
             self.run_worker(
-                self._await_ask_outcome(outcome, toast=toast, clear_in_flight=clear_in_flight),
+                self._await_ask_outcome(
+                    outcome, toast=toast, clear_in_flight=clear_in_flight, notice=notice
+                ),
                 exclusive=False,
                 exit_on_error=False,
             )
             return
-        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight)
+        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight, notice=notice)
 
     async def _await_ask_outcome(
-        self, pending: Any, *, toast: bool, clear_in_flight: str | None = None
+        self,
+        pending: Any,
+        *,
+        toast: bool,
+        clear_in_flight: str | None = None,
+        notice: str = "",
     ) -> None:
         """Await a viewer's ask op and report it in the owner's words."""
         try:
@@ -29229,18 +29323,29 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — a dead transport is not a lost answer
             logger.warning("a queued-ask op failed on the wire", exc_info=True)
             outcome = {"ok": False, "error": str(exc) or "the ask was refused"}
-        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight)
+        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight, notice=notice)
 
     def _ask_refusal(
-        self, outcome: Any, *, toast: bool, clear_in_flight: str | None = None
+        self,
+        outcome: Any,
+        *,
+        toast: bool,
+        clear_in_flight: str | None = None,
+        notice: str = "",
     ) -> None:
         """The one place a refused ask op becomes words on screen.
 
         ``clear_in_flight`` ends a gesture's in-flight mark on a REFUSAL only: an
-        accepted op keeps it until the snapshot that drops the row, so the row
-        never flickers back to live between the reply and the frame.
+        accepted op keeps it until the row settles or leaves (``_sync_ask_surface``
+        sweeps both), so the row never flickers back to live between the reply and
+        the frame.
+
+        ``notice`` is the ACCEPTED op's own receipt (UX round 1, U2), reported in
+        the same slot: an ask op that worked used to say nothing at all.
         """
         if outcome.get("ok"):
+            if notice:
+                self._ask_gesture_notice(notice)
             return
         if clear_in_flight:
             self._ask_dismiss_in_flight.discard(clear_in_flight)
@@ -29250,6 +29355,21 @@ class OperatorApp(App[None]):
             self._ask_gesture_refusal(text)
         else:
             self._system_notice(text, "warning")
+
+    def _ask_gesture_notice(self, text: str) -> None:
+        """Acknowledge a queued-ask gesture where it happened (UX round 1, U2).
+
+        The happy path used to be SILENT: the row left the list, the counts
+        changed, and nothing said what the queue had recorded — the only trace of
+        a dismissal was an absence, while an answered or declined ask keeps a
+        receipt chip. `yield_to_actionable` marks this as the courtesy it is: the
+        user did the thing, so their receipt must never evict a failure they have
+        not read yet.
+        """
+        try:
+            self.query_one(Toast).show(text, duration_ms=TOAST_RECEIPT_MS, yield_to_actionable=True)
+        except Exception:  # noqa: BLE001 — a stripped harness still gets the words
+            self._system_notice(text, "info")
 
     def _ask_gesture_refusal(self, text: str) -> None:
         """Report a refused `d`/`x` where the gesture happened, not in the transcript.
@@ -29265,17 +29385,25 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — no toast in this harness; still say it
             self._system_notice(text, "warning")
 
-    def _dismiss_ask(self, ask_id: str) -> None:
-        """Take a TIMED-OUT ask out of the view.
+    def _dismiss_ask(self, ask_id: str, *, reason: str | None = None) -> None:
+        """Put an OPEN or TIMED-OUT ask away from the view.
 
-        The dismissal's own act asks the model nothing and buys no turn; what it can
-        still OWE is the deadline notice the ask never got (fork A, §14), which the
-        next run's reconcile delivers in its dismissed wording. Its twin in
-        ``asks/queue.py`` and ``serving.py`` says the same thing for the same reason.
+        ``reason`` is the operator's word for WHY, chosen in the list's two-choice
+        card (R5); ``None`` is the lapsed row's one-key door, where the queue
+        records its own default — the agent had already walked past that deadline,
+        so nothing turns on the operator naming a reason (design §14).
+
+        An OPEN ask is dismissed on every live state (SA-D4): mid-turn its
+        response row rides the steering queue to the running turn's next
+        boundary, and an idle session holds it durably with no turn. The
+        dismissal's own act asks the model nothing and buys no turn; what it can
+        still OWE is the deadline notice the ask never got, which the next run's
+        reconcile delivers in its dismissed wording. Its twin in ``asks/queue.py``
+        and ``serving.py`` says the same thing for the same reason.
         """
         fleet_row = self._fleet_row_for(ask_id)
         if fleet_row is not None and self._fleet_answer_starts_here(fleet_row):
-            self._run_fleet_ask_op(fleet_row, "dismiss")
+            self._run_fleet_ask_op(fleet_row, "dismiss", reason=reason)
             return
         session = self._queued_ask_session()
         reader: Any = getattr(session, "dismiss_ask", None)
@@ -29285,13 +29413,17 @@ class OperatorApp(App[None]):
             return
         # Acknowledge `x` AT ONCE (#2481 round 1): the row is marked in flight —
         # the same `…` mark and second-press guard a fleet answer uses — until the
-        # frame that drops it lands, or a refusal clears it. Before this, a
+        # frame that SETTLES it lands, or a refusal clears it. Before this, a
         # viewer's dismiss crossed the wire with nothing on screen saying the key
-        # had landed. Snapshots clear it when the row leaves (`_sync_ask_surface`).
+        # had landed. Snapshots clear it when the row leaves OR stops being
+        # answerable (`_sync_ask_surface`); since SA-D8 a dismissed row stays, so
+        # only the second arm can end this mark.
         self._ask_dismiss_in_flight.add(ask_id)
         self._mark_ask_in_flight(ask_id, True)
-        outcome: Any = reader(ask_id, by="terminal")
-        self._handle_ask_outcome(outcome, toast=True, clear_in_flight=ask_id)
+        outcome: Any = reader(ask_id, by="terminal", reason=reason)
+        self._handle_ask_outcome(
+            outcome, toast=True, clear_in_flight=ask_id, notice=dismiss_receipt(reason)
+        )
 
     def on_ask_bar_toggled(self, message: AskBar.Toggled) -> None:
         """A click or Enter on the minimized bar: expand, or collapse if already up."""
@@ -29332,7 +29464,9 @@ class OperatorApp(App[None]):
 
     def on_ask_queue_list_dismiss(self, message: AskQueueList.Dismiss) -> None:
         message.stop()
-        self._dismiss_ask(message.ask_id)
+        # The list owns the two-choice card, so a reason arrives set for an OPEN
+        # ask and unset for a lapsed one; both end in the same door.
+        self._dismiss_ask(message.ask_id, reason=message.reason)
 
     def _notify_mobile_title(self, name: str) -> None:
         """Push a title (generated, renamed, or provisional) to the phone.
@@ -38720,7 +38854,140 @@ class OperatorApp(App[None]):
         """
         self._open_settings_view()
 
-    def _open_settings_view(self) -> None:
+    def action_command_palette(self) -> None:
+        """Open the app's command palette (``ctrl+p``).
+
+        Overrides Textual's action of the same name for one reason: the
+        framework pushes a bare ``CommandPalette``, whose placeholder and
+        no-match line are hardcoded English. ``OperatorCommandPalette`` is the
+        same screen with those two strings resolved through this app's
+        catalogue; every other behaviour (keys, list, selection, dismissal) is
+        inherited unchanged.
+
+        The binding itself is Textual's ``COMMAND_PALETTE_BINDING`` (``ctrl+p``
+        on 8.2.8), injected at runtime — see ``docs/design/keymap.md`` §E.4
+        clause 5 for why an app binding cannot claim that key.
+        """
+        if self.use_command_palette and not palette_is_open(self):
+            self.push_screen(OperatorCommandPalette(id="--command-palette"))
+
+    def _palette_session_rows(self) -> list[Any]:
+        """The session-store scan behind the palette's conversation rows.
+
+        Split from :meth:`_palette_entries` so the provider can run it in a
+        thread: the scan is uncapped by design (a capped catalogue cannot find
+        a session past the cap — the reasoning `/resume` records), and cold it
+        costs 1.5-2.2 s on a real store. On the event loop that is a frozen
+        frame between `ctrl+p` and the palette; off it, the palette paints and
+        the rows arrive.
+
+        Never raises: a palette that cannot list history still opens, and a
+        broken store must not turn a keystroke into a traceback.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.resume import recent_session_rows
+
+        try:
+            return list(recent_session_rows(config_dir(), limit=None))
+        except Exception:  # noqa: BLE001 — see docstring
+            return []
+
+    def _palette_entries(self, *, session_rows: Iterable[Any]) -> list[PaletteEntry]:
+        """Every action the ``ctrl+p`` palette offers, in discovery order.
+
+        The SINGLE seam that reads live state, called by the palette provider
+        from its shielded scan task (off the input path). It derives from the surfaces
+        that already own each vocabulary rather than carrying a table of its
+        own: ``SLASH_COMMANDS`` for commands, ``settings_io.SECTIONS`` for
+        settings, the session store for conversations, and the live session's
+        registries for agent and team names. Nothing is duplicated, so a
+        palette row cannot outlive the command or section it names.
+
+        Two bounded choices, both so the palette cannot lie:
+
+        * a settings section the page itself hides (the dynamically gated
+          agent-messages section) is not offered — ``bridge_availability``
+          owns that visibility and the settings page reads it live, so the
+          palette asks the same question;
+        * sessions come from the same uncapped scan ``/resume`` uses, but only
+          the twelve most recent are DISCOVERY rows; a query reaches the rest
+          (see ``build_palette_entries``).
+        """
+        from local_operator import settings_io
+        from local_operator.paths import config_dir
+        from local_operator.team_bridge import availability as bridge_availability
+
+        directory = config_dir()
+        sections = [
+            section
+            for section in settings_io.SECTIONS
+            if bridge_availability.section_visible(section.name, directory)
+        ]
+        return build_palette_entries(
+            slash_commands=SLASH_COMMANDS,
+            sections=sections,
+            session_rows=session_rows,
+            agent_rows=self._agent_profile_rows(),
+            team_names=self._known_team_names(),
+        )
+
+    def _leave_full_page_modes(self) -> bool:
+        """Leave every full-page mode, for a palette selection about to paint.
+
+        A full-page mode is not a layer over the transcript: each one sets
+        ``_transcript_view().display = False`` and owns the region plus the
+        composer. A slash command dispatched while one is up paints its
+        receipt (a listing, a picker, a notice) into that hidden surface and
+        leaves the page owning the frame, so the palette leaves the mode FIRST
+        — via the closers a user's Esc reaches, each of which restores the
+        layout, the composer and focus in its own way.
+
+        Every closer is a no-op returning ``False`` when its mode is not up,
+        so the sweep is unconditional and cannot mistake one mode for another.
+        """
+        left = False
+        for close in (
+            self._close_settings_view,
+            self._close_org_chart_view,
+            self._close_import_view,
+            self._close_review_view,
+            self._close_schedule_view,
+            self._close_library_view,
+            self._close_projects_view,
+            self._close_agent_form,
+            self._close_team_form,
+            self._close_subagent_view,
+            self._close_file_viewer,
+        ):
+            left = close() or left
+        return left
+
+    async def _run_palette_entry(self, entry: PaletteEntry) -> None:
+        """Run a palette selection through the surface that already owns it.
+
+        A settings row opens the SAME page ``/settings`` opens, landing on the
+        chosen section. Every other row is handed to ``_run_slash_command`` as
+        the line a user would have typed — one dispatcher, so a palette entry
+        and its typed spelling cannot diverge in validation, receipts or
+        refusal copy.
+
+        ``_run_slash_command`` returns an awaitable only for the branches that
+        must complete inline (the cold-bind path); awaiting a ``None`` would be
+        a type error, and scheduling the awaitable itself would be the same
+        second hop that method's docstring exists to avoid. So it is awaited
+        only when one is returned.
+        """
+        if entry.section:
+            self._open_settings_view(section=entry.section)
+            return
+        if not entry.slash:
+            return
+        self._leave_full_page_modes()
+        pending = self._run_slash_command(entry.slash)
+        if pending is not None:
+            await pending
+
+    def _open_settings_view(self, *, section: str | None = None) -> None:
         """Enter the full-page settings mode.
 
         A MODE of this screen, cloned from :meth:`_open_org_chart_view`: the
@@ -38733,11 +39000,17 @@ class OperatorApp(App[None]):
         The read-only content (teams, agents, provider state) is resolved HERE
         and handed to the widget, so a repaint costs no registry or credential
         I/O — the same split the org chart makes with its resolved tree.
+
+        ``section`` is the palette's landing request: a ``settings_io.SECTIONS``
+        name the page scrolls to and puts the cursor on. ``None`` is the typed
+        ``/settings`` route and keeps the page's own remembered position.
         """
         self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._settings_view is not None:
+            if section is not None:
+                self._settings_view.focus_section(section)
             return
         from local_operator.config import ConfigManager
         from local_operator.paths import config_dir
@@ -38745,7 +39018,7 @@ class OperatorApp(App[None]):
         # Captured before anything is blurred: this is where Esc puts the user
         # back, almost always the composer.
         self._settings_focus_restore = self.focused
-        view = SettingsView(ConfigManager(config_dir()))
+        view = SettingsView(ConfigManager(config_dir()), section=section)
         self._settings_view = view
         self._transcript_view().display = False
         self.screen.mount(view, before=self.query_one("#input-dock"))
@@ -54337,6 +54610,7 @@ class OperatorApp(App[None]):
         # module is what every interactive session imports.
         from local_operator.harness.types import AbortSignal
         from local_operator.providers.oauth.callback_server import LoginCancelledError
+        from local_operator.providers.oauth.radient import RadientLoginDisabled
 
         assert self._providers is not None
         if self._login_lock is None:
@@ -54485,6 +54759,19 @@ class OperatorApp(App[None]):
                     f"login cancelled. {stopped}retry with /login {provider}",
                     "info",
                 )
+        except RadientLoginDisabled:
+            # A preserved disablement is an OUTCOME: the sign-in WAS verified, so
+            # the catch-all's red "login failed" contradicted the sentence it
+            # printed and invited the user to retry a login that had just worked
+            # (design round 2, D1). ``warning`` is the transcript's
+            # "attention, not failure" rung; the copy is cause-agnostic because
+            # the typed outcome also covers automatic causes, and it closes the
+            # sentence with what did NOT change.
+            await notice(
+                "Sign-in verified. This Radient sign-in stays disabled; "
+                "its saved state was preserved. Nothing else changed.",
+                "warning",
+            )
         except Exception as error:
             local = getattr(self._providers.provider(provider), "local_setup", False)
             await notice(f"{'setup' if local else 'login'} failed: {error}", "error")
@@ -56171,14 +56458,19 @@ class OperatorApp(App[None]):
         session = self._session
         name, _, request = arg.partition(" ")
         name = name.strip()
-        if name.startswith("="):
+        # A leading `=` means "literal name, never a verb"; capture it before
+        # the strip so the detach below cannot fire on a profile named
+        # clear/none (command-palette round 2, NIT — the same guard the local
+        # `/agent` handler and `_cmd_team` now carry).
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # The DETACH verb, byte-for-byte the grammar ``_cmd_team`` and
         # ``serving.py`` run (issue #2014 added it because a team OWNS the
         # agent slot, so detaching is the only way to free it again). A request
         # after the verb is a mistyped attach and falls through to the lookup.
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             # ONE implementation of the verb for this process (MINOR-1): it also
             # syncs BOTH band segments, which this seam used to skip. The typed
             # ``data`` rides only a SUCCESSFUL detach (agent review round 3,
@@ -56283,10 +56575,11 @@ class OperatorApp(App[None]):
         # starts with ``=``, addressed by doubling it — stays reachable from a
         # follower of THIS app's session (review round 4, R4-1: this builder
         # was the one seam without it).
-        if name.startswith("="):
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")

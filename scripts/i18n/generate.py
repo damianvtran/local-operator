@@ -83,6 +83,12 @@ OWNED_SPA_NAMESPACES = (
     "relay.session.tags",
     "relay.account_policy",
     "relay.library",
+    # The ask card's own copy (R5 surfaces, 2026-10-23): the dismiss reasons and
+    # the stale-ask context line, painted by the SPA inside the asks sheet. One
+    # small owned namespace rather than keys added to `relay.session`, because a
+    # new key in a namespace a locale has not carried yet GROWS the shrink-only
+    # coverage allowance (docs/I18N.md).
+    "relay.ask",
 )
 
 GENERATED_HEADER = (

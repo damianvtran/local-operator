@@ -50,9 +50,12 @@ describe("retainConfigStream", () => {
 		// relay.account_policy (LOH-12) join relay.shell in OWNED_SPA_NAMESPACES;
 		// relay.library is the phone Library's own en-only copy (plural count);
 		// relay.session.tags is the LOH-11 tag slice's own namespace.
+		// relay.ask is the R5 ask card's own: the dismiss reasons and the
+		// stale-ask context line, bundled like every other owned surface.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
+			"relay.ask",
 			"relay.library",
 			"relay.session",
 			"relay.session.tags",
