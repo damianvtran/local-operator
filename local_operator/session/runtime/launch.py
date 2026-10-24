@@ -427,7 +427,10 @@ def _spawn_runtime(
     first provider call and the selection row it journals at admission all
     carry that level. Applying it afterwards over the model RPC would leave the
     child briefly on the model's own default and would lose the level
-    altogether if the owner was already running.
+    altogether if the owner was already running. The birth FAST DIAL rides it
+    for exactly those reasons (``LOP_MOBILE_CHILD_FAST``): a conversation the
+    pane created with the toggle on must run its first turn on the tier, not
+    report one it is not sending (ui#1265).
 
     ONE VALUE HERE IS NOT ROUTING DATA: the engage claim
     (``types.ENGAGED_ENV``). It has to travel in the environment because it is a
@@ -448,6 +451,12 @@ def _spawn_runtime(
         "LOP_MOBILE_CHILD_PROVIDER",
         "LOP_MOBILE_CHILD_MODEL",
         "LOP_MOBILE_CHILD_EFFORT",
+        # The DIAL is part of the same birth sample (``DraftModel.fast_mode``,
+        # ui#1265). It is scrubbed here for the reason this tuple exists at all:
+        # a child spawned from inside another session inherits that session's
+        # flags, and a stale ``LOP_MOBILE_CHILD_FAST`` would arm premium pricing
+        # on a fresh conversation from a sibling that finished hours ago.
+        "LOP_MOBILE_CHILD_FAST",
         "LOP_MODEL_SELECTION_OVERRIDE",
     ):
         env.pop(key, None)
@@ -460,6 +469,17 @@ def _spawn_runtime(
         effort = getattr(initial_model, "reasoning_effort", None)
         if effort:
             env["LOP_MOBILE_CHILD_EFFORT"] = str(effort)
+        # THE DIAL rides the same channel and is written on BOTH conditions for
+        # the same reason ``spec_for_target`` clamps it: the target's own
+        # ``supports_fast_mode`` is authoritative about whether the key may be
+        # sent at all, so asking a child with no tier to go fast would be a 400
+        # on its first turn. ABSENT, not ``"0"``: the key's presence is what
+        # tells the child a dial was CHOSEN, and every caller before this field
+        # has to leave exactly the bytes it left before.
+        if getattr(initial_model, "fast_mode", False) and getattr(
+            initial_model, "supports_fast_mode", False
+        ):
+            env["LOP_MOBILE_CHILD_FAST"] = "1"
     if model_selection_override:
         env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
     if defer_materialise:

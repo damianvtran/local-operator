@@ -282,8 +282,8 @@ async def test_reserved_routing_picker_and_printed_talk_command(tmp_path, monkey
         await _boot(pilot, app)
         rows = app._team_argument_choices(_PickerEditor("/team "))
         names = [row.name for row in rows]
-        assert names[-3:] == ["chart", "new", "edit"]
-        assert {"=new", "=edit", "=chart", "crew"} <= set(names[:-3])
+        assert names[-4:] == ["chart", "new", "edit", "promote"]
+        assert {"=new", "=edit", "=chart", "crew"} <= set(names[:-4])
         assert not app._team_argument_choices(_PickerEditor("/team new "))
         assert {row.name for row in app._team_argument_choices(_PickerEditor("/team edit "))} == {
             "edit new",
@@ -373,6 +373,7 @@ async def test_empty_registry_still_discovers_new(tmp_path, monkeypatch):
             "chart",
             "new",
             "edit",
+            "promote",
         ]
         for command, expected in (
             ("/team edit", "/team edit <name>"),

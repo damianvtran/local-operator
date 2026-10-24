@@ -1440,7 +1440,13 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     async def admit_prompt(
-        self, text: str, *, command_id: str, images: list[dict[str, str]], steer: bool = False
+        self,
+        text: str,
+        *,
+        command_id: str,
+        images: list[dict[str, str]],
+        steer: bool = False,
+        files: list[dict[str, Any]] | None = None,
     ) -> tuple[str, bool]:
         """Submit a prompt and return the runtime's ADMISSION receipt.
 

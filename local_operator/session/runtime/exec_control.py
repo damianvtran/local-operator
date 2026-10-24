@@ -164,6 +164,7 @@ async def start_exec_control(
     cwd: str,
     yolo: bool = False,
     supervised: bool = True,
+    resumed: bool = False,
     supervisor_fd: int | None = None,
 ) -> ExecControl:
     """Publish a record and serve the control socket for ``session``.
@@ -213,9 +214,26 @@ async def start_exec_control(
     attached supervisor — the behavioural difference this module's header
     calls out.
 
+    THE CONVERSATION'S OWN RECORDED CHOICE COMES FIRST (2026-10-23), ahead of
+    the config read above: a resumed conversation that carries ``approvals.json``
+    starts in the mode its human typed there, in BOTH directions. Without that
+    the seed below would hand a resumed, deliberately-ungated conversation to
+    the file, and the handle's own read of the same sidecar would disagree with
+    the value it was constructed from — the M1 posture hazard this paragraph
+    exists to prevent, one source over. ``--yolo`` still outranks both, because
+    a flag on this run is narrower and newer than either.
+
     Imports are function-local by contract, not by habit: ``serving`` pulls the
     composition root and ``server`` pulls asyncio, and this package sits on the
     CLI startup path (see the module header and :mod:`.serving`).
+
+    ``resumed`` is set by the runner from ``--resume``: the run opened an
+    EXISTING conversation, so it inherits that conversation's outstanding work.
+    An unsupervised one gets the ask surface WITHOUT the approval gates
+    (``install_ask_surface``): its open asks, their deadline wakes and their
+    owed response rows belong to the conversation, while a parked approval card
+    has nobody to answer it here — which is also why ``sessions`` withholds
+    ``--control`` from a resume worker.
     """
     import asyncio
 
@@ -267,20 +285,52 @@ async def start_exec_control(
     # than overstated (review R1-4).
     auto_approve = yolo
     if not yolo:
-        try:
-            approval_mode = (
-                str(
-                    ConfigManager(config_dir=config_directory).get_config_value(
-                        "tool_approval_mode", "ask"
+        # THE CONVERSATION'S OWN RECORDED CHOICE OUTRANKS THE MACHINE DEFAULT
+        # (2026-10-23), and it is consulted HERE as well as in the handle
+        # because this value is what the handle is CONSTRUCTED with: a resumed
+        # conversation told to start ungated must not park its first card while
+        # waiting for a delivery. The read is the same sidecar the handle reads
+        # in ``_adopt_persisted_approval_override`` — that one then finds this
+        # value already adopted and agrees with it, which is the point (gate and
+        # posture equal, one read).
+        transcript = getattr(session, "transcript", None) or getattr(session, "_transcript", None)
+        directory = getattr(transcript, "directory", None)
+        override: str | None = None
+        if directory is not None:
+            from pathlib import Path
+
+            from local_operator.session.approval_policy import read_override
+
+            if isinstance(directory, Path):
+                override, _warning = read_override(directory)
+        if override is not None:
+            auto_approve = override == "auto"
+        else:
+            try:
+                approval_mode = (
+                    str(
+                        ConfigManager(config_dir=config_directory).get_config_value(
+                            "tool_approval_mode", "ask"
+                        )
                     )
+                    .strip()
+                    .lower()
                 )
-                .strip()
-                .lower()
-            )
-        except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
-            logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
-            approval_mode = "ask"
-        auto_approve = approval_mode == "auto"
+            except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
+                logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
+                approval_mode = "ask"
+            auto_approve = approval_mode == "auto"
+    # THE QUEUED ENGINE MUST BE ON (review round 1, MINOR-1 / QA Q1). With the
+    # operator's kill switch (``LOP_ASK_NONBLOCKING=0``) the queue does not exist
+    # at all, so an ask surface here could only advertise a tool whose single
+    # outcome is the refusal — beside a prompt describing the BLOCKING call. That
+    # is the prompt/tool mismatch this PR removes, inverted, and ``main``
+    # advertised no ``ask`` on this arm either. The handler itself stays as
+    # belt-and-braces for a host that installs the surface directly.
+    from local_operator.asks import policy
+
+    install_ask_surface = not supervised and resumed and policy.enabled()
+
     handle = ServingSessionHandle(
         session,
         loop,
@@ -294,6 +344,7 @@ async def start_exec_control(
         auto_approve=auto_approve,
         approval_pinned=yolo,
         install_gates=supervised,
+        install_ask_surface=install_ask_surface,
         # Declared so the §6 registration's store-existence check and the
         # registration itself share this run's root (MINOR-3).
         config_dir=config_directory,
@@ -416,6 +467,7 @@ async def maybe_start_exec_control(
     enabled: bool,
     cwd: str,
     yolo: bool = False,
+    resumed: bool = False,
     supervisor_fd: int | None = None,
 ) -> ExecControl | None:
     """Start the surface when asked, disposing the session if it cannot start.
@@ -434,7 +486,9 @@ async def maybe_start_exec_control(
     if not enabled:
         return None
     try:
-        return await start_exec_control(session, cwd=cwd, yolo=yolo, supervisor_fd=supervisor_fd)
+        return await start_exec_control(
+            session, cwd=cwd, yolo=yolo, resumed=resumed, supervisor_fd=supervisor_fd
+        )
     except BaseException:
         try:
             await session.dispose()

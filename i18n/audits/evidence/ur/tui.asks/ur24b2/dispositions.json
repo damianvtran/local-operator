@@ -1,0 +1,214 @@
+{
+  "schema": 1,
+  "record_kind": "round_1_disposition_verification",
+  "disposition_count": 21,
+  "verified_fixed_count": 19,
+  "verified_superseded_count": 1,
+  "unresolved_count": 1,
+  "rows": [
+    {
+      "id": "UR-R1-001",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "Five relay dismiss values use خارج; answered/no-reply receipts preserve their distinct safety meanings."
+    },
+    {
+      "id": "UR-R1-002",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "Transcription cleanup label is fully native: ٹرانسکرپٹ کی صفائی."
+    },
+    {
+      "id": "UR-R1-003",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "All 589 changed settings values were read; systemic English/hybrid prose is remediated, with only new MINOR residuals UR-R2-002 and UR-R2-006."
+    },
+    {
+      "id": "UR-R1-004",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "Monitor description now naturally covers check cadence, retention, and giving up."
+    },
+    {
+      "id": "UR-R1-005",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "Slash provider/manager terms are localized as پرووائیڈر/مینیجر."
+    },
+    {
+      "id": "UR-R1-006",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "Slash retry wording uses دوبارہ کوشش کریں."
+    },
+    {
+      "id": "UR-R1-007",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "Changed settings use ذیلی ایجنٹ and قطار for child and row concepts."
+    },
+    {
+      "id": "UR-R1-008",
+      "disposition": "verified_superseded_by_UR2-010",
+      "round2_finding_id": null,
+      "verification": "The conflict is resolved consistently: all six changed terminal forms and all 19 unchanged relay values use masculine ٹیگ."
+    },
+    {
+      "id": "UR-R1-009",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "Both stale lanes read {reviewed} پر جائزہ."
+    },
+    {
+      "id": "UR-R1-010",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "verification": "Manual-selection condition reads منتخب ہونے پر لاگو حد."
+    },
+    {
+      "id": "UR2-001",
+      "severity": "MAJOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 6,
+      "exact_proposed_match_count": 5,
+      "alternative_or_residual": [
+        {
+          "key": "wire.settings.speech_transcription_cleanup.label",
+          "exact_proposed_match": false,
+          "current": "ٹرانسکرپٹ کی صفائی"
+        }
+      ],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-002",
+      "severity": "MAJOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 4,
+      "exact_proposed_match_count": 3,
+      "alternative_or_residual": [
+        {
+          "key": "wire.slash.usage",
+          "exact_proposed_match": false,
+          "current": "پرووائیڈر کا استعمالی کوٹہ دکھائیں"
+        }
+      ],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-003",
+      "severity": "MINOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 1,
+      "exact_proposed_match_count": 1,
+      "alternative_or_residual": [],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-004",
+      "severity": "MAJOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 2,
+      "exact_proposed_match_count": 2,
+      "alternative_or_residual": [],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-005",
+      "severity": "MAJOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 1,
+      "exact_proposed_match_count": 1,
+      "alternative_or_residual": [],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-006",
+      "severity": "MAJOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 5,
+      "exact_proposed_match_count": 2,
+      "alternative_or_residual": [
+        {
+          "key": "relay.ask.dismiss.receipt",
+          "exact_proposed_match": false,
+          "current": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا"
+        },
+        {
+          "key": "relay.ask.dismiss.receipt_answered_in_chat",
+          "exact_proposed_match": false,
+          "current": "خارج کیا گیا — گفتگو میں جواب موجود ہے"
+        },
+        {
+          "key": "relay.ask.dismiss.receipt_moot",
+          "exact_proposed_match": false,
+          "current": "خارج کیا گیا — اب ضرورت نہیں"
+        }
+      ],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-007",
+      "severity": "MAJOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 3,
+      "exact_proposed_match_count": 3,
+      "alternative_or_residual": [],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-008",
+      "severity": "MINOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 3,
+      "exact_proposed_match_count": 3,
+      "alternative_or_residual": [],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-009",
+      "severity": "MAJOR",
+      "disposition": "unresolved_reopened",
+      "round2_finding_id": "UR-R2-001",
+      "example_count": 3,
+      "exact_proposed_match_count": 2,
+      "alternative_or_residual": [
+        {
+          "key": "wire.errors.settings.inline_credentials",
+          "exact_proposed_match": false,
+          "current": "ایسا اینڈ پوائنٹ استعمال کریں جس میں ان لائن [redacted]ز یا کوئری پیرامیٹرز نہ ہوں۔"
+        }
+      ],
+      "verification": "Raw current value still contains a literal redaction token in the credential noun."
+    },
+    {
+      "id": "UR2-010",
+      "severity": "MINOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 5,
+      "exact_proposed_match_count": 5,
+      "alternative_or_residual": [],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    },
+    {
+      "id": "UR2-011",
+      "severity": "MINOR",
+      "disposition": "verified_fixed",
+      "round2_finding_id": null,
+      "example_count": 1,
+      "exact_proposed_match_count": 1,
+      "alternative_or_residual": [],
+      "verification": "Current values implement the proposed text or a native equivalent; all other changed values in the affected scope were reviewed."
+    }
+  ]
+}

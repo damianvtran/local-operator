@@ -8,7 +8,11 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
 
-from local_operator.agent_profiles import NameTakenError, install_seed
+from local_operator.agent_profiles import (
+    MAX_INSTRUCTIONS_CHARS,
+    NameTakenError,
+    install_seed,
+)
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
@@ -72,7 +76,7 @@ class ProfileEdit(Input):
     expected_definition_revision: str | None = None
     kind: Literal["role", "specialist"] | None = None
     description: str | None = Field(default=None, max_length=8000)
-    instructions: str | None = Field(default=None, max_length=8000)
+    instructions: str | None = Field(default=None, max_length=MAX_INSTRUCTIONS_CHARS)
     tools: list[str] | None = None
     effort: str | None = None
     delegate: bool | None = None
@@ -97,7 +101,7 @@ class ProfileCreate(Input):
     name: str = Field(min_length=1, max_length=128)
     kind: Literal["role", "specialist"] = "role"
     description: str = Field(max_length=8000)
-    instructions: str = Field(min_length=1, max_length=8000)
+    instructions: str = Field(min_length=1, max_length=MAX_INSTRUCTIONS_CHARS)
     tools: list[str] | None = None
     effort: str | None = None
     delegate: bool | None = None

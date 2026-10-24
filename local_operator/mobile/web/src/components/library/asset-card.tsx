@@ -17,9 +17,10 @@
  * so the same tile renders on both themes without a conditional.
  */
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { libraryThumbUrl } from "../../api";
+import { libraryBytesUrl, libraryThumbUrl, libraryWaveformUrl } from "../../api";
 import { cn } from "../../lib/cn";
 import { formatBytes, kindGlyph, kindLabel, originLabel, sourceTitle } from "../../lib/library";
+import { SoundPlayer, useWaveformPeaks } from "../sound-player";
 import type { LibraryAsset } from "../../types";
 
 /** Mount `children` only after the element approaches the viewport. Falls back
@@ -68,6 +69,10 @@ export function AssetCard({
 	const [thumbRef, near] = useNearViewport<HTMLDivElement>();
 	const [thumbFailed, setThumbFailed] = useState(false);
 	const isImage = asset.kind === "image" && !thumbFailed;
+	const isAudio = asset.kind === "audio";
+	/* Lazy like the thumbnail: a catalog can hold thousands of rows, and a sound's
+	   peaks are a request per mounted tile. `near` only ever turns on. */
+	const peaks = useWaveformPeaks(libraryWaveformUrl(asset.id), isAudio && near);
 	const subtitle = [kindLabel(asset.kind), formatBytes(asset.size_bytes)].filter(Boolean).join(" · ");
 	const source = sourceTitle(asset);
 	const shownTags = asset.tags.slice(0, 2);
@@ -76,7 +81,27 @@ export function AssetCard({
 	return (
 		<article className="relative flex min-w-0 flex-col overflow-hidden rounded-md border border-hairline bg-surface">
 			<div ref={thumbRef} className="relative aspect-[4/3] w-full bg-sunken">
-				{isImage && near ? (
+				{isAudio ? (
+					/* THE ONE MOBILE PLAYER, seated in the tile's own 4:3 well instead
+					   of an audio glyph. It is a SIBLING ABOVE the inset-0 open button
+					   (z-10): a press on play must play, never open the asset, while a
+					   press anywhere else in the well still opens it. Mounted only once
+					   the tile approaches the viewport — same gate as the thumbnail. */
+					<div
+						className="absolute inset-x-2 top-1/2 z-10 -translate-y-1/2"
+						data-sound-seat=""
+					>
+						{near ? (
+							<SoundPlayer
+								variant="compact"
+								src={libraryBytesUrl(asset.id)}
+								peaks={peaks}
+								label={asset.name}
+								durationHint={asset.duration_s ?? 0}
+							/>
+						) : null}
+					</div>
+				) : isImage && near ? (
 					<img
 						src={libraryThumbUrl(asset.id)}
 						alt=""

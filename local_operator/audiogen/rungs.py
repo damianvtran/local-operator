@@ -60,7 +60,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 from pydantic import SecretStr
@@ -87,6 +87,10 @@ from local_operator.audiogen.pricing import sound_effect_estimate, voiceover_est
 from local_operator.clients._http import APIError
 from local_operator.imagegen.media import download_asset
 from local_operator.stt.errors import api_error_from_httpx_response
+from local_operator.tts.output_format import PREFERRED_OUTPUT_FORMAT, bitrate_kbps_for
+from local_operator.tts.output_format import (
+    post_with_format_fallback as _post_at_best_format,
+)
 
 __all__ = [
     "AudioCancelReceipt",
@@ -152,9 +156,34 @@ RADIENT_AUDIO_CANCEL_PATH = "/tools/audio/cancel"
 #: is charged, and a burst of retries is what the bound itself is protecting
 #: against — hence the small cap rather than an unbounded loop.
 SUBMIT_MAX_ATTEMPTS = 4
-#: The backoff before each retry (2, 4, 8; a fourth refusal is surfaced).
-#: Capped at 30 s by the contract; the values never reach it.
-SUBMIT_BACKOFF_S = (2.0, 4.0, 8.0, 16.0)
+#: The wait BEFORE each retry: attempts land at 0 / 10 / 30 / 65 s.
+#:
+#: Sized against the server's own hold, not guessed. THE CONTRACT THIS MUST
+#: OUTLAST: the audio server deliberately does NOT abort a running vendor call
+#: when a client cancels (agent-server ``TestRunningCancelDoesNotAbortTheCall``
+#: pins it), so a stopped batch's abandoned in-flight calls keep its
+#: per-account slots until the provider's ``ElevenLabsSpeechTimeout`` — 45 s —
+#: expires. A ladder shorter than that exhausts inside the window it exists to
+#: outlast: the observed incident was 4 attempts over 10.5-14 s (2/4/8 s
+#: jittered DOWN to 0.75-1.0) against a 45 s hold, so a resumed 3-item batch
+#: failed every item on its first submission. 65 s clears the hold plus the
+#: artifact/terminal write, which is the property a batch caller relies on: a
+#: later batch WAITS out work the stop abandoned, and the agent never needs to
+#: know platform slots exist.
+#:
+#: The trade, stated where the constants live: ``SOUND_BATCH_TIMEOUT_S`` stays
+#: 225 s (``tools.audio_tool``). Under sustained capacity a 14-item batch on 2
+#: workers could spend 7 rounds x 65 s on admission alone, while the reported
+#: 3-item resume waits at least 65 s — 65-74.75 s with the jitter above —
+#: plus one generation. Raising the batch budget instead would let a stuck
+#: batch outlive the tool call's own bound, so the ladder is what gives.
+SUBMIT_BACKOFF_S = (10.0, 20.0, 35.0)
+#: The batch jitter MULTIPLIER. It only ever LENGTHENS a wait: two workers
+#: still desynchronise, but the floor never drops below the hold the ladder is
+#: sized to outlast. A 0.75 floor would shorten a 65 s window to 49 s — inside
+#: the 45 s hold plus the terminal write, which is exactly the race that made a
+#: jittered batch retry back into the window it was waiting out.
+SUBMIT_JITTER = (1.0, 1.15)
 #: The server's fixed sentence for the admission bound (there is no
 #: ``Retry-After`` header to read — the contract says so explicitly).
 AUDIO_RATE_LIMITED_SENTENCE = "Audio generation is busy right now. Wait a moment and try again."
@@ -163,6 +192,11 @@ AUDIO_RATE_LIMITED_SENTENCE = "Audio generation is busy right now. Wait a moment
 #: bind a recorder and never pay the wall clock — the same seam the rung's
 #: ``pause`` uses for its polls.
 _submit_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+#: Injected clock for the ladder's elapsed receipt, module-level for the same
+#: reason as ``_submit_sleep``: a test proves the 65 s window without spending
+#: it. Real runs read the monotonic clock, so the receipt names real seconds.
+_submit_clock: Callable[[], float] = time.monotonic
 
 #: The terminal vocabulary the contract defines. A status outside it is an
 #: unreadable payload (``invalid_response``) rather than an infinite poll loop:
@@ -200,10 +234,15 @@ OPENAI_AUDIO_BASE_URL = "https://api.openai.com/v1"
 #: contract's MP3-only rule; no WAV).
 BYOK_MEDIA_TYPE = "audio/mpeg"
 
-#: ElevenLabs' ``output_format`` for a voiceover — the vendored map's fixed
-#: value (``mp3_44100_128``), restated here because the URL pairing happens in
-#: THIS module and the map's constant lives behind the adapters' params.
-ELEVENLABS_OUTPUT_FORMAT = "mp3_44100_128"
+#: ElevenLabs' ``output_format`` the harness asks for. This is a CODE constant
+#: rather than the vendored map's ``fixed.elevenlabs.output_format``: the map is
+#: a byte-for-byte copy of ``agent-server``'s canonical artifact (see
+#: ``voicing_map/README.md``) and cannot take a local edit, so the harness's own
+#: preference lives here and in ``tts.output_format``, which owns the plan-aware
+#: one-shot fallback to 128. The map's value stays the vendor's universal format
+#: (128) until the same change lands upstream; nothing in this module reads it as
+#: a preference any more.
+ELEVENLABS_OUTPUT_FORMAT = PREFERRED_OUTPUT_FORMAT
 
 
 def progress_details(
@@ -323,33 +362,47 @@ def _is_transient_api_error(exc: APIError) -> bool:
 def _is_admission_refusal(exc: APIError) -> bool:
     """Whether this submit failure is the admission bound (retryable) — nothing else.
 
-    Two spellings count: the HTTP status (429) and the contract's code
-    (``audio_rate_limited``) in either the parsed ``code`` or the details map.
-    A 429 from an INTERMEDIARY would not be safe to retry blindly, so the code
-    is what decides when it is present; the bare status is the fallback for a
-    deployment whose body is not JSON.
+    THE STATUS IS THE GUARD, and it is read before anything else: only HTTP 429
+    is the admission bound. A body may repeat the contract's code on ANY status,
+    and trusting the code first retried a 5xx carrying ``audio_rate_limited`` —
+    the one case the ladder's own rule forbids, because a request that may have
+    been accepted can be billed twice by a re-POST (review M1). A status-less
+    error is not an admission refusal either: the ladder is for a response that
+    said "refused", never for an unknown outcome.
     """
-    if exc.code == "audio_rate_limited":
-        return True
-    if exc.details.get("error_type") == "audio_rate_limited":
-        return True
     return exc.status_code == 429
 
 
-def _rate_limited_error(exc: APIError) -> APIError:
+def _rate_limited_error(exc: APIError, *, attempts: int, elapsed_s: float) -> APIError:
     """The surfaced failure for an exhausted admission retry.
 
     ``reason_class`` (the ``code``) is ``transient``: a busy process is a
     retry-later condition, never a balance or credential signal. The wire's
-    ``error_type`` rides the details so a surface can say which refusal it was,
-    and the message is the server's own sentence when it sent one.
+    ``error_type`` rides the details so a surface can say which refusal it was.
+
+    The receipt NAMES THE CAPACITY WINDOW it waited out — ``4 attempts over
+    65 s`` — and carries the same figures structurally, because the previous
+    incident's receipt (the provider's generic "busy right now" sentence,
+    repeated per item) could not distinguish "capacity held for a minute"
+    from "a permanently broken request". ``elapsed_s`` is real elapsed time
+    from the injected clock, never the ladder's nominal sum.
     """
-    message = str(exc).strip() or AUDIO_RATE_LIMITED_SENTENCE
+    waited = round(elapsed_s, 1)
+    message = f"Audio platform at capacity: {attempts} attempts over {waited:g} s."
+    server_said = str(exc).strip()
+    if server_said and server_said != AUDIO_RATE_LIMITED_SENTENCE and server_said not in message:
+        # A vendor's own words when they say something the canned sentence
+        # does not (e.g. a Retry-After-derived hint); the boilerplate is dropped.
+        message = f"{message} ({server_said})"
     return APIError(
         message,
         status_code=exc.status_code or 429,
         code="transient",
-        details={"error_type": "audio_rate_limited"},
+        details={
+            "error_type": "audio_rate_limited",
+            "attempts": attempts,
+            "capacity_window_s": waited,
+        },
     )
 
 
@@ -382,6 +435,48 @@ def _hub_reason_error(exc: APIError) -> APIError:
     return exc
 
 
+T = TypeVar("T")
+
+
+async def _retrying_admission(submit: Callable[[], Awaitable[T]], *, jitter: bool) -> T:
+    """Run ONE submit under the admission ladder — the only retry policy here.
+
+    Both submit paths (the Radient hub and the BYOK vendors) call this so the
+    server's documented 45 s hold and the vendors' bounds cannot drift into two
+    ladders with two opinions about how long capacity can stay held.
+
+    Why retry this failure and nothing else: an admission refusal leaves no job
+    row and no quote, so a retry cannot double-queue or double-bill — the
+    contract says so explicitly. Every other submit error is the upstream's
+    ANSWER (a rejected parameter, a timeout, a 5xx after the request may have
+    landed) and fails straight through: a blind re-POST there can bill twice.
+
+    ``submit`` is a coroutine FACTORY, not a coroutine: each attempt must issue
+    a fresh request, and an awaited-once coroutine cannot be re-awaited.
+    """
+    started = _submit_clock()
+    last: APIError | None = None
+    attempts = 0
+    for attempt in range(SUBMIT_MAX_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            return await submit()
+        except APIError as exc:
+            if not _is_admission_refusal(exc):
+                raise
+            last = exc
+            if attempts >= SUBMIT_MAX_ATTEMPTS:
+                break
+            delay = SUBMIT_BACKOFF_S[min(attempt, len(SUBMIT_BACKOFF_S) - 1)]
+            if jitter:
+                # Two batch workers may hit the same account cap at once.
+                # Stretch (never shorten) so the retry still clears the hold.
+                delay *= random.uniform(*SUBMIT_JITTER)
+            await _submit_sleep(delay)
+    assert last is not None
+    raise _rate_limited_error(last, attempts=attempts, elapsed_s=_submit_clock() - started)
+
+
 async def _submit_with_backoff(
     client: httpx.AsyncClient,
     url: str,
@@ -390,17 +485,15 @@ async def _submit_with_backoff(
     credential: str,
     jitter: bool = False,
 ) -> dict[str, Any]:
-    """POST the submit, retrying ONLY the admission-bound refusal.
+    """POST the Radient submit, retrying ONLY the admission-bound refusal.
 
-    Why retry this one and nothing else: the contract states a refused submit
-    leaves no job row and no quote, so a retry cannot double-queue or
-    double-bill; every other submit error fails straight through (the comment
-    on ``_request_json`` is the general rule, and this is its one sanctioned
-    exception, spelled by the server). Backoff is bounded and the sleeper is
-    injectable so tests never sleep.
+    The ladder itself lives in ``_retrying_admission`` (shared with the BYOK
+    paths); this wrapper only owns what is Radient-specific: the request, and
+    appending the hub's per-parameter ``details.reason`` to a NON-admission
+    refusal, where it is the actionable text every surface shows.
     """
-    last: APIError | None = None
-    for attempt in range(SUBMIT_MAX_ATTEMPTS):
+
+    async def _once() -> dict[str, Any]:
         try:
             return await _request_json(
                 client,
@@ -413,21 +506,15 @@ async def _submit_with_backoff(
                 json=body,
             )
         except APIError as exc:
-            if not _is_admission_refusal(exc):
-                # The hub's refusal sentence is generic; its per-parameter
-                # reason rides ``details.reason``. Consume it here, at the
-                # source, so the attempt message (and every surface built
-                # from it) carries the actionable text (see the helper).
-                raise _hub_reason_error(exc) from exc
-            last = exc
-            if attempt >= SUBMIT_MAX_ATTEMPTS - 1:
-                break
-            delay = SUBMIT_BACKOFF_S[min(attempt, len(SUBMIT_BACKOFF_S) - 1)]
-            # Two batch workers may hit the same account cap simultaneously.
-            # Desynchronize retries without exceeding the existing bounded ladder.
-            await _submit_sleep(delay * random.uniform(0.75, 1.0) if jitter else delay)
-    assert last is not None
-    raise _rate_limited_error(last)
+            if _is_admission_refusal(exc):
+                raise
+            # The hub's refusal sentence is generic; its per-parameter reason
+            # rides ``details.reason``. Consume it here, at the source, so the
+            # attempt message (and every surface built from it) carries the
+            # actionable text (see the helper).
+            raise _hub_reason_error(exc) from exc
+
+    return await _retrying_admission(_once, jitter=jitter)
 
 
 async def _request_json(
@@ -1010,8 +1097,13 @@ def _byok_voiceover_attempt(provider: str, model: str, spec: AudioJobSpec) -> An
 
 def _elevenlabs_fixed() -> dict[str, Any]:
     """The vendored map's ``fixed.elevenlabs`` block — the one source for the
-    platform constants (similarity_boost, use_speaker_boost, output_format)
-    the TTS daemon's own BYO leg reads from the same file.
+    platform constants (similarity_boost, use_speaker_boost) the TTS daemon's
+    own BYO leg reads from the same file.
+
+    ``output_format`` is deliberately NOT read from here: it is a preference
+    owned by :mod:`local_operator.tts.output_format`, because the map is a
+    vendored artifact that cannot be edited locally (``voicing_map/README.md``)
+    and still pins the vendor's universal 128.
     """
     from local_operator.tts import adapters as tts_adapters
 
@@ -1066,9 +1158,7 @@ async def run_elevenlabs(
                 payload["language_code"] = params.language_code
             payload["voice_settings"] = voice_settings
             url = f"{base}/v1/text-to-speech/{params.voice_id}"
-            request_params: dict[str, str] = {
-                "output_format": str(fixed.get("output_format") or ELEVENLABS_OUTPUT_FORMAT)
-            }
+            request_params: dict[str, str] = {"output_format": ELEVENLABS_OUTPUT_FORMAT}
             model = params.model_id or model
         else:
             if spec.duration_s is None:  # pragma: no cover - the tool validates first
@@ -1085,8 +1175,10 @@ async def run_elevenlabs(
             if spec.loop:
                 payload["loop"] = True
             url = f"{base}/v1/sound-generation"
-            request_params = {}
-
+            # The vendor's default is mp3_44100_128; asking explicitly is what
+            # keeps the effect from taking a default that changes under us, and
+            # the fallback helper drops it to 128 for a plan that refuses 192.
+            request_params = {"output_format": ELEVENLABS_OUTPUT_FORMAT}
         emit_progress(
             emit,
             f"Generating via ElevenLabs ({model})…",
@@ -1097,15 +1189,25 @@ async def run_elevenlabs(
                 model=model,
             ),
         )
-        data, content_type = await _post_audio(
-            http,
-            url,
-            headers=headers,
-            payload=payload,
-            params=request_params,
-            model_label="ElevenLabs",
+        answer = await _post_at_best_format(
+            lambda wire: _post_audio(
+                http,
+                url,
+                headers=headers,
+                payload=payload,
+                params=wire,
+                model_label="ElevenLabs",
+                api_key=api_key,
+                # Only a batch stretches its waits; a single call keeps its timing.
+                jitter=spec.batch_submission,
+            ),
             api_key=api_key,
+            endpoint=("voiceover" if spec.direction == "voiceover" else "sound_effect"),
+            model=model,
+            params=request_params,
         )
+        data, content_type = answer.value
+        used_format = answer.output_format
 
     estimate = (
         voiceover_estimate("elevenlabs", model, len(spec.text))
@@ -1130,7 +1232,15 @@ async def run_elevenlabs(
                 duration_s=compute_duration(data),
                 format="mp3" if content_type == BYOK_MEDIA_TYPE else None,
                 sample_rate_hz=44100 if spec.direction == "voiceover" else None,
-                bitrate_kbps=128 if spec.direction == "voiceover" else None,
+                # The receipt states the bitrate of the format that ACTUALLY
+                # went on the wire, not a constant: this rung now asks for 192
+                # and may have dropped to 128, and a receipt that says 128 over
+                # 192 kbps bytes contradicts the artifact. The vendor serves
+                # the requested token verbatim; a token naming no bitrate (PCM)
+                # answers None rather than a guess.
+                bitrate_kbps=(
+                    bitrate_kbps_for(used_format) if spec.direction == "voiceover" else None
+                ),
                 voicing_notes=voicing,
             )
         ],
@@ -1204,6 +1314,7 @@ async def run_openai(
             params={},
             model_label="OpenAI",
             api_key=api_key,
+            jitter=spec.batch_submission,
         )
 
     estimate = voiceover_estimate("openai", model, len(spec.text))
@@ -1238,39 +1349,56 @@ async def _post_audio(
     params: dict[str, str],
     model_label: str,
     api_key: str,
+    jitter: bool = False,
 ) -> tuple[bytes, str]:
-    """One JSON POST answered with audio bytes, with the shared error shape.
+    """One JSON POST answered with audio bytes, under the SAME admission ladder.
 
     ``timeout=HTTP_TIMEOUT_BYOK_S`` bounds the whole call; the vendor's
     content-type is read off the header (falling back to the frozen contract's
     MP3 type), and every failure is an ``APIError`` the walk classifies.
+
+    Why the ladder reaches BYOK at all: a vendor 429 is a REFUSAL — no audio
+    was produced and nothing was charged — so retrying it is as safe here as
+    on the hub, and a stop-then-resume race (or a shared vendor rate limit)
+    must not fail an item on its first submission. The retry set is deliberately
+    only the admission refusal: timeouts, transport errors and 5xx are NOT
+    retried, because those may have been accepted and a re-POST could bill
+    twice. Only HTTP 429 is the admission bound: a 4xx or 5xx that reuses the
+    ``audio_rate_limited`` code is not retried either — the status is the guard,
+    not the body.
     """
-    try:
-        response = await client.post(
-            url,
-            headers={**headers, "Content-Type": "application/json"},
-            json=payload,
-            params=params,
-            timeout=httpx.Timeout(HTTP_TIMEOUT_BYOK_S),
-        )
-    except httpx.TimeoutException as exc:
-        raise APIError(
-            f"{model_label} timed out after {HTTP_TIMEOUT_BYOK_S:.0f}s.",
-            status_code=None,
-            code="timeout",
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise APIError(
-            f"{model_label} request failed: {exc}", status_code=None, code="network"
-        ) from exc
-    if response.status_code >= 400:
-        raise api_error_from_httpx_response(
-            response, fallback_message=f"{model_label} refused the request", secrets=(api_key,)
-        )
-    content_type = (response.headers.get("content-type") or "").split(";")[0].strip()
-    if not content_type or content_type == "application/octet-stream":
-        content_type = BYOK_MEDIA_TYPE
-    return response.content, content_type
+
+    async def _once() -> tuple[bytes, str]:
+        try:
+            response = await client.post(
+                url,
+                headers={**headers, "Content-Type": "application/json"},
+                json=payload,
+                params=params,
+                timeout=httpx.Timeout(HTTP_TIMEOUT_BYOK_S),
+            )
+        except httpx.TimeoutException as exc:
+            raise APIError(
+                f"{model_label} timed out after {HTTP_TIMEOUT_BYOK_S:.0f}s.",
+                status_code=None,
+                code="timeout",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise APIError(
+                f"{model_label} request failed: {exc}", status_code=None, code="network"
+            ) from exc
+        if response.status_code >= 400:
+            raise api_error_from_httpx_response(
+                response,
+                fallback_message=f"{model_label} refused the request",
+                secrets=(api_key,),
+            )
+        content_type = (response.headers.get("content-type") or "").split(";")[0].strip()
+        if not content_type or content_type == "application/octet-stream":
+            content_type = BYOK_MEDIA_TYPE
+        return response.content, content_type
+
+    return await _retrying_admission(_once, jitter=jitter)
 
 
 # ---------------------------------------------------------------------------

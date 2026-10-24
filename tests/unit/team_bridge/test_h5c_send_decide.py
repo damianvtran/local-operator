@@ -80,6 +80,31 @@ async def test_a_send_carries_the_caller_ref_and_the_named_destination() -> None
     }
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"account_id": "acc_2", "kind": "agent"},
+        {"endpoint_id": "bep_9", "kind": "agent"},
+        {"account_id": "acc_2", "typo": "ignored-before"},
+        {"account_id": "acc_2", "endpoint_id": ""},
+        {"account_id": "acc_2", "endpoint_id": "bep_9"},
+        {"account_id": "   "},
+        {"account_id": 42},
+        {},
+    ],
+)
+async def test_send_recipient_is_closed_before_http(target) -> None:
+    """A destination typo must refuse, never become a different successful send."""
+    requests: list[httpx.Request] = []
+    client = _make_client(_capture(requests))
+    with pytest.raises(ValueError) as refusal:
+        await client.send(
+            tenant_id=TENANT, to=target, type="note", text="synthetic", client_ref=REF
+        )
+    assert getattr(refusal.value, "code", None) == "invalid_request"
+    assert requests == []
+
+
 async def test_a_request_send_carries_the_request_block_only() -> None:
     requests: list[httpx.Request] = []
     client = _make_client(_capture(requests))

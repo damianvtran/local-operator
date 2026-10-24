@@ -919,6 +919,64 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
 
 
 @pytest.mark.asyncio
+async def test_a_birth_fast_is_the_constructed_specs_dial(tmp_config_dir: Path) -> None:
+    """The chosen SPEED reaches the spec this session is BUILT on.
+
+    The desktop create path (ui#1265) can birth a conversation on fast, and the
+    dial travels the same channel as ``birth_effort``: the view's spawn
+    environment (``launch._spawn_runtime`` -> ``LOP_MOBILE_CHILD_FAST``) into
+    ``spawn_owned_session`` and then into this factory. Construction rather than
+    a later switch is the point — the owner's first frontend snapshot, its first
+    provider call and the selection row it journals at admission then agree with
+    the chip the user set before the conversation existed.
+
+    Two controls. A caller that names no dial gets today's spec (every caller
+    before this field, the CLI, the TUI). And a dial asked of a route that does
+    not SELL the tier is CLAMPED to off rather than raising: a stored choice may
+    outlive the catalogue that offered it, and the refusal belongs to the moment
+    the user picks (the create/preview 422), never to a launch that would then
+    fail to open the conversation.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n" "values:\n" "  hosting: anthropic\n" "  model_name: claude-opus-5\n"
+    )
+    chosen = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5", birth_fast=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert chosen.model.supports_fast_mode is True, "the registry must sell this tier"
+        assert chosen.model.fast_mode is True
+    finally:
+        await chosen.dispose()
+
+    default = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5"),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert default.model.fast_mode is False, "a caller that names no dial keeps today's spec"
+    finally:
+        await default.dispose()
+
+    clamped = await create_session(
+        _args(hosting="deepseek", model="deepseek-flash", birth_fast=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert clamped.model.supports_fast_mode is False
+        assert clamped.model.fast_mode is False, "no tier, no dial — and no failed launch"
+    finally:
+        await clamped.dispose()
+
+
+@pytest.mark.asyncio
 async def test_dict_compaction_config_flows_through_prompt(
     tmp_config_dir: Path,
 ) -> None:
@@ -3083,6 +3141,60 @@ async def test_one_attachment_transition_journals_exactly_one_row(tmp_config_dir
 
 
 @pytest.mark.asyncio
+async def test_the_env_block_carries_the_session_id_and_never_the_name(
+    tmp_config_dir: Path,
+) -> None:
+    """Self-identity rides the byte-stable prefix: the ID, never the NAME.
+
+    The incident: an agent could not recognise its own row in the
+    ``sessions`` listing, read it as a peer on the same topic, and spawned a
+    duplicate. The id now sits in the env block, which the model reads every
+    turn. The name is deliberately absent — auto-naming and user renames would
+    otherwise anchor a stale name for the run or force a stable-prefix rebuild
+    on every rename (see ``_env_details``).
+
+    Stability is the other half: two prepares hand back byte-identical blocks,
+    write ONE ``system_prefix`` entry, and journal no ``[session-state]``
+    environment delta — the id is captured once, so it cannot reprice the
+    cached prefix mid-session.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.resume import write_session_title
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        session_id = session._transcript.directory.name
+        title = "a name the stable prefix must never carry"
+        # A real rename, through the writer the listings read — the point is
+        # that the prefix does not follow it, whatever route the name takes.
+        write_session_title(session._transcript.directory, title, user_set=True, past_names=[])
+
+        first = await session._prepare_system_blocks()
+        env = first[2]
+        assert f"Session ID: {session_id}" in env
+        assert title not in env
+
+        second = await session._prepare_system_blocks()
+        assert second[2] == env, "the env block moved between two prepares"
+
+        prefixes = [
+            entry
+            for entry in session._transcript.entries()
+            if str(entry.payload.get("custom_type", "")) == "system_prefix"
+        ]
+        assert len(prefixes) == 1, "a second prefix epoch was persisted"
+        assert _session_state_rows(session) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
     tmp_config_dir: Path,
 ) -> None:
@@ -3143,6 +3255,111 @@ async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
 
 
 @pytest.mark.asyncio
+async def test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own(
+    tmp_config_dir: Path,
+) -> None:
+    """R1-3: pin BOTH halves of the fork residual, so it stays deliberate.
+
+    ``_prepare`` has no fork branch — a fork passes its own id like any session.
+    What suppresses it is the INHERITED frozen prefix: the fork loads the
+    parent's ``system_prefix`` byte-for-byte (so the parent's provider cache
+    still hits), the wire block therefore keeps the PARENT's ``Session ID``
+    line, and the fork id reaches the same request as a ``[session-state] ##
+    Environment`` delta. Two identity surfaces disagreeing is the class this PR
+    exists to fix; this records the bound — the state record is the newer
+    authority and is in context before the first model call — and that the
+    delta is written once, not per turn.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.fork import fork_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        # FREEZE the parent's prefix in its own transcript — that is the entry
+        # the clone carries and the fork inherits.
+        await parent._prepare_system_blocks()
+        parent_id = parent._transcript.directory.name
+    finally:
+        await parent.dispose()
+
+    fork_id = await asyncio.to_thread(fork_session, Path(tmp_config_dir), parent_id)
+    fork = await create_session(
+        _args(hosting="test", model="test", yolo=True, resume=fork_id),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(fork, Session)
+    try:
+        assert fork._transcript.directory.name == fork_id
+        first = await fork._prepare_system_blocks()
+        assert f"Session ID: {parent_id}" in first[2], first[2]
+        assert f"Session ID: {fork_id}" not in first[2], first[2]
+
+        second = await fork._prepare_system_blocks()
+        assert second[2] == first[2]
+
+        rows = [row for row in _session_state_rows(fork) if fork_id in str(row.payload)]
+        assert len(rows) == 1, [str(row.payload) for row in rows]
+        changed = (rows[0].payload.get("details") or {}).get("blocks") or {}
+        # Section index 2 IS the environment block — the fork's own id, delivered
+        # as the delta rather than as a prefix rebuild.
+        assert list(changed) == ["2"], changed
+    finally:
+        await fork.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_childs_env_block_carries_its_own_session_id(tmp_config_dir: Path) -> None:
+    """The child shape is a session too, and it holds the ``sessions`` tool.
+
+    ``_construct_child_session`` builds its own blocks (the factory is not
+    reused), so threading the id into the factory's provider alone would have
+    left a delegated child — the shape ``.github/workflows/ci.yml`` records as
+    ~93% of sessions, the reason children get their own context ratchet — with
+    the old three-line env block and no way to recognise its own row. The id
+    here is the same field its ToolContext carries, so the prompt and the
+    listing agree byte-for-byte.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-self-id",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+            child_id = child._transcript.directory.name
+            assert child_id != parent._transcript.directory.name
+            assert f"Session ID: {child_id}" in blocks[2]
+            # The parent's id must not leak in as the child's identity.
+            assert f"Session ID: {parent._transcript.directory.name}" not in blocks[2]
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: Path) -> None:
     """A parent with no runtime probe answers "nothing measured", and that is
     not the same as "attached" — the fail-open default belongs to the PARK
@@ -3176,6 +3393,59 @@ async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: P
             await child.dispose()
     finally:
         await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_factory_closure_carries_the_open_asks_section(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SA-D3: the REAL prompt closure reads the reminder off the goal holder.
+
+    The section is built by the session (its queue, its stamp) but reaches the
+    provider through the holder the factory closure reads, so a missing argument
+    at ``build_system_blocks`` — or a missing read at the closure — would leave
+    the feature dead while every session-level test still passed.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.asks import policy
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+
+    async def hook(questions):  # pragma: no cover — presence is what gates ask
+        return None
+
+    session.set_ask_handler(hook)
+    queue = session.ask_queue()
+    assert queue is not None
+    try:
+        blocks = session._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        assert "<open-asks>" not in str(blocks[-1]), "nothing open, nothing shipped"
+
+        outcome = queue.enqueue(
+            [{"id": "ship", "question": "Ship it tonight?", "options": []}], 3600
+        )
+        assert outcome["ok"], outcome
+        blocks = session._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        tail = str(blocks[-1])
+        assert "<open-asks>" in tail
+        assert "Ship it tonight?" in tail
+        assert str(outcome["details"]["ask_id"]) in tail
+        # No prompt has been admitted, so there is no "as of" to claim — the
+        # honest shape, not a zero or a made-up clock.
+        assert "As of the user's message" not in tail
+    finally:
+        await session.dispose()
 
 
 def test_a_bom_does_not_survive_into_the_prompt(
@@ -7343,6 +7613,57 @@ async def test_without_the_key_the_headless_gate_still_asks(
         monkeypatch.setattr(sf.sys.stdin, "isatty", lambda: False)
         with pytest.raises(ApprovalUnavailableError):
             await gates[0]("bash", "echo probe")
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_conversations_approval_choice_reaches_the_headless_gate(
+    tmp_config_dir: Path, monkeypatch
+) -> None:
+    """The CONVERSATION outranks the config for the plain headless gate (2026-10-23).
+
+    A ``--resume`` reopens a conversation whose human had typed ``/approvals
+    auto``; the file says ``ask``. The gate that decides this run's write/exec
+    calls must read the conversation's own record, or the resumed run denies
+    calls its owner had already chosen to allow — the mirror of the incident
+    the config read above exists for. A FRESH run has no such file, which is
+    why the same expression keeps the config default for new conversations.
+    """
+    import local_operator.session_factory as sf
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session.approval_policy import write_override
+
+    session_id = "7c1d2e3f4a5b"
+    directory = tmp_config_dir / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text(
+        json.dumps({"id": "e1", "type": "user", "content": "hello"}) + "\n", encoding="utf-8"
+    )
+    write_override(directory, "auto")
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n"
+        "values:\n"
+        "  hosting: test\n"
+        "  model_name: test\n"
+        "  tool_approval_mode: ask\n"
+    )
+    seen: list[bool] = []
+    real = sf._make_request_approval
+
+    def spy(auto: bool):
+        seen.append(auto)
+        return real(auto)
+
+    monkeypatch.setattr(sf, "_make_request_approval", spy)
+    session = await create_session(
+        _args(hosting="test", model="test", resume=session_id),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert seen == [True], "the resumed conversation's recorded auto must reach the gate"
     finally:
         await session.dispose()
 

@@ -230,11 +230,41 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     # `isinstance(..., int)` exists for in `ask_pending_request`.
     assert wire["recommended"] == 0 and wire["recommended"] is not defaults["recommended"]
 
+    # The APPROVAL half of the same contract. `ask_pending_request` does not
+    # populate the three policy keys (they are gate-only), so the ask census
+    # below cannot derive them; assert them NON-DEFAULT through the same
+    # projection, JSON and inbound-rebuild path here, which is where a field
+    # dropped by the `known_pending` filter would disappear.
+    approval = PendingRequest(
+        request_id="wire-approval",
+        kind="approval",
+        title="Allow bash?",
+        approval_mode="ask",
+        approval_provenance="session",
+        approval_global_mode="auto",
+    )
+    approval_payload = SessionProjection(session_id="s1", pid=0, pending=approval).to_json()
+    approval_received = _projection_from_json(approval_payload, _record())
+    assert approval_received.pending is not None
+    assert approval_received.pending.approval_mode == "ask"
+    assert approval_received.pending.approval_provenance == "session"
+    assert approval_received.pending.approval_global_mode == "auto"
+    assert approval_payload["pending"]["approval_global_mode"] == "auto"
+
     # The fields this question cannot exercise, each with why. `secret` and
     # `persist` are covered non-default by the secret test below, which is the
     # only shape the validator permits them on; `detail` is hardcoded empty by
-    # `ask_pending_request` for an ask, so nothing derives it.
-    not_derivable_here = {"secret", "persist", "detail"}
+    # `ask_pending_request` for an ask, so nothing derives it. The three
+    # approval policy keys are gate-only and empty on an ask wire — asserted
+    # non-default through the approval round-trip immediately above.
+    not_derivable_here = {
+        "secret",
+        "persist",
+        "detail",
+        "approval_mode",
+        "approval_provenance",
+        "approval_global_mode",
+    }
     assert set(derived) | not_derivable_here == set(defaults), (
         "a PendingRequest field is neither asserted with a derived value nor "
         "listed as underivable; an unwired field would slip through"

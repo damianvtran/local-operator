@@ -173,7 +173,7 @@ In the TUI, `/failovers` prints the live cascade and which provider is serving.
 - `effort`: `auto` (default false) enables the zero-token local prompt-complexity classifier; `allowMax` lets high-complexity prompts select a model's maximum effort (default stops one rung below max)
 - `variables`: non-secret named values exposed through the variable tools; environment values remain lower precedence
 - `tui`: terminal UI settings such as `theme`
-- `hub`: Agent Hub updates. `hub.auto_update.agents` / `hub.auto_update.teams` (default `true`: merge hub updates into pulled items; `false` still checks and shows "update available"), `hub.check_interval_min` (default `60`, 5-1440). Conflict merges use your current default model, resolved fresh for each merge. The legacy `hub.merge_model` config value is read for compatibility but ignored; it is not an editable setting. Live: read on every check. See the agents guide.
+- `hub`: Agent Hub updates. `hub.auto_update.agents` / `hub.auto_update.teams` (default `true`: merge hub updates into pulled items; `false` still checks and shows "update available"), `hub.check_interval_min` (default `15`, 5-1440). Conflict merges use your current default model, resolved fresh for each merge. The legacy `hub.merge_model` config value is read for compatibility but ignored; it is not an editable setting. Live: read on every check. A desktop session start also asks for one check, throttled to one per two minutes and never awaited by the create. See the agents guide.
 - `display.*`: TUI display flags. Each is a literal top-level key with a dot in
   it (`display.shimmer`, not a nested `display:` block). The composer family
   hides pieces of the input area, one boolean per piece, all default `true`

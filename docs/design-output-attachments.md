@@ -36,7 +36,7 @@ is a generic, pointer-shaped block and one registration call.
   "size_bytes": 123456,
   "width": 1024, "height": 1024,
   "duration_s": 3.2,
-  "name": "flux-dev-01.png"    // short display handle, never a filesystem path
+  "name": "red-fox-in-snow.png" // display handle derived from the request (prompt or agent stem)
 }
 ```
 
@@ -82,7 +82,7 @@ block = cache_media(
     raw,                      # decoded bytes (not base64)
     "image/png",              # content_type
     kind=None,                # derived from content_type when omitted; refused outside the vocabulary
-    name="flux-dev-01.png",   # optional display handle
+    name="red-fox-in-snow.png",   # derived from the request (prompt or agent-supplied stem)
     source_url="https://…",   # optional provider URL
     width=None, height=None,  # images: sniffed from the header for free when omitted
     duration_s=None,          # audio/video

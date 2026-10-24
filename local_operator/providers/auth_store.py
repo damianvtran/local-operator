@@ -961,8 +961,26 @@ def close_shared_auth_stores() -> None:
 atexit.register(close_shared_auth_stores)
 
 
+def _radient_account_identity(credential: Mapping[str, Any]) -> str | None:
+    """Storage namespace, not authority to enroll or select an account.
+
+    Org-first dedupe loses account A's credential when B joins the same org.
+    Default organization is mutable routing metadata, not account identity.
+    Include the exact stored endpoint so an account label on another hub cannot
+    replace a pinned row either. Missing endpoint metadata remains missing; this
+    helper must not invent the currently configured hub as a legacy binding.
+    """
+    account = credential.get("account_id")
+    if not isinstance(account, str) or not account.strip():
+        return None
+    endpoint = credential.get("api_endpoint")
+    if endpoint is not None and not isinstance(endpoint, str):
+        return None
+    return "radient-account:" + json.dumps([account, endpoint], separators=(",", ":"))
+
+
 def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
-    """Dedupe key so one account holds one row (org scope ⇒ separate rows).
+    """Provider storage identity; Radient default-org changes keep the same row.
 
     API keys and CLI-stored credentials never dedupe (each key is its own
     row). OAuth payloads dedupe on the account identity when the IdP returns
@@ -973,6 +991,10 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     """
     if credential.get("type") == "api_key" or credential.get("source") == "login":
         return None
+    if provider == "radient":
+        binding = _radient_account_identity(credential)
+        if binding is not None:
+            return binding
     for field in ("org_id", "account_id", "email", "project_id"):
         value = credential.get(field)
         if value:
@@ -1790,6 +1812,21 @@ class AuthStore:
             return creds
         return [c for c in creds if c.disabled_cause is None]
 
+    def retained_radient_login_ids(self) -> tuple[int, ...]:
+        """Safe status references, never a route back into credential selection.
+
+        Read only identity/state columns: retained bearer payloads and guessed
+        labels have no place in the recovery notice, including read-only hosts.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return ()
+        rows = conn.execute(
+            "SELECT id FROM auth_credentials WHERE provider = 'radient' "
+            "AND credential_type = 'oauth' AND disabled_cause = 'identity_unattributed' ORDER BY id"
+        ).fetchall()
+        return tuple(row[0] for row in rows)
+
     def active_local_credential(self, provider: str, endpoint: str) -> StoredCredential | None:
         """The last configured token for this endpoint, without reviving history.
 
@@ -1802,6 +1839,56 @@ class AuthStore:
             if row.credential_type == "api_key" and row.data.get("endpoint") == endpoint:
                 return row if row.disabled_cause is None else None
         return None
+
+    def complete_radient_login(self, result: dict[str, Any]) -> StoredCredential:
+        """Consume one verified interactive result after host cancellation checks.
+
+        Generic metadata/refresh writes cannot enter this transition. The flow
+        receipt rechecks its abort signal and payload before any persistence;
+        serialized flags or a copied dictionary carry no admission authority.
+        """
+        from local_operator.providers.oauth.radient import consume_verified_login
+
+        if self._read_only:
+            raise AuthStoreError("A read-only credential store cannot complete a login")
+        payload = consume_verified_login(result)
+        # Defer the existing parked-service notification until quarantine and
+        # same-account restoration have reached their final durable state.
+        stored = self._upsert_credential_metadata("radient", payload, _notify=False)
+        if stored.data != payload:
+            raise AuthStoreError("Radient login changed before completion")
+        # Fresh authenticated material supersedes automatic identity/token
+        # failures for this exact binding, never an unrelated operator disable.
+        # No unknown row is rebound to the newly verified account.
+        if stored.disabled_cause in {"identity_unattributed", "invalidated-token"}:
+            self._conn.execute(
+                "UPDATE auth_credentials SET disabled_cause = NULL WHERE id = ? "
+                "AND disabled_cause = ? AND data = ?",
+                (stored.id, stored.disabled_cause, json.dumps(stored.data)),
+            )
+            self._conn.commit()
+            stored = self._reread_after_write(stored.id)
+        if stored.disabled_cause is not None:
+            return stored
+        hub = payload["api_endpoint"]
+        for legacy in self.list_credentials("radient"):
+            account = legacy.data.get("account_id")
+            if (
+                legacy.credential_type != "oauth"
+                or (isinstance(account, str) and account.strip())
+                or legacy.data.get("api_endpoint") not in (None, "", hub)
+            ):
+                continue
+            # Preserve contents/id/key and explicit disabled states. Another
+            # login may have attributed this row after the scan; CAS refuses
+            # to quarantine that new identity or a concurrently disabled row.
+            self._conn.execute(
+                "UPDATE auth_credentials SET disabled_cause = ?, updated_at = ? "
+                "WHERE id = ? AND data = ? AND disabled_cause IS NULL",
+                ("identity_unattributed", self._now_ms(), legacy.id, json.dumps(legacy.data)),
+            )
+        self._conn.commit()
+        return self._after_credential_write("radient", stored.id)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Seal Muse secrets before metadata serialization; preserve other providers."""
@@ -1832,12 +1919,13 @@ class AuthStore:
         return row
 
     def _upsert_credential_metadata(
-        self, provider: str, credential: dict[str, Any]
+        self, provider: str, credential: dict[str, Any], *, _notify: bool = True
     ) -> StoredCredential:
-        """Insert, or update the row for the same identity (org scope ⇒ rows).
+        """Insert or update the provider's same identity; preserve other accounts.
 
-        Revives soft-deleted rows for the same identity (re-login), and lifts
-        the row's retry backoff blocks — see :meth:`_after_credential_write`.
+        Non-Radient re-logins revive same-identity soft-deleted rows. Radient
+        disabled states require a verified completion, not this dictionary API.
+        Retry backoff bookkeeping remains in :meth:`_after_credential_write`.
 
         The login path already resolves ``store_credentials_as`` before calling
         here, so this normalization is usually a no-op. It is applied anyway
@@ -1895,41 +1983,55 @@ class AuthStore:
                 "AND identity_key = ? ORDER BY id",
                 (provider, identity),
             ).fetchone()
-            if row is None and provider == "radient" and identity != f"oauth:{provider}":
-                # ADOPT THE PRE-IDENTITY ROW. A provider that starts returning
-                # an IdP identity (Radient's id_token claims, decoded from this
-                # release on) moves its dedupe key from the per-provider
-                # constant to the account id, so the first re-login after the
-                # upgrade found no row and INSERTED a second one beside the
-                # constant-keyed row — the stale-refresh-token duplicate the
-                # constant exists to prevent. Upgrading that one row in place is
-                # exactly what the constant key did before (every login of that
-                # provider landed on it), so this never merges two rows that
-                # would not have been one row yesterday. Scoped to Radient, the
-                # one provider whose identity changed shape in this release:
-                # xAI/Anthropic have carried an id_token identity for a while,
-                # and a constant-keyed row there can be a DIFFERENT account.
-                row = self._conn.execute(
-                    "SELECT id FROM auth_credentials WHERE provider = ? "
-                    "AND identity_key = ? ORDER BY id",
-                    (provider, f"oauth:{provider}"),
-                ).fetchone()
-                if row is not None and credential_type == "oauth":
-                    self._conn.execute(
-                        "UPDATE auth_credentials SET identity_key = ? WHERE id = ?",
-                        (identity, row[0]),
-                    )
-                else:
-                    row = None
+            if provider == "radient" and credential_type == "oauth":
+                binding = _radient_account_identity(payload)
+                if row is not None and binding is None:
+                    previous = self.get_credential(row[0])
+                    if previous is not None and previous.data.get("account_id"):
+                        raise AuthStoreError("Unproven Radient login cannot replace an account")
+                if binding is not None:
+                    # Upgrade only a uniquely matching stored binding. The old
+                    # constant/org key is not proof that a row belongs to this
+                    # login; rebinding it would invalidate another owner's pin.
+                    endpoint = payload.get("api_endpoint")
+                    has_hub = isinstance(endpoint, str) and bool(endpoint.strip())
+                    candidates = [
+                        item
+                        for item in self.list_credentials(provider, include_disabled=True)
+                        if item.credential_type == "oauth"
+                        and _radient_account_identity(item.data) == binding
+                        # Missing legacy hub metadata cannot be filled from the
+                        # current default. A row already in this new namespace
+                        # can still be re-logged-in without adopting history.
+                        and (has_hub or item.identity_key == binding)
+                    ]
+                    if len(candidates) > 1:
+                        raise AuthStoreError("Ambiguous stored Radient account binding")
+                    if row is not None and (not candidates or candidates[0].id != row[0]):
+                        raise AuthStoreError("Stored Radient account namespace mismatch")
+                    if row is None and candidates:
+                        row = (candidates[0].id,)
+                        self._conn.execute(
+                            "UPDATE auth_credentials SET identity_key = ? WHERE id = ?",
+                            (identity, row[0]),
+                        )
             if row is not None:
                 self._conn.execute(
                     "UPDATE auth_credentials SET credential_type = ?, data = ?, "
-                    "disabled_cause = NULL,"
+                    # Only a future verified Radient completion may release
+                    # a disabled identity. A generic same-key metadata write
+                    # must preserve quarantine and explicit operator disables.
+                    "disabled_cause = CASE WHEN provider = 'radient' "
+                    "THEN disabled_cause ELSE NULL END,"
                     " updated_at = ?, login_incarnation = ? WHERE id = ?",
                     (credential_type, data_json, now, incarnation, row[0]),
                 )
                 self._conn.commit()
-                return self._after_credential_write(provider, row[0])
+                return (
+                    self._after_credential_write(provider, row[0])
+                    if _notify
+                    else self._reread_after_write(row[0])
+                )
 
         cursor = self._conn.execute(
             "INSERT INTO auth_credentials "
@@ -1939,7 +2041,11 @@ class AuthStore:
             (provider, credential_type, data_json, identity, now, now, incarnation),
         )
         self._conn.commit()
-        return self._after_credential_write(provider, cursor.lastrowid)
+        return (
+            self._after_credential_write(provider, cursor.lastrowid)
+            if _notify
+            else self._reread_after_write(cursor.lastrowid)
+        )
 
     @staticmethod
     def native_lifecycle_snapshot(db_path: Path, provider: str) -> list[tuple[Any, ...]] | None:
@@ -2049,6 +2155,9 @@ class AuthStore:
         gate.
         """
         stored = self._reread_after_write(credential_id)
+        # Identity labels in a generic write are not an interactive admission
+        # receipt. Quarantine belongs after a verified exchange and the host's
+        # cancellation check, never in this shared metadata-write hook.
         self.clear_blocks(stored.id)
         self._rearm_parked_tunnel_login(provider, stored)
         return stored
@@ -3031,6 +3140,7 @@ class AuthStore:
             from local_operator.providers.oauth.callback_server import (
                 InvalidGrantError,
                 LoginError,
+                RefreshNotSentError,
             )
 
             presented = self._presented_refresh_token(fresh)
@@ -3097,11 +3207,22 @@ class AuthStore:
                     async with asyncio.timeout(PROVIDER_REFRESH_TOTAL_BUDGET_S):
                         refreshed = await refresh(fresh)
                 except AuthStoreError:
-                    # The refresh fn's OWN refusal. Nothing about it says what
-                    # happened to the token on the wire, so the marker is left
-                    # exactly as it is: armed if the exchange may have run, and
-                    # absent if it never did.
+                    # The provider's own failure, which cannot say whether the
+                    # request was written: keep the marker exactly as it is.
+                    # The case where nothing was sent has its own type below.
                     raise
+                except RefreshNotSentError as exc:
+                    # Nothing was presented: the provider refused before its
+                    # first request reached a socket, so the marker armed just
+                    # above is a claim this exchange cannot support. Keeping it
+                    # would defer the next refresh for the marker's whole bound
+                    # and report that deferral in place of this refusal. The
+                    # refusal still surfaces as the store's own error type, as
+                    # every refresh failure here does.
+                    self._clear_send_marker(row.id, armed)
+                    raise AuthStoreError(
+                        f"OAuth refresh for '{row.provider}' was refused before sending: {exc}"
+                    ) from exc
                 except InvalidGrantError as exc:
                     # RFC 6749 SS5.2 terminal grant error. Re-raised as the store's
                     # own permanent-failure type so nothing above imports the

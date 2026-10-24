@@ -331,7 +331,14 @@ def test_update_row_is_absent_when_none() -> None:
     assert "/update" not in rows
 
 
-def test_update_row_copy_and_narrow_drop() -> None:
+def test_update_row_copy_and_narrow_wrap() -> None:
+    """Narrow terminals WRAP the instruction rather than dropping it (D2).
+
+    The old rule printed the short sentence and no command below the full
+    sentence's width. That made the same width behave differently per locale —
+    Urdu's full sentence is longer, so it lost ``/update`` while English kept
+    it. Wrapping keeps every row whole (no ``/upd…``) and the command present.
+    """
     info = WelcomeInfo(
         version="0.27.0",
         model_label="test/model",
@@ -340,10 +347,42 @@ def test_update_row_copy_and_narrow_drop() -> None:
     )
     wide = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
     assert "! latest is v0.28.0 — /update" in wide
-    narrow = plain(build_welcome_lines(info, 22, ROOMY_H))
+    narrow_lines = build_welcome_lines(info, 22, ROOMY_H)
+    narrow = plain(narrow_lines)
     assert "latest is v0.28.0" in narrow
-    assert "/update" not in narrow
-    assert "/upd" not in narrow
+    assert "/update" in narrow
+    update_rows = [line.plain for line in narrow_lines if "/update" in getattr(line, "plain", "")]
+    assert update_rows, "the wrapped update row disappeared"
+    for line in update_rows:
+        assert "…" not in line, line
+        assert cell_len(line) <= 22, line
+
+
+@pytest.mark.parametrize("height", [1, 2, 3])
+def test_wrapped_update_group_is_whole_or_absent(height: int) -> None:
+    """R2-1: the wrapped sentence is atomic in the height ladder.
+
+    At tiny heights the ladder used to shed one wrapped line at a time and keep
+    the contextless tail (`/update` with no sentence). The group now leaves or
+    stays whole.
+    """
+    info = WelcomeInfo(
+        version="0.27.0",
+        model_label="test/model",
+        cwd="/tmp/project",
+        update_available="0.28.0",
+    )
+    rendered = plain(build_welcome_lines(info, 24, height))
+    lines = rendered.splitlines()
+    has_command = any("/update" in line for line in lines)
+    has_sentence = any("latest is" in line for line in lines)
+    # A wrapped tail that survives without its sentence is the defect; a whole
+    # group whose last line happens to BE "/update" is the correct render.
+    assert has_command == has_sentence, lines
+    if has_command:
+        assert any("v0.28.0" in line for line in lines), lines
+    if height == 1:
+        assert not has_command, lines
 
 
 def test_update_sheds_before_harness_notice_and_login() -> None:

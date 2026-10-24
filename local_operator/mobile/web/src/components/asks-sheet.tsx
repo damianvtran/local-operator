@@ -39,6 +39,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
+import { messageRuntime } from "../store";
 import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
 import {
@@ -91,6 +92,20 @@ export function AsksSheet({
 }) {
 	const [allRows, setRows] = useState<PendingAsk[]>([]);
 	const [loaded, setLoaded] = useState(false);
+	/** The receipt for a dismissal this sheet has just seen, KEYED TO THE ASK it
+	    was about (agent review round 2, M1 = UX round 2, U9).
+
+	    The daemon answers `{"ok": true, "detail": "dismissed"}`, and the card
+	    leaves the aggregate — so the receipt is the only trace of the act. Two
+	    things the first cut got wrong, both fixed here: it rendered only when the
+	    sheet was EMPTY (so the ordinary multi-ask queue acknowledged nothing), and
+	    it survived the operator's NEXT act (answering a second ask left "Dismissed
+	    — no longer needed" over an answer, which is the class of claim this lane
+	    exists to remove). The ask id is kept so a later dismissal replaces this
+	    one rather than being confused with it. */
+	const [receipt, setReceipt] = useState<
+		{ askId: string; reason: "moot" | "answered_in_chat" | "lapsed" } | null
+	>(null);
 	const [error, setError] = useState("");
 	const [nowMs, setNowMs] = useState(() => Date.now());
 	const revision = useAsksRevision();
@@ -134,7 +149,12 @@ export function AsksSheet({
 	   triggers: two effects keyed on `open` would each fire on the opening
 	   transition and fetch the aggregate twice for one tap. */
 	useEffect(() => {
-		if (!open) return;
+		if (!open) {
+			/* A RECEIPT BELONGS TO ONE OPENING: reopening later must not present
+			   a dismissal from the last visit as though it just happened. */
+			setReceipt(null);
+			return;
+		}
 		void load();
 	}, [open, revision, rowsSignature, load]);
 
@@ -172,6 +192,32 @@ export function AsksSheet({
 	/* THE HEAD FIRST, then the wire's own order (`orderedForDisplay`) — the
 	   order the minimized chip names (UX round 1, U8). */
 	const listed = useMemo(() => orderedForDisplay(rows), [rows]);
+	/* THE RECEIPT IS THE INSTANT ECHO, AND IT STANDS DOWN WHEN ITS ROW HAS
+	   SETTLED (SA-D8, design D1 = UX U2; review round 2, M2). Since §17 a
+	   dismissal taken before the ask's deadline KEEPS the row as a settled
+	   receipt, so once that row is here the sheet would state one fact twice:
+	   this unattributed line above the list, and the same catalogue sentence on
+	   the card below it — two type sizes, two ink tokens, one `gap-3` apart, and
+	   the upper one reads as a status of whatever sits directly under it.
+
+	   PRESENCE OF THE ID IS NOT THE TEST. The read that follows a tap is a round
+	   trip, and until it lands `rows` is the OLD list, which still carries the
+	   ask as `open` — the exact gap this line exists to cover. Suppressing on the
+	   id alone hid the acknowledgement precisely when it was needed and left a
+	   live-looking card after a successful dismissal, so the test is the ROW's
+	   own status: only a row that says `dismissed` replaces the sentence.
+
+	   THE LAPSED DOOR FALLS OUT OF THAT RULE rather than needing its own: a
+	   dismissal at or after the deadline removes the row (case 2 of §17), so the
+	   read either omits it or still shows it as `timed_out` — never `dismissed` —
+	   and the receipt stays as that door's only acknowledgement. */
+	const shownReceipt =
+		receipt &&
+		!listed.some(
+			(row) => row.ask_id === receipt.askId && String(row.status) === "dismissed",
+		)
+			? receipt
+			: null;
 	/* QUESTIONS, the same unit the bar and the header entry state (agent review
 	   round 1, R3): three surfaces answering "how much is waiting" in two units is
 	   the defect. All three now count this one conversation's rows.
@@ -221,8 +267,26 @@ export function AsksSheet({
 				{!loaded && !error ? (
 					<p className="text-body-sm text-ink-muted">reading asks…</p>
 				) : null}
-				{loaded && rows.length === 0 && !error ? (
-					<p className="text-body-sm text-ink-muted">
+				{/* THE RECEIPT IS NOT THE EMPTY STATE (agent review round 2, M1 = UX
+				    round 2, U9). It used to render only when the list was empty, so a
+				    dismissal from a queue of two acknowledged nothing at all; it now
+				    sits above whatever remains — the place the card left — with the
+				    empty state below it saying only that nothing is waiting.
+
+				    AND IT STANDS DOWN ONCE ITS OWN ROW ARRIVES (SA-D8): the settled
+				    card below states the same sentence, so keeping both would say one
+				    thing twice. See `shownReceipt`. */}
+				{shownReceipt ? (
+					<p className="text-body-sm text-ink-muted" data-testid="ask-receipt">
+						{messageRuntime.t(
+							shownReceipt.reason === "lapsed"
+								? "relay.ask.dismiss.receipt"
+								: `relay.ask.dismiss.receipt_${shownReceipt.reason}`,
+						)}
+					</p>
+				) : null}
+				{loaded && rows.length === 0 && !error && !shownReceipt ? (
+					<p className="text-body-sm text-ink-muted" data-testid="ask-sheet-empty">
 						nothing waiting — questions the agent asks will appear here.
 					</p>
 				) : null}
@@ -268,7 +332,16 @@ export function AsksSheet({
 								row={row}
 								sessionId={sessionId}
 								nowMs={nowMs}
-								onSettled={() => void load()}
+								onSettled={(kind) => {
+									/* A NON-DISMISSAL SETTLEMENT RETIRES THE RECEIPT (M1): after
+									   answering, an unretired "Dismissed — …" would describe the
+									   operator's previous act as though it were their last. */
+									if (kind !== "dismiss") setReceipt(null);
+									void load();
+								}}
+								onDismissed={(askId, reason) =>
+									setReceipt({ askId, reason: reason ?? "lapsed" })
+								}
 							/>
 						</div>
 					);

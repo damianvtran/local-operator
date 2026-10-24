@@ -1,0 +1,189 @@
+{
+  "schema": 1,
+  "record_kind": "auditor_receipt",
+  "locale": "ur",
+  "round": 3,
+  "date": "2026-10-24",
+  "status": "passed",
+  "verdict": "clean_terminal",
+  "previous_revision": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+  "revision": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "delta": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a..5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "scope": {
+    "changed_catalogues": 4,
+    "changed_keys_read": 19,
+    "unrelated_values_reaudited": false
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "5ebbaba9537e",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "served_model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "fallback": "none",
+    "date": "2026-10-24",
+    "result": "passed",
+    "findings": 0
+  },
+  "independence": {
+    "translator_sessions": [
+      "52136848d1fc",
+      "7a648afb0f8d",
+      "7c4a4229b011",
+      "ffc94c8cb17d"
+    ],
+    "integrator_session": "3f68f20b2cad",
+    "independent_from_all_translator_and_integrator_sessions": true,
+    "auditor_contributed_translation_or_remediation": false,
+    "auditor_edited_source_catalogues_ledger_or_eligibility": false
+  },
+  "hash_algorithm": "SHA-256 over exact UTF-8 file bytes; context_sha256 is null when English has no sidecar",
+  "all_current_scoped_en_ur_context_hashes_match_provenance": true,
+  "round_2_dispositions": {
+    "finding_groups": 7,
+    "total_dispositions": 13,
+    "resolved_dispositions": 13,
+    "changed_remediations": 11,
+    "allowed_unchanged_choice_identifier_values": 2,
+    "unresolved": 0,
+    "preview_alternate": "تجرباتی accepted as idiomatic feature-preview wording",
+    "evidence": "round2-disposition-summary.json"
+  },
+  "ledger_contract": {
+    "source": "docs/design/i18n.md §6",
+    "auditor.findings": "unresolved BLOCKER/MAJOR only",
+    "blocker_count": 0,
+    "major_count": 0,
+    "minor_count": 0,
+    "nit_count": 0
+  },
+  "mechanical": {
+    "catalogue_check": {
+      "command": "/Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+      "exit_code": 0,
+      "actual_output": "check.py: catalogue checks: 0 problem(s)"
+    },
+    "scoped_keys_checked": 19,
+    "key_parity_problems": 0,
+    "icu_argument_parity_problems": 0,
+    "plural_selector_parity_problems": 0,
+    "non_nfc_values": 0,
+    "forbidden_bidi_control_values": 0,
+    "non_latin_digit_values": 0,
+    "technical_token_missing": 0,
+    "plural_messages_in_delta": 0,
+    "plural_render_samples": 0,
+    "cldr_reference": "No changed plural messages; direct Node Intl.PluralRules(\"ur\") reference remains 0=other, 1=one, 2/3/21=other.",
+    "maxCells_entries_in_delta": 0,
+    "pseudo": {
+      "keys_checked": 19,
+      "argument_parity_errors": 0,
+      "applicable_plural_render_samples": 0,
+      "interpretation": "Synthetic parser evidence only; no changed maxCells or plural values."
+    },
+    "credential_artifact_check": {
+      "literal_redaction_artifact_absent": true,
+      "unicode_replacement_character_absent": true,
+      "english_credentials_absent": true,
+      "native_plural_matches_existing_catalogue": true,
+      "safety_predicates_present": true
+    },
+    "help_fit": {
+      "key": "wire.slash.hub",
+      "method": "Approximate /help comparison only; no hard maxCells or rendered pass is claimed.",
+      "en_cells": 56,
+      "ur_cells": 57,
+      "delta": 1,
+      "over_55_cells": true,
+      "over_english_plus_10": false
+    }
+  },
+  "semantic": {
+    "accuracy_idiom_register_glossary_reviewed_for_every_changed_value": true,
+    "new_findings": 0,
+    "findings_file": "ur-core.round3.findings.json",
+    "human_report": "ur-core.round3.findings.md"
+  },
+  "namespaces": [
+    {
+      "namespace": "wire.errors.settings",
+      "namespace_key_count": 12,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "e5a010a1dbe5698c96b92d35f616e7dfc557c801b5e1eca1a6c84a543b92c91e",
+      "context_sha256": null,
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "namespace_key_count": 43,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "836d3410761ea771d3201602418322a8577b98681dbc946d590f9a8d48c6e509",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.settings",
+      "namespace_key_count": 818,
+      "scoped_keys_read": 16,
+      "changed_keys": 16,
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "0bb60816444bcf86a6c2d93e9c6ee7211fd377dd080e8cb39ae7f7d39ec30840",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.slash",
+      "namespace_key_count": 52,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "e1897b69d355d05d44dd6761affb866749fa431630234421dfb31c65141c8cb1",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    }
+  ],
+  "companions": [
+    "current-hashes.json",
+    "runtime-mechanical.json",
+    "pseudo-evidence.json",
+    "help-fit.json",
+    "round2-disposition-summary.json",
+    "ur-core.round3.findings.json",
+    "ur-core.round3.findings.md",
+    "ur-core.round3.semantic.json"
+  ],
+  "pending_gates": [
+    "Second independent high-visibility/safety audit remains separate and unclaimed.",
+    "Native rendered RTL/bidi/shaping and long-text/fallback evidence remains separate and unclaimed.",
+    "Rendered /help fit review for wire.slash.hub (57 cells vs English 56); not a hard maxCells failure."
+  ],
+  "source_state": {
+    "git_status_porcelain": "",
+    "ledger_sha256": "bfc623b0b698e2f6e6dfc0446a0697ce34b26dec2c6f56d922da34ae5be4aef4",
+    "shipped_sha256": "8c37aff60b6cb448a2c1f638b525d24c98b7bb1870fd44d0cbbe2ca12a476d8c",
+    "modified_by_auditor": false
+  }
+}

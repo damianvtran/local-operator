@@ -1,0 +1,7 @@
+tui.status.agents	EN="{count, plural, one {# agent} other {# agents}}"	UR="{count, plural, one {# ایجنٹ} other {# ایجنٹس}}"
+tui.status.band.starting	EN="starting…"	UR="شروع ہو رہا ہے…"
+tui.status.band.working	EN="working"	UR="کام جاری"
+tui.status.jobs	EN="{count, plural, one {# job} other {# jobs}}"	UR="{count, plural, one {# جاب} other {# جاب}}"
+tui.status.model.connecting	EN="connecting…"	UR="منسلک ہو رہا ہے…"
+tui.status.model.setup	EN="setup"	UR="ترتیب"
+tui.status.tunnel.parked	EN="remote access off"	UR="ریموٹ رسائی بند"

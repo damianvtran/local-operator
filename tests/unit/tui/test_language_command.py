@@ -107,22 +107,23 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
         # as the browse — the accepted command shape.
         assert any(
             text.startswith("language: en (English)")
-            and "<auto|en|fr|es|ru|vi|hi>" in text
+            and "/language <value>; space browses" in text
             and "; space" in text
             for text in texts
         ), texts
         for text in _language_notices(app):
             assert cell_len(text) <= 70, text
-        # Hindi expands the option list for every locale, so keep the 70-cell
-        # gate across all accepted values, including auto's resolved receipt.
-        for value in ("en", "fr", "es", "ru", "vi", "hi", "auto"):
+        # The bare receipt names the space browse instead of enumerating the
+        # value space (which grows with every shipped locale), so it stays well
+        # inside the 70-cell notice row for every accepted value.
+        for value in ("en", "fr", "es", "ru", "vi", "ur", "hi", "auto"):
             app._run_slash_command(f"/language {value}")
             await pilot.pause()
             app._run_slash_command("/language")
             await pilot.pause()
             assert any(
                 text.startswith(f"language: {'en' if value == 'auto' else value} (")
-                and "<auto|en|fr|es|ru|vi|hi>; space" in text
+                and "/language <value>; space browses" in text
                 for text in _notices(app)
             ), (value, _notices(app))
         for text in _language_notices(app):
@@ -193,7 +194,7 @@ async def test_the_space_opens_the_choices_on_the_current_value(config_dir: Path
         picker = editor.picker
         assert picker.is_open(), "the space must open the choices list"
         rows = _choice_map(picker)
-        assert list(rows) == ["auto", "en", "fr", "es", "ru", "vi", "hi"], list(rows)
+        assert list(rows) == ["auto", "en", "fr", "es", "ru", "vi", "ur", "hi"], list(rows)
         assert picker.highlighted_name() == "auto", "the browse starts where the user is"
         assert rows["auto"].detail == "← current"
         # After a committed switch the marker moves with the value.
@@ -209,23 +210,30 @@ async def test_the_space_opens_the_choices_on_the_current_value(config_dir: Path
 
 
 @pytest.mark.asyncio
-async def test_unknown_and_unshipped_values_are_refused_with_the_option_list(
+async def test_unknown_and_unshipped_values_are_refused_with_the_affordance(
     config_dir: Path,
 ) -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(110, 34)) as pilot:
         await _boot(pilot, app)
-        # Hindi ships in this wave; Chinese stays held after the incomplete
-        # slash audit, and Urdu awaits translation. Neither supported-but-
-        # unshipped locale may write config or appear in the available list.
-        for value in ("klingon", "zh-CN", "ur"):
+        # Hindi and Urdu now ship; Chinese stays held after the incomplete
+        # slash audit. A supported-but-unshipped locale may not write config.
+        for value in ("klingon", "zh-CN"):
             app._run_slash_command(f"/language {value}")
             await pilot.pause()
-            receipt = f"unknown language '{value}' — available: auto, en, fr, es, ru, vi, hi"
+            receipt = f"unknown language '{value}' — press space to list values"
             assert receipt in _notices(app), _notices(app)
             assert _stored(config_dir) is None
         for text in _language_notices(app):
             assert cell_len(text) <= 70, text
+        # The echoed token is bounded by CELLS, not characters: a wide token
+        # would otherwise push the refusal past the row.
+        for token in ("語" * 30, "\\" * 20):
+            app._run_slash_command("/language " + token)
+            await pilot.pause()
+            long_notice = _language_notices(app)[-1]
+            assert "…" in long_notice, long_notice
+            assert cell_len(long_notice) <= 70, long_notice
 
 
 @pytest.mark.asyncio

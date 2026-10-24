@@ -15,11 +15,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from local_operator.config import ConfigManager
+from local_operator.session.approval_policy import write_override
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.exec_control import (
@@ -39,6 +41,11 @@ class FakeSession:
     owns_runtime = True
     outcome_is_synchronous = True
     runtime_locality: RuntimeLocality = "this-process"
+
+    #: Some cases attach a transcript directory so the handle's sidecar read has
+    #: a real path; declared so the facade tests can set it without pyright's
+    #: attr-defined error (as ``test_serving.FakeSession`` does).
+    transcript: Any
 
     def __init__(self, *, graceful: bool = True) -> None:
         self.session_id = "exec-sess"
@@ -273,6 +280,57 @@ async def test_the_gate_is_seeded_from_the_saved_mode(isolated_config: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_conversations_choice_seeds_the_gate(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """The CONVERSATION outranks the config at the exec seed (2026-10-23).
+
+    ``start_exec_control`` builds the handle with the mode it read at t0, so a
+    resumed conversation that recorded ``auto`` must be seeded from that record
+    — not from ``config.yml``, which says ``ask`` here. Seeding from the file
+    would park the run's first card on a session whose human had already chosen
+    ``auto``, and the handle's own record read would then disagree with the
+    value it was constructed from (the posture hazard the module docstring
+    names).
+    """
+    ConfigManager(isolated_config).set_config_value("tool_approval_mode", "ask")
+    session_dir = tmp_path / "session"
+    write_override(session_dir, "auto")
+    session = FakeSession()
+    session.transcript = SimpleNamespace(directory=session_dir)
+
+    control = await start_exec_control(session, cwd="/tmp")
+    try:
+        assert control.handle._auto_approve is True, "the seed ignored the conversation's record"
+        assert control.handle._explicit_approvals_mode == "auto"
+        assert await control.handle._approval_gate("bash", "echo probe-ok") is True
+        assert control.handle._fold.projection.pending is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_yolo_outranks_a_resumed_conversations_recorded_ask(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """``--yolo`` is a flag on THIS run, so it outranks a stored conversation
+    choice in both of its properties: it approves inline AND it pins."""
+    ConfigManager(isolated_config).set_config_value("tool_approval_mode", "ask")
+    session_dir = tmp_path / "session"
+    write_override(session_dir, "ask")
+    session = FakeSession()
+    session.transcript = SimpleNamespace(directory=session_dir)
+
+    control = await start_exec_control(session, cwd="/tmp", yolo=True)
+    try:
+        assert control.handle._auto_approve is True
+        assert control.handle._approval_pinned is True
+        assert control.handle._explicit_approvals_mode is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
 async def test_ask_mode_still_parks_a_card(isolated_config: Path) -> None:
     """Default (ask): the seed changes the BOOT VALUE, not the asking.
 
@@ -355,6 +413,92 @@ async def test_an_unsupervised_run_without_the_key_still_denies(isolated_config:
         assert control.handle._auto_approve is False
         notice = control.handle._approvals_slash(FakeSession(), "", SlashResult)
         assert "non-TTY requests deny" in notice.text
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_unsupervised_run_installs_the_ask_surface(
+    isolated_config: Path,
+) -> None:
+    """#2803: a resume worker owns its conversation's ask queue, and nothing else.
+
+    ``sessions resume`` / ``exec --background --resume`` opens an EXISTING
+    conversation. Its open asks, deadline wakes and owed response rows are that
+    conversation's work, and without the ask hook ``Session.ask_queue`` answers
+    ``None`` — so no queue is built, ``ask``/``ask_withdraw`` never reach the
+    model, and an overdue deadline is delivered to whichever turn happens to
+    come next (SA-D2).
+
+    The approval half stays absent on purpose: a parked approval card has no
+    one to answer it in a resume worker, which is why ``sessions`` withholds
+    ``--control`` from one.
+    """
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=False, resumed=True)
+    try:
+        assert session._ask_handler is not None
+        assert getattr(session, "_approval_handler", None) is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_unsupervised_run_installs_no_ask_surface(
+    isolated_config: Path,
+) -> None:
+    """The control for the cell above: no ``--resume``, no ask surface (SA-D2)."""
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=False)
+    try:
+        assert getattr(session, "_ask_handler", None) is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_kill_switch_leaves_a_resumed_run_with_no_ask_surface(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-1 / QA Q1: with the queued engine off, match ``main`` — no ``ask``.
+
+    ``LOP_ASK_NONBLOCKING=0`` means there is no queue, so a hook installed here
+    could only advertise a tool whose single outcome is the refusal, beside a
+    prompt describing the BLOCKING call. The predicate therefore requires
+    ``asks.policy.enabled()``; this cell pins that it is consulted rather than
+    assumed.
+    """
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=False, resumed=True)
+    try:
+        assert getattr(session, "_ask_handler", None) is None
+        # The consequence that matters is upstream of this handle: no hook makes
+        # `Session.ask_queue()` answer None, which is what keeps `ask` and
+        # `ask_withdraw` out of the inventory.
+        assert policy.enabled() is False
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_supervised_run_keeps_the_real_ask_gate(
+    isolated_config: Path,
+) -> None:
+    """``--control`` still owns the presentation half: the gate, not the stub.
+
+    A supervised run has a supervisor able to answer, so the resumed flag must
+    not take the queued-only arm from it.
+    """
+    from local_operator.session.runtime.serving import _unanswerable_ask
+
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=True, resumed=True)
+    try:
+        assert session._ask_handler is control.handle._ask_gate
+        assert session._ask_handler is not _unanswerable_ask
     finally:
         await control.aclose()
 

@@ -617,7 +617,7 @@ def test_project_slash_runs_the_verbs_with_the_shared_receipts(
 
 
 @pytest.mark.asyncio
-async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_receipts(
+async def test_language_slash_writes_through_the_shared_funnel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Slice C's routed branch: the terminal's funnel and receipts, served.
@@ -627,8 +627,10 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     terminal switch land on the same key with the same value space; applying
     the swap is the frontend's half (the running TUI re-renders from its config
     watcher, whose external-change path announces it). Unknown values are
-    refused with the option list, word for word with the terminal, and the
-    ``lang`` alias routes to the same branch.
+    refused with the option list (this client enumerates it because the phone
+    sheet has no space picker; the terminal names the space key instead), and
+    the ``lang`` alias routes to the same branch. A long unknown token is
+    echoed truncated by display cells.
     """
     from types import SimpleNamespace
 
@@ -652,16 +654,21 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
 
     setting = settings_io.resolve_key("language")
     assert setting is not None
+    for token in ("語" * 30, "\\" * 20):
+        long_refusal = await handle._slash_result("language", token, SlashResult)
+        assert long_refusal.text.startswith("unknown language '"), long_refusal.text
+        assert "…" in long_refusal.text, long_refusal.text
+        assert token not in long_refusal.text
 
-    # Bare: the report, word for word with the terminal's.
+    # Bare: this client enumerates the value space (no phone picker).
     bare = await handle._slash_result("language", "", SlashResult)
     assert bare.style == "info"
-    assert bare.text == "language: en (English) — /language <auto|en|fr|es|ru|vi|hi>; space"
+    assert bare.text == "language: en (English) — auto, en, fr, es, ru, vi, ur, hi"
 
     # Unknown: the option-list refusal, and nothing written.
     refused = await handle._slash_result("language", "xx", SlashResult)
     assert refused.style == "warning"
-    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es, ru, vi, hi"
+    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es, ru, vi, ur, hi"
     assert stored() is None
 
     # The ALIAS routes to the same branch, and the switch writes the key.
@@ -679,16 +686,16 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     switched = await handle._slash_result("language", "vi", SlashResult)
     assert switched.text == "language: vi saved — active vi (Vietnamese)"
     wide = await handle._slash_result("language", "", SlashResult)
-    assert wide.text == "language: vi (Vietnamese) — /language <auto|en|fr|es|ru|vi|hi>; space"
+    assert wide.text == "language: vi (Vietnamese) — auto, en, fr, es, ru, vi, ur, hi"
     assert cell_len(wide.text) <= 70
 
     # Hindi grows every bare receipt's option list. Exercise every accepted
     # value through the real shared write funnel, not a formatter-only budget.
-    for value in ("auto", "en", "fr", "es", "ru", "vi", "hi"):
+    for value in ("auto", "en", "fr", "es", "ru", "vi", "ur", "hi"):
         switched = await handle._slash_result("language", value, SlashResult)
         assert switched.style == "info"
         assert stored() == value
         report = await handle._slash_result("language", "", SlashResult)
-        assert "<auto|en|fr|es|ru|vi|hi>; space" in report.text
+        assert "auto, en, fr, es, ru, vi, ur, hi" in report.text
         assert cell_len(switched.text) <= 70, switched.text
         assert cell_len(report.text) <= 70, report.text

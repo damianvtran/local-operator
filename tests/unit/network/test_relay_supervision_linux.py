@@ -1424,6 +1424,55 @@ def test_invalid_launchd_plist_never_claims_boot_persistence(monkeypatch, tmp_pa
     assert state["active"] and not state["persistent"]
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_systemd_install_prepares_append_log_parent_before_start(linux_host, monkeypatch, existing):
+    """systemd opens the log before the daemon can create its own directory."""
+    log = linux_host / "logs" / "network.log"
+    monkeypatch.setattr(relay, "log_path", lambda: log)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    monkeypatch.setattr(relay, "render_systemd", lambda port: f"StandardOutput=append:{log}\n")
+    monkeypatch.setattr(relay, "_answers_as_service", lambda: True)
+    if existing:
+        log.parent.mkdir()
+    starts = []
+
+    def systemctl(*args, **kwargs):
+        if "enable" in args:
+            assert log.parent.is_dir()
+            assert f"StandardOutput=append:{log}" in _unit(linux_host).read_text()
+            starts.append(args)
+        return SimpleNamespace(returncode=0, stdout="active", stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    assert relay._install_systemd()["ok"]
+    assert len(starts) == 1
+
+
+def test_systemd_install_dry_run_does_not_prepare_log_parent(linux_host, monkeypatch):
+    log = linux_host / "logs" / "network.log"
+    monkeypatch.setattr(relay, "log_path", lambda: log)
+    _no_systemctl(monkeypatch)
+    assert relay._install_systemd(dry_run=True)["ok"]
+    assert not log.parent.exists()
+
+
+def test_systemd_log_parent_failure_never_starts_service(linux_host, monkeypatch):
+    log = linux_host / "logs" / "network.log"
+    monkeypatch.setattr(relay, "log_path", lambda: log)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _no_systemctl(monkeypatch)
+    mkdir = Path.mkdir
+
+    def fail_log_parent(path, *args, **kwargs):
+        if path == log.parent:
+            raise PermissionError("synthetic log parent refusal")
+        return mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_log_parent)
+    with pytest.raises(PermissionError, match="synthetic log parent refusal"):
+        relay._install_systemd()
+
+
 @pytest.mark.parametrize("linger", [False, True])
 def test_systemd_install_receipt_reports_actual_linger(linux_host, monkeypatch, linger):
     """Enable success cannot silently stand in for successful linger repair."""

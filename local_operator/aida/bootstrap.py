@@ -174,12 +174,16 @@ def _discard_failed_create(config_dir: Path, session_id: str) -> None:
     window this covers is between ``mkdir`` and the first append — nothing
     durable can be inside it), so it can never delete a real conversation.
     """
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.session.cleanup import remove_fresh_session_dir
 
     directory = _sessions_root(config_dir) / session_id
     try:
-        if not directory.is_dir() or (directory / TRANSCRIPT_NAME).exists():
+        # ``has_transcript``, not a stat of the plain name: a session whose
+        # transcript was compressed holds its whole conversation in the archive
+        # beside the missing plain file, and this guard's one job is to never
+        # remove a directory that does.
+        if not directory.is_dir() or compression.has_transcript(directory):
             return
         # The audited fresh-removal primitive writes the ``failed-create``
         # receipt before it removes, and refuses when the receipt cannot be

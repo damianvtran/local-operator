@@ -1,0 +1,62 @@
+{
+  "old_commit": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+  "new_commit": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "changed_key_count": 19,
+  "direct_neighbor_count": 8,
+  "review_key_count": 27,
+  "flag_counts": {},
+  "credential": {
+    "established_native_plural": "کریڈینشلز",
+    "inline_uses_exact_native_plural": true,
+    "inline_literal_artifact_count": 0,
+    "inline_safety_predicates_preserved": true,
+    "all_scoped_literal_artifact_count": 0
+  },
+  "fit": {
+    "explicit_maxCells_scoped_count": 0,
+    "actual_overflow_count": 0,
+    "pseudo_30pct_overflow_count": 0,
+    "changed_approx_help_count": 1,
+    "changed_approx_help_overflow_risks": [
+      {
+        "key": "wire.slash.hub",
+        "cells": 57,
+        "approx_guide_cells": 55
+      }
+    ]
+  },
+  "namespace_hashes": [
+    {
+      "namespace": "wire.errors.settings",
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "e5a010a1dbe5698c96b92d35f616e7dfc557c801b5e1eca1a6c84a543b92c91e",
+      "context_sha256": null,
+      "changed_keys_reviewed": 1,
+      "direct_neighbors_reviewed": 1
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "836d3410761ea771d3201602418322a8577b98681dbc946d590f9a8d48c6e509",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "changed_keys_reviewed": 1,
+      "direct_neighbors_reviewed": 0
+    },
+    {
+      "namespace": "wire.settings",
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "0bb60816444bcf86a6c2d93e9c6ee7211fd377dd080e8cb39ae7f7d39ec30840",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "changed_keys_reviewed": 16,
+      "direct_neighbors_reviewed": 7
+    },
+    {
+      "namespace": "wire.slash",
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "e1897b69d355d05d44dd6761affb866749fa431630234421dfb31c65141c8cb1",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "changed_keys_reviewed": 1,
+      "direct_neighbors_reviewed": 0
+    }
+  ]
+}
