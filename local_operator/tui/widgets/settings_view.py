@@ -56,18 +56,30 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import register_refresh
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
 from local_operator.tui.error_text import error_text
+from local_operator.tui.i18n_status import (
+    display_tr,
+    localized_display,
+    technical_display,
+)
 from local_operator.tui.widgets.command_picker import ghost_for
 from local_operator.tui.widgets.model_picker import ModelRow, rank_rows
 from local_operator.tui.widgets.subagent_view import HintButton
 from local_operator.tui.widgets.tool_card import truncate_cells
 
-_t = tr("tui.small")
+_t = display_tr("tui.small")
+
+
+def _paint(text: str, *, source_locale: str | None = None) -> str:
+    """Project registry copy only at its terminal paint boundary."""
+    return localized_display(text, source_locale=source_locale).plain
+
+
 #: The read-only pane's width in cells, MIRRORED from `.settings-view-pane` in
 #: local_operator.tcss. Duplicated deliberately: the widths have to be known
 #: before layout runs (see `_list_width`), and Textual offers no way to read a
@@ -3814,7 +3826,7 @@ class SettingsView(Vertical):
             # answers "when does this take effect" once per group rather than
             # fifty times down the page. See the module docstring.
             head = Text(no_wrap=True)
-            head.append(row.section.title, style=fg + Style(bold=True))
+            head.append(_paint(row.section.title), style=fg + Style(bold=True))
             # The tag sheds its PREFIX before it sheds the scope itself: on a
             # narrow body "takes effect: new sessions" does not fit beside the
             # title, and the half that carries the meaning is the scope. Dropped
@@ -3896,7 +3908,12 @@ class SettingsView(Vertical):
             # difference alone does not survive a monochrome terminal, and
             # "which one am I on" is the question the expansion exists to answer.
             line.append("● " if chosen else "○ ", style=accent if chosen else dim)
-            line.append(row.choice.label, style=base)
+            choice_label = (
+                technical_display(str(row.choice.label)).plain
+                if row.setting.key == "language"
+                else _paint(row.choice.label)
+            )
+            line.append(choice_label, style=base)
             if row.choice.value == row.setting.default:
                 # Which member SHIPPED, named in the list rather than inferred
                 # from the ink (#440 §2.2). This is the information the
@@ -3907,7 +3924,14 @@ class SettingsView(Vertical):
                 # it came with" before touching anything.
                 line.append(_t(_x.settings_view_default_marker()), style=dim)
             if row.choice.description:
-                line.append(f"  {row.choice.description}", style=faint)
+                # The Urdu terminal-capability note is English renderer guidance,
+                # not translated catalogue prose; do not give it RTL provenance.
+                source = (
+                    "en" if row.setting.key == "language" and row.choice.value == "ur" else None
+                )
+                line.append(
+                    f"  {_paint(row.choice.description, source_locale=source)}", style=faint
+                )
             return line
 
         if row.kind == "chain" and row.chain is not None:
@@ -3953,7 +3977,7 @@ class SettingsView(Vertical):
             return line
         line.append(" " * _ROW_INDENT)
         line.append(marker, style=accent if selected else dim)
-        label = truncate_cells(setting.label, _LABEL_BUDGET)
+        label = truncate_cells(_paint(setting.label), _LABEL_BUDGET)
         line.append(label, style=base)
         pad = max(1, _VALUE_COLUMN - cell_len(line.plain))
         line.append(" " * pad)
@@ -4706,7 +4730,7 @@ class SettingsView(Vertical):
                 # finding names.
                 clause_style = _bridge_ink()
             width = self._detail_width()
-            help_text = row.setting.help
+            help_text = _paint(row.setting.help)
             if row.setting.hotkey_scope == "desktop":
                 # The desktop sentence REPLACES the registry help on this page,
                 # for the reason `_DESKTOP_HOTKEY_DETAIL` states. The registry
