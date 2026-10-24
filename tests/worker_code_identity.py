@@ -65,11 +65,11 @@ class WorkerCodeIdentity:
         # neither inspect an arbitrary object nor broaden subclass acceptance.
         for _ in range(4):
             if type(work) is functools.partial:
-                work = cast(functools.partial, work).func
+                work = cast("functools.partial[object]", work).func
             else:
                 break
         if type(work) is CoroutineType:
-            code = cast(CoroutineType, work).cr_code
+            code = cast("CoroutineType[object, object, object]", work).cr_code
         elif type(work) is FunctionType:
             code = work.__code__
         elif type(work) is MethodType and type(cast(MethodType, work).__func__) is FunctionType:
