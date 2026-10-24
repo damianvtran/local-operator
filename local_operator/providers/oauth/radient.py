@@ -24,6 +24,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginCancelledError,
     LoginError,
     OAuthCallbackFlow,
+    RefreshNotSentError,
     raise_for_refresh_failure,
 )
 from local_operator.providers.oauth.pkce import create_pkce_pair
@@ -335,11 +336,13 @@ async def refresh_radient_token(
     ) not in (None, "", DEFAULT_RADIENT_API_BASE_URL):
         # A background refresh cannot move a grant to another issuer or infer
         # a new hub. Unknown legacy metadata remains unknown until sign-in.
-        raise LoginError("Radient refresh endpoint has no trusted API hub binding")
+        # Pre-send by construction: nothing below this line has touched a
+        # socket, so the store must not keep its send marker over this refusal.
+        raise RefreshNotSentError("Radient refresh endpoint has no trusted API hub binding")
     # Check both standard 'refresh' and compatibility 'refresh_token' keys
     refresh_token = credentials.get("refresh") or credentials.get("refresh_token")
     if not refresh_token:
-        raise LoginError("No refresh token stored for Radient")
+        raise RefreshNotSentError("No refresh token stored for Radient")
 
     payload = {
         "grant_type": "refresh_token",
