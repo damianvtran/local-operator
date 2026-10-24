@@ -80,9 +80,40 @@ RECALL_HARD_TOKENS = 2000
 #: SQLITE_FULL instead of growing the file. This is a SEPARATE budget from the
 #: token quotas above: a store can hold token headroom and still be out of bytes,
 #: which is why `lop memory status` reports both and why the refusal names the
-#: byte cap. Raising this (or auto-compacting) is a product decision, not a
-#: repair for a full store.
-MAX_DB_BYTES = 64 * 1024 * 1024
+#: byte cap.
+#:
+#: INTERIM (2026-10-24): this was 64 MiB, raised to 128 MiB only to restore this
+#: host's ability to write facts. The store had run out of room under the old
+#: bound: 62.9 MiB of 64 MiB (16,096 of 16,384 pages, 98.2%, freelist 0) when
+#: two sync failures were observed, and at its cap later. The raise does NOT
+#: restore peer sync by itself, and neither failure was caused by this cap: peer
+#: ``d_1bb8...`` refuses our pushes because ITS OWN store is full, and
+#: ``d_3836...`` refuses one operation on content grounds (``Sensitive path
+#: refused``, retrying on an 1800 s floor).
+#:
+#: The defect this does NOT fix: ``ops`` is append-only and has no retention
+#: bound of any kind. It is 38.2 MiB / 50,377 rows against 3.28 MiB of live
+#: facts, 93% of it this device's own origin, and no age, cursor or capacity
+#: mechanism removes anything. Raising the cap buys room; it does not bound the
+#: journal.
+#:
+#: It comes back down when the bounded-journal design lands (all-heads +
+#: tombstones retention with a snapshot/re-baseline path) AND the store drains
+#: below 64 MiB, measured as ``storage_bytes`` from `lop memory status` after a
+#: VACUUM. The VACUUM must come first: ``PRAGMA max_page_count`` silently clamps
+#: to the current page count, so lowering it on a store whose file is still
+#: larger — including one with reclaimable pages — does nothing. Nothing lowers
+#: this at runtime: no code path writes a smaller ``max_page_count``, so
+#: removing this raise is a deliberate follow-up change, not an automatic
+#: behaviour. Treat any further raise the same way.
+#:
+#: Accepted side effect: :meth:`MemoryStore._page_cap_refusal` keeps the generic
+#: refusal when the host filesystem reports no more free space than this cap
+#: (``disk_free <= cap_bytes``). Raising the cap to 128 MiB means a host with
+#: 64-128 MiB free now loses the cap diagnosis it previously got; the guard is
+#: deliberate (it avoids advising "forget facts" on a genuinely full disk), so
+#: this is recorded rather than "fixed".
+MAX_DB_BYTES = 128 * 1024 * 1024
 #: Page size the cap is expressed against in :meth:`MemoryStore.connection`.
 #: ``PRAGMA max_page_count`` takes pages, so the enforced byte cap is
 #: ``(MAX_DB_BYTES // 4096) * page_size`` — for a default 4096-byte store that

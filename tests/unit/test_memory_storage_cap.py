@@ -11,6 +11,13 @@ Round 2 adds the recovery state: forget/VACUUM leave reusable pages in the
 freelist, and a store at max_page_count with freelist > 0 still accepts writes.
 Status must not call that FULL (`storage_full` is "no free page AND no headroom")
 and the near-cap warning must exist for the 90-99.9% state where refusals land.
+
+The interim raise (64 MiB -> 128 MiB) is pinned at the end of this file. It
+restored this host's ability to write facts after a live store ran out of room
+under the old cap; it did not by itself restore peer sync. The tests there
+prove an existing store gains headroom on the next open with no migration, and
+that the refusal still fires at the raised cap. The growth is modelled at a
+page scale that costs kilobytes, never 128 MiB of real data.
 """
 
 import json
@@ -19,7 +26,13 @@ import sqlite3
 import pytest
 
 import local_operator.memory as memory
-from local_operator.memory import MAX_DB_BYTES, MemoryError, MemoryIdentity, MemoryStore
+from local_operator.memory import (
+    CAP_PAGE_SIZE,
+    MAX_DB_BYTES,
+    MemoryError,
+    MemoryIdentity,
+    MemoryStore,
+)
 from local_operator.memory_cli import render_human, run
 
 
@@ -69,7 +82,7 @@ def status(tmp_path, identity):
     return json.loads(out)["usage"], render_human(out, failed)
 
 
-def fill_meta_to_page_cap(db):
+def fill_meta_to_page_cap(db, prefix="fill"):
     """Consume pages until SQLite refuses one; leaves page_count == max_page_count.
 
     Bounded on purpose: an unbounded loop would hang the suite if a future
@@ -78,7 +91,7 @@ def fill_meta_to_page_cap(db):
     """
     for index in range(500):
         try:
-            db.execute("INSERT INTO meta VALUES (?,?)", (f"fill-{index}", "x" * 8192))
+            db.execute("INSERT INTO meta VALUES (?,?)", (f"{prefix}-{index}", "x" * 8192))
             db.commit()
         except sqlite3.OperationalError:
             db.rollback()
@@ -345,3 +358,96 @@ def test_non_cap_sqlite_errors_keep_the_generic_refusal(tmp_path):
     with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
         with store.connection():
             raise sqlite3.OperationalError("database or disk is full")
+
+
+def test_the_interim_cap_is_128_mib_and_the_enforced_cap_agrees(tmp_path):
+    """The raise is a decision pinned in one number, and reported == enforced.
+
+    `#2801` established that `storage_cap_bytes` (status) and `max_page_count *
+    page_size` (what SQLITE_FULL is judged on) must be the same number. Raising
+    the constant must not let them drift, so this pins both the literal interim
+    value and their agreement at it.
+    """
+    assert MAX_DB_BYTES == 128 * 1024 * 1024
+
+    store, _ = make_store(tmp_path)
+    with store.connection() as db:
+        _, page_size, cap, _ = store._page_budget(db)
+    assert page_size == CAP_PAGE_SIZE
+    assert cap == MAX_DB_BYTES // CAP_PAGE_SIZE
+
+    usage = store.inventory()
+    assert usage["storage_cap_bytes"] == cap * page_size == MAX_DB_BYTES
+    # The number the constant reports beside the enforced one, for a page-aligned
+    # value: nothing here may claim a cap SQLite does not apply.
+    assert usage["limits"]["storage_bytes"] == MAX_DB_BYTES
+
+
+def test_a_store_at_the_old_bound_gains_headroom_on_reopen_and_grows_to_the_new_one(
+    tmp_path, monkeypatch
+):
+    """No migration: the cap is per-connection, not a property of the file.
+
+    Modelled at 32 -> 64 pages (the same 2x step as 64 -> 128 MiB) so the whole
+    test costs kilobytes. The store is filled to the old bound first, where
+    status reports FULL, then reopened under the raised bound: the file must be
+    unchanged on open and no longer report FULL, and it must keep growing past
+    the old page count up to the new cap. The write assertion is deliberately a
+    real put, not one the old bound refused: a store at the page cap still
+    accepts writes that fit the intra-page slack, so refusal is not a property of
+    the page count alone.
+    """
+    old_cap_pages, new_cap_pages = 32, 64
+    monkeypatch.setattr(memory, "MAX_DB_BYTES", CAP_PAGE_SIZE * old_cap_pages)
+    store, _ = make_store(tmp_path)
+    with store.connection() as db:
+        db.commit()
+        fill_meta_to_page_cap(db)
+        assert db.execute("PRAGMA page_count").fetchone()[0] == old_cap_pages
+
+    # The pre-raise state the fleet was in: no free page and no headroom.
+    assert store.inventory()["storage_full"] is True
+
+    # Reopen under the raised bound: same file, no rewrite, new headroom.
+    monkeypatch.setattr(memory, "MAX_DB_BYTES", CAP_PAGE_SIZE * new_cap_pages)
+    with store.connection() as db:
+        db.commit()
+        pages, _, cap, _ = store._page_budget(db)
+        assert cap == new_cap_pages
+        assert pages == old_cap_pages
+    usage = store.inventory()
+    assert usage["storage_full"] is False
+    assert usage["storage_cap_bytes"] == new_cap_pages * CAP_PAGE_SIZE
+
+    # The real write path works at the old page count, and the store grows past
+    # the old bound towards the raised cap.
+    item = store.put("global", {"title": "Past the old bound", "body": "Accepted after the raise."})
+    assert item["status"] == "active"
+    with store.connection() as db:
+        db.commit()
+        fill_meta_to_page_cap(db, prefix="raised")
+        # 8 KiB rows can leave one page unallocated at the cap (measured: 63 of
+        # 64). Top up with small rows so the store sits exactly at the raised
+        # cap, which is the state the at-cap wording describes.
+        for index in range(200):
+            if db.execute("PRAGMA page_count").fetchone()[0] >= new_cap_pages:
+                break
+            try:
+                db.execute("INSERT INTO meta VALUES (?,?)", (f"topup-{index}", "y" * 512))
+                db.commit()
+            except sqlite3.OperationalError:
+                db.rollback()
+                break
+        fill = db.execute("PRAGMA page_count").fetchone()[0]
+        assert fill == new_cap_pages > old_cap_pages
+
+    # The store-full message still fires at the raised cap, naming its size.
+    with pytest.raises(MemoryError) as refused_at_new:
+        for index in range(200):
+            store.put(
+                "global",
+                {"title": f"After the raised cap {index}", "body": f"Needs a page {index}."},
+            )
+    message = str(refused_at_new.value)
+    assert "Memory store is full" in message and "has reached its" in message
+    assert human_bytes(new_cap_pages * CAP_PAGE_SIZE) in message
