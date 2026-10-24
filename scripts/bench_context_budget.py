@@ -1678,7 +1678,25 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # the alternative — keeping the floor by not saying them — is the defect the PR
 # exists to fix.
 # Ceiling = measured head + the 55 band (33,309 + 55).
-BUDGET_BILLED_TOKENS = 33_364
+#
+# RAISED 33,364 -> 33,466 for the TEAM BRIDGE surface after #2757 and #2760
+# merged: the threads lane added the ``channel_thread`` op and the
+# ``thread_root_id`` parameter, and the reactions lane added the ``react`` op
+# and its ``emoji``/``remove`` parameters. Measured by THIS script on one tree
+# with an isolated HOME, before and after trimming the tool's prose:
+#   before trim   92,912 chars = ~33,422 billed   FAIL, 58 over
+#   after trim    92,814 chars = ~33,386 billed   FAIL, 22 over
+#   budget        33,466 (measured head + 80 headroom)
+# The trim is real and model-facing: the bridge description loses the
+# repeated op roster (Pydantic publishes it in the schema anyway), the
+# thread-reply clause moves entirely to ``thread_root_id``'s own field note in
+# ``read tool://bridge``, and ``ChannelMemberParams``' docstring keeps its rule
+# in one shorter sentence. Ops are NOT removed: all five channel ops stay
+# discoverable with their parameter names.
+# What remains is unavoidably the two ops' schema surface; the 80-token margin
+# is deliberate — the brief's point was that landing at the measured number
+# would let the next small op tip it again.
+BUDGET_BILLED_TOKENS = 33_466
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1831,7 +1849,13 @@ BUDGET_BILLED_TOKENS = 33_364
 # so it is recorded as ``deferred — needs a third flag-pair state`` (SA-D2) and
 # not solved by a new flag here.
 # Ceiling = measured head + the 55 band (30,045 + 55).
-BUDGET_CHILD_BILLED_TOKENS = 30_100
+# RAISED 30,100 -> 30,203 with the top arm above, for the same Team Bridge
+# surface (#2757 threads + #2760 reactions): the child surface publishes the
+# bridge schema too, so it carries the same two ops. Measured on this tree with
+# the same trim applied:
+#   child head  83,741 chars = ~30,123 billed
+#   child budget 30,203 (measured head + 80 headroom, same margin as the top arm)
+BUDGET_CHILD_BILLED_TOKENS = 30_203
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
