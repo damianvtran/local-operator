@@ -242,3 +242,55 @@ def test_base64url_round_trip_without_padding() -> None:
     assert wire.unb64u(encoded) == payload
     # A peer that pads anyway is tolerated rather than refused.
     assert wire.unb64u(encoded + "==") == payload
+
+
+# ---------------------------------------------------------------------------
+# The member name: one rule, and it is the identity's own
+# ---------------------------------------------------------------------------
+
+
+def test_a_name_is_trimmed_and_stored_on_the_identity(root: Path) -> None:
+    """``set_name`` is the durable half of a rename: the file is what a restart,
+    a rotation and a rebuild re-read, so it is the value that must survive."""
+    minted = identity.mint(root, name="ip-172-31-18-0")
+    current, previous = identity.set_name("  build-box  ", root=root)
+    assert previous == "ip-172-31-18-0"
+    assert current.name == "build-box"
+    # READ BACK FROM DISK, not from the object: a rename that only moved memory
+    # would pass every surface until the next restart and then revert.
+    stored = identity.load(root)
+    assert stored is not None and stored.name == "build-box"
+    # The key is not part of a rename.
+    assert stored.device_id == minted.device_id
+    assert stored.public_key == minted.public_key
+
+
+@pytest.mark.parametrize(
+    ("raw", "why"),
+    [
+        ("", "empty"),
+        ("   ", "whitespace only"),
+        ("x" * (identity.MEMBER_NAME_MAX + 1), "one over the row budget"),
+        ("a#b", "the peer-token separator"),
+        ("tab\tbed", "a control character"),
+        ("line\u2028sep", "a line separator"),
+        ("d_" + "c" * 32, "a device id"),
+    ],
+)
+def test_a_name_rule_refuses_what_no_surface_can_render(raw: str, why: str) -> None:
+    """Every rejection carries a SENTENCE, because the caller is a person-facing
+    verb — and the cases are the ones that would break a listing or make an
+    argument ambiguous rather than merely look odd."""
+    with pytest.raises(ValueError) as excinfo:
+        identity.validate_member_name(raw)
+    assert str(excinfo.value).endswith((".", "?")) or ":" in str(excinfo.value), why
+
+
+def test_a_name_of_exactly_the_limit_is_accepted() -> None:
+    """The bound is inclusive, and it is the module constant rather than a literal
+    at the call site, so the parser's help and the rule cannot drift silently."""
+    assert identity.validate_member_name("x" * identity.MEMBER_NAME_MAX) == (
+        "x" * identity.MEMBER_NAME_MAX
+    )
+    # Unicode is stored unfolded: folding is a display decision, not a storage one.
+    assert identity.validate_member_name(" 项目-真 ") == "项目-真"

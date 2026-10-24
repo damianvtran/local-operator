@@ -849,3 +849,135 @@ def test_the_record_lock_is_not_held_across_the_epoch_rehandshake(
     assert not worker.is_alive(), "the epoch frame must be answered once the peer is back"
     assert reply["detail"]["applied"] is True
     assert audit_mod.events_logged(log).count("epoch_rotated") == 1
+
+
+# ---------------------------------------------------------------------------
+# A name after the join: Rule N1, and the row it belongs to
+# ---------------------------------------------------------------------------
+
+
+def _renamable(root: Path) -> tuple[Any, types.NetworkRecord]:
+    """A network whose own row belongs to a REAL minted identity.
+
+    ``relay.rename_self`` writes the identity file and then the row of the device it
+    names, so the record's ``self_device_id`` has to be that device's id — a
+    hand-typed one would silently rename nothing and pass a weaker test.
+    """
+    me = identity.mint(root, name="ip-172-31-18-0")
+    record = types.NetworkRecord(
+        network_id=NETWORK,
+        name="home-net",
+        epoch=1,
+        self_device_id=me.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    record.members.append(
+        types.MemberRecord(
+            device_id=me.device_id,
+            public_key=me.public_key,
+            name=me.name,
+            role="admin",
+            capabilities=sorted(types.capabilities_for_role("admin")),
+            added_via="self",
+        )
+    )
+    record.members.append(
+        types.MemberRecord(
+            device_id=PEER,
+            public_key=wire.b64u(b"b" * 32),
+            name="laptop",
+            role="drive",
+            capabilities=sorted(types.capabilities_for_role("drive")),
+            added_via="invite",
+        )
+    )
+    store.save(record, root)
+    return me, record
+
+
+def test_rename_self_moves_only_the_row_it_owns(root: Path) -> None:
+    """The write is scoped to the renaming device: a peer's name is that peer's
+    statement about itself, and a local edit of it would be overwritten on the
+    next pull (Rule N1) and would be a lie in the meantime."""
+    me, record = _renamable(root)
+    digest_before = relay.members_digest_of(record)
+    receipt = relay.rename_self("build-box", root=root)
+    assert receipt.device_id == me.device_id
+    assert receipt.previous == "ip-172-31-18-0"
+    assert receipt.name == "build-box"
+    assert receipt.networks == (NETWORK,)
+    after = next(row for row in store.list_networks(root) if row.network_id == NETWORK)
+    assert after.member(me.device_id).name == "build-box"
+    assert after.member(PEER).name == "laptop"
+    # THE DIGEST DOES NOT MOVE, and that is what makes a cosmetic rename safe: a
+    # digest that changed on a name would turn "did your list match mine" into a
+    # false mismatch, which is why ``members_digest_of`` excludes it by design.
+    assert relay.members_digest_of(after) == digest_before
+
+
+def test_rename_self_refuses_a_name_another_member_already_has(root: Path) -> None:
+    """The collision this design exists to stop is a WRITE mistarget, and the M1
+    finding on the resolver fix added the tombstone half: a row this device can
+    still be asked about holds its name even after it was removed."""
+    me, record = _renamable(root)
+    record.members.append(
+        types.MemberRecord(
+            device_id="d_" + "c" * 32,
+            public_key=wire.b64u(b"c" * 32),
+            name="removed-box",
+            lifecycle="expired",
+            removed_at=time.time(),
+        )
+    )
+    store.save(record, root)
+    with pytest.raises(types.MeshRefusal) as taken:
+        relay.rename_self("LAPTOP", root=root)  # case-folded: a display duplicate
+    assert taken.value.code == "name_taken"
+    assert PEER[:8] in taken.value.sentence
+    with pytest.raises(types.MeshRefusal) as tombstoned:
+        relay.rename_self("removed-box", root=root)
+    assert tombstoned.value.code == "name_taken"
+    # A name shaped like a REMOVED device's id is refused by the name rule itself,
+    # which is the blanket form of the same guard.
+    with pytest.raises(types.MeshRefusal) as as_id:
+        relay.rename_self("d_" + "c" * 32, root=root)
+    assert as_id.value.code == "invalid_device_name"
+    # Nothing moved: a refusal is not a partial write.
+    assert identity.load(root).name == "ip-172-31-18-0"
+
+
+def test_a_name_is_believed_only_from_the_device_it_names() -> None:
+    """Rule N1 at its own seam. The sender is the link's authenticated device id, so
+    the device's own row may move its name and a third party relaying the same row
+    may not — which is the whole reason no new wire op is needed."""
+    record, _state = _record()
+    _admit_peer(record)
+    own = record.member(PEER).to_json()
+    own["name"] = "build-box"
+    changed, added = relay.adopt_members(record, [own], sender_device_id=PEER)
+    assert (changed, added) == (True, [])
+    assert record.member(PEER).name == "build-box"
+    # A DIFFERENT device relays the same row with an invented name.
+    third_party = record.member(PEER).to_json()
+    third_party["name"] = "impostor"
+    changed, added = relay.adopt_members(record, [third_party], sender_device_id=SELF)
+    assert (changed, added) == (False, [])
+    assert record.member(PEER).name == "build-box"
+
+
+def test_a_rotation_frame_may_not_revert_a_rename() -> None:
+    """The other half of Rule N1: an epoch frame is a THIRD PARTY's table, and the
+    rotation statement it carries signs ids and the new key — never a name."""
+    record, _state = _record()
+    peer = _admit_peer(record)
+    peer.name = "build-box"
+    stale = peer.to_json()
+    stale["name"] = "laptop"  # the name this record admitted the device under
+    rows = [types.MemberRecord.from_json(stale)]
+    relay._keep_local_authority(record, rows)  # noqa: SLF001 — the rule's own seam
+    assert rows[0].name == "build-box"
+    # And the successor rule prefers the local name for a rotated row.
+    successor = types.MemberRecord.from_json(stale)
+    relay._take_over_standing(peer, successor)  # noqa: SLF001
+    assert successor.name == "build-box"

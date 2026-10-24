@@ -1369,11 +1369,21 @@ def _take_over_standing(local: MemberRecord, successor: MemberRecord) -> None:
     successor.last_seen_instance = local.last_seen_instance or successor.last_seen_instance
     successor.duplicate_count = max(local.duplicate_count, successor.duplicate_count)
     successor.suspect = local.suspect or successor.suspect
-    successor.name = successor.name or local.name
+    # THE LOCAL NAME WINS HERE, unlike a newcomer's row: a rotation statement signs
+    # ids and the new key, NOT a name, so the name in an adopted successor row is a
+    # third party's word about a device this record already knew. A rename is
+    # learned from the device itself (``adopt_members``), which is the only sender
+    # allowed to move it.
+    successor.name = local.name or successor.name
     successor.endpoints = list(successor.endpoints or local.endpoints)
 
 
-def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, list[str]]:
+def adopt_members(
+    record: NetworkRecord,
+    rows: Sequence[Any],
+    *,
+    sender_device_id: str = "",
+) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
     THE SAME TRUST DECISION THE JOIN ALREADY MAKES, made again where it is needed.
@@ -1391,6 +1401,13 @@ def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, lis
     * A row this device already holds keeps its LOCAL role, capabilities and
       public key. Authority is not something a peer gets to assert about a third
       device; the row's own declaration is the only thing a peer can relay.
+    * ONE EXCEPTION TO THAT, and it is a name: a row's ``name`` is applied from the
+      frame only when the frame's SENDER is the device that row names. A name is
+      the device's own statement about itself (design §3.1), the link's
+      authenticated ``device_id`` is what proves who said it, and no third party's
+      table may therefore rename anybody — including the rotating device, whose
+      statement signs ids and the new key only. Empty and identical names are
+      ignored, so this rule never erases a name and never marks a no-op changed.
     * A row this device does NOT hold is adopted as the frame carries it, exactly
       as an admission frame's rows are, because without it the member is invisible
       to every surface here — listings, dialling, and the authoriser that has to
@@ -1438,6 +1455,18 @@ def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, lis
         # itself, and the row it lands on is the only place `_ensure_link` dials.
         if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
             existing.endpoints = list(incoming.endpoints)
+            changed = True
+        # RULE N1 (naming design §3.3): the name is applied only from the device the
+        # row NAMES. ``sender_device_id`` is the link's authenticated peer id, so no
+        # signature or wire op is needed for a cosmetic label — and a third device,
+        # including one relaying somebody else's table, cannot rename a device here.
+        if (
+            sender_device_id
+            and incoming.device_id == sender_device_id
+            and incoming.name
+            and incoming.name != existing.name
+        ):
+            existing.name = incoming.name
             changed = True
         # THE SAME RETIREMENT RUNS HERE, against the row this record already holds as
         # the successor: a record that learned the rotated row before it had the
@@ -1907,17 +1936,145 @@ def set_member_capabilities(
     )
 
 
+@dataclass(frozen=True)
+class RenameReceipt:
+    """What ``rename_self`` changed, for the receipt and the relay's own memory."""
+
+    device_id: str
+    name: str
+    previous: str
+    networks: tuple[str, ...]
+
+
+def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
+    """Rename THIS device: the identity file, then its row in every network.
+
+    THE ONLY WRITER OF A NAME AFTER ADMISSION, and it is scoped to the device's
+    OWN rows — no argument can name a peer. That is a correctness rule before it is
+    a security one: a peer's row is believed only from that peer
+    (:func:`adopt_members`'s acceptance rule), so a locally invented label for
+    somebody else would be overwritten on the next pull and would be a lie in the
+    meantime.
+
+    ORDER IS THE FAIL-SAFE ONE: validation and the collision guard run BEFORE any
+    write, so a refused rename has changed nothing. Then the identity file (0600,
+    staged) is written first and the rows second, because the identity is what a
+    rebuild re-reads — a row that moved while the file did not would be undone by
+    the next admission.
+
+    THE COLLISION GUARD IS A LOCAL POLICY, NOT A MESH-WIDE ONE. It refuses a name
+    already carried by a DIFFERENT row this device holds, tombstones included: a
+    removed device's name or id staying visible is exactly what makes a later
+    ``_resolve_device`` query answer the wrong device (the deferred M1 finding on
+    PR #2869). It cannot promise the mesh has no duplicate — a joiner still picks
+    its own name from its own identity, which this device cannot refuse — so a
+    duplicate arriving over the wire converges as two rows sharing a name, and
+    resolution stays by id. That is the warning-versus-refusal line: THIS command
+    refuses to create a duplicate it can see; it does not claim names are unique.
+
+    Callers hold no lock: the identity write is its own file, and each record is
+    read and saved inside ``store.mutate`` so a live relay's writers are not
+    reverted by a snapshot.
+    """
+    from local_operator.network import identity as identity_mod
+    from local_operator.network import store
+
+    try:
+        fresh = identity_mod.validate_member_name(name)
+    except ValueError as exc:
+        raise MeshRefusal("invalid_device_name", str(exc)) from exc
+
+    current = identity_mod.load(root)
+    if current is None:
+        raise MeshRefusal(
+            "identity_missing",
+            "this device has no mesh identity yet; create a network here first",
+        )
+    # THE WHOLE ROW SET, not ``active_members()``: a tombstoned row is still a name
+    # this device can be asked about, and its id still burns.
+    taken: list[tuple[str, str]] = []
+    for listed in store.list_networks(root):
+        if listed.self_device_id != current.device_id:
+            continue
+        for row in listed.members:
+            if str(row.device_id) == current.device_id:
+                continue
+            if str(row.name or "").casefold() == fresh.casefold():
+                taken.append((str(listed.name or listed.network_id), str(row.device_id)))
+    if taken:
+        network, device = taken[0]
+        raise MeshRefusal(
+            "name_taken",
+            f"{fresh!r} is already the name of {device[:8]} in {network}; pick another name — a "
+            "name is each device's own statement about itself, so the other device has to "
+            "be renamed from itself",
+        )
+
+    # The identity write is the primitive's (0600, staged, validated again there —
+    # one rule, one implementation), and it returns the name it replaced.
+    _, previous = identity_mod.set_name(fresh, root=root)
+
+    updated: list[str] = []
+    for listed in store.list_networks(root):
+        if listed.self_device_id != current.device_id:
+            continue
+        try:
+            with store.mutate(listed.network_id, root) as record:
+                row = record.member(current.device_id)
+                if row is None or row.name == fresh:
+                    continue
+                row.name = fresh
+                store.save(record, root)
+                updated.append(record.network_id)
+        except FileNotFoundError:
+            # A network forgotten between the listing and this write is not a reason
+            # to abandon the rest of them (the rotation path's rule).
+            continue
+
+    # THE AUDIT RECORD IS BESIDE THE WRITE, not a second source of truth: the rows
+    # and the identity file are the record, and ``AuditLog.record`` never raises, so
+    # this cannot turn a successful rename into a reported failure. ``root`` is
+    # passed through because the relay may be serving a non-ambient store.
+    from local_operator.network.audit import AuditEvent, AuditLog
+
+    log = AuditLog(root)
+    log.record(
+        AuditEvent(
+            event="device_renamed",
+            actor=current.device_id,
+            subject=current.device_id,
+            actor_kind="device",
+            detail={"previous": previous, "name": fresh, "networks": updated},
+        )
+    )
+    log.close()
+
+    return RenameReceipt(
+        device_id=current.device_id,
+        name=fresh,
+        previous=previous,
+        networks=tuple(updated),
+    )
+
+
 def _keep_local_authority(record: NetworkRecord, rows: list[MemberRecord]) -> None:
-    """Give each incoming row this device already holds its LOCAL role and set.
+    """Give each incoming row this device already holds its LOCAL role, set and name.
 
     A row this device does not hold yet (a member admitted elsewhere) is taken as
     the frame carries it, exactly as ``adopt_members`` does.
+
+    ``name`` IS PRESERVED HERE TOO, and that is the half of the rule that keeps a
+    ROTATION from reverting a rename: an epoch frame is a THIRD PARTY's table, and
+    the rotation statement it carries signs ids and the new public key, never a
+    name. A name update is believed only from the device the row names
+    (:func:`adopt_members`), so this path may add a row but may not rename one.
     """
     for row in rows:
         local = next((m for m in record.members if m.device_id == row.device_id), None)
         if local is not None and local.active:
             row.role = local.role
             row.capabilities = list(local.capabilities)
+            row.name = local.name or row.name
 
 
 def capability_change_lines(change: CapabilityChange, *, network_name: str) -> list[str]:
@@ -5184,7 +5341,7 @@ class RelayServer:
         # be merged away — reverted on disk, with the higher sequence ``save``
         # stamps hiding it.
         with store.mutate(listed.network_id, self.root) as record:
-            changed, added = adopt_members(record, rows)
+            changed, added = adopt_members(record, rows, sender_device_id=link.device_id)
             link.member_pull_added = list(added)
             if not changed:
                 return ""
@@ -11273,6 +11430,7 @@ class RelayServer:
             # this order makes the core table win even if that check were lost.
             **self._local_slice_handlers,
             "net_member_caps": self._ctl_member_caps,
+            "net_identity_name": self._ctl_identity_name,
             # THE ONE FIELD THIS OP READS: `refresh` asks the relay for a fresh
             # table pass before it reports — the operator-facing `status` read
             # (`RelayServer.status`). Health probes send nothing and wait for no
@@ -11485,6 +11643,26 @@ class RelayServer:
             "removed": list(change.removed),
             "capabilities": list(change.capabilities),
             "changed": change.changed,
+        }
+
+    def _ctl_identity_name(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """``lop network identity set-name``: rename THIS device, durably.
+
+        THE RELAY PATH IS NOT POLISH. Every ``identity.name`` reader INSIDE this
+        process reads ``self.identity`` — ``status``'s device name, the peer record
+        published under ``run/peers``, the unattended remedy's sentence — so a
+        file-only write would leave the surfaces this relay answers showing the old
+        name until a restart, while ``identity show`` (which reads the file) showed
+        the new one. :func:`rename_self` writes the file and the rows; this handler
+        is what makes the running process agree with them.
+        """
+        receipt = rename_self(str(frame.get("name") or ""), root=self.root)
+        self.identity.name = receipt.name
+        return {
+            "device_id": receipt.device_id,
+            "name": receipt.name,
+            "previous": receipt.previous,
+            "networks": list(receipt.networks),
         }
 
     def _ctl_trust(self, frame: dict[str, Any]) -> dict[str, Any]:
