@@ -535,13 +535,19 @@ async def test_enroll_default_on_body_never_carries_consented_via(tmp_path: Path
 
 
 def _remove_enabled_key(root: Path) -> None:
-    """Delete ``team_bridge.enabled`` from the real document, keeping siblings."""
+    """Delete ``team_bridge.enabled`` from the real document, keeping siblings.
+
+    ``settings_io._delete`` rather than a rebuilt section: the config writer
+    copies every disk value the payload does not model straight back, so a
+    delete that is not DECLARED is undone by the very write that performs it
+    (``drop=`` in ``ConfigManager._write_config`` is the only removal path).
+    This is main's rule for every settings write; the helper predates it.
+    """
+
+    from local_operator import settings_io
     from local_operator.config import ConfigManager
 
-    manager = ConfigManager(root)
-    section = dict(manager.get_config_value("team_bridge", {}) or {})
-    section.pop("enabled", None)
-    manager.set_config_value("team_bridge", section)
+    settings_io._delete(ConfigManager(root), ("team_bridge", "enabled"))
 
 
 # -- M1: an explicit OFF landing DURING the enrolment round trip wins ----------
