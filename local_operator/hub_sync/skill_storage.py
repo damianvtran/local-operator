@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -47,6 +48,64 @@ logger = logging.getLogger(__name__)
 
 #: The exact tombstone suffix unpull mints: ``uuid.uuid4().hex``.
 _UNPULL_OPERATION = re.compile(r"^[a-f0-9]{32}$")
+
+#: A staged file with no local predecessor lands owner-readable and never
+#: executable: the document carrier has no mode on the wire, so a fresh install
+#: (or a path the remote just added) has no local choice to preserve and must
+#: stay inert.
+_DEFAULT_FILE_MODE = 0o644
+
+#: Group/other WRITE never rides a stage. Those bits are a property of the source
+#: checkout's umask, not a decision about content the store now serves to several
+#: harness roots; a file any local account can rewrite is a supply-chain footgun
+#: even on a single-user machine.
+_STRIPPED_FILE_BITS = 0o022
+
+
+def _sanitise_staged_mode(st_mode: int) -> int:
+    """The permission bits a stored file may carry, from a source's raw ``st_mode``.
+
+    ``S_IMODE`` keeps ``0o7777``, so ``& 0o777`` is what drops setuid, setgid and
+    sticky: executing a stored skill must never change the identity the process
+    runs as. Group/other write then goes for the reasons in the constants above.
+    """
+
+    return stat.S_IMODE(st_mode) & 0o777 & ~_STRIPPED_FILE_BITS
+
+
+def _staged_file_mode(source: Path) -> int:
+    """The mode a staged file inherits from the local file it replaces.
+
+    WHY the source, not a constant ``0600``: the store's DIRECTORY is the privacy
+    boundary. The root, every staging directory and every alias directory are
+    ``0700``, so only the owner can traverse them; a per-file ``0600`` therefore
+    adds no confidentiality on this machine while costing exactly the two things
+    the store now needs:
+
+    * **executability** -- harness skill roots are symlinked at these files, so a
+      user's ``0755`` ``scripts/doctor.sh`` that lands ``0600`` cannot run at all;
+    * **cross-tool readability** -- several harnesses read the same file as the
+      owner, and the tighter per-file bit can only refuse them.
+
+    The source is the file at the same relative path in the destination alias
+    BEFORE the swap -- the local copy this document replaces. A path with no
+    predecessor (a fresh install, or a remote-added file) has no local mode to
+    preserve and lands ``_DEFAULT_FILE_MODE``, so remote content is never
+    executable merely because it arrived.
+
+    Sanitised by :func:`_sanitise_staged_mode`: setuid, setgid and sticky never
+    travel, and group/other write is stripped. A source that cannot be statted,
+    or is not a regular file, falls back to the default rather than propagating
+    an unreadable mode.
+    """
+
+    try:
+        info = os.stat(source, follow_symlinks=False)
+    except OSError:
+        return _DEFAULT_FILE_MODE
+    if not stat.S_ISREG(info.st_mode):
+        return _DEFAULT_FILE_MODE
+    return _sanitise_staged_mode(info.st_mode)
 
 
 @dataclass(frozen=True)
@@ -139,16 +198,24 @@ class ManagedSkillStorage:
             if directory.is_symlink():
                 raise LinkError("skill-validation", "managed skill staging is unsafe")
             directory.mkdir(mode=0o700, exist_ok=True)
+        # The PREVIOUS local copy is the source of each file's mode. Validate the
+        # payload value on the same boundary the commit uses (Any -> checked
+        # kebab-case name) and let ``path`` keep its own symlink refusal.
+        previous = self.path(validate_name(record.payload.get("local_alias")))
         for file in document.files:
             target = content / file.path
             parent = content
             for component in Path(file.path).parts[:-1]:
                 parent = parent / component
                 parent.mkdir(mode=0o700, exist_ok=True)
+            # Create private, then widen: the file never exists under a broader
+            # mode than the one it ends up with, and the chmod lands BEFORE the
+            # fsync so the mode is as durable as the bytes it belongs to.
             fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(file.content.encode("utf-8"))
                 stream.flush()
+                os.chmod(target, _staged_file_mode(previous / file.path))
                 os.fsync(stream.fileno())
         for directory, _children, _files in os.walk(content, topdown=False):
             _sync_directory(Path(directory))
