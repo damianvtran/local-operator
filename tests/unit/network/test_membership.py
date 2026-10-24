@@ -947,7 +947,9 @@ def test_rename_self_refuses_a_name_another_member_already_has(root: Path) -> No
         relay.rename_self("d_" + "c" * 32, root=root)
     assert as_id.value.code == "invalid_device_name"
     # Nothing moved: a refusal is not a partial write.
-    assert identity.load(root).name == "ip-172-31-18-0"
+    loaded = identity.load(root)
+    assert loaded is not None
+    assert loaded.name == "ip-172-31-18-0"
 
 
 def test_a_name_is_believed_only_from_the_device_it_names() -> None:
@@ -1076,7 +1078,9 @@ def test_a_row_write_that_fails_is_reported_as_a_partial_rename(
     # THE HALF THAT DID LAND IS REAL, and that is exactly why it must be reported:
     # the identity file already carries the new name.
     monkeypatch.setattr(store, "mutate", real_mutate)
-    assert identity.load(root).name == "build-box"
+    loaded = identity.load(root)
+    assert loaded is not None
+    assert loaded.name == "build-box"
     reread = next(row for row in store.list_networks(root) if row.network_id == second.network_id)
     reread_row = reread.member(me.device_id)
     assert reread_row is not None
