@@ -259,9 +259,9 @@ function SlashSheet({
 							}
 							onClose();
 						}}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
-						<span className="shrink-0 font-mono text-mono-sm text-ink">
+						<span dir="ltr" className="shrink-0 font-mono text-mono-sm text-ink">
 							/{c.name}
 							{c.arguments === "required" ? (
 								<span className="text-ink-dim"> …</span>
@@ -313,7 +313,7 @@ function EffortSheet({
 						key={rung}
 						type="button"
 						onClick={() => set(rung)}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -464,7 +464,7 @@ export function ComposerFrame() {
 				   empty with `Message…`, the send disc `bg-sunken`
 				   /`text-ink-disabled`. Design review round 1 (D1) measured the gap
 				   this closes: the reserve read as "ring + outline" with the
-				   right-hand control invisible (the sunken disc sits at 1.05:1
+				   end-hand control invisible (the sunken disc sits at 1.05:1
 				   against the canvas) and then three glyphs and a placeholder
 				   popped in at the reveal. */}
 				<span

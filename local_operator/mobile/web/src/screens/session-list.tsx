@@ -134,7 +134,7 @@ function subagentNoun(n: number): string {
     and the exact figure is one tap away in the session view's roster header. */
 const COUNT_CAP = 99;
 
-/** The right-cluster chip for a session's delegated children.
+/** The end-cluster chip for a session's delegated children.
 
     IT COUNTS `running + queued` BY DESIGN, which is deliberately NOT how the
     catalogue label counts: `CatalogEntry.status` prints `2 subagents running ·
@@ -159,7 +159,7 @@ function delegatedChip(children: number): string {
 	return `${shown} ${subagentNoun(children)}`;
 }
 
-/** The right-cluster word `new`. It lingers through a 120ms opacity fade when
+/** The end-cluster word `new`. It lingers through a 120ms opacity fade when
     the mark clears (session opened) instead of blinking out — but it MUST
     unmount once the fade lands: an opacity-0 `shrink-0` span would keep
     pushing the `N agents` / `N todo` chips rightward forever. The fade is a
@@ -340,7 +340,7 @@ function SessionCard({
 			onPointerUp={cancelPress}
 			onPointerLeave={cancelPress}
 			onPointerCancel={cancelPress}
-			/* THE SAME REQUEST, WITHOUT A POINTER. A right-click and the platform's
+			/* THE SAME REQUEST, WITHOUT A POINTER. A end-click and the platform's
 			   long-press context menu both mean "actions for this row", so they open
 			   the sheet instead of being swallowed. */
 			onContextMenu={(event) => {
@@ -369,7 +369,7 @@ function SessionCard({
 				}
 				navigate(`/s/${encodeURIComponent(s.session_id)}`);
 			}}
-			className="flex min-h-11 w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
+			className="flex min-h-11 w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-start select-none active:bg-elevated"
 		>
 			<div className="flex items-center gap-2">
 				{/* ONE reserved indicator slot serving every state, so every title
@@ -606,7 +606,7 @@ function SessionCard({
 			    blank second line had. A tagged row grows by exactly one line. */}
 			<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} />
 			<div className="flex items-baseline gap-2">
-				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
+				<span dir="ltr" className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
 					{cwdText}
 					{/* D1 (round-1 design review): a second line with NOTHING on it
 					    rendered 44.00px against its neighbours' 50.89px — a 6.89px
@@ -624,7 +624,7 @@ function SessionCard({
 				    touch (a row drag is a tap), and `main` itself became horizontally
 				    scrollable. `min-w-0 truncate` lets both spans share the row; the
 				    row can never exceed it. */}
-				<span className="ml-auto min-w-0 truncate font-mono text-mono-sm text-ink-dim">
+				<span dir="ltr" className="ms-auto min-w-0 truncate font-mono text-mono-sm text-ink-dim">
 					{s.model_label}
 				</span>
 			</div>
@@ -659,7 +659,7 @@ function ThemePicker({
 							applyTheme(t.id);
 							setCurrent(t.id);
 						}}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -1529,7 +1529,7 @@ export function SessionListScreen() {
 					local operator
 				</h1>
 				<button type="button" onClick={() => navigate("/settings/account-routing")}
-					className="ml-auto min-h-11 shrink-0 rounded-md border border-control px-3 text-body-sm text-ink-muted"
+					className="ms-auto min-h-11 shrink-0 rounded-md border border-control px-3 text-body-sm text-ink-muted"
 					aria-label={messageRuntime.t("relay.account_policy.title")}>
 					{messageRuntime.t("relay.account_policy.entry")}
 				</button>
@@ -1540,7 +1540,7 @@ export function SessionListScreen() {
 				    in its placeholder — and it clears itself the moment a frame
 				    lands, because `connected` flips back on the SSE's own open. */}
 				{sessions.length > 0 && !connected ? (
-					<span role="status" className="ml-auto shrink-0 text-meta text-ink-dim">
+					<span role="status" className="ms-auto shrink-0 text-meta text-ink-dim">
 						reconnecting…
 					</span>
 				) : null}
@@ -1912,7 +1912,7 @@ export function SessionListScreen() {
 						onClick={() =>
 							pinRow && void togglePin(pinRow.session_id, !pinConfirmed)
 						}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface disabled:opacity-50"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start text-body active:bg-surface disabled:opacity-50"
 					>
 						<span className="w-4 shrink-0 text-accent" aria-hidden>
 							★
@@ -1946,7 +1946,7 @@ export function SessionListScreen() {
 								setPinTarget(null);
 								setTagsTarget(pinRow.session_id);
 							}}
-							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface"
+							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start text-body active:bg-surface"
 						>
 							<span className="w-4 shrink-0 text-accent" aria-hidden>
 								#

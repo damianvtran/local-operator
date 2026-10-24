@@ -51,11 +51,11 @@ describe("SessionStatus", () => {
 		const spend = container.querySelector('[data-testid="session-status-spend"]');
 		expect(context?.textContent).toBe("6.2%/200k");
 		expect(spend?.textContent).toBe("$1.25");
-		// `ml-auto` sits on the SECOND cell, so each keeps a fixed edge and a
+		// `ms-auto` sits on the SECOND cell, so each keeps a fixed edge and a
 		// lone reading neither reflows nor floats: context hugs the left,
 		// spend the right — the single-cell states mirror the pair.
-		expect(spend?.className).toContain("ml-auto");
-		expect(context?.className).not.toContain("ml-auto");
+		expect(spend?.className).toContain("ms-auto");
+		expect(context?.className).not.toContain("ms-auto");
 
 		const contextOnly = render(
 			<SessionStatus projection={projection({ cumulative_parent_cost: null })} />,
@@ -64,12 +64,12 @@ describe("SessionStatus", () => {
 			'[data-testid="session-status-context"]',
 		);
 		expect(loneContext?.textContent).toBe("6.2%/200k");
-		expect(loneContext?.className).not.toContain("ml-auto");
+		expect(loneContext?.className).not.toContain("ms-auto");
 
 		const spendOnly = render(<SessionStatus projection={projection({ context_tokens: null })} />);
 		const loneSpend = spendOnly.container.querySelector('[data-testid="session-status-spend"]');
 		expect(loneSpend?.textContent).toBe("$1.25");
-		expect(loneSpend?.className).toContain("ml-auto");
+		expect(loneSpend?.className).toContain("ms-auto");
 	});
 
 	it("marks a lower-bound spend with the band's \u2265", () => {

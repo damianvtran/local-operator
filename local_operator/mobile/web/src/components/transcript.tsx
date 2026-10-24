@@ -135,7 +135,7 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			const images = entry.images ?? [];
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline border-s-2 border-s-accent bg-surface px-3 py-1.5">
 						{/* Attachments render inline like the TUI's image block: the
 						   picture the user sent is part of the turn, not a stripped
 						   "[image attached]" note. AttachmentImage owns the loading
@@ -178,16 +178,16 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			// The child launch/user task also uses this kind during loading/error.
 			// Without producer facts it is a visible request boundary, not hub traffic.
 			if (!isHubReceipt(entry)) return entry.kind === "parent_message" ? (
-				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
+				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md border border-hairline border-s-2 border-s-accent bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
 			) : (
-				<div className="min-w-0 rounded-sm border-l-2 border-l-hairline pl-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
+				<div className="min-w-0 rounded-sm border-s-2 border-s-hairline ps-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
 			);
-			// A receipt is internal traffic, not a right-aligned human turn. Reuse
+			// A receipt is internal traffic, not a end-aligned human turn. Reuse
 			// the existing disclosure so the full body remains reachable on demand.
 			const label = hubReceiptLabel(entry);
 			const intent = [entry.details?.expects_reply === true ? "Reply requested" : "", entry.details?.steer === true ? "Steered" : ""].filter(Boolean);
 			return <Disclosure header={<span className="text-meta text-ink-dim">Hub · From {label}{intent.length ? ` · ${intent.join(" · ")}` : ""}</span>}>
-				<div className="flex flex-col gap-2 pl-3">
+				<div className="flex flex-col gap-2 ps-3">
 					<p className="text-meta text-ink-muted">{label}{entry.details?.direction ? ` · ${entry.details.direction}` : ""}{entry.details?.job_id && entry.details?.label ? ` · Job ${entry.details.job_id}` : ""}</p>
 					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{typeof entry.details?.body === "string" ? entry.details.body : entry.text}</p>
 					{media}
@@ -207,7 +207,7 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			if (sender.model_label) parts.push(sender.model_label);
 			const label = parts.length > 0 ? parts.join(" · ") : "Peer session";
 			return (
-				<div className="min-w-0 rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+				<div className="min-w-0 rounded-md border border-hairline border-s-2 border-s-accent bg-surface px-3 py-1.5">
 					<span className="block text-meta text-ink-dim">↔ {label}</span>
 					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
 				</div>
