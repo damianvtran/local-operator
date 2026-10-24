@@ -27650,7 +27650,8 @@ class OperatorApp(App[None]):
         self._ask_rows = list(rows)
         # A session-scope `x` holds its row in flight until the row stops being a
         # thing the gesture can act on: ABSENT from this frame (the old sweep —
-        # the row left the queue), or PRESENT and SETTLED (SA-D8).
+        # the row left the queue), or PRESENT, SETTLED and NOT LAPSED (SA-D8) —
+        # `present[i].settled and present[i].status != STATUS_TIMED_OUT` below.
         # The second arm is load-bearing now: a dismissal taken before the ask's
         # deadline KEEPS its row as a settled receipt (§17), so waiting for the
         # frame to drop it means the `…` mark never goes away — a busy glyph on
