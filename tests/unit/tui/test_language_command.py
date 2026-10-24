@@ -115,7 +115,7 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
             assert cell_len(text) <= 70, text
         # Hindi expands the option list for every locale, so keep the 70-cell
         # gate across all accepted values, including auto's resolved receipt.
-        for value in ("en", "fr", "es", "ru", "vi", "hi", "auto"):
+        for value in ("en", "fr", "es", "ru", "vi", "ur", "hi", "auto"):
             app._run_slash_command(f"/language {value}")
             await pilot.pause()
             app._run_slash_command("/language")
@@ -220,7 +220,7 @@ async def test_unknown_and_unshipped_values_are_refused_with_the_option_list(
         for value in ("klingon", "zh-CN"):
             app._run_slash_command(f"/language {value}")
             await pilot.pause()
-            receipt = f"unknown language '{value}' — /language lists the values"
+            receipt = f"unknown language '{value}' — press space to list values"
             assert receipt in _notices(app), _notices(app)
             assert _stored(config_dir) is None
         for text in _language_notices(app):

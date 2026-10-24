@@ -9812,9 +9812,12 @@ class ServingSessionHandle(SessionHandle):
         if not wanted:
             return SlashResult(
                 kind="notice",
+                # The phone sheet has no argument picker, so this client DOES
+                # enumerate the value space; the terminal receipt (which has
+                # the space picker) does not, for its 70-cell notice row.
                 text=(
                     f"language: {resolved} ({language_name(resolved)}) — "
-                    "/language <value>; space browses"
+                    f"{', '.join(options)}"
                 ),
                 style="info",
             )
@@ -9828,7 +9831,11 @@ class ServingSessionHandle(SessionHandle):
             # unaudited locale keys no catalogue and would render codes.
             return SlashResult(
                 kind="notice",
-                text=f"unknown language {wanted!r} — /language lists the values",
+                text=(
+                    f"unknown language "
+                    f"{(wanted if len(wanted) <= 20 else wanted[:20] + '…')!r} — "
+                    f"available: {', '.join(options)}"
+                ),
                 style="warning",
             )
         stored = config_value()
