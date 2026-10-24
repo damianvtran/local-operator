@@ -2325,6 +2325,7 @@ def _mcp_credential_row(
     evidence_owner = str(evidence.get("owner_device") or "")
     owner_evidence_is_newer = True
     if local_unavailable:
+        assert isinstance(diagnostics, Mapping)  # narrowed by local_unavailable
         from local_operator.network.credentials.types import peer_number
 
         # A local grant is the runtime's first rung. Only a refusal observed
