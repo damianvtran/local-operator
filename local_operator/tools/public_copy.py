@@ -220,6 +220,15 @@ def _origin_identity(url: str) -> str:
     return "/".join(parts[-2:]).lower()
 
 
+#: The audit log's open flags.  ``O_NONBLOCK`` is for the FIFO case: with
+#: ``O_WRONLY`` and no reader the open returns ``ENXIO`` instead of blocking, so
+#: a FIFO planted at the path is a refusal rather than a hung tool call (review
+#: S-8 measured the blocking open past 6 s).  Regular files ignore the flag.
+#: Windows has no FIFO at a filesystem path and no ``O_NONBLOCK``, so it
+#: resolves to 0 there.
+_AUDIT_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NONBLOCK", 0)
+
+
 def _audit_path() -> Path:
     """The audit log this process appends to.
 
@@ -240,25 +249,28 @@ def _open_audit_log(audit_dir: Path) -> int:
     records, and an existing permissive file stayed permissive.
 
     POSIX opens the directory itself with ``O_DIRECTORY | O_NOFOLLOW``, pins the
-    file to that directory with ``dir_fd`` and ``O_NOFOLLOW``, requires a regular
-    file and enforces mode ``0600`` on the open inode (``fchmod`` on the pinned
-    object, not a path lookup).  Windows has neither flag, so it refuses the two
-    link cases by ``lstat`` and checks the opened handle; ACLs replace the mode
-    check there.  Any failure raises and the caller refuses the read.
+    file to that directory with ``dir_fd``, ``O_NOFOLLOW`` and ``O_NONBLOCK``,
+    requires a regular file and enforces mode ``0600`` on the open inode
+    (``fchmod`` on the pinned object, not a path lookup).  ``O_NONBLOCK`` makes
+    a FIFO at the log path fail the open (``ENXIO``) instead of blocking it
+    before the regular-file check (review S-8).  Windows has no such flags, so
+    it refuses the two link cases by ``lstat`` and checks the opened handle;
+    ACLs replace the mode check there.  Any failure raises and the caller
+    refuses the read.
     """
     audit_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = audit_dir / _AUDIT_FILENAME
     if os.name == "nt":
         if audit_dir.is_symlink() or path.is_symlink():
             raise OSError(f"{path} is reached through a symlink")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(path, _AUDIT_OPEN_FLAGS, 0o600)
     else:
         dir_fd = os.open(audit_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             os.fchmod(dir_fd, 0o700)
             fd = os.open(
                 _AUDIT_FILENAME,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                _AUDIT_OPEN_FLAGS | os.O_NOFOLLOW,
                 0o600,
                 dir_fd=dir_fd,
             )

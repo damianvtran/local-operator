@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -805,3 +806,52 @@ async def test_an_existing_permissive_audit_log_is_tightened(
     assert os.stat(log).st_mode & 0o777 == 0o600
     assert os.stat(audit).st_mode & 0o777 == 0o700
     assert len(log.read_text().splitlines()) == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
+def test_a_fifo_at_the_audit_path_refuses_without_blocking(
+    tmp_path: Path,
+) -> None:
+    """S-8: a FIFO at the log path must fail the open, not block it.
+
+    The open runs in a worker thread, so a regression would hang the pytest
+    worker with no way for the test to fail.  Run the real tool in a child
+    process instead: ``subprocess.run(timeout=…)`` kills it and reports a
+    failure if the open blocks again.  Without ``O_NONBLOCK`` the measured
+    behaviour was no return within 6 s.
+    """
+    root = _public_repo(tmp_path)
+    audit = tmp_path / "config" / "audit"
+    audit.mkdir(parents=True)
+    os.mkfifo(audit / "public-copy-reads.jsonl")
+    script = (
+        "import asyncio, sys\n"
+        "from local_operator.harness.types import ToolContext\n"
+        "from local_operator.tools.public_copy import execute_read_public_copy\n"
+        "ctx = ToolContext(cwd=sys.argv[1], session_dir=sys.argv[2])\n"
+        "r = asyncio.run(execute_read_public_copy(sys.argv[3], {\n"
+        "    'path': 'local_operator/i18n/catalogues/en/wire.slash.json',\n"
+        "    'key': 'wire.slash.credential',\n"
+        "}, None, None, ctx))\n"
+        "print('REFUSED' if r.is_error else 'SERVED')\n"
+        "print(r.text)\n"
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(root),
+            str(tmp_path / "sessions" / "abc123"),
+            "call-s8-1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=dict(os.environ, LOCAL_OPERATOR_CONFIG_DIR=str(tmp_path / "config")),
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "REFUSED" in proc.stdout
+    assert "audit record could not be written" in proc.stdout
+    assert "Type or paste a secret" not in proc.stdout
