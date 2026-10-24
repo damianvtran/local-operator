@@ -1323,14 +1323,26 @@ class Store:
                 "schema_damaged",
                 f"body_reservations primary key is {sorted(pk_columns)}",
             )
+        # A unique index may only be STRONGER than the primary key. The PK's
+        # own autoindex has exactly the PK columns; anything narrower — a
+        # single identity column, or UNIQUE(owner_key, conversation_id) — makes
+        # a second legitimate row impossible and surfaces later as a raw
+        # IntegrityError from a normal record call (M1 residual / M5). A unique
+        # on a non-key column (body_sha256, state) is the same defect.
+        required = {"owner_key", "conversation_id", "message_id"}
         for index in conn.execute("PRAGMA index_list(body_reservations)"):
-            if not index[3]:
+            # PRAGMA index_list rows are (seq, name, unique, origin, partial):
+            # the second flag is ORIGIN ("pk"/"u"/"c"), not uniqueness. Reading
+            # the wrong slot made every index look unique and refused this
+            # store's own non-unique eligibility index.
+            if not index[2]:
                 continue
-            parts = tuple(part[2] for part in conn.execute(f"PRAGMA index_info({index[1]})"))
-            if parts in (("owner_key",), ("conversation_id",), ("message_id",)):
+            parts = {part[2] for part in conn.execute(f"PRAGMA index_info({index[1]})")}
+            if not required <= parts:
                 raise StoreRefused(
                     "schema_damaged",
-                    "body_reservations carries a single-column UNIQUE",
+                    f"body_reservations unique index {index[1]} covers {sorted(parts)}, "
+                    "which cannot hold more than one row per message",
                 )
 
     @staticmethod
@@ -2191,7 +2203,10 @@ class Store:
         """Extend THIS turn's claim. False means the claim was lost."""
 
         self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
-        self._reservation_field("turn_token", turn_token, _SESSION_TOKEN)
+        # ONE grammar, shared with claim: a token the store accepted must
+        # also be renewable, or a colon-bearing connector token is written
+        # and then never extendable (M4).
+        self._reservation_field("turn_token", turn_token, _CLAIM_TOKEN)
 
         with self._connect() as conn:
             self._init(conn)

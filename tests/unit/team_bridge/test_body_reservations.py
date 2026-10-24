@@ -334,6 +334,99 @@ def test_a_column_complete_table_with_the_wrong_key_shape_refuses(tmp_path, shap
     assert refused.value.code == "schema_damaged"
 
 
+def test_a_colon_bearing_token_can_be_claimed_and_then_renewed(tmp_path) -> None:
+    """M4: one grammar on both sides — a token the store accepts renews."""
+
+    store = _token_probe(tmp_path)
+    now = time.time()
+    token = "connector:0f9c2b1e-7a44-4f3e-9d51-6b7c8a9d0e11"
+
+    assert store.claim_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token=token,
+        turn_token=token,
+        now=now,
+        ttl=300,
+    )
+    assert store.renew_body_claim(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token=token,
+        turn_token=token,
+        now=now + 5,
+        ttl=300,
+    )
+
+
+@pytest.mark.parametrize(
+    "unique_clause",
+    [
+        "UNIQUE (owner_key, conversation_id)",
+        "UNIQUE (body_sha256)",
+        "UNIQUE (state)",
+    ],
+)
+def test_a_narrower_or_off_key_unique_index_refuses(tmp_path, unique_clause) -> None:
+    """M5: a unique that cannot hold two legitimate rows is damage."""
+
+    store = _store(tmp_path)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(body_reservations)")]
+        conn.execute("DROP TABLE body_reservations")
+        body = ", ".join(f"{name} TEXT" for name in columns)
+        conn.execute(
+            f"CREATE TABLE body_reservations ({body}, "
+            "PRIMARY KEY (owner_key, conversation_id, message_id), "
+            f"{unique_clause})"
+        )
+        conn.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+        conn.commit()
+
+    with pytest.raises(StoreRefused) as refused:
+        _open(store)
+    assert refused.value.code == "schema_damaged"
+
+
+def test_the_fresh_ddl_passes_the_shape_check(tmp_path) -> None:
+    """The validator must accept the table this store itself creates."""
+
+    store = Store(tmp_path)
+    store.active_owner()  # fresh DDL + stamp through the real open path
+    with store._connect() as conn:
+        Store._validate_body_reservations(conn)
+
+
+def test_consent_withdrawn_is_a_valid_release_reason(tmp_path) -> None:
+    """M3 follow-up: the newly valid reason must actually be usable."""
+
+    store = _token_probe(tmp_path)
+    now = time.time()
+    store.claim_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="tok-a",
+        turn_token="turn-a",
+        now=now,
+        ttl=300,
+    )
+
+    assert store.release_body_claim(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="tok-a",
+        reason="consent_withdrawn",
+        now=now + 1,
+    )
+    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    assert row["state"] == "pending"
+    assert row["last_error"] == "consent_withdrawn"
+
+
 def test_two_consumers_cannot_both_claim(tmp_path) -> None:
     store = _store(tmp_path)
     assert _reserve(store)
