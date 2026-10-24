@@ -113,8 +113,9 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
         ), texts
         for text in _language_notices(app):
             assert cell_len(text) <= 70, text
-        # Hindi expands the option list for every locale, so keep the 70-cell
-        # gate across all accepted values, including auto's resolved receipt.
+        # The bare receipt names the space browse instead of enumerating the
+        # value space (which grows with every shipped locale), so it stays well
+        # inside the 70-cell notice row for every accepted value.
         for value in ("en", "fr", "es", "ru", "vi", "ur", "hi", "auto"):
             app._run_slash_command(f"/language {value}")
             await pilot.pause()
@@ -209,7 +210,7 @@ async def test_the_space_opens_the_choices_on_the_current_value(config_dir: Path
 
 
 @pytest.mark.asyncio
-async def test_unknown_and_unshipped_values_are_refused_with_the_option_list(
+async def test_unknown_and_unshipped_values_are_refused_with_the_affordance(
     config_dir: Path,
 ) -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -225,6 +226,13 @@ async def test_unknown_and_unshipped_values_are_refused_with_the_option_list(
             assert _stored(config_dir) is None
         for text in _language_notices(app):
             assert cell_len(text) <= 70, text
+        # The echoed token is bounded by CELLS, not characters: a wide token
+        # would otherwise push the refusal past the row.
+        app._run_slash_command("/language " + "語" * 30)
+        await pilot.pause()
+        long_notice = _language_notices(app)[-1]
+        assert "…" in long_notice, long_notice
+        assert cell_len(long_notice) <= 70, long_notice
 
 
 @pytest.mark.asyncio

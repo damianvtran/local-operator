@@ -29,6 +29,7 @@ import logging
 import re
 import secrets
 import time
+import unicodedata
 import uuid
 from asyncio import InvalidStateError
 from collections import deque
@@ -311,6 +312,30 @@ ASK_UNAVAILABLE_NOTICE = (
 #: not an arbitrary awaitable — widening the annotation here would push that
 #: distinction out to every caller.
 _AskGateFn = Callable[[list[Any]], Coroutine[Any, Any, dict[str, list[str]] | None]]
+
+
+def _echo_within_cells(text: str, budget: int = 20) -> str:
+    """Bound the echoed unknown language by display cells, not characters.
+
+    Mirrors the terminal's helper. This module deliberately does not import
+    ``rich`` (the runtime has no console), so width comes from the East Asian
+    Width property: wide and fullwidth characters cost two cells.
+    """
+
+    def width(value: str) -> int:
+        total = 0
+        for char in value:
+            total += 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+        return total
+
+    if width(text) <= budget:
+        return text
+    out = ""
+    for char in text:
+        if width(out + char) > budget - 1:
+            break
+        out += char
+    return out + "…"
 
 
 class AskUnavailableError(RuntimeError):
@@ -7940,7 +7965,8 @@ class ServingSessionHandle(SessionHandle):
             return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
         if command == "language":
             # The terminal's funnel, served: one `settings_io.write_setting`
-            # against the `language` key; receipts word for word (see
+            # against the `language` key; the receipt keeps the terminal's
+            # voice but enumerates the values for the phone (see
             # `_language_slash`).
             return self._language_slash(args, SlashResult)
         # THE DELETE-SCOPED VERBS ARE GATED HERE, where the verb is chosen.
@@ -9819,8 +9845,7 @@ class ServingSessionHandle(SessionHandle):
                 # enumerate the value space; the terminal receipt (which has
                 # the space picker) does not, for its 70-cell notice row.
                 text=(
-                    f"language: {resolved} ({language_name(resolved)}) — "
-                    f"{', '.join(options)}"
+                    f"language: {resolved} ({language_name(resolved)}) — " f"{', '.join(options)}"
                 ),
                 style="info",
             )
@@ -9835,8 +9860,7 @@ class ServingSessionHandle(SessionHandle):
             return SlashResult(
                 kind="notice",
                 text=(
-                    f"unknown language "
-                    f"{(wanted if len(wanted) <= 20 else wanted[:20] + '…')!r} — "
+                    f"unknown language {_echo_within_cells(wanted)!r} — "
                     f"available: {', '.join(options)}"
                 ),
                 style="warning",
