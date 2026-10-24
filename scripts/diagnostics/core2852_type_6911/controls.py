@@ -1,0 +1,9 @@
+import ast,json,copy,os
+from pathlib import Path
+b=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])/'core-type-offhost';tree=ast.parse((b/'runner.py').read_text());scope=dict(Path=Path,FILES=('tests/worker_code_identity.py','tests/unit/test_worker_code_identity.py'));exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='validate_report'],type_ignores=[]),'<actual-report-validator>','exec'),scope);root=Path('/isolated/BASELINE');rows=[dict(file=str(root/scope['FILES'][0]),severity='error',rule='reportMissingTypeArgument',range=dict(start=dict(line=line-1))) for line in (68,72)];baseline=dict(version='1.1.414',summary=dict(filesAnalyzed=2,errorCount=2,warningCount=0,informationCount=0),generalDiagnostics=rows);fixed=copy.deepcopy(baseline);fixed['summary']['errorCount']=0;fixed['generalDiagnostics']=[];scope['validate_report'](baseline,1,root,'BASELINE');scope['validate_report'](fixed,0,root,'FIXED');results=[]
+for name,rc,kind,mutate in [('bool',True,'BASELINE',lambda p:None),('none',None,'BASELINE',lambda p:None),('version',1,'BASELINE',lambda p:p.update(version='1.1.413')),('count',1,'BASELINE',lambda p:p['summary'].update(errorCount=1)),('wrong_rule',1,'BASELINE',lambda p:p['generalDiagnostics'][0].update(rule='reportPrivateUsage')),('wrong_root',1,'BASELINE',lambda p:p['generalDiagnostics'][0].update(file='/repo/tests/worker_code_identity.py')),('cap',1,'BASELINE',lambda p:p.update(generalDiagnostics=p['generalDiagnostics']*11))]:
+ p=copy.deepcopy(baseline);mutate(p)
+ try:scope['validate_report'](p,rc,root,kind)
+ except ValueError:results.append(name)
+ else:raise AssertionError(name)
+(b/'pure-results.json').write_text(json.dumps(dict(validator_cases_pass=results,baseline_fixed_synthetic=True,actual_analyzer_executed=False,orchestration_not_exercised=True),indent=2)+'\n');print('ACTUAL_VALIDATOR_7_REJECTIONS_SIMULATED_REPORTS_NO_ANALYZER_EXECUTION')

@@ -1,0 +1,60 @@
+name: Core2852 exact two-file typing preflight
+on:
+  push:
+    branches: [diag/core2852-type-preflight-6911]
+permissions:
+  contents: read
+jobs:
+  typing-preflight:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Shared setup deadline
+        run: date +%s > "$RUNNER_TEMP/core2852-setup-start"
+      - uses: actions/checkout@v7
+        timeout-minutes: 1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        timeout-minutes: 1
+        with:
+          python-version: '3.12.15'
+      - name: Ephemeral exact analyzer or STOP
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          command -v node; command -v npm
+          remaining=$((120-$(date +%s)+$(cat "$RUNNER_TEMP/core2852-setup-start")))
+          test "$remaining" -gt 0
+          tool="$(mktemp -d "$RUNNER_TEMP/core2852-analyzer-XXXXXX")"
+          printf '%s\n' "$tool" > "$RUNNER_TEMP/core2852-analyzer-path"
+          timeout "$remaining" npm install --prefix "$tool" --ignore-scripts --no-audit --no-fund pyright@1.1.414 > "$tool/setup.log" 2>&1
+      - name: Baseline then fixed exact two files
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'tool="$(cat "$RUNNER_TEMP/core2852-analyzer-path")"; test -z "$tool" || rm -rf -- "$tool"' EXIT
+          test "$(( $(date +%s)-$(cat "$RUNNER_TEMP/core2852-setup-start") ))" -le 120
+          export TYPE_PREFLIGHT_TOOL="$(cat "$RUNNER_TEMP/core2852-analyzer-path")/node_modules/pyright"
+          export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=''
+          python -B scripts/run_bounded.py --timeout 145 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.core2852_type_6911.runner "$RUNNER_TEMP/core2852-type-output"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        timeout-minutes: 1
+        with:
+          name: core2852-type-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/core2852-type-output/typing.json
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Always remove owned analyzer handoff
+        if: always()
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/core2852-analyzer-path"; then
+            tool="$(cat "$RUNNER_TEMP/core2852-analyzer-path")"
+            case "$tool" in "$RUNNER_TEMP"/core2852-analyzer-*) rm -rf -- "$tool" ;; *) exit 1 ;; esac
+          fi
