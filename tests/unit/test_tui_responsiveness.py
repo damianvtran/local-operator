@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,32 @@ TICK_S = 0.005
 NOISE_K = 3.0
 NOISE_CPU_CAP_MS = 1500.0
 NOISE_WALL_CAP_MS = 4000.0
+
+#: The S2 cell's bar on the CPU the turn ADDS over its control leg. It is the
+#: calibrated loaded ceiling itself, not a new constant: the control leg
+#: cancels the layout work that forced the 500 ms calibration in the first
+#: place (413 ms of legitimate layout CPU on CI), and a runner's wake noise
+#: shows up in wall time, not in the CPU a thread actually executes. The
+#: noise-scaled formula is kept for the WALL backstop and for callers that
+#: still assert an absolute CPU bound via ``assert_no_stall_loaded``.
+TURN_DELTA_CPU_CEILING_MS = 500.0
+
+
+@dataclass(frozen=True)
+class LegPeak:
+    """Worst probe interval recorded inside one measurement leg.
+
+    Both clocks are kept because they answer different questions: ``cpu_ms``
+    is loop-thread work that could block a frame, while ``wall_ms`` also
+    includes the process being descheduled. Legs are opened with
+    :meth:`StallRecorder.begin_leg` and closed with
+    :meth:`StallRecorder.end_leg`. The interval that straddles a boundary is
+    attributed to the leg that was open when the probe sampled it, so a leg
+    carries at most one ``TICK_S`` of boundary slop.
+    """
+
+    cpu_ms: float
+    wall_ms: float
 
 
 class StallRecorder:
@@ -154,6 +181,11 @@ class StallRecorder:
         #: 1.0 until measured, so uncalibrated callers keep fixed ceilings.
         self.cpu_calibration_ratio: float = 1.0
         self._noise_open = False
+        #: Running maxima of the leg opened by :meth:`begin_leg`, including
+        #: intervals below ``stall_ms``; see :class:`LegPeak`.
+        self._leg_cpu_ms = 0.0
+        self._leg_wall_ms = 0.0
+        self._leg_open = False
 
     async def _probe(self) -> None:
         last_cpu = time.thread_time()
@@ -172,6 +204,11 @@ class StallRecorder:
                 self.noise_floor_ms is None or wall_gap_ms > self.noise_floor_ms
             ):
                 self.noise_floor_ms = wall_gap_ms
+            if self._leg_open:
+                if cpu_gap_ms > self._leg_cpu_ms:
+                    self._leg_cpu_ms = cpu_gap_ms
+                if wall_gap_ms > self._leg_wall_ms:
+                    self._leg_wall_ms = wall_gap_ms
             if cpu_gap_ms >= self.stall_ms:
                 self.cpu_stalls.append(cpu_gap_ms)
             if wall_gap_ms >= self.stall_ms:
@@ -194,6 +231,31 @@ class StallRecorder:
         except asyncio.CancelledError:
             pass
         self._task = None
+
+    def begin_leg(self) -> None:
+        """Open a measurement leg; its peaks cover every probe interval until closed.
+
+        WHY legs exist here: the S2 cell times two comparable stretches of
+        layout churn in one run — a turn-free control and the turn itself —
+        and an absolute worst interval includes the app's own rendering cost
+        in both. The honest quantity is the difference between the legs; this
+        is the bookkeeping that keeps them apart. Intervals are recorded on
+        BOTH clocks even below ``stall_ms``, so a leg's peak is not quantised
+        by the stall-recording threshold.
+        """
+        self._leg_cpu_ms = 0.0
+        self._leg_wall_ms = 0.0
+        self._leg_open = True
+
+    def end_leg(self) -> LegPeak:
+        """Close the open leg and return its worst intervals."""
+        self._leg_open = False
+        return LegPeak(cpu_ms=self._leg_cpu_ms, wall_ms=self._leg_wall_ms)
+
+    @property
+    def leg_open(self) -> bool:
+        """Whether a leg is open, so a failing test can close it in ``finally``."""
+        return self._leg_open
 
     def measurement_summary(self) -> dict[str, object]:
         """Persist bounded evidence on passing CI cells too, without re-profiling."""
@@ -333,6 +395,26 @@ class StallRecorder:
         starved off it; the 4000 ms cap keeps the canonical 5 s freeze
         tripping every bound.
         """
+        bound_cpu, bound_wall, context = self.loaded_bounds(
+            cpu_ceiling_ms=cpu_ceiling_ms,
+            wall_ceiling_ms=wall_ceiling_ms,
+            noise_floor_ms=noise_floor_ms,
+        )
+        self.assert_no_stall(cpu_ceiling_ms=bound_cpu, wall_ceiling_ms=bound_wall, context=context)
+
+    def loaded_bounds(
+        self,
+        cpu_ceiling_ms: float = 500.0,
+        wall_ceiling_ms: float = 2000.0,
+        noise_floor_ms: float | None = None,
+    ) -> tuple[float, float, str]:
+        """The loaded CPU/wall bounds, and the context naming their arithmetic.
+
+        Extracted so the S2 delta assertion and its JUnit summary report the
+        exact numbers :meth:`assert_no_stall_loaded` would have used: one
+        formula, several readers. With no measured floor the fixed ceilings
+        pass through unchanged, so uncalibrated callers keep today's bar.
+        """
         bound_cpu = cpu_ceiling_ms
         bound_wall = wall_ceiling_ms
         context = ""
@@ -351,7 +433,82 @@ class StallRecorder:
                 f"(K={NOISE_K:g}, caps {NOISE_CPU_CAP_MS:.0f}/{NOISE_WALL_CAP_MS:.0f}, "
                 f"fixed {cpu_ceiling_ms:.0f}/{wall_ceiling_ms:.0f})"
             )
-        self.assert_no_stall(cpu_ceiling_ms=bound_cpu, wall_ceiling_ms=bound_wall, context=context)
+        return bound_cpu, bound_wall, context
+
+    def assert_turn_delta_loaded(
+        self,
+        control: LegPeak,
+        turn: LegPeak,
+        cpu_ceiling_ms: float = TURN_DELTA_CPU_CEILING_MS,
+        wall_ceiling_ms: float = 2000.0,
+        noise_floor_ms: float | None = None,
+    ) -> None:
+        """Loaded bar applied to the DELTA the turn adds over a control leg.
+
+        WHY the delta and not the turn's absolute worst interval: this path's
+        largest legitimate loop-CPU cost is Textual layout — 413 ms measured
+        on CI against the fixed 500 ms ceiling, with a second legitimate
+        sample at 557.8 ms (run 38165502284, 2026-10-11). The absolute reading
+        therefore mostly measures the app's rendering and the runner hosting
+        it, not the send path the cell claims to pin. The control leg mounts
+        the same widgets through the same append path and pumps the same
+        cadence WITHOUT the agent-turn transition events, so layout cost
+        cancels in ``turn.cpu_ms - control.cpu_ms``; what remains is the
+        synchronous work the turn itself adds, which is the quantity a freeze
+        regression moves. ``control`` is measured before the turn in the same
+        run with the same :class:`StallRecorder` and the same app.
+
+        The CPU bar keeps the calibrated 500 ms constant and does NOT ride
+        the run's wake-stretch floor or descheduling ratio: those estimators
+        exist to absorb the absolute layout and wake cost, and a difference
+        of two same-run legs already cancels both (``thread_time`` counts CPU
+        actually executed either way). Re-scaling the delta by them would
+        hand a loaded runner a multi-second CPU allowance in exactly the
+        quantity where the noise they model has cancelled — and would let a
+        deliberate 650 ms synchronous block pass. The wall side stays an
+        ABSOLUTE backstop over the collected stall list, using the existing
+        noise-scaled formula: a blocking sleep on the loop is invisible to
+        ``thread_time``, so it cannot show up in a CPU delta and must still
+        red as a wall gap.
+        """
+        bound_cpu = cpu_ceiling_ms
+        _, bound_wall, _ = self.loaded_bounds(
+            cpu_ceiling_ms=cpu_ceiling_ms,
+            wall_ceiling_ms=wall_ceiling_ms,
+            noise_floor_ms=noise_floor_ms,
+        )
+        delta_cpu = turn.cpu_ms - control.cpu_ms
+        worst_wall = max(self.wall_stalls, default=0.0)
+        floor_text = (
+            f"{noise_floor_ms:.0f} ms" if noise_floor_ms is not None else "unmeasured"
+        )
+        suffix = (
+            f" [CPU bound {bound_cpu:.0f} ms fixed (layout cancels in the delta, "
+            f"so the run's wake floor and descheduling ratio are not applied), "
+            f"wall bound {bound_wall:.0f} ms, noise floor {floor_text}, "
+            f"wall/CPU descheduling ratio x{self.cpu_calibration_ratio:.2f}]"
+        )
+        suffix += (
+            f"\ncontrol: {control.cpu_ms:.1f} ms CPU / {control.wall_ms:.1f} ms wall; "
+            f"turn: {turn.cpu_ms:.1f} ms CPU / {turn.wall_ms:.1f} ms wall"
+        )
+        if self._callbacks is not None and (
+            delta_cpu >= bound_cpu or worst_wall >= bound_wall
+        ):
+            suffix += "\ncallback attribution: " + json.dumps(self._callbacks.summary())
+        assert delta_cpu < bound_cpu, (
+            f"the agent-turn path added {delta_cpu:.1f} ms of loop-thread CPU over "
+            f"the comparable control leg (turn {turn.cpu_ms:.1f} ms - control "
+            f"{control.cpu_ms:.1f} ms, bound {bound_cpu:.1f} ms); "
+            f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
+            f"{suffix}"
+        )
+        assert worst_wall < bound_wall, (
+            f"event loop probe wake gap was {worst_wall:.0f} ms of wall time "
+            f"(ceiling {bound_wall:.0f} ms); "
+            f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
+            f"{suffix}"
+        )
 
 
 # --- A2: the title backfill answers a no-title directory once ----------------
@@ -1278,15 +1435,39 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
     record_property: Callable[[str, object], None],
 ) -> None:
     """S2: a streamed reply with tool batches, from submit to ``agent_end``,
-    leaves no loop stall above the bar — the reported 'sending a message
-    freezes the UI until processed'. The pricing leg is made hostile the same
-    way the unit test makes it: discovery stubbed slow, memo cold. The bar
-    scales with the run's own measured noise floor (the idle leg below; the
-    constants and the CI dataset behind them sit beside NOISE_K): on a quiet
-    machine it is the calibrated 500 ms, on a loaded runner the bound rides
-    the runner's own wake noise and its measured wall/CPU descheduling ratio.
-    That ratio does not measure fixed-work throughput. Callback diagnostics
-    explain future oversized samples without changing the cumulative contract."""
+    adds no loop stall above the bar over a comparable control leg — the
+    reported 'sending a message freezes the UI until processed'. The pricing
+    leg is made hostile the same way the unit test makes it: discovery stubbed
+    slow, memo cold.
+
+    WHAT IS MEASURED, and why it is a delta: this path's dominant legitimate
+    loop-CPU cost is Textual layout, not the send plumbing — 413 ms of layout
+    CPU was recorded on CI against the fixed 500 ms ceiling, with a second
+    legitimate sample at 557.8 ms (run 38165502284). An absolute bar therefore
+    mostly measures the app's rendering and the runner hosting it, and a
+    machine-noise sample can cross it while the send path is healthy. So the
+    cell first measures a CONTROL leg in the same run, on the same app and the
+    same ``StallRecorder``: the same assistant block and tool card mounted
+    through the same append path, the same band update and the same pump
+    cadence, but with NONE of the agent-turn transition events
+    (``AgentStartEvent``/``Message*``/``ToolExecution*``/``AgentEndEvent``).
+    Both legs draw the same widget shapes through the same layout engine, so
+    layout cost cancels in ``turn - control`` and the remainder is the
+    synchronous work the turn itself adds — the quantity a freeze regression
+    actually moves. A deliberate 650 ms block injected into a turn-only handler
+    fails this assertion in the local negative control, while the control leg
+    is untouched.
+
+    The CPU bar is the calibrated 500 ms applied to the DELTA, not to the raw
+    interval: the control leg cancels the layout cost, so the absolute CPU
+    reading's need for runner-noise scaling goes with it. The wall side stays
+    an ABSOLUTE backstop over the collected stall list, still scaled by the
+    run's measured wake floor, because a blocking sleep is invisible to
+    ``thread_time`` and cannot appear in a CPU delta. The one-time empty →
+    conversation composition is retired before either leg, so boot layout sits
+    in neither (the S1 cell owns boot composition). Callback diagnostics and
+    the JUnit measurement summary ride along as before, now with both legs'
+    numbers."""
     from local_operator.harness.types import (
         AgentEndEvent,
         AgentStartEvent,
@@ -1302,6 +1483,9 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
     from local_operator.model import configure, discovery
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.events import ContextUsageReported
+    from local_operator.tui.widgets.assistant import AssistantBlock
+    from local_operator.tui.widgets.tool_card import ToolCard
+    from local_operator.tui.widgets.transcript import NoticeBlock
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
     slow = _SlowListing(5.0)
@@ -1310,6 +1494,8 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
     configure.invalidate_model_info_cache()
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
+    control_peak = LegPeak(cpu_ms=0.0, wall_ms=0.0)
+    turn_peak = LegPeak(cpu_ms=0.0, wall_ms=0.0)
     try:
         with CallbackSpans(asyncio.get_running_loop()) as callbacks:
             async with app.run_test(size=(100, 30)) as pilot:
@@ -1323,12 +1509,49 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
                     # The run's own noise floor, measured before the turn: pump the idle
                     # app for a spell — timers, paints, the same pump the turn will use —
                     # with none of the turn's legs on it. The worst wake stretch observed
-                    # here is what the turn's CPU-sum reading is allowed to ride on; the
-                    # constants and the CI dataset behind them are beside NOISE_K.
+                    # here scales the WALL backstop only; the CPU delta is asserted against
+                    # the fixed calibrated ceiling because noise of this kind is wall time,
+                    # not loop-thread CPU. The constants and the CI dataset behind them sit
+                    # beside NOISE_K.
                     recorder.begin_noise_window()
                     for _ in range(12):
                         await pilot.pause(0.05)
                     recorder.end_noise_window()
+                    # Retire the one-time empty → conversation composition OUTSIDE
+                    # both legs. That transition is boot layout (the S1 cell owns
+                    # boot composition), and whichever leg drew first would price
+                    # it as its own work; excluding it from both is what makes the
+                    # legs comparable. The warm-up notice is deliberately inert.
+                    app._append_block(NoticeBlock("control warm-up"))
+                    # --- Control leg: comparable layout churn, no turn events ---
+                    # Mount the same assistant text and the same tool card through
+                    # the same appends the turn's handlers use, settle them the same
+                    # way, make the same band update, and pump the same cadence. The
+                    # control's second flush is longer than the turn's single delta on
+                    # purpose: it can only make the control cost MORE, so the delta
+                    # stays conservative. Why this is comparable work: every operation
+                    # below is what the turn's event handlers reach after dispatch (see
+                    # the docstring), and Textual layout cost is a function of the widget
+                    # tree and frames drawn, not of the session event that requested
+                    # them. What is absent is exactly the turn's transition events, so
+                    # the difference the assertion takes is the turn's own addition.
+                    recorder.begin_leg()
+                    control_block = AssistantBlock()
+                    control_block.update_text("streaming answer")
+                    app._append_block(control_block)
+                    app._refresh_working_activity()
+                    control_block.update_text("streaming answer, second flush")
+                    control_card = ToolCard("control-t1", "bash", {"command": "ls"})
+                    app._append_block(control_card)
+                    app._refresh_working_activity()
+                    control_block.finalize_text()
+                    control_card.mark_done("", None)
+                    app._status.update(context_tokens=10_200, context_is_estimate=False)
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                    control_peak = recorder.end_leg()
+                    # --- Turn leg: the same churn plus the transition events ---
+                    recorder.begin_leg()
                     # A turn with message text, a tool batch, per-call usage reports, and
                     # an unpriceable model on the components — the exact surface the
                     # freeze was reported on.
@@ -1354,19 +1577,44 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
                     session.emit(AgentEndEvent())
                     for _ in range(20):
                         await pilot.pause(0.05)
+                    turn_peak = recorder.end_leg()
                 finally:
+                    if recorder.leg_open:
+                        recorder.end_leg()
                     await recorder.stop()
                     # JUnit retains this on PASS and FAIL; future CI evidence
                     # must not require another profiling run to read the clocks.
-                    record_property("s2_loop_liveness", json.dumps(recorder.measurement_summary()))
-                # Loaded bar (500 ms CPU / 2 s wall): this path has legitimate loop
-                # CPU from Textual layout (413 ms recorded on CI), and the
-                # reconnect/connect tests are the ones that assert the strict 50 ms
-                # CPU bar against the parse regression. Bench numbers were recorded in
-                # bench/before.json vs after.json — out of the tree now, one `git show`
-                # away at ba225070 (AGENTS.md, "Evidence goes on the PR, never into the
-                # repository").
-                recorder.assert_no_stall_loaded(noise_floor_ms=recorder.noise_floor_ms)
+                    # The control/turn legs and the derived bound are here so a
+                    # passing run records the delta the assertion actually read.
+                    _, bound_wall, _ = recorder.loaded_bounds(
+                        noise_floor_ms=recorder.noise_floor_ms
+                    )
+                    record_property(
+                        "s2_loop_liveness",
+                        json.dumps(
+                            {
+                                **recorder.measurement_summary(),
+                                "control_worst_cpu_ms": round(control_peak.cpu_ms, 1),
+                                "control_worst_wall_ms": round(control_peak.wall_ms, 1),
+                                "turn_worst_cpu_ms": round(turn_peak.cpu_ms, 1),
+                                "turn_worst_wall_ms": round(turn_peak.wall_ms, 1),
+                                "turn_delta_cpu_ms": round(
+                                    turn_peak.cpu_ms - control_peak.cpu_ms, 1
+                                ),
+                                "delta_cpu_bound_ms": TURN_DELTA_CPU_CEILING_MS,
+                                "wall_bound_ms": round(bound_wall, 1),
+                            }
+                        ),
+                    )
+                # Loaded bar on the DELTA over the control leg; the absolute wall
+                # backstop and the collected stall lists stay. See the docstring and
+                # assert_turn_delta_loaded for why the delta, not the raw interval,
+                # is the honest quantity here.
+                recorder.assert_turn_delta_loaded(
+                    control=control_peak,
+                    turn=turn_peak,
+                    noise_floor_ms=recorder.noise_floor_ms,
+                )
 
     finally:
         # Keep the stub installed until its background reader has drained, even
