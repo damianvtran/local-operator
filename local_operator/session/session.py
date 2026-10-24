@@ -9899,9 +9899,10 @@ class Session:
         finally:
             directory = getattr(self._transcript, "directory", None)
             if directory is not None:
+                from local_operator.wakes.spooled import await_spool_write
                 from local_operator.session.runtime.inbox import settle_owed_turn
 
-                settle_owed_turn(directory)
+                await await_spool_write(settle_owed_turn, directory)
 
     async def _drain_spooled_peer_inbox_rows(self) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.

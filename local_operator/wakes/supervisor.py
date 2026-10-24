@@ -742,7 +742,7 @@ def _reconcile_spooled(config_dir: Path, spooled: dict[str, dict[str, Any]]) -> 
     Mutates the caller's freshly read copy, so the pass that read it decides on
     what is left rather than on what was found.
     """
-    from local_operator.wakes.spooled import clear_spooled_turn, spool_owes_turn
+    from local_operator.wakes.spooled import clear_if_no_owed_turn, spool_owes_turn
 
     sessions = Path(config_dir) / "sessions"
     for session_id, record in list(spooled.items()):
@@ -755,10 +755,11 @@ def _reconcile_spooled(config_dir: Path, spooled: dict[str, dict[str, Any]]) -> 
         # narrows the window to the unlink itself; the drain-side half of the same
         # finding is closed in ``inbox.settle_owed_turn``, which re-notes an
         # obligation its own spool still owes.
-        clear_spooled_turn(
+        clear_if_no_owed_turn(
             config_dir,
             session_id,
-            expected_updated_at_ms=record.get("updated_at_ms"),
+            sessions / session_id,
+            expected_generation=record.get("generation"),
         )
         del spooled[session_id]
 
@@ -1767,6 +1768,10 @@ class _Sweeper:
             return False
 
         async def _run() -> bool:
+            from local_operator.wakes.spooled import await_spool_write
+
+            outcomes: list[str] = []
+
             def _outcome(reason: str) -> None:
                 """Report one engagement's outcome to the spooled-turn walk.
 
@@ -1785,7 +1790,7 @@ class _Sweeper:
                 it too: an unanticipated raise out of ``_engage_one`` is a raise
                 that did not happen, which is exactly what ``failed`` means.
                 """
-                _note_spooled_attempt(config_dir, session_id, reason=reason)
+                outcomes.append(reason)
                 _note_trigger_attempt(config_dir, session_id, reason=reason)
 
             try:
@@ -1831,7 +1836,17 @@ class _Sweeper:
                 # Popped in the task itself rather than in a done-callback so
                 # the key is gone the moment the work is, with no window where
                 # a finished engagement still blocks its own retry.
-                self._in_flight.pop(key, None)
+                try:
+                    # Persist backoff before releasing retry ownership, even on
+                    # cancellation. Failed bookkeeping latches this engagement
+                    # against a hot retry; task error stays observable to owner.
+                    for reason in outcomes:
+                        await await_spool_write(_note_spooled_attempt, config_dir,
+                                                session_id, reason=reason)
+                except Exception:
+                    raise
+                else:
+                    self._in_flight.pop(key, None)
             if started:
                 self.started += 1
             return started
@@ -2199,27 +2214,9 @@ def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> 
     """
     if reason not in _SPOOLED_ATTEMPT_REASONS:
         return
-    # ON THE LOOP, DELIBERATELY (review round 3, R3-4; premises corrected in
-    # R4-1, which was right to check them). The sibling ledger write beside this
-    # one goes through ``asyncio.to_thread`` and this does not, on the only
-    # argument that survives reading both: this is ONE small atomic write — one
-    # ~200-byte JSON file, flushed and fsynced by ``spooled._write`` — and it
-    # happens at most once per attempted raise for a session, never closer than
-    # ``spooled.RETRY_BASE_S`` apart, against a process whose slice is ten
-    # seconds. The earlier version of this comment argued from a contrast with
-    # the ledger that does not exist (that write reads one record too); the
-    # decision does not need it. Threading this would also make the callback
-    # awaitable, which the engage's own call sites are not.
-    try:
-        from local_operator.wakes.spooled import note_attempt, read_spooled_turn
+    from local_operator.wakes.spooled import note_attempt
 
-        if read_spooled_turn(config_dir, session_id) is None:
-            return
-        note_attempt(config_dir, session_id, error=reason)
-    except Exception:  # noqa: BLE001 — bookkeeping must never stop an engagement
-        logger.warning(
-            "could not record the spooled-turn attempt for %s", session_id, exc_info=True
-        )
+    note_attempt(config_dir, session_id, error=reason)
 
 
 def _note_trigger_attempt(config_dir: Path, session_id: str, *, reason: str) -> None:

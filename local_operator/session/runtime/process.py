@@ -4639,9 +4639,12 @@ async def _drain_inbox_into(handle: object) -> int:
     # otherwise leave the supervisor raising a runtime for a session with nothing
     # to run. Placed AFTER the loop rather than in a wrapper so the deferral
     # branch above keeps its own, opposite, decision.
+    from local_operator.wakes.spooled import await_spool_write
     from local_operator.session.runtime.inbox import settle_owed_turn
 
-    settle_owed_turn(directory, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))
+    await await_spool_write(
+        settle_owed_turn, directory, cwd=str(getattr(handle, "_desktop_cwd", "") or "")
+    )
     return delivered
 
 

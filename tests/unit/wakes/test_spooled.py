@@ -629,7 +629,7 @@ def test_clear_refuses_a_record_that_changed_under_the_caller(tmp_path: Path) ->
 
     assert (
         spooled.clear_spooled_turn(
-            config_dir, "sess-guard", expected_updated_at_ms=judged["updated_at_ms"]
+            config_dir, "sess-guard", expected_generation=judged["generation"]
         )
         is False
     ), "a record re-noted since the caller judged it is not stale"
@@ -639,7 +639,7 @@ def test_clear_refuses_a_record_that_changed_under_the_caller(tmp_path: Path) ->
     assert current is not None
     assert (
         spooled.clear_spooled_turn(
-            config_dir, "sess-guard", expected_updated_at_ms=current["updated_at_ms"]
+            config_dir, "sess-guard", expected_generation=current["generation"]
         )
         is True
     ), "the same call against the value it read does clear it"
@@ -676,3 +676,65 @@ def test_settling_re_arms_a_record_its_own_spool_still_needs(
         "raise the reader too — a runtime existing here does not imply a "
         "supervisor does"
     )
+
+
+@pytest.mark.parametrize("second", [123456, 123455])
+def test_generation_is_not_the_wall_clock(tmp_path: Path, second: int) -> None:
+    spooled.note_spooled_turn(tmp_path, "cas", now_ms=123456)
+    old = spooled.read_spooled_turn(tmp_path, "cas")
+    assert old is not None
+    spooled.note_spooled_turn(tmp_path, "cas", now_ms=second)
+    current = spooled.read_spooled_turn(tmp_path, "cas")
+    assert current is not None and current["rows"] == 2
+    assert current["updated_at_ms"] == second
+    assert not spooled.clear_spooled_turn(tmp_path, "cas", expected_generation=old["generation"])
+    assert spooled.clear_spooled_turn(tmp_path, "cas", expected_generation=current["generation"])
+
+
+def test_attempt_and_recreation_each_invalidate_snapshots(tmp_path: Path) -> None:
+    spooled.note_spooled_turn(tmp_path, "cas", now_ms=1)
+    old = spooled.read_spooled_turn(tmp_path, "cas")
+    assert old is not None
+    spooled.note_attempt(tmp_path, "cas")
+    assert not spooled.clear_spooled_turn(tmp_path, "cas", expected_generation=old["generation"])
+    assert spooled.clear_spooled_turn(tmp_path, "cas")
+    spooled.note_spooled_turn(tmp_path, "cas", now_ms=1)
+    assert not spooled.clear_spooled_turn(tmp_path, "cas", expected_generation=old["generation"])
+
+
+def test_busy_snapshot_withholds_authority_and_lock_survives_unlink(tmp_path: Path) -> None:
+    spooled.note_spooled_turn(tmp_path, "cas")
+    lock = spooled._session_lock(tmp_path, "cas")
+    inode = lock.path.stat().st_ino
+    with lock:
+        record = spooled.read_spooled_turn(tmp_path, "cas")
+        assert record is not None and record["generation"] is None
+        assert spooled.read_spooled(tmp_path)["cas"]["generation"] is None
+        assert not spooled.clear_spooled_turn(tmp_path, "cas", expected_generation=None)
+    assert spooled.clear_spooled_turn(tmp_path, "cas")
+    spooled.note_spooled_turn(tmp_path, "cas")
+    assert lock.path.stat().st_ino == inode
+
+
+def test_legacy_migrates_without_changing_display_fields(tmp_path: Path) -> None:
+    spooled.note_spooled_turn(tmp_path, "cas", now_ms=123)
+    path = spooled.spooled_path(tmp_path, "cas")
+    legacy = json.loads(path.read_text())
+    legacy.pop("generation")
+    path.write_text(json.dumps(legacy))
+    record = spooled.read_spooled_turn(tmp_path, "cas")
+    assert record is not None
+    assert {k: v for k, v in record.items() if k != "generation"} == legacy
+    assert not spooled.clear_spooled_turn(tmp_path, "cas", expected_updated_at_ms=123)
+    assert not spooled.clear_spooled_turn(tmp_path, "cas", expected_generation=None)
+
+
+def test_clear_rechecks_inbox_authority(tmp_path: Path) -> None:
+    directory = _session(tmp_path, "cas", rows=[{"source": "user", "text": "synthetic"}])
+    spooled.note_spooled_turn(tmp_path, "cas")
+    record = spooled.read_spooled_turn(tmp_path, "cas")
+    assert record is not None
+    assert not spooled.clear_if_no_owed_turn(tmp_path, "cas", directory,
+                                           expected_generation=record["generation"])
+    assert not spooled.clear_if_no_owner_row(tmp_path, "cas", directory,
+                                           expected_generation=record["generation"])
