@@ -138,6 +138,10 @@ class PendingBody:
     sender_label: str
     body: str
     authority: RequestAuthority
+    #: The hub's closed sender kind. It belongs with the source frame's typed
+    #: fields, but it arrives on the fetched body rather than on the row, so it
+    #: travels here and overwrites the source's placeholder before rendering.
+    sender_kind: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -278,8 +282,20 @@ def assemble_injection(
             size_bytes=size,
             authority=pending.authority,
         )
+    source = pending.source
+    if pending.sender_kind != source.sender_kind:
+        # The fetched classification wins over the row's placeholder — the row
+        # is contentless, so the hub is the only honest source for this field.
+        source = ConversationBodyFrame(
+            tenant_id=source.tenant_id,
+            conversation_id=source.conversation_id,
+            message_id=source.message_id,
+            sender_kind=pending.sender_kind,
+            mention=source.mention,
+            conversation_seq=source.conversation_seq,
+        ).validated()
     frame = build_body_frame(
-        pending.source,
+        source,
         conversation_label=pending.conversation_label,
         sender_label=pending.sender_label,
         body=pending.body,

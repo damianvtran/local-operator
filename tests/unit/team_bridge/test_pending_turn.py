@@ -22,6 +22,7 @@ from local_operator.team_bridge.store import (
     OwnerReceipt,
     OwnerSnapshot,
     Store,
+    StoreRefused,
     state_db_path,
 )
 
@@ -207,6 +208,73 @@ def test_an_aborted_or_failed_turn_leaves_the_row_retryable(tmp_path) -> None:
         == "unverified"
     )
     assert _row(store)["state"] == "pending"
+
+
+def test_a_same_account_relogin_does_not_serve_the_old_generation(tmp_path) -> None:
+    """B1: the binding is the ROW's credential + generation, not just the key.
+
+    ``owner_key`` is identical across a re-login, so a reader matching only the
+    key would hand the OLD generation's reservation to the new owner — claim,
+    fetch and injection included (design S-3b).
+    """
+
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+
+    relogged = OwnerSnapshot(
+        credential_id=8,  # a new credential row
+        account_id="acc_1",
+        tenant_id="3f2a1111-2222-4333-8444-555566667777",
+        endpoint_id="ep_1",
+        canonical_base_url="https://hub.example",
+        enrollment_generation=2,
+    )
+    assert store.pending_body_reservation_for(relogged, SESSION) is None
+
+    turn = PendingTurn(relogged, SESSION, config_dir=tmp_path)
+    assert asyncio.run(turn.open(budget=_budget(), fetch=_fetch)) is False
+    assert _row(store)["state"] == "pending"
+
+
+def test_a_store_refusal_on_renew_is_drift_not_a_stolen_lease(tmp_path, monkeypatch) -> None:
+    """m2: a busy store must not be reported as somebody else's claim."""
+
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+    turn = _turn(tmp_path)
+    assert asyncio.run(turn.open(budget=_budget(), fetch=_fetch)) is True
+
+    def busy(*_args: Any, **_kwargs: Any) -> bool:
+        raise StoreRefused("state_unreadable", "busy")
+
+    monkeypatch.setattr(Store, "renew_body_claim", busy)
+    assert turn.for_call() is None
+    assert (
+        turn.settle(entry_id="entry_1", error=None, stop_reason="stop", aborted=False) == "drifted"
+    )
+    assert _row(store)["last_error"] == "admission_drift"
+
+
+def test_a_hydrated_frame_carries_the_closed_sender_kind(tmp_path, monkeypatch) -> None:
+    """M1: the kind the hub reported reaches the frame's trusted section."""
+
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+
+    async def agent_fetch(conversation_id: str, message_id: str) -> FetchedBody | None:
+        return FetchedBody(
+            body=BODY_TEXT,
+            body_sha256=DIGEST,
+            conversation_label="#qa",
+            sender_label="Ada",
+            sender_kind="agent",
+        )
+
+    turn = _turn(tmp_path)
+    assert asyncio.run(turn.open(budget=_budget(), fetch=agent_fetch)) is True
+    text = turn.for_call()
+    assert text is not None
+    assert "sender_kind: agent" in text
 
 
 def test_the_aside_builder_never_consults_the_pending_turn() -> None:

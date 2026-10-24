@@ -17230,10 +17230,17 @@ class Session:
         The number comes from the model spec's window minus the output reserve
         and the tokens the provider last reported, and it is labelled with that
         provenance rather than passed as a bare int: the recorded size-ledger
-        gap means nobody can audit an unlabelled budget. The 4-bytes-per-token
-        factor is a CONSERVATIVE approximation, stated here because it is an
-        approximation — a frame that does not fit is refused, so erring low
-        costs a retry, never a truncated message.
+        gap means nobody can audit an unlabelled budget.
+
+        IT CAN ERR IN BOTH DIRECTIONS, and saying so is the point: the
+        4-bytes-per-token factor is an approximation (low for CJK, high for
+        escape-heavy text), and the subtraction uses the LAST REPORTED prompt
+        size rather than the request being built — if this turn has grown since
+        that report, the budget is TOO HIGH and a frame that fits it may still
+        overflow the provider's real headroom. A frame that does not fit is
+        refused, so erring low costs a retry; erring high costs a provider
+        error. The request-local size ledger is still the fix, and this is an
+        advisory cap in the meantime, not a guarantee.
         """
 
         from local_operator.team_bridge.request_body import BodyBudget
@@ -17281,12 +17288,14 @@ class Session:
         if not isinstance(body, str) or not isinstance(body_hash, str):
             return None
         name = fetched.get("conversation_name")
+        kind = fetched.get("sender_kind")
         sender = fetched.get("sender_label")
         return FetchedBody(
             body=body,
             body_sha256=body_hash,
             conversation_label=name if isinstance(name, str) else "",
             sender_label=sender if isinstance(sender, str) else "",
+            sender_kind=kind if isinstance(kind, str) else "unknown",
         )
 
     async def _open_pending_body_turn(self) -> None:
