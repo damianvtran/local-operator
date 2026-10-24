@@ -58,6 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.session.approval_policy import OVERRIDE_FILENAME
+
 if TYPE_CHECKING:
     from local_operator.network.relay import RelayServer
 
@@ -132,6 +134,32 @@ CREATED_AT_NAME = "created_at.json"
 #: module that owns it, so the duplication cannot drift.
 COPY_SET_NAMES: tuple[str, ...] = (
     TRANSCRIPT_NAME,
+    # THE TRANSCRIPT'S ARCHIVE FORMS (``compression.ARCHIVE_FILENAMES``), spelled
+    # here because this module must import standalone. They ARE the transcript: a
+    # compressed session is one whose body is ``transcript.jsonl.gz``/``.zst``
+    # instead of ``transcript.jsonl``, and ``compression.restore_for_write`` turns
+    # it back into the plain file this layer's protocol is written in.
+    #
+    # WHY THE ACCOUNTING MATTERS EVEN THOUGH THE ARCHIVE NEVER TRAVELS. A
+    # deleting move asks ``assert_complete`` BEFORE anything restores the
+    # transcript (``mobility._source_prepare``, deliberately: the question "would
+    # this delete something we cannot carry" is answered before the conversation
+    # is stopped), so an archive that no list names refuses the move with
+    # ``unlisted_content`` — and the sentence it prints offers "move or remove
+    # it" as the remedy, which for a compressed session is the only copy of the
+    # conversation. Compression is on by default, so this was every session past
+    # ``after_days``. Leaving them OUT of ``EXCLUDED_ENTRIES`` is the same point
+    # from the other side: excluding the transcript would let a deleting move
+    # proceed without it if the restore ever failed.
+    #
+    # What makes the pair harmless is that the prepare restores the archive
+    # before anything is digested or served: the plan names ``transcript.jsonl``
+    # with the plain bytes, and the archive is gone. In the window before that,
+    # both names are accounted for; neither is ever carried under its own name
+    # (``_member_stamps`` skips a member that is absent, and the restore is what
+    # retires the archive).
+    "transcript.jsonl.zst",
+    "transcript.jsonl.gz",
     "title.json",
     "attachment.json",
     "origin.json",
@@ -333,6 +361,14 @@ ATTACHMENT_SIDECAR_SUFFIX = ".json"
 #: ``tests/unit/network/test_sync_copy_set.py``, which also proves that every
 #: entry the retention module calls bookkeeping is on one list or the other.
 EXCLUDED_ENTRIES: dict[str, str] = {
+    # THE INBOX'S TWO TRANSPORT LOCKS (``session/runtime/inbox``): empty
+    # coordination files whose only meaning is "a writer/reader on THIS device is
+    # inside the spool transaction". Copying one would carry a lock with no
+    # owner; treating it as content would refuse a move whenever a drain happened
+    # to be running. They are runtime state, and the destination's inbox opens
+    # them lazily, so they are never copied.
+    ".inbox-write.lock": "a transport lock owned by this device's spool writers",
+    ".inbox-reader.lock": "a transport lock owned by this device's spool reader",
     # Session-scoped role definitions (``profile_scope.SESSION_ROLES_DIRNAME``).
     # v1 deliberately does not carry them: S3's move path refuses by default and
     # names the roles, with ``--drop-session-roles`` as the explicit escape. S1
@@ -437,6 +473,45 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # (``process._EXIT_REQUEST_FRESH_S``). Carried to the destination it would be an
     # instruction from another device to stop a conversation that device does not own.
     "runtime-exit-request.json": "an exit request addressed to the runtime that wrote it",
+    # THE TRANSCRIPT COMPRESSION LOCK (``session/compression.LOCK_NAME``): the
+    # advisory lock a runtime holds while it has the session open (and the
+    # compressor takes non-blocking before it rewrites anything). Copied, it
+    # would be the SOURCE device's claim that this session is in use — a
+    # destination would read its own copy as contended, and a deleting move's
+    # completeness check would have to account for a file that is meaningful
+    # only where it was taken.
+    ".transcript.lock": "a per-device writer lock, meaningful only where it was taken",
+    # THE PARKED PLAIN JOURNAL OF A CRASH-INTERRUPTED COMPRESSION
+    # (``session/compression.QUARANTINE_NAME``, ``.transcript.jsonl.quarantine``).
+    # The pass publishes the VERIFIED archive first and only then renames the plain
+    # file here, so a surviving quarantine always has a byte-identical archive beside
+    # it, and ``restore_for_write`` renames it back to the plain name before any byte
+    # is served. Excluded rather than carried because carrying it would be a second
+    # name for the transcript on a destination that also restored the archive; left
+    # unclassified it would refuse the move of a session whose only sin is a crash
+    # during the compression pass, with "remove it" as the remedy.
+    ".transcript.jsonl.quarantine": (
+        "a crash-interrupted compression's parked plain journal, restored by the "
+        "next write and duplicated by the verified archive beside it"
+    ),
+    # The listing cache written beside an archive at compression time
+    # (``session/compression.PREVIEW_SIDECAR_NAME``): two condensed strings
+    # ABOUT the transcript's tail, derived from bytes the copy carries anyway.
+    # Excluded because it is a cache, not a fact about the conversation: the
+    # transcript itself arrives (as the plain journal the restore publishes) and
+    # the destination rebuilds this document from that transcript's own tail on
+    # the first listing that needs it — ``resume._tail_entries`` writes the
+    # sidecar after the read — so carrying it would be a second source of truth
+    # about a transcript to save exactly nothing. Leaving it behind costs one
+    # bounded tail read, once: the process that paid it records the answer.
+    "preview.json": "a listing cache derived from the archive's tail; the destination rebuilds it",
+    # The conversation's own approval choice (``session.approval_policy``). A
+    # copy is a NEW conversation and must not inherit a loosened consent; the
+    # same rule `fork` applies. Classified here rather than left unlisted, and
+    # never copied rather than carried: without the entry a move of any session
+    # that used the approvals feature refused with `unlisted_content` and told
+    # the user to delete the record (round-4 review, blocker).
+    OVERRIDE_FILENAME: "the conversation's own approval choice; a copy must start without it",
 }
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading
@@ -953,9 +1028,17 @@ def referenced_attachments_in(directory: Path) -> list[str]:
     staging or replica copy. ``_member_stamps`` hashes the blob set this returns,
     so the two ends only agree if they derive the set the same way.
     """
+    from local_operator.session import compression
+
+    # The resolver, not the plain name: a compressed session's references are in
+    # the archive, and a scanner that read nothing would report "no attachments"
+    # for a conversation that names several. This is a READ, so it never restores.
     try:
-        payload = (Path(directory) / TRANSCRIPT_NAME).read_bytes()
-    except OSError:
+        resolved = compression.transcript_for_read(Path(directory))
+        if resolved is None:
+            return []
+        payload = resolved.read_bytes()
+    except (OSError, compression.ArchiveError):
         return []
     return sorted({match.decode("ascii") for match in _ATTACHMENT_REF.findall(payload)})
 
@@ -1293,6 +1376,7 @@ def plan_id(
     a move, whose transcript is carried every byte (see ``_safe_region``).
     """
     store = Path(attachments_dir) if attachments_dir is not None else Path(root) / "attachments"
+    _restore_for_serving(session_dir(root, session_id))
     return _content_digest(
         session_dir(root, session_id),
         session_id,
@@ -1349,6 +1433,55 @@ def _attested_digest(files: dict[str, str], links: tuple[str, ...], session_id: 
     return _content_digest_from(stamps, session_id)
 
 
+def _restore_for_serving(directory: Path) -> bool:
+    """Make ``directory``'s transcript PLAIN before the replication layer reads it.
+
+    THE DECISION THIS ENCODES. Sync is a byte protocol: a plan publishes offsets
+    and digests into ``transcript.jsonl``, a fetch serves ranges of that file, and
+    an append splices at ``prefix_bytes``. A compressed archive has none of those
+    properties — it is not addressable by plain-journal offsets — so the layer
+    keeps operating on plain transcripts, and the device that HOLDS the session
+    restores it before serving. The alternative (teaching the wire the archive
+    format) would change the protocol for every peer, including ones that predate
+    compression.
+
+    Best effort and idempotent: ``True`` when a plain transcript exists afterwards
+    — already plain, restored, or nothing to restore (``False``, and the caller's
+    own read reports the absence in its usual words). A decode failure leaves the
+    archive untouched and answers ``False``; the caller then refuses with the
+    read error rather than serving an empty plan.
+    """
+    from local_operator.session import compression
+
+    try:
+        return compression.restore_for_write(directory)
+    except OSError:
+        # restore_for_write already folds its own failures; this covers a path
+        # that vanished under it, which the caller reports as a missing session.
+        return False
+
+
+def restore_transcript(directory: Path) -> bool:
+    """Make ``directory``'s transcript PLAIN before this layer digests or serves it.
+
+    THE INVARIANT, SPELLED ONCE. Sync's protocol is written in plain-journal bytes:
+    a plan publishes offsets and digests into ``transcript.jsonl`` and a fetch
+    serves ranges of that file, so a compressed session is restored to the plain
+    form before any byte is described (see :func:`_restore_for_serving`).
+    ``build_manifest`` has always done that for the plan it builds. Callers that
+    digest the copy set BEFORE a manifest exists — ``mobility._source_prepare``
+    hashes every member while the source is still running, so the stop covers the
+    copy rather than the digest — have to restore first: a stamp taken from
+    ``transcript.jsonl.gz`` describes a member the plan will not name, and the
+    ``stamps_valid`` re-check then reads the archive's removal by the restore as a
+    change and refuses a move that already happened (review round 3, M-1).
+
+    ``False`` when nothing needed restoring OR the restore failed; a caller that
+    needs the two apart asks :func:`compression.unreadable_archive_error`.
+    """
+    return _restore_for_serving(directory)
+
+
 def build_manifest(
     root: Path,
     session_id: str,
@@ -1372,9 +1505,14 @@ def build_manifest(
     the previous shape read the whole copy set twice for the same plan (once for the
     id, once for the items) and then re-read it on every chunk.
     """
+    from local_operator.session import compression
+
     have = have or {}
     directory = session_dir(root, session_id)
-    transcript = directory / TRANSCRIPT_NAME
+    _restore_for_serving(directory)
+    # ``plain_path`` rather than a second spelling of the name: the restore
+    # above has just made the plain journal the file this plan describes.
+    transcript = compression.plain_path(directory)
     try:
         raw = transcript.read_bytes()
     except OSError as exc:
@@ -1952,6 +2090,23 @@ def pull(
     have = have or {}
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    # THE REPLICATION LAYER WRITES PLAIN TRANSCRIPTS. A destination that holds a
+    # COMPRESSED replica must turn it back into the plain file before an append:
+    # the plan's ``prefix_bytes`` are byte offsets into the plain journal, and
+    # appending to a decompressed copy that is published under no name would
+    # either lose the prefix or splice it twice. Restoring first keeps the wire
+    # protocol untouched — both ends still speak plain transcript bytes.
+    from local_operator.session import compression
+
+    if not _restore_for_serving(dest_dir) and compression.archive_path(dest_dir) is not None:
+        # REFUSE, DO NOT SHADOW. Writing the plain name beside an archive this
+        # build cannot decode would leave a truncated journal that every reader
+        # prefers over the archive holding the rest of the conversation.
+        raise SyncRefused(
+            "no_session",
+            f"{session_id} holds an archived transcript this device cannot decode, "
+            "so it cannot be appended to",
+        )
     # THE PLAN IS ASKED FOR AGAIN WHEN IT CANNOT DESCRIBE THIS DESTINATION. An
     # "append" plan is a claim that this destination already holds the source's
     # first ``prefix_bytes``; if the file here is not that long, the claim is
@@ -1975,7 +2130,13 @@ def pull(
         if str(transcript.get("mode") or "replace") != "append":
             break
         start = int(transcript.get("prefix_bytes") or 0)
-        existing = (dest_dir / TRANSCRIPT_NAME).stat().st_size if transcript_exists(dest_dir) else 0
+        try:
+            # The PLAIN file, which ``_restore_for_serving`` above guarantees when
+            # a transcript is held at all; an absent one reads as "no prefix",
+            # which re-plans this as a full copy (``have``'s cursor is dropped).
+            existing = compression.plain_path(dest_dir).stat().st_size
+        except OSError:
+            existing = 0
         if existing == start:
             break
         have = {key: value for key, value in (have or {}).items() if key != "cursor"}
@@ -2098,7 +2259,17 @@ def pull(
 
 
 def transcript_exists(directory: Path) -> bool:
-    return (Path(directory) / TRANSCRIPT_NAME).is_file()
+    """Whether this device holds a transcript for the session in ``directory``.
+
+    ANY physical form (:func:`compression.has_transcript`): a compressed replica
+    is still a replica this device holds — the resolver restore below turns it
+    back into the plain file a sync writes, so answering "not held" here would
+    make the destination re-plan a full copy of a session it already has, and
+    make a move's source look empty.
+    """
+    from local_operator.session import compression
+
+    return compression.has_transcript(directory)
 
 
 def _destination_for(dest_dir: Path, attachments_root: Path, name: str) -> Path | None:
@@ -2864,7 +3035,12 @@ class SyncWatcher(threading.Thread):
         pushed: list[tuple[str, str]] = []
         for session_id, holders in self._replicated().items():
             try:
-                stat = (Path(self._server.root) / "sessions" / session_id / TRANSCRIPT_NAME).stat()
+                from local_operator.session import compression
+
+                source, _codec = compression.transcript_source(
+                    Path(self._server.root) / "sessions" / session_id
+                )
+                stat = source.stat()
             except OSError:
                 read_stamp(self._server.root, session_id)
                 continue

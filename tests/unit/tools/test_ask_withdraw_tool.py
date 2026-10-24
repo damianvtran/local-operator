@@ -68,6 +68,23 @@ def test_the_advertised_schema_is_the_two_reasons_and_the_cells_map():
     assert "message_id" not in props
 
 
+def test_the_description_reconciles_earlier_answers_with_verbatim_words():
+    """Review round 1 m3: the settle case is often a message several turns back,
+    and "even a paraphrase" sat beside "VERBATIM" as if the model should
+    paraphrase the user. The description names both readings once: the message
+    that answered it (latest or earlier), and the user's own words rather than
+    the options — still recorded verbatim."""
+    tool = _tools(_context(withdraw=lambda *_a, **_k: {"ok": True}))["ask_withdraw"]
+    text = " ".join(tool.description.split())
+    assert "the user's chat message that answered it (latest or earlier)" in text
+    assert "even if they used their own words rather than the options" in text
+    assert "VERBATIM" in text
+    assert "paraphrase" not in text
+    # The all-empty refusal (m2) is stated here so the model does not learn it
+    # from an error: the recipe this release teaches makes it reachable.
+    assert "Every cell empty is refused" in text
+
+
 @pytest.mark.asyncio
 async def test_the_receipt_and_details_are_relayed_byte_for_byte():
     calls: list[tuple[str, dict[str, Any]]] = []

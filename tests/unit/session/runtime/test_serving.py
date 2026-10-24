@@ -36,7 +36,10 @@ from local_operator.session.naming import (
 )
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
-from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.session.runtime.serving import (
+    AskUnavailableError,
+    ServingSessionHandle,
+)
 
 
 class FakeSession:
@@ -57,6 +60,10 @@ class FakeSession:
     #: fake stands in for without creating it.
     _name_state: ConversationName
     conversation_name_state: ConversationName
+    #: Some cases attach a transcript directory so the handle's two-hop sidecar
+    #: read has something real to resolve; declared here so the facade tests can
+    #: set it without an attr-defined complaint.
+    transcript: Any
 
     def __init__(self) -> None:
         self.session_id = "sess-1"
@@ -972,6 +979,70 @@ async def test_ask_gate_asks_multiple_questions_one_at_a_time() -> None:
     await handle.ask_answer(second.request_id, "yes")
     assert await asyncio.wait_for(asked, 1) == {"env": ["prod"], "confirm": ["yes"]}
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_the_ask_surface_can_be_installed_without_the_approval_gates() -> None:
+    """#2803: a resumed, unsupervised run gets the ASK half and nothing else.
+
+    The ask half is what makes the queue exist at all (``Session.ask_queue``
+    answers ``None`` without a hook), so a resume worker without it never builds
+    a queue, never advertises ``ask``/``ask_withdraw``, and cannot deliver a row
+    its conversation's ask log owes.
+    """
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    handle = ServingSessionHandle(
+        session, loop, cwd="/tmp", install_gates=False, install_ask_surface=True
+    )
+
+    assert handle._gates_installed is False
+    # NOTHING about approvals moved: that half is why `--control` is withheld
+    # from a resume worker in the first place.
+    assert getattr(session, "_approval_handler", None) is None
+    assert getattr(handle, "_approval_gate", None) is None
+    assert session._ask_handler is handle._ask_gate
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_neither_flag_installs_no_ask_surface() -> None:
+    """A fresh unsupervised ``lop exec`` still has no ``ask`` (SA-D2)."""
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    ServingSessionHandle(session, loop, cwd="/tmp", install_gates=False)
+
+    assert getattr(session, "_ask_handler", None) is None
+
+
+@pytest.mark.asyncio
+async def test_the_queued_only_ask_surface_refuses_in_words_when_awaited() -> None:
+    """The kill-switch arm must not report a user who was never shown a card.
+
+    Under the queued engine the handler is only a capability flag —
+    ``execute_ask`` awaits it on the BLOCKING arm alone. With the engine off
+    (``LOP_ASK_NONBLOCKING=0``) there is nobody to present the question, and
+    returning ``None`` would render as "the user closed the question", so the
+    arm raises a sentence instead.
+    """
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    handle = ServingSessionHandle(
+        session, loop, cwd="/tmp", install_gates=False, install_ask_surface=True
+    )
+    with pytest.raises(AskUnavailableError) as raised:
+        await session._ask_handler(
+            [
+                AskQuestion(
+                    id="q0",
+                    question="which?",
+                    options=[AskOption(label="yes"), AskOption(label="no")],
+                )
+            ]
+        )
+
+    assert "No one can be asked on this run" in str(raised.value)
+    assert "the queued-ask engine is off" in str(raised.value)
+    assert handle._ask_gate is session._ask_handler
 
 
 @pytest.mark.asyncio
@@ -2143,6 +2214,43 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
         applied[-1].reasoning_effort
         == build_model_spec("deepseek", "deepseek-flash").reasoning_effort
     )
+
+
+@pytest.mark.asyncio
+async def test_a_pair_only_switch_keeps_the_fast_dial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A re-pick of the row in force must not erase the speed the user set.
+
+    ``build_model_spec`` never seeds ``fast_mode`` (it is the one dial billed at a
+    premium, so it cannot arrive on by inference), and ``Session.set_model``
+    assigns the rebuilt spec BEFORE its same-pair early return. So the birth
+    override RPC — the one ``AttachedSession._consume_model_override`` sends on
+    the first send of a draft created with fast on (ui#1265) — rebuilt the spec
+    and reseated the conversation on standard speed at the exact moment the user
+    expected the tier they had just chosen.
+
+    Same rule as the level beside it (#2471): a pair re-pick is not a request to
+    forget a knob. A GENUINE switch does not carry the dial — it is a per-model
+    premium, and re-arming it on a different model is how a switch costs money
+    the user never agreed to.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    fast = build_model_spec("anthropic", "claude-opus-5").model_copy(update={"fast_mode": True})
+    assert fast.supports_fast_mode, "the registry must sell this tier"
+    session.model = fast
+
+    await handle.set_model_effort("anthropic", "claude-opus-5", None)
+    assert applied[-1].fast_mode is True, "the dial the owner was born on must survive the RPC"
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    assert applied[-1].fast_mode is False, "a switch to another model is not a fast re-arm"
 
 
 @pytest.mark.asyncio

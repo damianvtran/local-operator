@@ -276,6 +276,15 @@ export interface AskQuestion {
 	persist: boolean;
 }
 
+/** The effective approval mode a conversation is running under. */
+export type ApprovalMode = "ask" | "auto";
+
+/** Where that mode came from. `global` is `tool_approval_mode` in the machine's
+    config (every conversation that follows it); `session` is this
+    conversation's own saved choice; `pin` is a `--yolo`-style flag on THIS run,
+    which outlives no restart and outranks both. */
+export type ApprovalProvenance = "global" | "session" | "pin";
+
 export interface PendingRequest {
 	request_id: string;
 	kind: "approval" | "ask";
@@ -290,6 +299,21 @@ export interface PendingRequest {
 	    can show "Question 1 of 2" and the user knows more follow (U1). */
 	question_index: number;
 	question_total: number;
+	/** The mode IN FORCE for this conversation, and where it came from. Both are
+	    OPTIONAL and absent (or empty) on an older owner — a phone talking to a
+	    runtime that predates them must render no policy line rather than a
+	    guessed one (`lib/approval-policy.approvalPolicyLine`). They ride the
+	    projection, so the card states the runtime's answer, never the phone's
+	    memory of the last gesture it made from this screen. */
+	approval_mode?: ApprovalMode | "";
+	approval_provenance?: ApprovalProvenance | "";
+	/** The MACHINE default (`tool_approval_mode`) as the runtime resolves it, so a
+	    session override can state the mode it overrides without deriving it.
+	    Optional/empty on an older owner; `approvalPolicyLine` then drops that
+	    clause rather than negating the session mode into a claim about the
+	    machine (UX round 2, U4: global=ask + a session `ask` override rendered
+	    "overrides global Auto" because the runtime never sent this). */
+	approval_global_mode?: ApprovalMode | "";
 }
 
 export interface CompletionAttention {
@@ -389,6 +413,27 @@ export interface PendingAsk {
 	    advance past them, and the log still holds nothing until the last question
 	    lands. Absent on every ask answered the atomic way. */
 	draft_question_ids?: string[];
+	/** THE CARD'S CONTEXT LINE (SA-D7), the pair the ask card draws as
+	    "3 messages from you since this was asked (last 19:36)": operator messages
+	    admitted after this ask was raised, and when the latest one was (epoch ms).
+
+	    ABSENT IS NOT ZERO. The runtime omits both when it cannot count them — an
+	    older daemon, an ask older than its retained window — and the card then
+	    draws no line at all. A present `0` is a fact (the ask is newer than every
+	    message) and draws no line either: there is nothing stale to report. */
+	user_messages_since?: number;
+	last_user_message_at?: number;
+	/** WHY and WHEN this ask was dismissed (SA-D8, design §17). `dismissed_at` is
+	    the stamp the daemon's shared visibility rule reads — a dismissal BEFORE
+	    the deadline keeps a settled row, one at or after it leaves — and
+	    `dismissed_reason` is the operator's own word (`moot` |
+	    `answered_in_chat`), which the settled card states under its badge.
+
+	    ABSENT on every other status, and absent on a dismissal recorded by an
+	    older runtime: the card then keeps the sentence it always had rather than
+	    inventing a reason. */
+	dismissed_at?: number;
+	dismissed_reason?: string;
 }
 
 /** One aggregated row of the published `spend_channels` object
@@ -846,8 +891,14 @@ export type CommandOp =
 	/* Dismiss is VIEW-ONLY: it removes the row from the queue's front end and asks
 	   the model nothing — no turn is bought HERE. The one thing it can still owe is
 	   the deadline notice that ask never got (design `ask-nonblocking.md` §14),
-	   delivered on the conversation's next run. */
-	| { op: "ask_dismiss"; ask_id: string }
+	   delivered on the conversation's next run.
+
+	   `reason` (R5) is the operator's word for WHY an OPEN ask is going away:
+	   `moot` says the question stopped mattering, `answered_in_chat` says it was
+	   already answered in the conversation. It is OPTIONAL because a lapsed ask's
+	   one-key door sends the body it always did — the queue then records its own
+	   default, and an older daemon sees exactly the frame it always accepted. */
+	| { op: "ask_dismiss"; ask_id: string; reason?: "moot" | "answered_in_chat" }
 	| { op: "snapshot" }
 	/* THE TURN-SUPPLEMENT FAMILY (memo §2.7). Additive ops the runtime's dispatch
 	   answers with its own receipt (`cancelled` / `steering` / `restarting` / the

@@ -57,6 +57,7 @@ function beat(over: Partial<SupplementBeat> = {}): SupplementBeat {
 		filesMore: 0,
 		more: [],
 		components: [],
+		sounds: [],
 		error: "",
 		cause: "",
 		dismissed: false,

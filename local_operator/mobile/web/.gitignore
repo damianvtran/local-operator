@@ -53,6 +53,9 @@ __pycache__/
 .DS_Store
 dist/
 node_modules/
+# …and a SYMLINKED node_modules: the trailing slash matches only a directory,
+# and a linked tree is how this repo's own lane leaked one (root `.gitignore`).
+node_modules
 .pnpm-store/
 local-operator-extension.zip
 gha-creds-*.json

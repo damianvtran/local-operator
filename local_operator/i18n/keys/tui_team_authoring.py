@@ -110,6 +110,10 @@ def project() -> Msg:
     return Msg("tui.team_authoring.project", {})
 
 
+def promote_hint() -> Msg:
+    return Msg("tui.team_authoring.promote_hint", {})
+
+
 def registry_missing() -> Msg:
     return Msg("tui.team_authoring.registry_missing", {})
 

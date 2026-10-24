@@ -758,6 +758,221 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     hub_link.add_argument("--json", action="store_true")
 
+    # ``skills``: the smallest CLI that exercises publish / pull / subscribe /
+    # update for hub skills, including the BUNDLE carrier (--bundle on publish,
+    # the publisher confirmation on public pulls). It drives the SAME service
+    # functions the desktop routes use -- there is no second sync engine.
+    skills_parser = subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "skills",
+        help="Publish, pull and synchronize hub skills (documents and bundles)",
+        description=(
+            "Bundle skills may not contain executables (any execute bit is refused), "
+            "and installing one never runs code."
+        ),
+        parents=[parent_parser],
+    )
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
+    skills_publish = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "publish",
+        help="Publish a local skill to the hub (documents; --bundle for binary/asset trees)",
+        parents=[parent_parser],
+    )
+    skills_publish.add_argument(
+        "name",
+        help="The local skill's name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--public",
+        action="store_true",
+        help="Publish to the public catalogue",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--org",
+        default=None,
+        metavar="TENANT",
+        help="Publish to this organization",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--bundle",
+        action="store_true",
+        help="Publish as a bundle: a directory whose SKILL.md needs relative binary "
+        "or asset files (plain text skills stay documents)",
+    )
+    skills_publish.add_argument(
+        "--alias",
+        default=None,
+        help="The published name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--no-subscribe",
+        action="store_true",
+        help="Publish without subscribing this machine",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Confirm the publication without prompting",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
+    )
+
+    skills_pull = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "pull",
+        help="Install a hub skill (a bundle needs the publisher/hash confirmation)",
+        parents=[parent_parser],
+    )
+    skills_pull.add_argument(
+        "hub_id",
+        help="The hub skill id",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_pull.add_argument(
+        "--public",
+        action="store_true",
+        help="Pull from the public catalogue",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--org",
+        default=None,
+        metavar="TENANT",
+        help="Pull from this organization",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--alias",
+        default=None,
+        help="The local name (defaults to the published name)",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--no-subscribe",
+        action="store_true",
+        help="Install without subscribing",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--confirm-publisher",
+        default=None,
+        metavar="ID",
+        help="The publisher account id the bundle prompt named",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--confirm-hash",
+        default=None,
+        metavar="HASH",
+        help="The bundle archive sha256 the prompt named",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Confirm the bundle publisher and hash shown by this command",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--reinstall",
+        action="store_true",
+        help="Bundle links only: discard local changes, re-fetch and re-pin the hub's "
+        "current archive (accepts a changed publisher after the confirmation)",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
+    )
+
+    skills_push = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "push",
+        help="Republish one linked skill's local changes (documents and bundles)",
+        parents=[parent_parser],
+    )
+    skills_push.add_argument(
+        "name",
+        help="The linked skill's name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_push.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Push without prompting (required off a terminal)",
+    )
+    skills_push.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
+    )
+
+    skills_sync = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "sync",
+        help="Check hub skills and fast-forward the ones that are safe to update",
+        parents=[parent_parser],
+    )
+    skills_sync.add_argument(
+        "--name",
+        default=None,
+        help="Only this linked skill",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_sync.add_argument(
+        "--all",
+        action="store_true",
+        help="Every linked skill (the default)",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--check",
+        action="store_true",
+        help="Report what would change, writing nothing",
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Accepted for script symmetry; sync never prompts (use --check to preview)",
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
+    )
+
+    skills_status = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "status",
+        help="Show every linked skill's local/hub state (no network)",
+        parents=[parent_parser],
+    )
+    skills_status.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON snapshot",
+    )
+
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
         "serve", help=_sv.serve().envelope(locale=help_locale)["text"], parents=[parent_parser]
@@ -11674,6 +11889,823 @@ def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
     return 0
 
 
+def skills_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop skills …`` -- publish / pull / sync / status for hub skills.
+
+    Thin by design: every arm calls the SAME ``hub_sync.service`` function the
+    desktop routes call (``preview_skill_publication`` + ``publish_skill``,
+    ``install_skill``, ``check_items`` + ``apply_items``, ``links_snapshot``), so
+    the CLI can never grow a second sync engine with different safety rules.
+    """
+
+    command = getattr(args, "skills_command", None)
+    if command == "publish":
+        return _skills_publish(args, base_dir)
+    if command == "pull":
+        return _skills_pull(args, base_dir)
+    if command == "push":
+        return _skills_push(args, base_dir)
+    if command == "sync":
+        return _skills_sync(args, base_dir)
+    if command == "status":
+        return _skills_status(args, base_dir)
+    print(
+        f"error: unknown skills command: {command}",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    return 2
+
+
+#: Bundle refusals as "what happened: what to do" (D6). Keyed by the LinkError
+#: code, so every skills arm words the same refusal the same way.
+_SKILL_REFUSAL_TEXT: dict[str, tuple[str, str]] = {
+    "bundle-invalid": (
+        "the bundle archive is not safe to install",
+        "fix the source files (no executables, symlinks or hidden paths) and publish again",
+    ),
+    "bundle-hash-mismatch": (
+        "the downloaded archive does not match the published hash",
+        "pull again; if it repeats, ask the publisher to republish",
+    ),
+    "bundle-too-large": (
+        "the bundle exceeds the carrier's size bound",
+        "trim the archive and republish",
+    ),
+    "bundle-confirmation-required": (
+        "this bundle needs its publisher and archive hash confirmed",
+        "re-run with --confirm-publisher ID --confirm-hash HASH, or --yes after reading "
+        "the facts",
+    ),
+    "bundle-confirmation-mismatch": (
+        "what you confirmed no longer matches the hub row",
+        "re-run the pull to read the current facts",
+    ),
+    "bundle-publisher-changed": (
+        "the hub row now names a different publisher",
+        "run `lop skills pull <id> --reinstall` to accept the change",
+    ),
+    "bundle-publisher-unnamed": (
+        "the hub did not name the publisher of this bundle",
+        "ask the publisher to republish so the revision names an account, then pull again",
+    ),
+    "bundle-local-changes": (
+        "the local bundle changed since it was checked",
+        "run `lop skills sync` or `lop skills push` again",
+    ),
+    "bundle-conflict": (
+        "the local bundle and the hub both changed",
+        "keep a copy, then pull again, or reconcile and push",
+    ),
+    "bundle-alias-rename-unsupported": (
+        "a bundle is installed under its published name",
+        "drop --alias and pull again",
+    ),
+    "bundle-form-changed": (
+        "the skill changed form between document and bundle",
+        "unpull the link and pull it again",
+    ),
+    "bundle-unsupported-server": (
+        "the hub does not support bundles yet",
+        "update the hub, or pull a document skill",
+    ),
+    "no-credential": (
+        "this machine has no hub credential for that scope",
+        "run `lop login radient` and try again",
+    ),
+    "reinstall-unsupported": (
+        "--reinstall applies to bundle links only",
+        "pull a document without --reinstall",
+    ),
+}
+
+
+_CONTROL_OR_FORMAT = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
+
+
+def _safe(value: Any, *, limit: int = 200) -> str:
+    """Untrusted (remote-derived) text made safe for ONE terminal line.
+
+    Publisher names, ids and file paths come from the hub: a ``"\x1b[2K\r"``
+    there would overwrite the very line the operator is approving (D1). Control
+    and format characters are VISIBLE-ESCAPED (``\x1b``, ``\u202e``) rather
+    than stripped, so a hostile id stays printable and can still be pasted into
+    a confirmation (D15); whitespace collapses to single spaces and the result
+    is bounded. Ordinary Unicode (accents, CJK, emoji) is returned unchanged.
+    """
+
+    text = str(value)
+
+    def escaped(match: re.Match[str]) -> str:
+        return match.group(0).encode("unicode_escape").decode("ascii")
+
+    visible = _CONTROL_OR_FORMAT.sub(escaped, text)
+    return " ".join(visible.split())[:limit]
+
+
+def _skills_fail(args: argparse.Namespace, error: Any) -> int:
+    """A refusal in the MODE the caller asked for (round-2 D11).
+
+    ``--json`` consumers parse this stream: a plain ``error:`` line breaks
+    them, so the same sentence and code are emitted as one JSON object.
+    """
+
+    import json as _json
+
+    code = str(getattr(error, "code", "") or "")
+    sentence = _skills_refusal(error)
+    if getattr(args, "json", False):
+        print(_json.dumps({"error": sentence, "code": code}))
+    else:
+        print(
+            f"error: {sentence}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    return 1
+
+
+def _publish_refusal(error: Any) -> Any:
+    """A publish-side refusal with the right verb and the offending path (D10).
+
+    The pull-side wording ("not safe to install") is wrong while publishing and
+    drops the entry name, which on a large skill turns a fix into a search. Only
+    the executable/special-mode refusal is rewritten; everything else passes
+    through to the shared sentence table.
+    """
+
+    from local_operator.hub_sync.identity import LinkError
+
+    match = re.search(r"source entry '([^']+)' is executable", str(error))
+    if match:
+        # A DISTINCT code: the shared table answers ``bundle-invalid`` with the
+        # pull-side sentence, which would drop the path this refusal exists to
+        # name. Not in the table -> the message below is the answer.
+        return LinkError(
+            "bundle-executable",
+            "bundles cannot contain executables: chmod -x "
+            f"{_safe(match.group(1))} and publish again",
+        )
+    return error
+
+
+def _skills_refusal(error: Any) -> str:
+    """A named bundle refusal as a sentence with a next action (D6)."""
+
+    code = str(getattr(error, "code", "") or "")
+    mapped = _SKILL_REFUSAL_TEXT.get(code)
+    if mapped is not None:
+        what, action = mapped
+        return f"{what}: {action} [{code}]"
+    return _safe(str(error))
+
+
+def _scope_label(visibility: str) -> str:
+    """The scope as the operator says it (D4: an org row is never "public")."""
+
+    return "organization" if visibility == "org" else "public"
+
+
+def _quoted_name(value: Any) -> str:
+    """A display name for a quoted segment: quotes and backslashes escaped.
+
+    ``_safe`` strips control/format characters but leaves quotes, so a name like
+    ``Minerva Labs (acct_real)")`` could CLOSE the segment and fabricate the
+    trusted id that follows it on the same line (round-3 r3-m3).
+    """
+
+    return _safe(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _print_pin(pin: Any, *, indent: str = "  ") -> None:
+    """Show the confirmed publisher + archive hash when a link carries one."""
+
+    if not isinstance(pin, Mapping):
+        return
+    name = pin.get("publisher_name")
+    label = _safe(pin.get("publisher_id"))
+    if name:
+        label += f' ("{_quoted_name(name)}")'
+    print(
+        f"{indent}publisher: {label}",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    if pin.get("archive_hash"):
+        print(
+            f"{indent}confirmed archive sha256: {_safe(pin.get('archive_hash'))}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+
+
+def _bytes_label(value: Any) -> str:
+    """Bytes, or MiB past one MiB, so a 25 MB skill reads as a size (D13)."""
+
+    size = int(value or 0)
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MiB"
+    return f"{size} bytes"
+
+
+def _bundle_lines(
+    bundle: Mapping[str, Any],
+    *,
+    publisher: Mapping[str, Any] | None,
+    indent: str = "  ",
+) -> list[str]:
+    """The human facts of one bundle (D3/D7): sizes, both hashes, file summary."""
+
+    count = int(bundle.get("file_count") or 0)
+    lines = [
+        f"{indent}{count} file{'' if count == 1 else 's'}, "
+        f"{_bytes_label(bundle.get('size'))} packed / "
+        f"{_bytes_label(bundle.get('uncompressed_size'))} unpacked",
+        f"{indent}archive sha256: {_safe(bundle.get('hash'))}",
+        f"{indent}tree hash: {_safe(bundle.get('tree_hash'))}",
+    ]
+    files = bundle.get("files")
+    if isinstance(files, list) and files:
+        names = [
+            _safe(row.get("path") if isinstance(row, Mapping) else row, limit=120) for row in files
+        ]
+        summary = f"{indent}files: " + ", ".join(names)
+        more = int(bundle.get("files_more") or 0)
+        if more:
+            summary += f" (… and {more} more)"
+        lines.append(summary)
+    if publisher:
+        label = _safe(publisher.get("id"))
+        if publisher.get("name"):
+            # QUOTED (D14): a display name can otherwise mimic a trusted id
+            # textually ("Minerva Labs (acct_real)") inside the same line.
+            label += f' ("{_quoted_name(publisher.get("name"))}")'
+        lines.append(
+            f"{indent}publisher: {label}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    return lines
+
+
+def _skills_scope(args: argparse.Namespace) -> tuple[str, str | None]:
+    """``--public`` / ``--org TENANT`` as the paired scope the service requires."""
+
+    public = bool(getattr(args, "public", False))
+    tenant = getattr(args, "org", None)
+    if public and tenant:
+        raise ValueError("pass either --public or --org, not both")
+    if not public and not tenant:
+        raise ValueError("pass --public or --org TENANT")
+    return ("public", None) if public else ("org", str(tenant))
+
+
+def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    try:
+        visibility, tenant_id = _skills_scope(args)
+    except ValueError as error:
+        print(
+            f"error: {error}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+        return 2
+    form = "bundle" if bool(getattr(args, "bundle", False)) else "document"
+    alias = getattr(args, "alias", None) or args.name
+    subscribe = not bool(getattr(args, "no_subscribe", False))
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    try:
+        preview = svc.preview_skill_publication(
+            ctx,
+            source_skill=args.name,
+            local_alias=alias,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            subscribe=subscribe,
+            auto_push=False,
+            confirm_public_egress=False,
+            form=form,
+        )
+    except LinkError as error:
+        return _skills_fail(args, _publish_refusal(error))
+    if not getattr(args, "json", False):
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"{form} publication of {_safe(args.name)!r} as {_safe(alias)!r} "
+            f"({_scope_label(visibility)})"
+        )
+        if form == "bundle":
+            print(
+                "\n".join(
+                    _bundle_lines(preview.get("bundle") or {}, publisher=preview.get("publisher"))
+                )
+            )
+            for note in preview.get("notes") or []:
+                print(
+                    f"  note: {_safe(note, limit=400)}",
+                    # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                )
+        if preview.get("reason"):
+            print(
+                "  cannot publish: " f"{_skills_refusal(_reason_error(str(preview['reason'])))}",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
+    if preview.get("reason"):
+        # The CODE stays machine-readable; the sentence rides beside it so a
+        # JSON consumer is not left with a bare token (round-2 D6).
+        preview["reason_message"] = _skills_refusal(_reason_error(str(preview["reason"])))
+        if getattr(args, "json", False):
+            print(_json.dumps(preview, indent=2))
+        return 1
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required",
+                    "pass --yes to publish (no terminal to confirm on)",
+                ),
+            )
+        answer = input("Publish this skill to the hub? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
+            return 1
+    try:
+        result = svc.publish_skill(
+            ctx,
+            source_skill=args.name,
+            local_alias=alias,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            subscribe=subscribe,
+            auto_push=False,
+            confirm_public_egress=False,
+            preview_receipt=str(preview.get("preview_receipt") or ""),
+            form=form,
+        )
+    except LinkError as error:
+        return _skills_fail(args, _publish_refusal(error))
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2))
+        return 0
+    link = result.get("link") or {}
+    print(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        f"published {_safe(link.get('name') or alias)} ({form}) as "
+        f"{_safe(link.get('hub_id') or '?')}"
+    )
+    return 0
+
+
+def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.provenance import canonical_hub_source
+
+    try:
+        visibility, tenant_id = _skills_scope(args)
+    except ValueError as error:
+        print(
+            f"error: {error}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+        return 2
+    subscribe = not bool(getattr(args, "no_subscribe", False))
+    reinstall = bool(getattr(args, "reinstall", False))
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    alias = getattr(args, "alias", None)
+    hub_source = canonical_hub_source(ctx.config_manager) or ""
+    try:
+        preview = svc.install_skill(
+            ctx,
+            hub_source=hub_source,
+            hub_id=args.hub_id,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            alias=alias,
+            subscribe=subscribe,
+            dry_run=True,
+            reinstall=reinstall,
+        )
+    except LinkError as error:
+        return _skills_fail(args, error)
+    bundle = preview.get("bundle")
+    publisher = preview.get("publisher")
+    confirm_publisher = getattr(args, "confirm_publisher", None)
+    confirm_hash = getattr(args, "confirm_hash", None)
+    if not getattr(args, "json", False):
+        name = (bundle or {}).get("name") or args.hub_id
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"install {_safe(name)!r} ({'bundle' if bundle else 'document'}) from "
+            f"{_scope_label(visibility)}"
+        )
+        if bundle:
+            print("\n".join(_bundle_lines(bundle.get("bundle") or {}, publisher=publisher)))
+            for note in bundle.get("notes") or []:
+                print(
+                    f"  note: {_safe(note, limit=400)}",
+                    # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                )
+    if bundle is None and reinstall:
+        return _skills_fail(
+            args,
+            LinkError(
+                "reinstall-unsupported",
+                "--reinstall applies to bundle links: a document has no archive "
+                "to reinstall from",
+            ),
+        )
+    if bundle is not None and visibility == "org" and (confirm_publisher or confirm_hash):
+        # D9: the service does not verify a publisher for org rows, so the CLI
+        # must not pretend it did. Say it plainly and ignore the flags.
+        if not getattr(args, "json", False):
+            print(
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                "  note: an organization install is authorized by membership; "
+                "--confirm-publisher/--confirm-hash do not apply"
+            )
+        confirm_publisher = confirm_hash = None
+    if bundle is not None and visibility == "public" and publisher is None:
+        # BEFORE the prompt and before the flag instruction (D5): no account is
+        # named, so there is no id to confirm and --yes cannot satisfy it.
+        return _skills_fail(
+            args,
+            LinkError(
+                "bundle-publisher-unnamed",
+                "the hub's response names no publisher account for this bundle; ask the "
+                "publisher to republish it so the revision names an account, then pull again",
+            ),
+        )
+    if (
+        bundle
+        and visibility == "public"
+        and getattr(args, "json", False)
+        and not getattr(args, "yes", False)
+        and not (confirm_publisher and confirm_hash)
+    ):
+        # A QUERY, NOT AN ERROR (D2): a non-interactive caller reads the facts
+        # and re-runs with the confirmation; nothing was installed.
+        payload = dict(preview)
+        payload["confirmation_required"] = True
+        print(_json.dumps(payload, indent=2))
+        return 0
+    confirmed = False
+    if bundle is None or visibility == "org":
+        # A DOCUMENT pull carries no bundle confirmation, and an ORG bundle is
+        # authorized by membership (the service verifies/pins only public rows).
+        pass
+    elif bool(getattr(args, "yes", False)):
+        confirmed = True
+    elif confirm_publisher and confirm_hash:
+        # The service compares BOTH against the row it re-reads; the CLI only
+        # forwards them, so a swapped publisher or archive refuses there.
+        pass
+    elif sys.stdin.isatty() and not getattr(args, "json", False):
+        answer = input("Install this bundle? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
+            return 1
+        confirmed = True
+    else:
+        return _skills_fail(
+            args,
+            LinkError(
+                "bundle-confirmation-required",
+                f"this {_scope_label(visibility)} bundle install needs the publisher "
+                "confirmation: pass --confirm-publisher ID --confirm-hash HASH, or --yes",
+            ),
+        )
+    try:
+        result = svc.install_skill(
+            ctx,
+            hub_source=hub_source,
+            hub_id=args.hub_id,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            alias=alias,
+            subscribe=subscribe,
+            confirm=confirmed,
+            confirm_publisher_id=confirm_publisher,
+            confirm_bundle_hash=confirm_hash,
+            reinstall=reinstall,
+        )
+    except LinkError as error:
+        return _skills_fail(args, error)
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2))
+        return 0
+    link = result.get("link") or {}
+    reports = result.get("reports") or []
+    outcome = str((reports[0] if reports else {}).get("outcome") or "")
+    if outcome == "unchanged":
+        # A plain pull of an already-linked skill REPLAYS the existing link:
+        # saying "installed" would claim a write that never happened (D19).
+        print(
+            f"already installed; no change: {_safe(link.get('name') or args.hub_id)}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    else:
+        print(
+            f"installed {_safe(link.get('name') or args.hub_id)}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    _print_pin(link.get("bundle_confirmation"), indent="  ")
+    return 0
+
+
+def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop skills push`` -- republish ONE linked skill through the push engine.
+
+    The manual twin of the runner's tick: a fresh check (the revision the commit
+    conditions on and the local fields it projects), the SAME outbound
+    projection, the SAME per-link transport and the SAME ``push_item`` -- a
+    second publish path would be a second place for the receipt/attestation
+    rules to drift. A bundle additionally uploads its rebuilt archive before
+    the commit, which ``push_item`` enforces through ``bundle_upload_hook``.
+    """
+
+    import asyncio
+    import json as _json
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.adapters import publish_document
+    from local_operator.hub_sync.budget import OperationBudget
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.outbox import Outbox
+    from local_operator.hub_sync.push import push_item
+
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    checks = svc.check_items(ctx, kinds=("skill",), names=[args.name])
+    check = svc.find_check(checks, "skill", args.name)
+    if check is None:
+        return _skills_fail(
+            args,
+            LinkError(
+                "link-not-found",
+                f"no linked skill named {args.name!r} (see `lop skills status`)",
+            ),
+        )
+    record = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
+    if record is None or record.identity is None:
+        return _skills_fail(
+            args,
+            LinkError(
+                "unresolved-link",
+                "this skill link has no confirmed origin; resolve it first",
+            ),
+        )
+    if record.outbound is None:
+        # THE MANUAL FIRST PUBLICATION. An unattended push refuses to invent an
+        # ancestor, but an explicit push IS that deliberate act: seed (A, P) from
+        # the KNOWN baseline -- the tree this link last pulled -- and only while
+        # the hub still holds exactly that tree, so the declared ancestor is a
+        # fact rather than a guess.
+        if record.lineage != "clean" or record.recorded_by == prov.UNKNOWN_BASELINE:
+            return _skills_fail(
+                args,
+                LinkError(
+                    "lineage-not-clean",
+                    "this link's lineage is not clean; resolve or pull again first",
+                ),
+            )
+        try:
+            # Both sides are already canonical (a baseline's fields verbatim, the
+            # check's adapter projection), so the fingerprint IS the comparison;
+            # the carrier dispatch inside it keeps bundles on tree hashes.
+            agreed = prov.fingerprint_snapshot(
+                "skill", dict(record.fields)
+            ) == prov.fingerprint_snapshot("skill", dict(check.remote or {}))
+        except Exception:  # noqa: BLE001 - an unreadable side proves no agreement
+            agreed = False
+        if not agreed:
+            return _skills_fail(
+                args,
+                LinkError(
+                    "hub-moved",
+                    "the hub moved since this link's baseline; run `lop skills sync` first",
+                ),
+            )
+        from dataclasses import replace as dc_replace
+
+        from local_operator.hub_sync.push import receipt_for
+
+        receipt = receipt_for(
+            "skill",
+            dict(record.fields),
+            dict(record.fields),
+            revision=record.remote_revision,
+            operation_id=None,
+        )
+        prov.write_baseline(ctx.config_dir, dc_replace(record, outbound=receipt))
+        record = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
+        assert record is not None
+    outbound = record.outbound
+    assert outbound is not None
+    identity = record.identity
+    if identity is None:
+        return _skills_fail(
+            args,
+            LinkError(
+                "unresolved-link",
+                "this skill link has no confirmed origin; resolve it first",
+            ),
+        )
+    is_bundle = "bundle" in (record.fields or {})
+    if is_bundle and not svc._capability_bundle(ctx.store().load(), identity):
+        return _skills_fail(
+            args, LinkError("bundle-unsupported-server", "the hub does not support bundles yet")
+        )
+    expected = check.remote_revision or outbound.remote_revision
+    if not expected:
+        return _skills_fail(
+            args,
+            LinkError(
+                "no-remote-revision",
+                "this link has no remote revision to condition the write on; run a check",
+            ),
+        )
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required",
+                    "pass --yes to push (no terminal to confirm on)",
+                ),
+            )
+        form = "bundle" if is_bundle else "document"
+        sent = ""
+        if is_bundle:
+            facts = (check.local or {}).get("bundle") or {}
+            count = int(facts.get("file_count") or 0)
+            sent = (
+                f", {count} file{'' if count == 1 else 's'} / " f"{_bytes_label(facts.get('size'))}"
+            )
+        scope = _scope_label(str(identity.visibility))
+        answer = (
+            input(
+                f"Republish {check.name!r} ({form}{sent}) to the {scope} hub "
+                f"at {expected}? [y/N] "
+            )
+            .strip()
+            .lower()
+        )
+        if answer not in ("y", "yes"):
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
+            return 1
+    transport, refused = svc.push_transport(ctx, record)
+    if transport is None:
+        return _skills_fail(
+            args, LinkError(str(refused or "no-credential"), "cannot publish this link")
+        )
+    # Manual intent outranks the schedule: a backoff window left by an earlier
+    # outage must not turn an explicit push into a silent skip.
+    svc.clear_retry(ctx, "skill", args.name)
+    operation_id = f"push-skill-{check.local_id}"
+    outcome = asyncio.run(
+        push_item(
+            kind="skill",
+            local_id=check.local_id,
+            captured_local=outbound.local_fields,
+            accepted=outbound.accepted_fields,
+            current_local=check.local or {},
+            remote_latest=check.remote or {},
+            expected_revision=expected,
+            transport=transport,
+            outbox=Outbox(ctx.config_dir),
+            operation_id=operation_id,
+            budget=OperationBudget.start("manual", operation_id, 1),
+            document_builder=lambda fields: publish_document(
+                "skill", ctx.config_dir, check.local_id, fields
+            ),
+            bundle_attested=not is_bundle or svc._capability_bundle(ctx.store().load(), identity),
+            bundle_upload=(svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None),
+        )
+    )
+    svc.record_push_outcome(ctx, check, outcome)
+    payload = {
+        "name": check.name,
+        "form": "bundle" if is_bundle else "document",
+        "state": outcome.state,
+        "reason": outcome.reason,
+        "revision": outcome.revision,
+        "operation_id": outcome.operation_id,
+    }
+    if getattr(args, "json", False):
+        print(_json.dumps(payload, indent=2))
+    else:
+        detail = ""
+        if outcome.reason:
+            detail = f" — {_skills_refusal(_reason_error(outcome.reason))}"
+        print(f"{_safe(check.name)}: {outcome.state}{detail}")
+    return 0 if outcome.state in ("pushed", "no-op") else 1
+
+
+def _reason_error(code: str) -> Any:
+    """A named push refusal as the LinkError the shared wording helper expects."""
+
+    from local_operator.hub_sync.identity import LinkError
+
+    return LinkError(code, code)
+
+
+def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+
+    names = [args.name] if getattr(args, "name", None) else None
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    checks = svc.check_items(ctx, kinds=("skill",), names=names)
+    if not checks:
+        if getattr(args, "json", False):
+            print(_json.dumps({"checks": [], "reports": []}, indent=2))
+            return 0
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"No linked skill named {_safe(args.name)!r}."
+            if getattr(args, "name", None)
+            else "No linked skills."
+        )
+        return 0
+    if getattr(args, "check", False):
+        rows = [svc.check_report(c).to_json() for c in checks]
+        if getattr(args, "json", False):
+            print(_json.dumps({"checks": rows}, indent=2))
+            return 0
+        for row in rows:
+            reason = row.get("error_class") or row.get("outcome") or ""
+            print(f"{row.get('name')}: {row.get('outcome')} {reason}".rstrip())
+        return 0
+    report = svc.apply_items(
+        ctx,
+        kind="skill",
+        names=names,
+        all_available=True,
+        auto=False,
+        checks=checks,
+    )
+    payload = report.to_json()
+    if getattr(args, "json", False):
+        print(_json.dumps(payload, indent=2))
+        return 0
+    for item in payload.get("reports") or []:
+        code = str(item.get("error_class") or "")
+        detail = _skills_refusal(_reason_error(code)) if code else str(item.get("outcome") or "")
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"{_safe(item.get('name'))}: {item.get('outcome')} {detail}".rstrip()
+        )
+    return 0
+
+
+def _skills_status(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    snapshot = svc.links_snapshot(ctx, kinds=("skill",))
+    if getattr(args, "json", False):
+        print(_json.dumps(snapshot, indent=2))
+        return 0
+    links = snapshot.get("links") or []
+    if not links:
+        print(
+            "No linked skills.",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+        return 0
+    for link in links:
+        form = "bundle" if str(link.get("form") or "") == "bundle" else "document"
+        pull = (link.get("pull") or {}) if isinstance(link.get("pull"), dict) else {}
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"{_safe(link.get('name'))} [{form}] "
+            f"{_scope_label(str(link.get('visibility') or 'public'))} "
+            f"state={pull.get('state') or 'unknown'}"
+        )
+        code = str(pull.get("error_class") or "")
+        if code and code in _SKILL_REFUSAL_TEXT:
+            print(f"  {_skills_refusal(_reason_error(code))}")
+        _print_pin(link.get("bundle_confirmation"), indent="  ")
+    return 0
+
+
 def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     """Create a new agent with the given name."""
 
@@ -16255,6 +17287,8 @@ def main() -> int:
                     return hub_link_set_command(args, base_dir)
                 parser.error(f"Invalid hub link command: {args.hub_link_command}")
             parser.error(f"Invalid hub command: {args.hub_command}")
+        elif args.subcommand == "skills":
+            return skills_command(args, base_dir)
         elif args.subcommand == "mobile":
             return mobile_command(args)
         elif args.subcommand == "tunnel":
@@ -16988,6 +18022,8 @@ def main() -> int:
                     )
                 degraded_reason = ""
                 paint_first_cwd = ""
+                from local_operator.session import compression
+
                 # PAINT FIRST, ATTACH BEHIND for a live owner whose conversation
                 # is on disk: the cold facade below paints it, and the TUI's eager
                 # engage binds it to that owner after the first paint (the bind
@@ -17010,7 +18046,11 @@ def main() -> int:
                     record is not None
                     and frontend_attach_refusal(record) is None
                     and not (initial_model is not None and (birth_args.hosting or birth_args.model))
-                    and (config_directory / "sessions" / session_id / "transcript.jsonl").is_file()
+                    # ANY physical form: a compressed session still has a
+                    # conversation to paint before the bind lands. The plain name
+                    # here would keep a compressed --resume on the slow dial for a
+                    # session whose history is sitting right beside it.
+                    and compression.has_transcript(config_directory / "sessions" / session_id)
                 ):
                     # The owner's directory, not this terminal's: the band paints
                     # it before the bind lands, and a live conversation's cwd is

@@ -313,6 +313,105 @@ def save(identity: DeviceIdentity, root: Path | None = None) -> Path:
     return path
 
 
+#: The longest display name this codebase stores for one device. 64 is a ROW
+#: BUDGET, not a protocol limit: the TUI's ``PEER`` column is 16 with an ellipsis
+#: (``mesh-ui.md`` §2.8.1) and Mesh node labels are short, while this codebase's
+#: ceiling for display text elsewhere is 255-256. One constant, so the identity
+#: file and the member row cannot end up with two different limits.
+MEMBER_NAME_MAX = 64
+
+
+def _looks_like_device_id(text: str) -> bool:
+    """Whether ``text`` is exactly a device id (``d_`` + 32 lowercase hex)."""
+    return (
+        len(text) == 34
+        and text.startswith("d_")
+        and all(char in "0123456789abcdef" for char in text[2:])
+    )
+
+
+def validate_member_name(raw: str) -> str:
+    """The one name rule, shared by the command and the relay op that serves it.
+
+    Returns the name to STORE: surrounding whitespace is trimmed as part of the
+    rule, because a trailing space is invisible on every surface that shows the
+    name and would otherwise make two spellings of one name.
+
+    Raises ``ValueError`` carrying a SENTENCE, never a bare code: every caller is a
+    person-facing verb, and the sentence is the product copy. The refusal codes
+    are the caller's to choose (``relay.rename_self`` maps them).
+    """
+    name = str(raw or "").strip()
+    if not name:
+        raise ValueError(
+            "a device name cannot be empty: an unnamed device is the state this command "
+            "exists to get out of"
+        )
+    if len(name) > MEMBER_NAME_MAX:
+        raise ValueError(
+            f"a device name is at most {MEMBER_NAME_MAX} characters; this one is "
+            f"{len(name)}, too long for the row it is shown in"
+        )
+    if "#" in name:
+        # ``#`` is ``peers.PEER_ID_SEPARATOR`` and ``split_peer_token`` splits on the
+        # LAST one, so a name holding a ``#`` cannot round-trip through the picker
+        # token it is printed in.
+        raise ValueError(
+            "a device name cannot contain '#': it is the separator a peer token is split "
+            "on, so this name could not survive the listing it is printed in"
+        )
+    for char in name:
+        code = ord(char)
+        if code < 0x20 or code == 0x7F or code in (0x2028, 0x2029):
+            raise ValueError(
+                "a device name cannot contain control characters or line separators: they "
+                "break the one-line receipts the name is quoted in"
+            )
+    if _looks_like_device_id(name):
+        # An id is how a device is addressed UNambiguously, and every device-taking
+        # verb tries the id first — so a name that IS an id would make one argument
+        # two readings with no way to tell which was meant.
+        raise ValueError(
+            "a device name cannot be a device id: the id is how a device is addressed "
+            "when a name is ambiguous, so the two spellings have to stay distinct"
+        )
+    return name
+
+
+def set_name(raw: str, *, root: Path | None = None) -> tuple[DeviceIdentity, str]:
+    """Rename THIS install durably, returning ``(identity, previous_name)``.
+
+    THIS FUNCTION OWNS THE IDENTITY WRITE ONLY, and that split is deliberate: rows
+    live in network records and this module does not import the store. The member
+    row is written by :func:`local_operator.network.relay.rename_self`, under the
+    store's own lock, because a live relay writes those same records.
+
+    Precedence, stated once so no later reader has to infer it: the name in this
+    file is what the device says about ITSELF, and its member rows are this
+    device's copies of that statement. The join-time seed (the ``joiner_name``
+    inside the signed transcript) is the FIRST value of both; this call is the
+    explicit LOCAL OVERRIDE afterwards, and the override is what survives — a
+    restart re-reads this file, a rotation is given ``name=self.name`` and keeps
+    it, and a rejoin-as-rebuild carries it back out through ``identity.name`` when
+    the operator passes no ``--name``.
+
+    Authorization is the operator's own action on their own device. Nothing about
+    a name is authority (``docs/design/mesh-transport-identity.md`` §3.1), so this
+    needs no signature and no peer's agreement; peers accept the new value under
+    the merge rule ``relay.adopt_members`` states.
+    """
+    name = validate_member_name(raw)
+    current = load(root)
+    if current is None:
+        raise RuntimeError(
+            "this install has no device identity to name; create a network here first"
+        )
+    previous = current.name
+    current.name = name
+    save(current, root)
+    return current, previous
+
+
 def load_or_mint(root: Path | None = None, *, name: str = "") -> DeviceIdentity:
     """The relay's startup call: the existing identity, or a fresh one."""
     existing = load(root)

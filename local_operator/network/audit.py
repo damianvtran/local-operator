@@ -127,6 +127,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # newcomer as having always been a member.
         "membership_learned",
         "device_rotated",
+        # A device renaming ITSELF (identity set-name). Cosmetic, never authority —
+        # which is why it is registered here and NOT added to DURABLE_EVENTS: a lost
+        # rename costs a label, while the durable list is the events whose loss would
+        # hide who could do what.
+        "device_renamed",
         "epoch_rotated",
         "epoch_conflict",
         "handshake_refused",
@@ -412,6 +417,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "member_capabilities_changed": frozenset({"added", "removed", "capabilities", "initiated_by"}),
     "member_left": frozenset({"epoch"}),
     "device_rotated": frozenset({"old_device", "new_device"}),
+    "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
     "epoch_conflict": frozenset({"epoch", "rotation_id", "winner"}),
     "handshake_refused": frozenset(
@@ -726,7 +732,36 @@ STREAM_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
 )
 
 OUTCOMES = ("ok", "refused", "failed", "partial")
-ACTOR_KINDS = ("human", "agent", "relay", "unknown")
+#: Who an event's actor IS, as far as this log can say. A CLOSED set, because an
+#: unlisted value is rewritten to "unknown" on the way in — the field is for reading,
+#: and a free-form one would make every consumer guess.
+#:
+#: ``device`` IS HERE BECAUSE TEN CALL SITES ACROSS SEVEN MODULES PASS IT, and the
+#: list is enumerated rather than counted because a numeral hid an omission once
+#: already: the five credential modules' emitters (``credentials/`` github,
+#: lifecycle, owner, reconcile, sync), the relay's ``credential.placement`` record,
+#: the CLI's ``credential.placement`` audit, ``device_renamed``, ``device_rotated``
+#: and the PEER-APPLIED ``epoch_rotated`` (``relay.py``, the emitter whose
+#: ``actor=link.device_id``). Before this value existed, every one of those rows
+#: silently rendered ``actor_kind: "unknown"`` — the audit recorded that SOMETHING
+#: happened and lost the fact that a DEVICE did it. The alternative fix (stop passing
+#: it, let those rows say ``human`` or ``unknown``) would erase a distinction every
+#: emitter clearly intends, so the set was widened instead. Do not "clean up" the
+#: emitters back to three values: "device" is a peer acting under its own key, which
+#: is neither a person at this keyboard nor an agent process here.
+#:
+#: NOT every device-shaped row carries it, and the rule matters more than a list:
+#: this value answers WHO ACTED, not who is NAMED. It is passed where the audited
+#: action is a device acting under its own key (the credential emitters, a rename, a
+#: rotation — the list above), and withheld where the actor id names a device but the
+#: initiator was the operator at this keyboard (the LOCAL ``epoch_rotated`` refusal
+#: after ``member rm``; ``member_removed``, ``invite_minted``, ``trust_changed``) or
+#: where the event audits THIS device's own act described from a peer's row
+#: (``membership_learned``, ``member_admitted``, ``panic_received``, and the link,
+#: pairing, reconcile, session-stream, authorisation and definitions families). Those
+#: keep the default deliberately; reclassifying them is a per-event decision and not
+#: a sweep, which is why the review's three examples are examples and not the tail.
+ACTOR_KINDS = ("human", "agent", "relay", "device", "unknown")
 
 
 def _resolve(name: str, explicit: Any, default: Any, cast: Any, root: Path | None = None) -> Any:
@@ -769,7 +804,8 @@ class AuditEvent:
     network_name: str = ""
     actor_name: str = ""
     #: A HINT, not an attestation: from ``LOP_ACTOR`` when a harness sets it, else
-    #: ``unknown``. Never presented as proof of who typed a command.
+    #: ``unknown``. Never presented as proof of who typed a command. The closed set is
+    #: :data:`ACTOR_KINDS`; a value outside it is stored as ``unknown``.
     actor_kind: str = "unknown"
     ts: float = field(default_factory=time.time)
 

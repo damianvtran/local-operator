@@ -179,6 +179,12 @@ def test_real_http_create_list_edit_cancel(proxy):
         {"body": 42},
         {"sendAt": "typo"},
         {"mentions": [{"kind": "human", "account_id": "x", "extra": "bad"}]},
+        # A thread root is held to the canonical message-id grammar: a
+        # malformed id must be refused HERE, not by the hub's 400.
+        {"thread_root_id": "not-a-message-id"},
+        {"thread_root_id": "bcmsg_ABC12345"},
+        {"thread_root_id": ""},
+        {"thread_root_id": 7},
     ],
 )
 def test_invalid_create_never_reaches_hub(proxy, change):
@@ -265,3 +271,36 @@ def test_invalid_upstream_success_is_bad_gateway(proxy, resource, malformed):
     assert len(calls) == 1
     assert response.json()["detail"]["code"] == "bridge_invalid_response"
     assert response.status_code == 502, response.text
+
+
+def test_a_scheduled_reply_forwards_its_thread_root(proxy):
+    """A scheduled message can be a thread reply, on the SAME wire field name.
+
+    Before this, ``ScheduledCreateIn`` was ``_Strict`` and had no root field, so
+    a scheduled reply was not expressible through the desktop route at all —
+    the client could carry ``thread_root_id`` but nothing upstream of it ever
+    set one.
+    """
+
+    client, calls, _state, _ = proxy
+    root = "bcmsg_root0001"
+    payload = CREATE | {"thread_root_id": root}
+
+    created = client.post(PREFIX, json=payload)
+
+    assert created.status_code == 200, created.text
+    assert calls[-1][:3] == ("POST", "/v1/messaging/scheduled", payload)
+    # The wire body carries the root, under the same name ``channel_post`` uses.
+    assert calls[-1][2]["thread_root_id"] == root
+
+
+def test_a_schedule_without_a_thread_root_sends_no_such_field(proxy):
+    """Absent stays absent: the hub's defaults must not be overwritten with a
+    null the model never supplied (``exclude_unset`` is the reason)."""
+
+    client, calls, _state, _ = proxy
+
+    created = client.post(PREFIX, json=CREATE)
+
+    assert created.status_code == 200, created.text
+    assert "thread_root_id" not in calls[-1][2]

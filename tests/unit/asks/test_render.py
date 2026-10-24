@@ -8,6 +8,7 @@ than left to whoever writes the next renderer.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
@@ -408,6 +409,22 @@ def test_the_receipts_state_what_happens_next():
     assert "a-7f3" in chat and "response arrives" in chat
 
 
+def test_the_chat_receipt_counts_the_questions_it_closed_unanswered():
+    """§16/SA-D1: an empty cell is a question the message does not cover, so
+    the ask closes it with the rest — and the receipt says how many, singular
+    and plural, because only the model can re-ask them. ``moot`` has no cells,
+    so the count never applies there."""
+    one = render.withdraw_receipt("a-7f3", "answered_in_chat", unanswered=1)
+    assert "1 question closed unanswered; re-ask any you still need." in one
+    two = render.withdraw_receipt("a-7f3", "answered_in_chat", unanswered=2)
+    assert "2 questions closed unanswered; re-ask any you still need." in two
+    moot = render.withdraw_receipt("a-7f3", "moot", unanswered=2)
+    assert "closed unanswered" not in moot
+    assert render.withdraw_receipt("a-7f3", "answered_in_chat") == render.withdraw_receipt(
+        "a-7f3", "answered_in_chat", unanswered=0
+    )
+
+
 def test_the_op_constants_are_the_sentences_the_queue_emits():
     assert render.WITHDRAW_BAD_REASON == "reason must be 'moot' or 'answered_in_chat'."
     assert "no answers" in render.WITHDRAW_MOOT_TAKES_NO_ANSWERS
@@ -433,12 +450,11 @@ def test_the_refusal_table():
     from local_operator.asks import store
 
     assert render.dismiss_refusal(_dismiss_record(store.STATUS_TIMED_OUT)) == ""
-    assert render.dismiss_refusal(_dismiss_record(store.STATUS_TIMED_OUT), agent_running=True) == ""
+    # SA-D4: an OPEN ask is accepted in EVERY runtime state — there is no
+    # ``agent_running`` fact left for a caller to pass, and none could decide
+    # anything if it did.
     assert render.dismiss_refusal(_dismiss_record(store.STATUS_OPEN)) == ""
-    assert (
-        render.dismiss_refusal(_dismiss_record(store.STATUS_OPEN), agent_running=True)
-        == render.DISMISS_AGENT_RUNNING
-    )
+    assert not hasattr(render, "DISMISS_AGENT_RUNNING")
     assert render.dismiss_refusal(_dismiss_record(store.STATUS_DISMISSED)) == (
         render.DISMISS_ALREADY_DISMISSED
     )
@@ -452,6 +468,10 @@ def test_the_refusal_table():
     )
     assert render.dismiss_refusal(None) == render.refusal_copy(None)
     assert not hasattr(render, "DISMISS_NOT_LAPSED")
+    signature = inspect.signature(render.dismiss_refusal)
+    assert list(signature.parameters) == [
+        "record"
+    ], "the retired ``agent_running`` parameter must not linger as an inert one"
 
 
 def test_a_bridge_request_is_dismissible_only_after_it_times_out():
@@ -499,9 +519,5 @@ def test_an_open_relay_is_dismissible_only_after_it_times_out():
     relay = {"ask_id": "a-r", "questions": [], "relay": {"session_id": "s", "ask_id": "a"}}
     assert render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}) == (
         render.DISMISS_RELAY_OPEN
-    )
-    assert (
-        render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}, agent_running=False)
-        == render.DISMISS_RELAY_OPEN
     )
     assert render.dismiss_refusal({**relay, "status": store.STATUS_TIMED_OUT}) == ""

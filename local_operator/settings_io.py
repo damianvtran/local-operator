@@ -556,6 +556,18 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         _t(_ws.session_cleanup_description()),
     ),
+    # The THIRD storage control, and a section of its own for the same reason the
+    # two cleanup classes are: it is a different promise (history is KEPT, only
+    # stored smaller) and it needs its own title, description and copy. Scope is
+    # NEW_LAUNCH, truthfully: the policy is read by the store-maintenance pass at
+    # launch and by its hourly sweep (``session_factory._store_maintenance_thread
+    # _main``), and never by a ``/new``.
+    Section(
+        "session_compression",
+        _t(_ws.session_compression_title()),
+        Scope.NEW_LAUNCH,
+        _t(_ws.session_compression_description()),
+    ),
     # LIVE, and its own section rather than a row under ``session``: the cap is
     # read on EVERY pad write (``scratchpad.scratchpad_budget_bytes``), so the
     # value applies to a running session on the very next write. ``session`` is
@@ -1324,7 +1336,21 @@ def _language_choices() -> tuple[Choice, ...]:
     """
     from local_operator.i18n.resolve import language_options
 
-    return tuple(Choice(value, label) for value, label in language_options())
+    return tuple(
+        Choice(
+            value,
+            label,
+            # Terminal capability guidance is deliberately not catalogue copy:
+            # it describes the TUI renderer, not the audited language package.
+            (
+                # i18n: ignore renderer capability note (English, not catalogue copy)
+                "Terminal: best effort; requires bidi and Arabic shaping."
+                if value == "ur"
+                else ""
+            ),
+        )
+        for value, label in language_options()
+    )
 
 
 #: One-line meaning for each rung of :data:`EFFORT_ORDER`, for the
@@ -3116,6 +3142,47 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.session_cleanup_remove_empty_choice_false_description()),
         ),
         gated_by="session.cleanup.enabled",
+    ),
+    # -- transcript compression ----------------------------------------------
+    # The consumer is ``session/compression.py``, which reads this path back
+    # through ``ConfigManager.get_nested_value`` on the SAME tuple
+    # (``COMPRESSION_PATH``) — the arrangement ``session.cleanup.*`` documents
+    # above, and for the same reason: the earlier opt-out that was written
+    # nested here and read flat there never worked. The row's default must equal
+    # the consumer's constant, which ``test_settings_io.py``'s
+    # ``test_every_default_matches_its_consumer`` enforces.
+    #
+    # ON by default, unlike ``session.cleanup.enabled``. The risk profile is the
+    # opposite one: nothing is removed, a verified archive replaces the file, and
+    # every read path resolves the archive. The day threshold is what "old"
+    # means, and it is gated by the switch because it is inert without it.
+    Setting(
+        key="session.compression.enabled",
+        path=("session", "compression", "enabled"),
+        section="session_compression",
+        label=_t(_ws.session_compression_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.session_compression_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.session_compression_enabled_choice_true_description()),
+            _t(_ws.session_compression_enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="session.compression.after_days",
+        path=("session", "compression", "after_days"),
+        section="session_compression",
+        label=_t(_ws.session_compression_after_days_label()),
+        kind=Kind.INT,
+        default=30,
+        # Both bounds and the default live in the help because the page paints
+        # help but not min/max (the ``delegated.max_age_hours`` precedent).
+        help=_t(_ws.session_compression_after_days_help()),
+        minimum=1,
+        maximum=3650,
+        unit="days",
+        gated_by="session.compression.enabled",
     ),
     # -- delegated-work retention --------------------------------------------
     # Nested one level deeper (``session.cleanup.delegated.*``) so the parent
@@ -5070,7 +5137,12 @@ SETTINGS: tuple[Setting, ...] = (
         section="hub",
         label=_t(_ws.hub_check_interval_min_label()),
         kind=Kind.INT,
-        default=60,
+        # The literal restates ``hub_sync.settings.DEFAULT_CHECK_INTERVAL_MIN``;
+        # ``_consumer_defaults`` in tests/unit/test_settings_io.py pins the two
+        # together. Conditional checks made an unchanged tick cheap, so the
+        # default is a quarter-hour rather than an hour -- see that constant for
+        # the reasoning.
+        default=15,
         minimum=5,
         maximum=1440,
         help=_t(_ws.hub_check_interval_min_help()),
@@ -6320,11 +6392,44 @@ def require_readable_config_path(config_file: Path | None) -> None:
 
 
 @serialized_config_write
-def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
+def _store(
+    manager: "ConfigManager",
+    path: Sequence[str],
+    value: Any,
+    *,
+    drop: "Mapping[tuple[str, ...], str] | None" = None,
+) -> None:
     _reload_before_write(manager)
     top = path[0]
+    # ``drop`` reaches ``ConfigManager._write_config``, which preserves every disk
+    # value this payload does not model. A caller that rebuilt the subtree to
+    # REMOVE something inside it must declare that removal here, or the value is
+    # copied straight back and the delete is undone.
+    merged_drop: dict[tuple[str, ...], str] = dict(drop or {})
+    if isinstance(value, Mapping):
+        # A mapping VALUE is the writer's whole model of that setting, so sub-keys
+        # it leaves out are REMOVED by the new value rather than unmodelled. The
+        # case that forces this: a tier's ``auto`` effort is stored as the
+        # ABSENCE of ``effort`` (``subagents.models.hi`` = ``{"model": ...}``), so
+        # preserving the old ``effort`` back would turn an explicit "auto" into
+        # whatever was there before — the user's choice silently reversed.
+        #
+        # Computed for a top-level path too: no setting has a mapping value there
+        # today, and the next one that does must get the same rule rather than a
+        # silent exception to it.
+        from local_operator.config import _leaf_values
+
+        previous = manager.get_nested_value(tuple(path), None)
+        if isinstance(previous, Mapping):
+            stored = _leaf_values(value)
+            for leaf in _leaf_values(previous):
+                if leaf not in stored:
+                    # `setdefault`: a caller that already declared this leaf (the
+                    # cascade page's deleted chain) has a more specific reason, and
+                    # the generic one must not overwrite it in the audit line.
+                    merged_drop.setdefault((*path, *leaf), "replaced by /settings")
     if len(path) == 1:
-        manager.set_config_value(top, value)
+        manager.set_config_value(top, value, drop=merged_drop)
         return
     existing = manager.get_config_value(top, None)
     # A shallow copy per level, so the write never mutates the manager's live
@@ -6338,7 +6443,7 @@ def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
         cursor[part] = dict(child) if isinstance(child, Mapping) else {}
         cursor = cursor[part]
     cursor[path[-1]] = value
-    manager.set_config_value(top, root)
+    manager.set_config_value(top, root, drop=merged_drop)
 
 
 @serialized_config_write
@@ -6351,15 +6456,24 @@ def _reset_account_policy(manager: "ConfigManager") -> None:
     if not isinstance(existing, Mapping):
         return
     root = dict(existing)
-    for key in (
+    aliases = (
         "accountSelectionPolicy",
         "account_selection_policy",
         "usageAwareAccountPick",
         "usage_aware_account_pick",
-    ):
+    )
+    for key in aliases:
         root.pop(key, None)
     if root != existing:
-        manager.set_config_value("retry", root)
+        # DECLARED, for the same reason ``_delete`` declares its removal: dropping
+        # the keys from the payload is not enough on its own, because the write
+        # preserves what the payload does not model and would read them back off
+        # disk. Without this the reset reports success and changes nothing.
+        manager.set_config_value(
+            "retry",
+            root,
+            drop={("retry", key): "reset by /settings" for key in aliases if key in existing},
+        )
 
 
 @serialized_config_write
@@ -6371,7 +6485,12 @@ def _delete(manager: "ConfigManager", path: Sequence[str]) -> None:
     if len(path) == 1:
         if top in values:
             del values[top]
-            manager.update_config({}, write=True)
+            # DECLARED, because the flush below is not a delete on its own:
+            # ``ConfigManager._write_config`` copies every disk value the payload
+            # does not model straight back into the file, so an undeclared removal
+            # is read back off disk and rewritten. The page reports a successful
+            # reset and the value is still there after the next read.
+            manager.update_config({}, write=True, drop={(top,): "reset by /settings"})
         return
     existing = manager.get_config_value(top, None)
     if not isinstance(existing, Mapping):
@@ -6387,7 +6506,7 @@ def _delete(manager: "ConfigManager", path: Sequence[str]) -> None:
     if path[-1] not in cursor:
         return
     del cursor[path[-1]]
-    manager.set_config_value(top, root)
+    manager.set_config_value(top, root, drop={(top, *path[1:]): "reset by /settings"})
 
 
 def _invalidate_caches() -> None:
@@ -6691,7 +6810,17 @@ def write_chains(
             for key, hops in merged.items()
             if key.strip() and hops
         }
-        _store(manager, ("retry", "fallbackChains"), stored)
+        # The chains this edit REMOVED, declared so the write's preservation does
+        # not read them back off disk. `merged` is built from `on_disk` plus the
+        # caller's edits, so a key that was on disk and is not in `stored` is one
+        # this call deleted — an empty chain is dropped rather than stored because
+        # `_normalize_chains` drops it on read, and deleting a chain must delete it.
+        removed = {
+            ("retry", "fallbackChains", str(key)): "chain deleted in /settings"
+            for key in on_disk
+            if key not in stored
+        }
+        _store(manager, ("retry", "fallbackChains"), stored, drop=removed)
     _invalidate_caches()
     _notify_watcher(manager)
 

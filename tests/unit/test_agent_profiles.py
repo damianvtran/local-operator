@@ -297,6 +297,21 @@ def test_aidas_seed_reaches_the_loader_whole() -> None:
     assert len(profile.instructions) == len(body), "the loader must not truncate her seed"
 
 
+def test_aidas_seed_body_stays_within_the_desktop_app_save_cap() -> None:
+    """The app refuses profile saves above 8,000 characters, so its bound is
+    stricter than the runtime constant (``MAX_INSTRUCTIONS_CHARS`` is 10,000).
+    The body measures 7,969 through the loader (7,970 in the file, which keeps
+    a trailing newline), so the next addition would pass every other gate and
+    still fail to save in the app. The harness has no 8,000 rule of its own,
+    so the policy lives here as a test rather than in library code."""
+    text = (SEEDS_DIR / "aida.md").read_text(encoding="utf-8")
+    _meta, body = _split_frontmatter(text)
+    assert len(body) <= 8_000, (
+        f"Aida's seed body is {len(body)} characters; the desktop app refuses "
+        "profile saves above 8,000."
+    )
+
+
 def test_an_allowlist_naming_absent_tools_matches_nothing_rather_than_raising() -> None:
     """A profile written on another machine (or naming an MCP tool this
     session never loaded) must still run, with the tools it does have."""
@@ -2286,7 +2301,7 @@ def test_aida_first_contact_offers_a_previewed_harness_import() -> None:
     """First-run is the agent path: she may offer migration, but never imports
     without an explicit preview and selection."""
     flat = " ".join(seed("aida").instructions.split())
-    assert load_seed_version("aida") == "1.5.5"
+    assert load_seed_version("aida") == "1.5.6"
     assert "harness_import" in flat
     assert "list, preview, require explicit selection" in flat
     assert "read-only on the other harness" in flat

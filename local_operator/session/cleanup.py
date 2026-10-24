@@ -89,11 +89,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from local_operator.session import compression
 from local_operator.session.retention import (
     _SIDECAR_NAMES,
     LIVE_MARKER_NAME,
     SESSIONS_DIRNAME,
-    TRANSCRIPT_FILENAME,
     _is_claimed,
     _process_alive,
     session_activity,
@@ -1296,7 +1296,18 @@ def remove_fresh_session_dir(
     # even a zero-byte one another writer created, means the directory is no
     # longer the one this request left empty.
     try:
-        if (resolved / TRANSCRIPT_FILENAME).exists():
+        # ``transcript_state``, not a stat of the plain name: an archived
+        # transcript is still a transcript, AND an unreadable directory is not
+        # proof of absence — this is the identity proof the whole removal rests
+        # on, and either misreading lets a real conversation be deleted.
+        state = compression.transcript_state(resolved)
+        if state == compression.TRANSCRIPT_UNREADABLE:
+            logger.warning(
+                "session cleanup: REFUSED to remove fresh %s (its contents cannot be read)",
+                resolved.name,
+            )
+            return False
+        if state == compression.TRANSCRIPT_PRESENT:
             logger.warning(
                 "session cleanup: REFUSED to remove fresh %s (a transcript exists)",
                 resolved.name,
@@ -2392,11 +2403,19 @@ def _has_open_asks(directory: Path) -> bool:
         return True
 
 
-def _guard(
+def _transcript_write_guard(
     directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
 ) -> str | None:
-    """The hard guards, in one place. Returns the guard's name when the
-    directory must be kept, ``None`` when the policy may consider it.
+    """The hazards that make REWRITING this session's transcript unsafe.
+    Returns the hazard's name, ``None`` when a writer may proceed.
+
+    This is the narrower half of :func:`_guard`, split out by CONCERN rather
+    than for reuse's sake. Compression rewrites the transcript and can be undone
+    (a verified restore happens on open), so the hazards that matter to it are
+    the ones a rewrite could race or contradict: an operator hold, a live claim
+    or lease on the directory, an armed wake or monitor that will fire against
+    it. The two CONTENT probes stay out of here and live in :func:`_guard`
+    because they answer a different question — see the asymmetry note there.
 
     Closed on every path: each probe already answers "keep" to its own
     failures, and the outer ``except`` makes an exception NONE of them
@@ -2408,8 +2427,10 @@ def _guard(
     call answers *after* its preempt wait, i.e. "with the resident this policy is
     holding removed, what is left to refuse?" — every other guard is still
     consulted, so a rehearsal cannot promise a deletion a wake or spooled mail
-    will refuse. The real path never passes it: there the lease is genuinely
-    gone, and the guards are read as they stand.
+    will refuse. Only :func:`_guard` forwards it, because only the deletion path
+    rehearses; the content probes it skips past are still read by ``_guard``
+    itself. The real path never passes it: there the lease is genuinely gone,
+    and the guards are read as they stand.
     """
     try:
         try:
@@ -2437,6 +2458,41 @@ def _guard(
             return "has an armed wake"
         if _has_armed_monitor(config_dir, directory.name):
             return "has an armed monitor"
+    except Exception as exc:  # noqa: BLE001 — a guard that cannot answer keeps
+        logger.warning("session cleanup: guard failed for %s (%r); keeping it", directory.name, exc)
+        return f"guard failed: {type(exc).__name__}"
+    return None
+
+
+def _guard(
+    directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
+) -> str | None:
+    """The hard guards for DELETION, in one place. Returns the guard's name
+    when the directory must be kept, ``None`` when the policy may consider it.
+
+    THE ASYMMETRY, which is why this is two layers and not one: deletion
+    destroys what it removes. An unread spooled message or an ask that can still
+    be answered is unrecoverable once the directory is gone — the user loses a
+    message they were never shown, or a question they can still see on their
+    phone. Compression does not: it rewrites the transcript and restores it on
+    open, and the mail and asks live in ``inbox.jsonl``/``asks.jsonl``, which no
+    compression path touches. So the two CONTENT probes must hold a deletion
+    and must not narrow a rewrite; ``compression._keep_reason`` therefore calls
+    :func:`_transcript_write_guard` and never this function. Narrowing _guard
+    instead would make the reversible pass refuse the operator's real old
+    transcripts (all 15 of a cloned store's sessions older than 30 days skipped
+    on "has unread spooled mail"), and widening the rewrite guard to match this
+    one would delete mail-protected sessions on a pass that has no business
+    asking.
+
+    Everything above the content probes is :func:`_transcript_write_guard`; the
+    composition keeps one definition per probe and keeps ``live_owner_gone``
+    meaning the same thing to both callers.
+    """
+    reason = _transcript_write_guard(directory, config_dir, now, live_owner_gone=live_owner_gone)
+    if reason is not None:
+        return reason
+    try:
         if _has_spooled_mail(directory):
             return "has unread spooled mail"
         if _has_open_asks(directory):
@@ -2507,8 +2563,15 @@ def _is_deletable_dir(directory: Path) -> bool:
 
 
 def _has_transcript(directory: Path) -> bool:
+    """Whether the session holds a NON-EMPTY transcript, in any physical form.
+
+    The physical source's size, so a compressed session still answers "yes, and
+    it has content": the archive is the conversation, and stat-ing the absent
+    plain name would report an empty session in the census.
+    """
+    source, _codec = compression.transcript_source(directory)
     try:
-        return (directory / TRANSCRIPT_FILENAME).stat().st_size > 0
+        return source.stat().st_size > 0
     except OSError:
         return False
 
@@ -2547,8 +2610,13 @@ def measure_session_dir(
         "contents_complete": True,
         "skipped_entries": 0,
     }
+    transcript_file, _codec = compression.transcript_source(directory)
     try:
-        contents["transcript_bytes"] = (directory / TRANSCRIPT_FILENAME).stat().st_size
+        # The PHYSICAL bytes the conversation occupies now (the journal, or the
+        # archive that replaced it). A removal receipt states what is on disk, and
+        # the census compares like with like across passes; a compressed session
+        # reporting 0 would read as a 300 MB content loss.
+        contents["transcript_bytes"] = transcript_file.stat().st_size
     except OSError:
         pass
     total = 0

@@ -303,6 +303,11 @@ CONTRACT_KEYS = (
     "LOP_MOBILE_CHILD_PROVIDER",
     "LOP_MOBILE_CHILD_MODEL",
     "LOP_MOBILE_CHILD_EFFORT",
+    # The birth dial (ui#1265) is part of the same spawn contract: a spare
+    # missing it adopts into a conversation that opens at standard speed while a
+    # cold child born on the same pick runs the tier, which is the drift this
+    # tuple exists to forbid.
+    "LOP_MOBILE_CHILD_FAST",
     "LOP_MODEL_SELECTION_OVERRIDE",
     "LOP_RUNTIME_DEFER_MATERIALISE",
     # The engage claim (``types.ENGAGED_ENV``, spelled out here because this
