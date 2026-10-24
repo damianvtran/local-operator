@@ -1166,6 +1166,49 @@ def test_create_transcription_forwards_provider_without_a_model(
     assert "model" not in fields
 
 
+def test_create_transcription_serializes_explicit_native_controls(
+    radient_client: RadientClient, tmp_path: Path
+) -> None:
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    mock_requests_post, bodies = _transcription_post()
+
+    with patch("requests.post", mock_requests_post):
+        radient_client.create_transcription(
+            file_path=str(audio_file),
+            remove_disfluencies=False,
+            include_audio_events=False,
+            edit_instruction="Remove hesitations",
+        )
+
+    fields = _multipart_fields(bodies[0])
+    assert fields["remove_disfluencies"] == "false"
+    assert fields["include_audio_events"] == "false"
+    assert fields["edit_instruction"] == "Remove hesitations"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"remove_disfluencies": 1},
+        {"include_audio_events": "false"},
+        {"edit_instruction": "x" * 2001},
+    ],
+)
+def test_create_transcription_validates_native_controls_before_post(
+    radient_client: RadientClient, tmp_path: Path, kwargs: Dict[str, Any]
+) -> None:
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    mock_requests_post, _ = _transcription_post()
+
+    with patch("requests.post", mock_requests_post):
+        with pytest.raises(ValueError):
+            radient_client.create_transcription(file_path=str(audio_file), **kwargs)
+
+    mock_requests_post.assert_not_called()
+
+
 # --- Upstream failures on the transcription path -------------------------------
 #
 # WHY THESE USE A REAL `requests.Response` AND NOT A MagicMock: the callers of

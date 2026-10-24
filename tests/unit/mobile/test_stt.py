@@ -180,7 +180,7 @@ async def test_the_radient_adapter_sends_bytes_off_the_loop_and_cleans_up(
             seen["base_url"] = base_url
 
         def create_transcription(
-            self, *, file_path: str, model: Any, prompt: Any, language: Any
+            self, *, file_path: str, model: Any, prompt: Any, language: Any, **kwargs: Any
         ) -> Any:
             seen["file_path"] = file_path
             seen["bytes"] = Path(file_path).read_bytes()
@@ -204,7 +204,7 @@ async def test_the_radient_adapter_sends_bytes_off_the_loop_and_cleans_up(
         model=None,
         path="provider_stt_radient",
         raw_text="hello world",
-        cleanup="client.rules.v1",
+        cleanup="client.rules.v2",
     )
     assert seen["bytes"] == b"RIFFfake-bytes"
     assert seen["credential_root"] == tmp_path
@@ -593,7 +593,7 @@ async def test_the_radient_adapter_omits_an_unmapped_language_hint(
             pass
 
         def create_transcription(
-            self, *, file_path: str, model: Any, prompt: Any, language: Any
+            self, *, file_path: str, model: Any, prompt: Any, language: Any, **kwargs: Any
         ) -> Any:
             seen["language"] = language
             return SimpleNamespace(text="[lip smack] Uh, hello.", provider="radient", language=None)
@@ -633,7 +633,7 @@ async def test_the_radient_adapter_normalises_en_us_and_cleans(
             pass
 
         def create_transcription(
-            self, *, file_path: str, model: Any, prompt: Any, language: Any
+            self, *, file_path: str, model: Any, prompt: Any, language: Any, **kwargs: Any
         ) -> Any:
             seen["language"] = language
             return SimpleNamespace(text="Uh, hello.", provider="radient")
@@ -655,7 +655,7 @@ async def test_the_radient_adapter_normalises_en_us_and_cleans(
 
     assert seen["language"] == "en"
     assert outcome.text == "Hello."
-    assert outcome.cleanup == "client.rules.v1"
+    assert outcome.cleanup == "client.rules.v2"
 
 
 @pytest.mark.asyncio
@@ -674,7 +674,7 @@ async def test_the_settings_key_changes_the_radient_output(
             pass
 
         def create_transcription(
-            self, *, file_path: str, model: Any, prompt: Any, language: Any
+            self, *, file_path: str, model: Any, prompt: Any, language: Any, **kwargs: Any
         ) -> Any:
             return SimpleNamespace(text="Uh, hello.", provider="radient")
 
@@ -708,4 +708,4 @@ async def test_the_settings_key_changes_the_radient_output(
         config_root=tmp_path,
     )
     assert auto.text == "Hello."
-    assert auto.cleanup == "client.rules.v1"
+    assert auto.cleanup == "client.rules.v2"
