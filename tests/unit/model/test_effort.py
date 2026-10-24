@@ -562,3 +562,74 @@ class TestConfiguredEffort:
         be a TYPE check rather than the vocabulary check downstream."""
         assert configured_effort(self._stored(tmp_path, 3)) is None
         assert configured_effort(self._stored(tmp_path, True)) is None
+
+
+class TestKimiK3:
+    """Kimi's K3 family, whose ladder was verified live rather than transcribed.
+
+    https://platform.kimi.ai/docs/guide/use-reasoning-effort (read 2026-10-24)
+    documents low/high/max with ``max`` as the default, and every rung was
+    honoured live against ``api.kimi.com/coding/v1/chat/completions`` on
+    ``k3.1-pro``. The DEFAULT is disputed — the coding-plan listing says
+    ``high``, and repeated measurements of omission land in different places
+    (below the rungs in one, between them in another, near ``max`` in a third)
+    — so the table seeds NO default and ``/effort auto`` keeps meaning "omit",
+    today's behaviour.
+    """
+
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            # api.kimi.com/coding/v1 spellings.
+            "k3",
+            "k3-256k",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+            # api.moonshot.cn spellings, plus the coding-plan alias rows whose
+            # listing states the same ``think_efforts`` shape.
+            "kimi-k3",
+            "kimi-k3.1-pro",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            # An aggregator prefix is route, not model.
+            "moonshotai/kimi-k3.1-pro",
+        ],
+    )
+    def test_the_k3_family_gets_the_documented_ladder(self, model_id: str) -> None:
+        assert supported_efforts(model_id) == ("low", "high", "max")
+        assert default_effort(model_id) is None
+
+    @pytest.mark.parametrize(
+        "model_id",
+        ["kimi-k2", "kimi-k2.6", "kimi-k2-0905-preview", "moonshotai/kimi-k2-thinking"],
+    )
+    def test_the_kimi_2x_rows_keep_their_empty_ladder(self, model_id: str) -> None:
+        """The generation digit is pinned to 3 on purpose: Kimi's 2.x rows reason
+        without a named tier, and handing them a ladder is an HTTP 400 on every
+        turn."""
+        assert supported_efforts(model_id) == ()
+        assert default_effort(model_id) is None
+
+    def test_a_listed_row_beats_the_table_and_seeds_nothing(self) -> None:
+        """The listing is the provider's own statement and wins; with the same
+        ladder and no default from either source, the spec boots on ``auto``
+        (omit) rather than on the listing's stated ``high``."""
+        from local_operator.model.configure import info_from_discovered_model
+        from local_operator.model.discovery import DiscoveredModel
+        from local_operator.model.registry import ModelInfo
+
+        row = DiscoveredModel(
+            id="k3.1-pro",
+            name="K3.1 Pro",
+            supports_images=True,
+            reasoning=True,
+            reasoning_efforts=("low", "high", "max"),
+        )
+        info = info_from_discovered_model(
+            "kimi", "k3.1-pro", row, ModelInfo(id="k3.1-pro", name="K3.1 Pro", description="")
+        )
+        spec = build_model_spec("kimi", "k3.1-pro", info)
+
+        assert spec.reasoning_efforts == ("low", "high", "max")
+        assert spec.reasoning_effort is None
+        assert spec.reasoning_default_effort is None
