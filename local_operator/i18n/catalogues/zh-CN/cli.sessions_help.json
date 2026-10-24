@@ -44,5 +44,6 @@
   "cli.sessions_help.sync": "pull另一设备拥有的对话副本",
   "cli.sessions_help.sync_description": "更新此设备上不归其所有的对话副本。副本存储在会话存储之外，绝不作为会话打开；`lop sessions move <id> --to local --from-replica`可将其恢复为新会话。",
   "cli.sessions_help.sync_session": "要pull的对话ID",
-  "cli.sessions_help.sync_owner": "持有该对话的对等设备（默认：询问）"
+  "cli.sessions_help.sync_owner": "持有该对话的对等设备（默认：询问）",
+  "cli.sessions_help.cleanup_scratchpads_only": "用--dry-run审计暂存区；否则只回收暂存区中的构建/缓存内容（绝不回收记录，也绝不回收你的对话）。"
 }

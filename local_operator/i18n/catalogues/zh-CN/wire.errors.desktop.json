@@ -31,6 +31,7 @@
   "wire.errors.desktop.desktop_refusal": "{error}",
   "wire.errors.desktop.effort_levels_missing": "{model}没有推理强度级别",
   "wire.errors.desktop.effort_not_in_levels": "{model}接受{levels}，不接受''{effort}''",
+  "wire.errors.desktop.fast_mode_unsupported": "{model}没有快速模式",
   "wire.errors.desktop.feed_subscriber_limit": "桌面事件流订阅者过多",
   "wire.errors.desktop.feed_subscription_unknown": "未知的桌面事件流订阅",
   "wire.errors.desktop.force_requires_confirm_replace": "--force会替换你的副本；使用replace并传入confirm_replace",

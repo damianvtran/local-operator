@@ -9,6 +9,7 @@
   "tui.notices.output_limit_tool_call": "模型在生成工具调用时达到输出上限 — 未执行任何操作；正在请求它分成更小的部分重新生成调用",
   "tui.notices.output_limit_before_call": "模型在调用运行前达到输出上限 — 未执行任何操作；正在请求它原样重新发出调用",
   "tui.notices.empty_reply": "模型返回了空回复（无文本，也无工具调用） — 正在重新请求它执行下一步或结束",
+  "tui.notices.fast_mode_refused": "快速模式：被{selector}拒绝 — {reason}；已关闭，按标准速度提供服务",
   "tui.notices.repeated_tool_errors": "工具反复报错 — 正在请求改用其他方法。",
   "tui.notices.kept_going_stopped": "因反复被要求继续，本轮已停止；待处理消息已丢弃。回复以说明下一步要做什么。",
   "tui.notices.image_unsupported": "{model}不支持图片 — 此会话中的图片已从其上下文中略去。切换到支持图片的模型后即可重新查看。",
