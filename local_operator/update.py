@@ -33,6 +33,7 @@ still rewrite the cache so the next splash is free.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -126,6 +127,284 @@ class InstallKind(str, Enum):
 # One error identity lets primitive transaction refusals reach existing CLI/TUI
 # handlers without circular imports or a traceback from an ordinary conflict.
 UpdateError = install_transaction.InstallTransactionError
+
+
+class PublicationError(UpdateError):
+    """PyPI's live answer disagrees with the release this run set out to install.
+
+    A CLASS because the update report says ``kind: publication`` for exactly
+    this cause: the index knows the version but its project document (or the
+    version it calls latest) has not caught up yet, which is a propagation
+    window rather than a network fault. :func:`_fresh_publication` raises it
+    after its bounded re-read; nothing else does.
+    """
+
+
+#: The stages the frozen failure report may name, in the order a healthy run
+#: reaches them. ``lock`` is a stage only in the sense that no stage ran — a
+#: writer held the root — and ``report`` covers a failure while assembling the
+#: report itself. The vocabulary is FROZEN with the schema token above.
+_UPDATE_STEPS = (
+    "check",
+    "publish",
+    "download",
+    "environment",
+    "install",
+    "promote",
+    "services",
+    "lock",
+    "report",
+)
+
+#: The cause vocabulary. ``unknown`` is the honest fallback: a failure the
+#: updater cannot attribute is still reported, with the step that was running.
+_UPDATE_FAILURE_KINDS = (
+    "network",
+    "publication",
+    "lock",
+    "disk",
+    "ownership",
+    "serve",
+    "refused",
+    "unknown",
+)
+
+#: How many times the publish step re-reads PyPI's live version before it
+#: refuses, and how long it waits between reads.
+#:
+#: THE MEASURED FAILURE (2026-10-24): 0.89.0's wheels landed on PyPI at
+#: 20:38:40-20:38:45Z, a `lop update` at 20:42:08Z built the 0.89.0 candidate
+#: correctly and then refused because the project-JSON endpoint (CDN-cached,
+#: unlike the files) still named 0.88.4. A manual retry 74 s later succeeded.
+#: Three reads ~5 s apart (two waits, 10 s total, inside the 15 s bound) ride
+#: out the observed ~4-5 minute tail on most occasions and cost a healthy run
+#: nothing: the first read agrees and no sleep happens.
+_PUBLICATION_CONFIRM_ATTEMPTS = 3
+_PUBLICATION_CONFIRM_DELAY_S = 5.0
+
+#: Indirection so a test can replace the wait without patching the global
+#: ``time.sleep`` (which any concurrent thread also calls).
+_sleep = time.sleep
+
+
+class _UpdateProgress:
+    """The structural stage tracker for ONE update run in ONE thread.
+
+    The failure report must say which stage failed without inferring it from
+    the messages already printed (the 2026-10-24 modal proves that inference
+    loses to unrelated chatter). Each stage boundary assigns :attr:`step`
+    where the work actually starts, so the value at raise time is the last
+    stage entered, not a guess made afterwards.
+
+    THREAD-LOCAL because the TUI's update worker and a CLI run can share this
+    module in one process, and a report must describe its own run.
+    """
+
+    __slots__ = ("step", "install_version", "target")
+
+    def __init__(self) -> None:
+        self.step = "check"
+        self.install_version = ""
+        self.target = ""
+
+
+_PROGRESS = threading.local()
+
+
+def _progress() -> _UpdateProgress:
+    state = getattr(_PROGRESS, "state", None)
+    if state is None:
+        state = _PROGRESS.state = _UpdateProgress()
+    return state
+
+
+def _begin_update(*, install_version: str = "") -> _UpdateProgress:
+    """Start a run's tracker at ``check``; every failing exit reads this one."""
+    state = _UpdateProgress()
+    state.install_version = install_version
+    _PROGRESS.state = state
+    return state
+
+
+def _reach(step: str) -> None:
+    """Record that the run has ENTERED ``step``. Not a claim it finished."""
+    _progress().step = step
+
+
+def _note_versions(*, install_version: str | None = None, target: str | None = None) -> None:
+    state = _progress()
+    if install_version is not None:
+        state.install_version = install_version
+    if target is not None:
+        state.target = target
+
+
+def _causes(exc: BaseException | None) -> list[BaseException]:
+    """``exc`` and every explicit cause/context behind it, nearest first.
+
+    Wrappers in this module re-raise with ``from exc`` precisely so the
+    original failure stays reachable; the classifier walks that chain instead
+    of asking every raise site to name its own kind.
+    """
+    found: list[BaseException] = []
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        found.append(exc)
+        exc = exc.__cause__ or exc.__context__
+    return found
+
+
+def _classify_failure(step: str, exc: BaseException | None) -> str:
+    """The frozen ``kind`` for a failure, from the exception source and stage.
+
+    A small table, deliberately: the exception class is checked first (lock and
+    publication have dedicated classes), then the errno family, then the stage
+    as the last structural signal. ``unknown`` is returned rather than inventing
+    a cause the updater cannot support.
+    """
+    chain = _causes(exc)
+    for candidate in chain:
+        if isinstance(
+            candidate, (install_transaction.LockBusy, install_transaction.LockUnsupported)
+        ):
+            return "lock"
+        if isinstance(candidate, PublicationError):
+            return "publication"
+    for candidate in chain:
+        if isinstance(candidate, PermissionError):
+            return "ownership"
+        if isinstance(candidate, OSError) and candidate.errno in (errno.ENOSPC, errno.EDQUOT):
+            return "disk"
+        if isinstance(candidate, OSError) and candidate.errno in (errno.EACCES, errno.EPERM):
+            return "ownership"
+    if step == "check":
+        return "network"
+    if step == "publish":
+        return "publication"
+    if step == "download":
+        return "network"
+    if step == "services":
+        return "serve"
+    return "unknown"
+
+
+def _failure_step(step: str, kind: str) -> str:
+    """A lock failure names ``lock``; every other stage keeps its own name."""
+    return "lock" if kind == "lock" else step
+
+
+def _installed_version_or_empty() -> str:
+    """The version this install names right now, or ``""`` if it cannot say.
+
+    A report is emitted on a failing path; a second failure while measuring it
+    must not replace the first one with a traceback.
+    """
+    try:
+        return installed_version()
+    except Exception:  # noqa: BLE001 — a report must still be emitted
+        return ""
+
+
+def _failure_payload(
+    *,
+    step: str,
+    kind: str,
+    exit_code: int,
+    error: str,
+    detail: str = "",
+    install_version: str | None = None,
+    target: str | None = None,
+) -> dict[str, Any]:
+    """The frozen ``update.report.v1`` failure shape, built in ONE place.
+
+    ``install_version``/``target``/``serve``/``daemons`` are present even on a
+    failure because the desktop parser validates them on every report; ``serve``
+    and ``daemons`` are empty because no census was taken, not because none
+    exists.
+    """
+    state = _progress()
+    return {
+        "update_report": {
+            "schema": _UPDATE_REPORT_SCHEMA,
+            "ok": False,
+            "install_version": (
+                install_version
+                if install_version is not None
+                else state.install_version or _installed_version_or_empty()
+            ),
+            "target": target if target is not None else state.target,
+            "serve": [],
+            "daemons": [],
+            "failure": {
+                "step": _failure_step(step, kind),
+                "kind": kind,
+                "exit_code": int(exit_code),
+                "error": error,
+                "detail": detail,
+            },
+        }
+    }
+
+
+def _emit_update_failure(
+    *,
+    step: str,
+    kind: str,
+    exit_code: int,
+    error: str,
+    detail: str = "",
+    install_version: str | None = None,
+    target: str | None = None,
+) -> None:
+    """Emit the ONE machine-readable failure line, last on stdout.
+
+    Mirrors :func:`_emit_update_report`: JSON, one line, ``flush=True``, so the
+    desktop app's per-line ``json.loads`` consumer sees it after the human
+    sentences and before the process exits.
+    """
+    payload = _failure_payload(
+        step=step,
+        kind=kind,
+        exit_code=exit_code,
+        error=error,
+        detail=detail,
+        install_version=install_version,
+        target=target,
+    )
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+def _fail(
+    step: str,
+    kind: str,
+    sentence: str,
+    *,
+    detail: str = "",
+    exit_code: int = 1,
+    target: str | None = None,
+    human: str | None = None,
+) -> int:
+    """Print the human refusal, emit the frozen failure report, return ``code``.
+
+    ONE call so a new failing exit cannot print a sentence and forget the
+    machine-readable half, which is the defect this change exists to end.
+
+    ``human`` carries the console text when it differs from the report's one
+    sentence: ``error`` must be ONE sentence (it is what the modal shows), while
+    the terminal keeps every line the pre-existing refusal printed — a remedy
+    the reader was already being given is not dropped to fit the contract.
+    """
+    print(human if human is not None else sentence, file=sys.stderr)
+    _emit_update_failure(
+        step=step,
+        kind=kind,
+        exit_code=exit_code,
+        error=sentence,
+        detail=detail,
+        target=target,
+    )
+    return exit_code
 
 
 #: Bound the child so a hung ``launchctl kickstart`` cannot stall the
@@ -2305,15 +2584,44 @@ def _fresh_publication(target: str, mode: str) -> PublicationEvidence | None:
     The installer is pinned to the returned artifact URL AND SHA256, not just a
     version/name. Refreshing before promotion must still describe those bytes.
     Background cache fallback intentionally remains unchanged and is not proof.
+
+    A ``latest`` disagreement is re-read before it is refused. PyPI's
+    project-JSON endpoint is CDN-cached while the release FILES are not, so a
+    run pressed inside the propagation window sees a stale ``info.version``
+    for a release it has already downloaded and built — measured 2026-10-24:
+    the 0.89.0 wheels were on the index at 20:38:40-45Z, a correct 0.89.0 build
+    was refused at 20:42:08Z and again at 20:42:26Z, and a manual retry at
+    20:43:22Z succeeded. Three reads ~5 s apart ride that window out; a
+    healthy run pays nothing (the first read agrees and never sleeps), and an
+    exhausted bound still refuses in the same sentence, so the guard's
+    semantics do not move.
     """
+    _reach("publish")
     if mode == "source":
         return None
     if not target:
         raise UpdateError("cannot promote an unversioned PyPI candidate; retry lop update")
     if mode == "latest":
-        latest = _fetch_pypi_version()
+        latest: str | None = None
+        for attempt in range(1, _PUBLICATION_CONFIRM_ATTEMPTS + 1):
+            latest = _fetch_pypi_version()
+            if latest == target:
+                break
+            if attempt < _PUBLICATION_CONFIRM_ATTEMPTS:
+                # INFO, not WARNING: this is a wait, not a failure, and the
+                # observed version is the one fact the next occurrence needs.
+                logger.info(
+                    "PyPI still reports %s as latest, not %s; re-reading in %.0fs "
+                    "(attempt %d/%d)",
+                    latest or "unconfirmed",
+                    target,
+                    _PUBLICATION_CONFIRM_DELAY_S,
+                    attempt,
+                    _PUBLICATION_CONFIRM_ATTEMPTS,
+                )
+                _sleep(_PUBLICATION_CONFIRM_DELAY_S)
         if latest != target:
-            raise UpdateError(
+            raise PublicationError(
                 f"fresh PyPI latest is {latest or 'unconfirmed'}, not {target}; retry lop update"
             )
     document, complaint = _pypi_release_document(target)
@@ -2395,6 +2703,7 @@ def _download_candidate_artifact(generation: Path, built: PublicationEvidence) -
     """
     import httpx
 
+    _reach("download")
     destination = _candidate_artifact(generation, built)
     destination.parent.mkdir()
     staging = destination.with_name(destination.name + ".tmp")
@@ -3456,10 +3765,18 @@ def install_into_generation(
         raise UpdateError(generation_layout_refusal())
     token = commit[:12] or version or "pypi"
     mode = "source" if source is not None else target_mode
+    # The publication gate is its own stage, marked by the caller as well as by
+    # the helper: the boundary belongs to the pipeline, so a failure raised BY
+    # the gate (or by anything that replaces it) is still reported as publish.
+    _reach("publish")
     built = _fresh_publication(version, mode)
     reused = _reuse_exact_current(built)
     if reused is not None:
         return reused
+    # Everything from here to the installer's exit is preparation: reserve the
+    # tree, persist the recovery operation, assemble the argv. A failure here
+    # is an environment failure, not a failed install — nothing ran yet.
+    _reach("environment")
     generation, nonce, baseline = _register_candidate(
         token, version, mode, commit or (str(source) if source is not None else "")
     )
@@ -3489,6 +3806,7 @@ def install_into_generation(
         if built is not None:
             artifact = _download_candidate_artifact(generation, built)
             argv = [*argv[:-1], "--from", str(artifact), DISTRIBUTION_NAME]
+        _reach("install")
         code = (runner or _run_installer_env)(argv, _generation_env(generation))
     except OSError as exc:
         # A missing ``uv``, an unwritable generations dir: the caller gets one
@@ -3501,6 +3819,7 @@ def install_into_generation(
         _discard_candidate(generation, nonce)
         raise
     operation.advance("prepared", candidate=str(generation))
+    _reach("promote")
     try:
         with _promotion_transaction(generation, version, mode, built):
             try:
@@ -8018,9 +8337,19 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
     and one row per supervised status the stage reported (D2). The supervised rows
     used to be the ``pending`` ones only, so a generation install — the layout
     this host runs — recorded nothing about units that had just been moved, or
-    about the ones that were not. ``refreshed`` proves a new pid, not the build
-    (see ``launchd.restart_if_build_moved``'s Q5 note), which is why
-    ``central_services_complete`` stays False below.
+    about the ones that were not.
+
+    ``central_services_complete`` USED TO BE THE LITERAL ``False``, which made it
+    a constant rather than a reading. The 2026-10-24 0.89.0 run proved the
+    difference: it recorded ``core_installed: true`` and
+    ``central_services_complete: false`` while the report's own ``serve`` row
+    said the daemon had moved to 0.89.0 and all five supervised units said
+    ``refreshed`` — two contradictory accounts of one run. It is now computed
+    from those same rows, and ``central_services_incomplete_reason`` names which
+    condition failed, so the pair can never read as a contradiction: True means
+    every reported daemon is ``refreshed``/``already``, every serving row is
+    ``current``, and BOTH censuses were actually measured; anything less is
+    False with a reason.
     """
     from local_operator import services
     from local_operator.session.runtime import registry
@@ -8091,6 +8420,23 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
     except Exception:  # noqa: BLE001 — failed inventory is explicit
         serving_measured = False
     supervised = [{"name": item.name, "state": item.status, "reason": ""} for item in stage.daemons]
+    # Completeness is a CONJUNCTION of measurements, never an assumption:
+    # a census that could not be read cannot prove anything, and an empty
+    # daemon list is not an authoritative "all clear" (the same rule the old
+    # constant over-applied by refusing every run).
+    incomplete: list[str] = []
+    if not stage.daemons:
+        incomplete.append("no supervised daemons reported")
+    for item in stage.daemons:
+        if item.status not in ("refreshed", "already"):
+            incomplete.append(f"daemon {item.name} failed")
+    pending_serve = [row for row in serving if row["state"] != "current"]
+    if pending_serve:
+        incomplete.append(f"{len(pending_serve)} serving row(s) pending")
+    if not serving_measured:
+        incomplete.append("serving census unreadable")
+    if not measured:
+        incomplete.append("runtime census unreadable")
     return {
         "contract": "rolling-no-kill-v1",
         "mode": "rolling-immutable",
@@ -8103,9 +8449,10 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
             "version": generation_version(current),
         },
         "core_installed": promoted is not None and generation_version(promoted) != "",
-        # Unsupported supervisor units / old12 FIRST activation are not an
-        # empty authoritative census. Never announce overall COMPLETE.
-        "central_services_complete": False,
+        "central_services_complete": not incomplete,
+        # Always present, "" when complete: the sibling that stops the boolean
+        # from reading as an observation the run never made.
+        "central_services_incomplete_reason": "; ".join(incomplete),
         "serving_measured": serving_measured,
         "services": serving + supervised,
         "runtimes": {
@@ -8151,6 +8498,7 @@ def _emit_update_report(
     payload = {
         "update_report": {
             "schema": _UPDATE_REPORT_SCHEMA,
+            "ok": True,
             "install_version": install_version,
             "target": target,
             "serve": [
@@ -8245,8 +8593,10 @@ def _generation_upgrade(
     _print_current_generation()
     # Match perform_upgrade's no-collection tail. A snapshot/controller caller
     # must not silently reintroduce deletion after immutable promotion succeeds.
+    _reach("services")
     stage = _run_services_tail(services=services)
     _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
+    _reach("report")
     _emit_update_report(
         install_version=install_version,
         target=target,
@@ -8289,20 +8639,19 @@ def _snapshot_command(
     """
     kind = install_kind()
     if kind is InstallKind.EDITABLE:
-        print(editable_refusal(), file=sys.stderr)
-        return 1
+        return _fail("environment", "refused", editable_refusal())
     if kind is not InstallKind.UV_TOOL:
         # The generation layout is uv-tool only, and so is this command: a pip
         # or pipx install has no per-generation root for a snapshot to land in,
         # and pretending otherwise would rewrite site-packages under the
         # running fleet — the failure this change exists to remove.
-        print(
+        return _fail(
+            "environment",
+            "refused",
             "lop update --from-snapshot installs into a uv-tool generation, "
             f"and this install is {kind.value} — install it with `uv tool "
             "install --force --from <dir> local-operator` instead.",
-            file=sys.stderr,
         )
-        return 1
     # THE HOOK'S ``before`` (S3b), captured before any install work: by the
     # time the hook runs, ``disk_build`` describes the generation just
     # installed, and the trigger's strictly-newer gate must compare the MOVE,
@@ -8311,11 +8660,14 @@ def _snapshot_command(
     # ref has nothing for members to do (note §3, condition 1).
     stamp_before = disk_build()
     before_version = str(stamp_before.version) if stamp_before is not None else ""
+    _reach("download")
     try:
         snapshot = resolve_snapshot(value)
     except UpdateError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        # These are input refusals (not a directory, not a ref, no
+        # pyproject.toml), not transfer failures: the fetch, if any, succeeded
+        # and the updater declined what it found.
+        return _fail("download", "refused", str(exc))
     try:
         # THE DOWNGRADE GATE, asked before the route is even classified: a
         # refusal must not be buried under (or pay for) the route announcement
@@ -8325,10 +8677,17 @@ def _snapshot_command(
         # does.
         downgrade = classify_snapshot_downgrade(snapshot, allow_downgrade=allow_downgrade)
         if downgrade.is_downgrade:
-            for line in snapshot_downgrade_lines(downgrade, value=value):
-                print(line, file=sys.stderr)
+            lines = snapshot_downgrade_lines(downgrade, value=value)
             if not downgrade.allowed:
-                return 1
+                return _fail(
+                    "check",
+                    "refused",
+                    lines[0] if lines else "refusing to install an older build",
+                    detail="\n".join(lines[1:]),
+                    human="\n".join(lines),
+                )
+            for line in lines:
+                print(line, file=sys.stderr)
         # THE ROUTE DECISION, made before any install work so the loud fallback
         # notice (or the wheel announcement) cannot end up buried behind a
         # bundle build or a refusal — see :func:`classify_snapshot_install` for
@@ -8445,12 +8804,18 @@ def _snapshot_command(
                 # (range) as a single paragraph of nested parentheses — a wall, at the
                 # one moment the reader's portal has already broken (design round 1,
                 # D1/D3).
-                print(
+                return _fail(
+                    "environment",
+                    "refused",
                     "lop-update: refusing to install this build — it has no mobile "
-                    f"web UI to serve (bundle status above).\n  Fix the build with {remedy}",
-                    file=sys.stderr,
+                    "web UI to serve (bundle status above).",
+                    detail=f"Fix the build with {remedy}",
+                    human=(
+                        "lop-update: refusing to install this build — it has no mobile "
+                        f"web UI to serve (bundle status above).\n  Fix the build with {remedy}"
+                    ),
                 )
-                return 1
+            _note_versions(target=snapshot.version)
             print(f"installing {snapshot.install_label} ({shape})")
             try:
                 install_into_generation(
@@ -8462,8 +8827,13 @@ def _snapshot_command(
                     note=note,
                 )
             except UpdateError as exc:
-                print(str(exc), file=sys.stderr)
-                return 1
+                step = _progress().step
+                return _fail(
+                    step,
+                    _classify_failure(step, exc),
+                    str(exc),
+                    target=snapshot.version,
+                )
             installed_version = snapshot.version
     finally:
         if snapshot.temporary:
@@ -8485,7 +8855,7 @@ def _snapshot_command(
     )
 
 
-def update_command(
+def _update_command_body(
     *,
     check: bool = False,
     refresh_daemons: bool = False,
@@ -8531,6 +8901,7 @@ def update_command(
     ever installs NEWER versions, so "allow a downgrade" is a question nothing
     on that path can answer.
     """
+    _begin_update()
     if refresh_daemons:
         return _run_daemon_repair(services_only=services_only)
 
@@ -8539,35 +8910,39 @@ def update_command(
 
     if from_snapshot is not None:
         if check:
-            print("--check compares against PyPI; --from-snapshot installs a tree", file=sys.stderr)
-            return 1
+            return _fail(
+                "check",
+                "refused",
+                "--check compares against PyPI; --from-snapshot installs a tree",
+            )
         return _snapshot_command(
             from_snapshot, services=services, allow_downgrade=allow_downgrade, roll=roll
         )
 
     if allow_downgrade:
-        print(
+        return _fail(
+            "check",
+            "refused",
             "--allow-downgrade applies to --from-snapshot; "
             "the PyPI path only installs newer versions",
-            file=sys.stderr,
         )
-        return 1
 
+    _reach("check")
     result = check_latest(force=True)
+    _note_versions(install_version=result.installed, target=result.latest or "")
     if result.latest is None:
         if result.pending_version is not None:
             # PyPI answered; the release exists and is still publishing.
             # Naming a connection fault here would send the reader to debug
             # a healthy network (UX round 1, M1) — coherent with the desktop
             # app's sentence for the same state.
-            print(
+            return _fail(
+                "check",
+                "publication",
                 f"PyPI has named {result.pending_version} but its files are still "
                 "publishing, so there is no update to install yet — try again in a few minutes",
-                file=sys.stderr,
             )
-        else:
-            print("could not reach PyPI to learn the latest version", file=sys.stderr)
-        return 1
+        return _fail("check", "network", "could not reach PyPI to learn the latest version")
 
     if check:
         if result.behind:
@@ -8575,6 +8950,9 @@ def update_command(
             print(f"latest on PyPI: {result.latest}")
             print("run `lop update` to install")
             return 2
+        # NOT a report exit: ``--check`` answers a question and installs
+        # nothing, so the update report (which says an update ran) stays out.
+        # Exit 2 for "behind" is the documented answer, not a failure.
         print(f"local-operator {result.installed} is the latest")
         return 0
 
@@ -8592,17 +8970,17 @@ def update_command(
         # current build is reported as such and not touched, so the cost of
         # running it on every `lop update` is a health probe per daemon.
         print(f"local-operator {result.installed} is the latest")
+        _reach("services")
         stage = _run_services_tail(services=services)
+        _reach("report")
         _emit_update_report(install_version=result.installed, target=result.latest, stage=stage)
         return 0
 
     kind = install_kind()
     if kind is InstallKind.EDITABLE:
-        print(editable_refusal(), file=sys.stderr)
-        return 1
+        return _fail("environment", "refused", editable_refusal())
     if kind is InstallKind.UNKNOWN:
-        print(unknown_refusal(), file=sys.stderr)
-        return 1
+        return _fail("environment", "refused", unknown_refusal())
 
     if is_git_snapshot():
         print(git_snapshot_notice())
@@ -8611,6 +8989,7 @@ def update_command(
     print(f"upgrading via {installer_label(kind)}…")
     pruned: list[str] = []
     promoted: list[Path] = []
+    _reach("install")
     try:
         installed = perform_upgrade(
             target=result.latest,
@@ -8619,8 +8998,13 @@ def update_command(
             on_promoted=promoted.append,
         )
     except UpdateError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        step = _progress().step
+        return _fail(
+            step,
+            _classify_failure(step, exc),
+            str(exc),
+            target=result.latest,
+        )
     print(f"installed {installed}")
     # Names the layout, not the build: on a machine with generations the build
     # now lives in its own tree and `current` names it, which is the one fact a
@@ -8632,8 +9016,10 @@ def update_command(
     _print_current_generation()
     for line in pruned:
         print(line)
+    _reach("services")
     stage = _run_services_tail(services=services)
     _roll_after_update(before=result.installed, after=installed, via="update", roll=roll)
+    _reach("report")
     _emit_update_report(
         install_version=installed,
         target=result.latest,
@@ -8641,3 +9027,54 @@ def update_command(
         promoted_generation=promoted[0] if promoted else None,
     )
     return 0
+
+
+def update_command(
+    *,
+    check: bool = False,
+    refresh_daemons: bool = False,
+    services_only: bool = False,
+    refresh_mobile: bool = False,
+    from_snapshot: str | None = None,
+    services: bool = True,
+    allow_downgrade: bool = False,
+    roll: bool = True,
+) -> int:
+    """``lop update``: the body's contract, plus the frozen failure report.
+
+    Every ordinary refusal inside :func:`_update_command_body` returns through
+    :func:`_fail`, which prints the human sentence and the machine-readable
+    line together. This wrapper is the second half of the same guarantee: an
+    ``UpdateError`` that ESCAPES the body (raised by a helper deep enough that
+    the body has no return statement to attach the report to, or by the
+    services tail after a successful install) is reported and turned into
+    exit 1, so no failing exit reaches the process boundary without a report.
+
+    A non-``UpdateError`` is reported with ``kind: unknown`` and the step that
+    was running, then RE-RAISED: an unexpected bug keeps its traceback, because
+    turning a crash into a tidy exit code is how a defect stops being visible.
+    """
+    _begin_update()
+    try:
+        return _update_command_body(
+            check=check,
+            refresh_daemons=refresh_daemons,
+            services_only=services_only,
+            refresh_mobile=refresh_mobile,
+            from_snapshot=from_snapshot,
+            services=services,
+            allow_downgrade=allow_downgrade,
+            roll=roll,
+        )
+    except UpdateError as exc:
+        step = _progress().step
+        return _fail(step, _classify_failure(step, exc), str(exc))
+    except Exception as exc:  # noqa: BLE001 — reported, then re-raised
+        step = _progress().step
+        _emit_update_failure(
+            step=step,
+            kind="unknown",
+            exit_code=1,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
