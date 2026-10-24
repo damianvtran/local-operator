@@ -2062,6 +2062,7 @@ def mcp_grant_diagnostics(
         "sharing_mode": "unavailable",
         "refresh_presence": "unknown",
         "expiry_known": False,
+        "grant_chain_at": None,
         "scopes_known": False,
         "access_state": "unknown",
     }
@@ -2102,10 +2103,14 @@ def mcp_grant_diagnostics(
     )
     metadata = data.get(GRANT_PROVENANCE_KEY)
     metadata = metadata if isinstance(metadata, dict) else {}
+    # Refresh rotations CONTINUE this chain; a new local grant moves it. Export
+    # the value-free stamp so readiness can tell a newer local login from older
+    # broker evidence without inferring either fact from a mutable row timestamp.
+    chain_stamp = _chain_stamp_of(data)
     bound_native = (
         metadata.get("kind") == "native"
         and metadata.get("resource_url") == server_url
-        and metadata.get("native_event_at") == _chain_stamp_of(data)
+        and metadata.get("native_event_at") == chain_stamp
     )
     provenance = (
         "copied"
@@ -2137,6 +2142,7 @@ def mcp_grant_diagnostics(
         ),
         "refresh_presence": "present" if refresh else "absent",
         "expiry_known": expiry is not None,
+        "grant_chain_at": chain_stamp if math.isfinite(chain_stamp) and chain_stamp > 0 else None,
         "scopes_known": bound_native and metadata.get("scopes_known") is True,
         "access_state": access,
     }

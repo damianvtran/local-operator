@@ -631,6 +631,86 @@ def test_mcp_owner_expiry_names_the_owner_in_the_row_and_remedy(
     assert rows[0]["remedies"] == ["sign in again on macbook"]
 
 
+def test_mcp_newer_local_expiry_outranks_older_owner_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real local grant supersedes an older owner refusal (review round 1, F-1)."""
+    import asyncio
+
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import TOKENS_OBTAINED_AT_KEY, McpTokenStorage
+    from local_operator.network import store
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+    from local_operator.providers.auth_store import AuthStore
+    from tests.unit.mcp.test_credential_status import NETWORK
+    from tests.unit.mcp.test_credential_status import PEER as OWNER
+    from tests.unit.mcp.test_credential_status import SELF, URL, _place, _record
+
+    root = tmp_path / "cfg"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    store.save(_record(), root)
+    _place(root)
+    key = credential_key_for_mcp(URL)
+    mcp_state.record(
+        NETWORK,
+        key,
+        state="expired",
+        code="interactive_required",
+        owner_device=OWNER,
+        owner_name="macbook",
+        root=root,
+    )
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+    auth = AuthStore(config_dir=root)
+    try:
+        storage = McpTokenStorage(URL, auth)
+        # The interactive writer is the real local-grant seam. An access-only
+        # grant with a zero-second lifetime is present but definitely expired;
+        # no refresh or broker call is needed to construct this state.
+        for lifetime in (3600, 0):
+            asyncio.run(
+                storage.set_tokens(
+                    OAuthToken.model_validate(
+                        {"access_token": "local-fixture-access", "expires_in": lifetime}
+                    )
+                )
+            )
+        local_row = auth.list_credentials("mcp-oauth")[0]
+        assert mcp_state.load(NETWORK, root)[key]["at"] < local_row.data[TOKENS_OBTAINED_AT_KEY]
+        fact = readiness.mcp_servers_fact(root)
+        diagnostics = fact["servers"][0]["auth_diagnostics"]
+        assert diagnostics["access_state"] == "expired"
+        assert diagnostics["sharing_mode"] == "unavailable"
+        assert diagnostics["refresh_presence"] == "absent"
+        viewer = _FakeViewer(
+            device_id=OWNER,
+            placement={
+                "owner_device": OWNER,
+                "owner_device_name": "macbook",
+                "holders": [{"device": SELF, "scope": "session"}],
+            },
+        )
+        rows = readiness.mcp_credential_rows(
+            SimpleNamespace(device_id=SELF, name="holder"),
+            _facts(mcp=fact),
+            viewer=viewer,
+            peer_label="holder",
+        )
+
+        assert rows[0]["code"] == "local_grant_unavailable"
+        assert "holder's stored login" in rows[0]["detail"]
+        assert rows[0]["remedies"] == ["sign in again on holder"]
+        assert diagnostics["grant_chain_at"] > mcp_state.load(NETWORK, root)[key]["at"]
+    finally:
+        auth.close()
+
+
 def test_mcp_local_expiry_names_the_peer_in_the_row_and_remedy() -> None:
     """With no owner-expiry evidence, a local dead row remains a local repair."""
     server = {

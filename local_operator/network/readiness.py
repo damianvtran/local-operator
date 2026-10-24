@@ -2323,11 +2323,26 @@ def _mcp_credential_row(
     evidence = server.get("auth_evidence")
     evidence = evidence if isinstance(evidence, Mapping) else {}
     evidence_owner = str(evidence.get("owner_device") or "")
+    owner_evidence_is_newer = True
+    if local_unavailable:
+        from local_operator.network.credentials.types import peer_number
+
+        # A local grant is the runtime's first rung. Only a refusal observed
+        # AFTER its current chain began may supersede it; an older refusal, a
+        # tie, or missing timing keeps the repair on this device. Refresh
+        # rotations carry the chain stamp, so this compares grant identity, not
+        # the last metadata write.
+        evidence_at = peer_number(evidence.get("at"), default=0)
+        local_grant_at = peer_number(diagnostics.get("grant_chain_at"), default=0)
+        owner_evidence_is_newer = (
+            evidence_at > 0 and local_grant_at > 0 and evidence_at > local_grant_at
+        )
     current_owner_evidence = (
         bool(owner)
         and peer_is_holder
         and server.get("has_placement") is True
         and evidence_owner == owner
+        and owner_evidence_is_newer
         and (local_unavailable or has_row is False)
     )
     if current_owner_evidence and evidence.get("state") == "expired":
