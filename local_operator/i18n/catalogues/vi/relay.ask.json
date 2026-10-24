@@ -1,0 +1,13 @@
+{
+  "relay.ask.context.messages": "{count, plural, other {# tin nhắn từ bạn kể từ khi câu hỏi này được đặt (gần nhất {time})}}",
+  "relay.ask.dismiss.answered_in_chat": "Đã trả lời trong cuộc trò chuyện",
+  "relay.ask.dismiss.answered_in_chat_note": "bạn đã trả lời trong cuộc trò chuyện",
+  "relay.ask.dismiss.cancel": "hủy",
+  "relay.ask.dismiss.moot": "Không còn cần nữa",
+  "relay.ask.dismiss.moot_note": "tác nhân sẽ không chờ câu trả lời nữa",
+  "relay.ask.dismiss.open": "bỏ qua…",
+  "relay.ask.dismiss.receipt": "Đã bỏ qua — không gửi câu trả lời",
+  "relay.ask.dismiss.receipt_answered_in_chat": "Đã bỏ qua — đã trả lời trong cuộc trò chuyện",
+  "relay.ask.dismiss.receipt_moot": "Đã bỏ qua — không còn cần nữa",
+  "relay.ask.dismiss.title": "Bỏ qua câu hỏi này"
+}

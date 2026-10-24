@@ -10,14 +10,17 @@ stopped conversation was BOOTED, and the boot reconcile delivered a row the
 dismissal had not cancelled yet, which started a paid turn (measured end to end;
 the architect's E1).
 
-WHAT IT ACCEPTS (D6, design §15): a TIMED-OUT ask, and an OPEN one — the cold
-session is exactly "no agent work is running", the only state in which an open ask
-may be dismissed. Nothing HERE starts, wakes or injects; the agent hears at the
-next boot of a runtime. THAT BOOT COSTS A TURN, stated plainly: any engage
-(including a warm-up that only opens the conversation) reconciles and delivers
-``ask-response-<id>`` into an idle runtime with no pending abort, which runs ONE
-paid turn — the same cost §14 already accepted for a timed-out ask's notice. Only
-a STOPPED live runtime holds the row without a turn (D2).
+WHAT IT ACCEPTS (D6, amended by SA-D4, design §15): a TIMED-OUT ask, and an
+OPEN one. The cold session is "no agent work is running", so an open ask may be
+dismissed there; the LIVE doors accept one in every live state too (mid-turn the
+response row rides the steering queue, idle it is held with no turn), which is
+why this module's rule is the fold's alone and not a runtime fact. Nothing HERE
+starts, wakes or injects; the agent hears at the next boot of a runtime. THAT
+BOOT COSTS A TURN, stated plainly: any engage (including a warm-up that only
+opens the conversation) reconciles and delivers ``ask-response-<id>`` into an
+idle runtime with no pending abort, which runs ONE paid turn — the same cost
+§14 already accepted for a timed-out ask's notice. Only a STOPPED or IDLE live
+runtime holds the row without a turn (D2, SA-D4).
 
 THE OWNER-CHECK -> APPEND -> WAKE-CANCEL WINDOW now applies to open asks too: a
 runtime that boots in that gap can republish the wake list with
@@ -34,8 +37,8 @@ THREE PROPERTIES MAKE WRITING FROM HERE SAFE, and each one is a check below:
   append under a running session can be lost, or can deliver a row without the
   turn the row is for. The caller falls back to the dial on ``ask_owner_present``
   — and ONLY on that, because every other refusal is an answer rather than a
-  reason to boot something. (The live door then applies the stopped-session
-  rule of D6 itself.)
+  reason to boot something. (The live door applies the queue's own fold rule in
+  whatever state the owner is in: SA-D4 retired D6's stopped-session gate.)
 * **The fold decides, in the queue's own words.** The refusal sentence comes from
   :func:`asks.render.dismiss_refusal`, the same function ``AskQueue.dismiss``
   calls, so a surface cannot tell which door answered it by the wording.
@@ -137,6 +140,21 @@ async def dismiss_cold(
     # its own record of what it delivered and republishes its schedule list, so a
     # write from here would be lost — or would leave the owed notice delivered by
     # a boot with nobody's turn to read it.
+    #
+    # THE WINDOW AFTER THIS CHECK IS BENIGN, and deliberately not narrowed (agent
+    # review round 1, open question b). A runtime that boots between the probe and
+    # the append finds the dismissal in the LOG: the append is one `write` under
+    # an `O_APPEND` flock (`store.append_event`), so it lands whole beside whatever
+    # the new owner writes, and the owner's next reconcile folds it — a boot
+    # reconcile reads the log before its first turn, so the owed response row is
+    # delivered then. The two cold-door writes beside the log are healed or
+    # refused, not lost: the derived index has every writer's "the log is the
+    # truth" contract (`_dismiss_in_index` warns and the next reconcile rewrites
+    # it), and the wake disarm answers `wake_owner_present`, which this module
+    # already treats as "the owner owns the list now" (`_WAKE_REFUSALS`). Between
+    # the check and the append there is no READ that could go stale, which is why
+    # a second probe or a lock around the pair would add a race without removing
+    # one.
     if _live_owner(root, session_id) is not None:
         return {"ok": False, "code": "ask_owner_present"}
 
@@ -160,7 +178,7 @@ async def dismiss_cold(
     if not store.append_event(directory, payload):
         return {"ok": False, "error": "the dismissal could not be recorded."}
 
-    _dismiss_in_index(root, session_id, ask_id)
+    _dismiss_in_index(root, session_id, ask_id, at=now, reason=payload["reason"])
     await _cancel_deadline_wake(root, session_id, ask_id)
     return {"ok": True}
 
@@ -182,14 +200,29 @@ def _live_owner(root: Path, session_id: str) -> int | None:
     return live_runtime_pid(root, session_id)
 
 
-def _dismiss_in_index(config_dir: Path, session_id: str, ask_id: str) -> None:
-    """Set this ask's row in the derived index to ``dismissed``.
+def _dismiss_in_index(
+    config_dir: Path,
+    session_id: str,
+    ask_id: str,
+    *,
+    at: int,
+    reason: str,
+) -> None:
+    """Set this ask's row in the derived index to a settled DISMISSAL.
 
     The index is what the cross-session view reads with no runtime to ask, so
     without this the phone keeps offering Dismiss on an ask the log has already
     settled until some runtime happens to reconcile. Best-effort by the same
     contract the queue's own writer keeps (``AskQueue._refresh``): the log is the
     truth and any writer heals the entry.
+
+    THREE FIELDS, NOT ONE (SA-D8). A stopped session has no runtime to reconcile
+    the entry from its log, so this write is the only chance the row has to state
+    WHEN and WHY it was dismissed — and both are load-bearing rather than nice:
+    the shared visibility rule (``store.dismissed_hidden``) decides "settled
+    receipt" from ``dismissed_at``, so a row carrying only ``status`` would hide
+    a pre-deadline dismissal the operator is owed a receipt for, and a surface
+    would have a chip with no reason to show under it.
     """
     try:
         entry = store.read_entry(config_dir, session_id)
@@ -200,6 +233,8 @@ def _dismiss_in_index(config_dir: Path, session_id: str, ask_id: str) -> None:
         for row in rows:
             if str(row.get("ask_id")) == ask_id:
                 row["status"] = store.STATUS_DISMISSED
+                row["dismissed_at"] = int(at)
+                row["dismissed_reason"] = store.normalize_dismiss_reason(reason)
                 touched = True
         if not touched:
             return

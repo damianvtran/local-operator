@@ -3477,6 +3477,291 @@
       },
       "status": "passed",
       "note": "session.compression 8-key delta (settings section + switch + age row). Translator job b1a1db1d58c6; independent auditor job 4c7749084e22, a different agent that read only the en source, sidecars, style guides and the produced catalogue. Both runs deepseek/deepseek-flash — independent at agent level, same model family (disclosed). Audit verdict PASS WITH FINDINGS: 0 blocker, 0 major, 1 MINOR (A-es-1: choice.true 'anteriores a' -> 'tras la antigüedad de abajo', the cleanup row's own phrase) and 2 NITs (A-es-2 label -> 'Comprimir las antiguas'; A-ru-1 'читаются обратно' -> 'распаковываются при чтении'), all applied verbatim from the auditor's own suggested wording and re-checked mechanically (keys, cell widths, prefix bytes). Prior acceptance for this namespace carried; no other key touched."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.palette",
+      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 864ba429feea9305a2a672ae57b71ebbf22a54ee92881276cd4d24f80493f106. Report: sessions/7bc94e70c275/scratchpad/audit-es.json."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.palette",
+      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, 1 non-gating MINOR. The placeholder's opener 'Trouver' fits the 48-cell budget; 'Rechercher' measures 51 and was refused as width-driven, not an idiom defect, so no fix was required (auditor accepted). Audited target sha256 857229201f88ffe91c5103aa1acf7e0ac058136b1d5abe1c546e4489af37698a. Report: sessions/b64104d39368/scratchpad/audit-fr.json."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.palette",
+      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 1103bd85cc6bce50ae5fa1754639046135fac188088df2c23c3ecb29fd9ed854. Report: sessions/e8351da7b481/scratchpad/audit-hi.json."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.palette",
+      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, 0 findings. 'ИИ-команда' was accepted for the team tag because bare 'команда' collides with the command tag; the auditor confirmed the qualifier reads naturally. Audited target sha256 89c5ac0531dea466527687785ec121414cb6d23e374f65bd8514b6ee184b3ae8. Report: sessions/f7d512c641f3/scratchpad/audit-ru.json."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.palette",
+      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 33e3917430cf3308ea04580d6fa31ace996a45f490d53d75082e9b27b8abb3af. Report: sessions/d71bc18a7798/scratchpad/audit-vi.json."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.asks",
+      "source_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Rounds 1 and 2 audited R5's copy and its remediation; THIS round adds one key, the lapsed door's receipt, whose whole point is to read the SAME as the phone's line for the same act (design round 2, D8). The translations reuse each locale's existing wording for that phone key verbatim, so the two surfaces cannot drift; the auditor confirmed the five strings match their phone counterparts and raise no finding. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.ask",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.asks",
+      "source_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Rounds 1 and 2 audited R5's copy and its remediation; THIS round adds one key, the lapsed door's receipt, whose whole point is to read the SAME as the phone's line for the same act (design round 2, D8). The translations reuse each locale's existing wording for that phone key verbatim, so the two surfaces cannot drift; the auditor confirmed the five strings match their phone counterparts and raise no finding. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.ask",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.asks",
+      "source_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Rounds 1 and 2 audited R5's copy and its remediation; THIS round adds one key, the lapsed door's receipt, whose whole point is to read the SAME as the phone's line for the same act (design round 2, D8). The translations reuse each locale's existing wording for that phone key verbatim, so the two surfaces cannot drift; the auditor confirmed the five strings match their phone counterparts and raise no finding. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.ask",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.asks",
+      "source_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Rounds 1 and 2 audited R5's copy and its remediation; THIS round adds one key, the lapsed door's receipt, whose whole point is to read the SAME as the phone's line for the same act (design round 2, D8). The translations reuse each locale's existing wording for that phone key verbatim, so the two surfaces cannot drift; the auditor confirmed the five strings match their phone counterparts and raise no finding. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.ask",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.asks",
+      "source_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Rounds 1 and 2 audited R5's copy and its remediation; THIS round adds one key, the lapsed door's receipt, whose whole point is to read the SAME as the phone's line for the same act (design round 2, D8). The translations reuse each locale's existing wording for that phone key verbatim, so the two surfaces cannot drift; the auditor confirmed the five strings match their phone counterparts and raise no finding. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.ask",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
     }
   ]
 }

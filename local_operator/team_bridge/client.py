@@ -971,6 +971,7 @@ class TeamBridgeClient:
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """One authenticated request: resolve, send, refresh-once-on-401, map refusals.
 
@@ -983,7 +984,12 @@ class TeamBridgeClient:
         resolution, here.
         """
 
-        pinned = access or await self.current_access()
+        # A desktop request can wait in IPC while the signed-in account changes.
+        # Compare its captured owner against the SAME bearer snapshot used below,
+        # including when an internal caller already resolved that snapshot. Never
+        # check ownership and then resolve credentials a second time for dispatch.
+        guarded = await self._guarded_access(expected_account_id, access=access)
+        pinned = guarded if guarded is not None else await self.current_access()
         try:
             response = await self._dispatch(
                 method, path, pinned.access_token, params=params, body=body
@@ -1025,7 +1031,9 @@ class TeamBridgeClient:
             pinned.credential_id, expected_account_id=pinned.account_id, force=True
         )
 
-    async def _guarded_access(self, expected_account_id: str | None) -> OAuthAccess | None:
+    async def _guarded_access(
+        self, expected_account_id: str | None, *, access: OAuthAccess | None = None
+    ) -> OAuthAccess | None:
         """Resolve the dispatch snapshot and enforce a captured-account guard.
 
         The desktop plane's anti-replay receipt (H1 review round 1, R6/Q1): a
@@ -1033,15 +1041,18 @@ class TeamBridgeClient:
         old body must yield ZERO mutations. The comparison runs against the
         EXACT pinned access the dispatch below will use — resolving again
         inside :meth:`_send` would reopen the very race this closes — and it
-        runs BEFORE any HTTP side effect. ``None`` (no guard supplied) returns
-        ``None`` and ``_send`` resolves as usual; the desktop ROUTES require
-        the field, so the guarded path is the only one the UI can take, and
-        this optionality serves tests and non-UI callers only.
+        runs BEFORE any HTTP side effect. With no guard, preserve any supplied
+        snapshot and otherwise let ``_send`` resolve as usual. Settings require
+        the receipt; conversations accept its omission for older clients, while
+        new renderers require the owner-guard capability and always supply it.
+        An already-resolved ``access`` is compared, not replaced: resolving again
+        here would discard the caller's binding just as surely as doing so later.
         """
 
         if expected_account_id is None:
-            return None
-        access = await self.current_access()
+            return access
+        if access is None:
+            access = await self.current_access()
         if access.account_id != expected_account_id:
             raise BridgeRefusal(
                 ACCOUNT_MISMATCH_CODE,
@@ -1786,6 +1797,7 @@ class TeamBridgeClient:
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Create (or find, for a dm) a conversation. The body is the wire shape.
 
@@ -1804,17 +1816,33 @@ class TeamBridgeClient:
             payload["actor_endpoint_id"] = actor_endpoint_id
         if origin_session_id:
             payload["origin_session_id"] = origin_session_id
-        return await self._send("POST", "/messaging/conversations", body=payload, access=access)
+        return await self._send(
+            "POST",
+            "/messaging/conversations",
+            body=payload,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
 
     async def conversation_lifecycle(
-        self, conversation_id: str, action: str, *, access: OAuthAccess | None = None
+        self,
+        conversation_id: str,
+        action: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Archive or unarchive. ``action`` is the closed set ``archive|unarchive``."""
 
         if action not in ("archive", "unarchive"):
             raise ValueError("action must be 'archive' or 'unarchive'")
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/{action}", access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/{action}",
+            params={"tenant_id": tenant_id} if tenant_id else None,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_members(
@@ -1824,6 +1852,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Invite members (humans become invited; agents become invited until consent)."""
 
@@ -1831,18 +1860,30 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/members", body=body, access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/members",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_remove_member(
-        self, conversation_id: str, account_id: str, *, access: OAuthAccess | None = None
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Remove a human member. Owner-only; succession is the server's rule."""
 
         return await self._send(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/members/{account_id}",
+            params={"tenant_id": tenant_id} if tenant_id else None,
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_join(
@@ -1851,6 +1892,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Accept an invitation, or self-join a tenant-visible channel."""
 
@@ -1860,15 +1902,25 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/join",
             body=body,
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_leave(
-        self, conversation_id: str, *, access: OAuthAccess | None = None
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Leave. Re-entry requires a fresh invitation (the leave/re-add boundary)."""
 
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/leave", access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/leave",
+            params={"tenant_id": tenant_id} if tenant_id else None,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_consent(
@@ -1880,6 +1932,7 @@ class TeamBridgeClient:
         consent_version: str,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Accept or decline an AGENT invitation, as the agent's owner.
 
@@ -1896,6 +1949,7 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/members/{account_id}/consent",
             body=body,
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_messages(
@@ -1940,6 +1994,7 @@ class TeamBridgeClient:
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Append one message. ``client_ref`` is required and idempotent.
 
@@ -1960,7 +2015,11 @@ class TeamBridgeClient:
         if origin_session_id:
             body["origin_session_id"] = origin_session_id
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/messages", body=body, access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/messages",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_body(
@@ -1996,6 +2055,7 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Record the screening verdict. ``reject`` is terminal."""
 
@@ -2009,6 +2069,7 @@ class TeamBridgeClient:
             params=params,
             body=body,
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_read(
@@ -2020,6 +2081,7 @@ class TeamBridgeClient:
         notify: Literal["all", "mention", "mute"] | None = None,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Advance the cursor and/or set the notification policy."""
 
@@ -2033,7 +2095,11 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/read", body=body, access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/read",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_notify(
@@ -2043,6 +2109,7 @@ class TeamBridgeClient:
         notify: Literal["all", "mention", "mute"],
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Set the caller's own notification policy (§10.1).
 
@@ -2059,7 +2126,11 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/read", body=body, access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/read",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def unread(

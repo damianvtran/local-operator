@@ -21,6 +21,7 @@ from local_operator.network.tool import build_network_tool
 from local_operator.team_bridge.tool import build_bridge_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
+from local_operator.tools.artifact_data_tool import build_artifact_data_tool
 from local_operator.tools.audio_tool import (
     build_generate_sound_effect_tool,
     build_generate_voiceover_tool,
@@ -199,6 +200,13 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # the END of both tables on purpose: appending never shifts a provider-visible
     # array prefix, which is what the prompt cache keys on.
     "tags": lambda _context: build_tags_tool(),
+    # createIf: rung 3 — present only where an ``anthropic`` OAuth grant is
+    # stored (sync, socket-free probe), because the claude.ai artifact store
+    # accepts nothing else and a session without one would hold a tool whose
+    # every call says "log in". Appended at the END of both tables on purpose:
+    # appending never shifts a provider-visible array prefix, which is what the
+    # prompt cache keys on.
+    "artifact_data": lambda context: build_artifact_data_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -256,8 +264,10 @@ DEFAULT_TOOL_NAMES: list[str] = [
     # newest append, so only `tags` ends both tables now.
     "generate_voiceover",
     "generate_sound_effect",
-    # The newest append (see the table comment above).
     "tags",
+    # The newest append (see the table comment above): createIf-gated on a
+    # stored anthropic OAuth grant.
+    "artifact_data",
 ]
 
 

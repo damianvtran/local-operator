@@ -103,6 +103,7 @@ this module is held across a fetch.
 
 from __future__ import annotations
 
+import base64
 import itertools
 import json
 import logging
@@ -112,7 +113,13 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from local_operator.harness.types import AttachmentContent, Message, TextContent
+from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
+from local_operator.harness.types import (
+    AttachmentContent,
+    DocumentContent,
+    Message,
+    TextContent,
+)
 from local_operator.optional import missing_extra_error
 
 logger = logging.getLogger(__name__)
@@ -134,6 +141,57 @@ OFFLOAD_MIN_CHARS = 20_000
 #: chunks, and a flat estimate keeps the estimator deterministic and
 #: independent of base64 payload length.
 IMAGE_TOKEN_ESTIMATE = 1200
+
+#: Tokens one PDF PAGE costs its provider, as a local planning estimate. Both
+#: native pricing and extraction pay per page: Anthropic renders each page as
+#: an image plus its text (roughly 1,500-3,000 tokens), the text fallback emits
+#: one page-marked chunk per page (~500-1,000 tokens for dense text), and a
+#: scanned page costs the most. 2,500 is the documented midpoint of the
+#: provider range and deliberately sits ABOVE the text fallback: this ruler
+#: exists to fire compaction BEFORE an oversized send, so over-counting a
+#: fallback is the safe direction, while undercounting a native PDF is what
+#: let a 100-page document pass the trigger (agent review round 2, minor 3).
+PDF_PAGE_TOKEN_ESTIMATE = 2_500
+
+#: Ceiling for ONE document block's local token charge, in the same unit. A
+#: thousand-page PDF at the per-page estimate would be 2.5M tokens, which is
+#: beyond every context this harness serves; the cap keeps one file from
+#: making the whole history's figure absurd while still being far above a
+#: context window, so the trigger fires and the pass does its job. It also
+#: bounds the BYTE-derived fallback (below) so a 32 MB base64 payload cannot
+#: report an eight-million-token history.
+MAX_DOCUMENT_TOKEN_ESTIMATE = 600 * PDF_PAGE_TOKEN_ESTIMATE
+
+
+def _document_token_estimate(block: DocumentContent) -> int:
+    """Tokens to charge for one document block.
+
+    Page count first, when the PDF can be parsed: a per-page charge is the
+    quantity providers actually bill and the only one that makes a long text
+    PDF visible to the trigger. The byte-derived charge (base64 length ~= one
+    token per character) is the fallback for an unparseable PDF and for
+    non-PDF documents, and is an over-estimate for both — the safe direction.
+
+    Both ``_compute_tokens`` and ``messages_tokens_upper_bound`` must call
+    THIS function or the upper bound stops being an upper bound.
+    """
+    if block.mime_type == "application/pdf" and block.data:
+        # Cached page count first: the digest-keyed answer is enough, and
+        # decoding 20 MB of base64 only to hand the parser bytes it has
+        # already read cost ~30 ms per turn on the pre-gate path (round-3
+        # minor 1).
+        cached, pages = known_pdf_page_count(block.digest)
+        if not cached:
+            try:
+                raw = base64.b64decode(block.data, validate=False)
+            except (ValueError, TypeError):
+                raw = None
+            if raw is not None:
+                pages = pdf_page_count(raw, block.digest)
+        if pages is not None:
+            return min(pages * PDF_PAGE_TOKEN_ESTIMATE, MAX_DOCUMENT_TOKEN_ESTIMATE)
+    return min(len(block.data), MAX_DOCUMENT_TOKEN_ESTIMATE)
+
 
 #: Fallback ratio when tiktoken is unavailable: ~4 chars per token.
 _CHARS_PER_TOKEN_FALLBACK = 4
@@ -803,6 +861,12 @@ def _compute_tokens(message: Message) -> int:
             # (agent review round 1, F4). Zero, explicitly, beside the wire
             # reader's own zero below.
             continue
+        elif isinstance(block, DocumentContent):
+            # NOT an image: see ``_document_token_estimate``. The previous
+            # fall-through charged a flat image estimate, which is wrong for
+            # both delivery paths and hid the block from any document-aware
+            # accounting (QA round 1 sweep).
+            total += _document_token_estimate(block)
         else:
             total += IMAGE_TOKEN_ESTIMATE
 
@@ -822,7 +886,7 @@ def estimate_messages_tokens(messages: Sequence[Message]) -> int:
     return sum(estimate_tokens(m) for m in messages)
 
 
-def estimate_wire_bytes(messages: Sequence[Message]) -> int:
+def estimate_wire_bytes(messages: Sequence[Message], *, utf8_text: bool = False) -> int:
     """Serialized request size in BYTES — deliberately NOT a token count.
 
     A third ruler, answering the one question neither token estimator asks:
@@ -868,7 +932,9 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
       measured mean of -2.42% and a worst case of -17.39% across 4,686 real
       sessions. Two known causes, both deliberate: message text is counted as
       characters rather than UTF-8 bytes, and the request's own JSON envelope
-      (roles, keys, block wrappers) is not modelled at all.
+      (roles, keys, block wrappers) is not modelled at all. ``utf8_text=True``
+      closes the text half for callers that must not under-count (the
+      document budget does; its 5% pad then covers only the envelope).
 
     That residual is absorbed by the budget's headroom rather than modelled —
     24 MB against a 32 MB cap is a ~28% margin, several times the worst
@@ -889,7 +955,13 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
     for message in messages:
         for block in message.content:
             if isinstance(block, TextContent):
-                total += len(block.text)
+                # The default keeps the long-standing character ruler every
+                # calibrated caller was measured against (documented under-
+                # count below). Callers that compare against a PROVIDER's byte
+                # ceiling must not under-count: ``utf8_text`` sizes the JSON
+                # string exactly — UTF-8 plus escape expansion — which is the
+                # same fast path ``_string_bytes`` already provides.
+                total += _string_bytes(block.text) if utf8_text else len(block.text)
             elif isinstance(block, AttachmentContent):
                 # Never serialized to a provider, so it contributes nothing to
                 # the wire — the same rule as `_compute_tokens` above. Without
@@ -898,6 +970,10 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
                 # will, because its bytes live in the store.
                 continue
             else:
+                # Documents included: ``block.data`` is the base64 payload,
+                # which IS the wire size of a native part; a fallback renders
+                # less than that, so this stays the safe (over-)estimate the
+                # byte budget wants.
                 total += len(block.data)
         for call in message.tool_calls or ():
             # Prefer the provider's own rendering when we kept it: that string
@@ -1230,6 +1306,11 @@ def messages_tokens_upper_bound(messages: Sequence[Message]) -> int:
                 text = block.text
                 total += len(text) if text.isascii() else 4 * len(text)
                 text_blocks += 1
+            elif isinstance(block, DocumentContent):
+                # MUST mirror ``_compute_tokens`` exactly: this function's one
+                # contract is never being below it, and a document charged
+                # differently here would break that invariant silently.
+                total += _document_token_estimate(block)
             else:
                 total += IMAGE_TOKEN_ESTIMATE
         # _compute_tokens encodes the text blocks as ONE "\n"-joined string, so

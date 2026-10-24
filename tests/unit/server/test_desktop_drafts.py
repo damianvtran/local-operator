@@ -35,6 +35,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -194,6 +195,194 @@ async def test_a_mint_retry_replays_the_same_id(draft_app) -> None:
     third = await client.post("/v1/desktop/sessions/draft", json=_mint_body(root))
     assert third.json()["result"]["draft_id"] != first.json()["result"]["draft_id"]
     assert len(app.state.desktop_sessions.drafts) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_replay_whose_draft_expired_mints_a_servable_id(draft_app, monkeypatch) -> None:
+    """A recorded id is an answer only while the pool can still serve it (2026-10-23).
+
+    The receipt exists to stop a retry registering a SECOND draft for one pane,
+    but the id it records dies with the registry entry (``DRAFT_TTL_S``).
+    Replaying it handed the client an id every door answers "Unknown session"
+    for: its ``/events`` streamed 404 and the pane painted the terminal missing
+    state over a brand-new chat. The retry must therefore mint a FRESH id —
+    servable here, 200 on ``/events`` — and supersede the row, so this retry and
+    every later one answer that fresh id rather than re-deriving another.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    body = _mint_body(root)
+    first = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"]
+    # Expire it in place: the same state the TTL reaches between two calls.
+    pool.drafts[first["draft_id"]].created = time.monotonic() - DRAFT_TTL_S - 1.0
+
+    second = await client.post("/v1/desktop/sessions/draft", json=body)
+    assert second.status_code == 200, second.text
+    fresh = second.json()["result"]
+    assert fresh["draft_id"] != first["draft_id"], "the dead id was replayed"
+    assert fresh["replayed"] is False, "a minted draft is not a replay"
+    assert fresh["draft_id"] in pool.drafts
+
+    # THE POINT OF THE FIX: the id the client was just handed answers 200.
+    async def no_frames(*args: Any, **kwargs: Any):
+        if False:  # pragma: no cover — keeps this an async generator
+            yield {}
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "events", no_frames)
+    events = await client.get(f"/v1/desktop/sessions/{fresh['draft_id']}/events")
+    assert events.status_code == 200, events.text
+
+    # ...and the receipt was REPLACED, so the next retry replays the fresh id
+    # instead of minting yet another draft for one pane.
+    third = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"]
+    assert third["draft_id"] == fresh["draft_id"]
+    assert third["replayed"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_replay_keeps_the_id_of_a_materialised_session(draft_app) -> None:
+    """A draft that became a conversation which still exists replays unchanged.
+
+    The refusal is scoped to ids that are provably GONE: a materialised session
+    is servable (its marker is on disk), so a retry after create must answer the
+    SAME conversation rather than start a second one beside it — which is the
+    duplicate the receipt exists to prevent.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    body = _mint_body(root)
+    draft_id = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"][
+        "draft_id"
+    ]
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "draft_id": draft_id},
+    )
+    assert created.status_code == 200, created.text
+    assert (root / "sessions" / draft_id / "desktop.json").is_file()
+    assert draft_id not in pool.drafts, "create did not consume the draft"
+
+    second = await client.post("/v1/desktop/sessions/draft", json=body)
+    assert second.status_code == 200, second.text
+    assert second.json()["result"]["draft_id"] == draft_id
+    assert second.json()["result"]["replayed"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_replay_whose_conversation_was_deleted_mints_again(draft_app) -> None:
+    """The other way a recorded mint dies: the conversation it became is deleted.
+
+    Same answer as expiry — a fresh, servable id — because the receipt's own
+    reason (do not duplicate a LIVE effect) has nothing left to protect: the
+    draft was consumed and the session is gone from disk.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    body = _mint_body(root)
+    draft_id = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"][
+        "draft_id"
+    ]
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "draft_id": draft_id},
+    )
+    assert created.status_code == 200, created.text
+    shutil.rmtree(root / "sessions" / draft_id)
+
+    second = await client.post("/v1/desktop/sessions/draft", json=body)
+    assert second.status_code == 200, second.text
+    fresh = second.json()["result"]
+    assert fresh["draft_id"] != draft_id
+    assert fresh["replayed"] is False
+    # The re-mint is registered, so its create and warm have an id to work with.
+    assert fresh["draft_id"] in pool.drafts
+
+
+@pytest.mark.asyncio
+async def test_the_replay_guard_leaves_the_fingerprint_gate_alone(draft_app) -> None:
+    """A STILL-SERVABLE id replays; a CHANGED body still refuses with 409.
+
+    The guard may only make a replay conditional on the recorded id's life. It
+    must not turn the journal into one that re-runs a request whose body moved:
+    the fingerprint is checked first, in the same claim, and a different body
+    under one request id stays the 409 the at-most-once contract reserves.
+    """
+    client, app, root = draft_app
+    body = _mint_body(root)
+    first = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"]
+    assert first["replayed"] is False
+    again = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"]
+    assert again == {"draft_id": first["draft_id"], "replayed": True}
+
+    moved = await client.post("/v1/desktop/sessions/draft", json={**body, "cwd": str(root.parent)})
+    assert moved.status_code == 409, moved.text
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_mint_after_expiry_resolves_the_named_model_again(
+    draft_app, monkeypatch
+) -> None:
+    """The re-mint runs the SAME admissions, including the model resolution.
+
+    The route resolves the normalised spec in its admission block, and a
+    recorded key skips that block by design (a replay must not re-admit). A
+    STALE record still mints, so the resolution has to happen on that path too —
+    otherwise the fresh draft is born on the configured default while the body
+    named another model, the exact substitution ``_draft_model_spec`` exists to
+    refuse. A still-servable replay must not resolve it at all.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    asked: list[str] = []
+
+    def resolve(model: Any) -> ModelSpec:
+        asked.append(model.model_id)
+        return ModelSpec(provider=model.provider, model_id=model.model_id)
+
+    monkeypatch.setattr(desktop_sessions_routes, "_draft_model_spec", resolve)
+    body = _mint_body(root, model={"provider": "anthropic", "model_id": "claude-opus-5"})
+    first = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"]
+    assert asked == ["claude-opus-5"]
+
+    replay = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"]
+    assert replay["replayed"] is True
+    assert asked == ["claude-opus-5"], "a servable replay re-admitted"
+
+    pool.drafts[first["draft_id"]].created = time.monotonic() - DRAFT_TTL_S - 1.0
+    fresh = (await client.post("/v1/desktop/sessions/draft", json=body)).json()["result"]
+    assert fresh["draft_id"] != first["draft_id"]
+    assert asked == ["claude-opus-5", "claude-opus-5"], "the re-mint skipped the model admission"
+    assert pool.drafts[fresh["draft_id"]].model == ModelSpec(
+        provider="anthropic", model_id="claude-opus-5"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_warm_residue_without_a_marker_is_not_servable(tmp_path: Path) -> None:
+    """The servability read is the MARKER, not the directory and not the origin.
+
+    A warmed draft's engage leaves a directory (``.execution-lease`` +
+    ``.session.pid``) whose origin reads as the user's, so "a directory exists"
+    — or ``_door_may_open``'s origin arm alone — would keep replaying an id the
+    door itself refuses (M1's second leg). ``desktop.json`` is what ``create``
+    writes and what every door reads as materialised, so it is the fact that
+    answers here too.
+    """
+    pool = DesktopSessions(tmp_path)
+    try:
+        residue = tmp_path / "sessions" / "abcdef123456"
+        residue.mkdir(parents=True)
+        (residue / ".execution-lease").write_text('{"pid": 1}', encoding="utf-8")
+        (residue / ".session.pid").write_text("1", encoding="utf-8")
+        assert pool.session_id_servable("abcdef123456") is False
+        # A REGISTERED draft needs no directory at all (a mint writes none).
+        assert pool.session_id_servable(await pool.mint_draft(str(tmp_path))) is True
+        (residue / "desktop.json").write_text(
+            json.dumps({"version": 1, "cwd": str(tmp_path)}), encoding="utf-8"
+        )
+        assert pool.session_id_servable("abcdef123456") is True
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio

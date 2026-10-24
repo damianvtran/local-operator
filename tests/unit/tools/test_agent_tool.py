@@ -389,7 +389,13 @@ def test_agent_schema_with_no_tiers_offers_only_inherit(tmp_path, context) -> No
     different reason (the choice is not the model's), and its description says
     that instead.
     """
-    ConfigManager(tmp_path / "config").set_config_value("subagents", {"model_choice": "model"})
+    # Zero tiers for this test: the autouse fixture seeded two, and a mapping write
+    # now merges into the file, so the removal has to be declared (PR #2819).
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents",
+        {"model_choice": "model"},
+        drop={("subagents", "models"): "this test has no tiers"},
+    )
 
     effort = _effort_schema(context)
 

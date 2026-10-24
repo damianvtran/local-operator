@@ -368,6 +368,14 @@ def static_feature_flags() -> dict[str, Any]:
         # live body read, never a cached one. The server dark gate still answers
         # 503, which the status route renders as a state.
         "team_bridge_conversations": 1,
+        # Optional captured DATA-owner receipts on conversation create/send
+        # (including retry), join/read+notify/consent/admit, archive/unarchive,
+        # member add/remove and leave. New renderers require this capability AND
+        # supply expected_account_id + explicit target tenant_id on every write.
+        # Legacy omission remains compatible. Threads/reactions are not present
+        # in this runtime: feature branches must adopt the same guard before
+        # advertising their mutations alongside this capability.
+        "team_bridge_conversation_owner_guard": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -824,6 +832,23 @@ def static_feature_flags() -> dict[str, Any]:
         # daemon that serves this route, so this key being present does not prove
         # the owner behind a given session can keep the pictures).
         "ask_attachments": 1,
+        # PUTTING A QUEUED ASK AWAY from the desktop: `dismiss` + `reason` on the
+        # `POST /v1/desktop/sessions/{id}/answers` body, accepted on an OPEN ask
+        # while the agent is running (SA-D5, design §15, 2026-10-23).
+        #
+        # WHY A KEY -- the `ask_attachments` argument verbatim: `Answer` is
+        # `extra="forbid"`, so a renderer that offered Dismiss against an older
+        # backend would 422 the user's own tap. Gated, the card draws no Dismiss
+        # affordance and behaves exactly as today, which is also the pre-feature
+        # state for an operator whose runtime predates the engine half.
+        #
+        # THE OWNER-SIDE HALF is not negotiated separately, and that is deliberate
+        # rather than an omission: unlike an answer's attachments (which a runtime
+        # must be able to keep, so `ask-attachments-v1` rides the owner record),
+        # the dismissal is settled by whichever door answers -- the no-boot cold
+        # door on this device, or the live op on the owner -- and an older owner
+        # simply refuses in the queue's own words, which the card shows inline.
+        "ask_dismiss": 1,
         # THE SPEECH SURFACE: `GET /v1/stt/paths` (the ordered cascade report)
         # and `POST /v1/stt/transcriptions` (the executor, with its 409
         # `stt_unavailable` structured refusal), plus the audio-accepting
