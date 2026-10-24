@@ -80,9 +80,29 @@ RECALL_HARD_TOKENS = 2000
 #: SQLITE_FULL instead of growing the file. This is a SEPARATE budget from the
 #: token quotas above: a store can hold token headroom and still be out of bytes,
 #: which is why `lop memory status` reports both and why the refusal names the
-#: byte cap. Raising this (or auto-compacting) is a product decision, not a
-#: repair for a full store.
-MAX_DB_BYTES = 64 * 1024 * 1024
+#: byte cap.
+#:
+#: INTERIM (2026-10-24): this was 64 MiB, and a live fleet store reached that
+#: bound (62.9 MiB of 64 MiB, 16,096 of 16,384 pages, freelist 0), after which
+#: two peers failed sync with ``bad_memory``. The raise restores service; it is
+#: NOT the fix. The underlying defect is that the journal has no
+#: liveness-independent bound: retention is gated on a sync cursor, and the
+#: cursor cannot advance for this device's own ops (46,742 of 50,377, 93%) or be
+#: acked by peers that cannot receive while the store is full. A bound gated on
+#: peer acknowledgement is therefore wedged by the very fullness it should
+#: prevent, which raising the cap only postpones.
+#:
+#: It comes back down when the retention design lands (a bounded journal with a
+#: snapshot/re-baseline path and tombstone retention) AND the store then drains
+#: below the old 64 MiB bound — the code-expressible figure is a compacted
+#: store's ``storage_bytes`` (``page_count * page_size``) from `lop memory
+#: status`, or equivalently ``storage_bytes - storage_free_bytes`` for a store
+#: whose freed pages are still in the freelist. Draining alone does not justify
+#: a lower cap while the journal can still grow without a liveness-independent
+#: bound. Nothing lowers this at runtime: no code path writes a smaller
+#: ``max_page_count``, so removing this raise is a deliberate follow-up change,
+#: not an automatic behaviour. Treat any further raise the same way.
+MAX_DB_BYTES = 128 * 1024 * 1024
 #: Page size the cap is expressed against in :meth:`MemoryStore.connection`.
 #: ``PRAGMA max_page_count`` takes pages, so the enforced byte cap is
 #: ``(MAX_DB_BYTES // 4096) * page_size`` — for a default 4096-byte store that
