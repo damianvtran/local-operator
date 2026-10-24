@@ -627,8 +627,9 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     terminal switch land on the same key with the same value space; applying
     the swap is the frontend's half (the running TUI re-renders from its config
     watcher, whose external-change path announces it). Unknown values are
-    refused with the option list, word for word with the terminal, and the
-    ``lang`` alias routes to the same branch.
+    refused with the option list (this client enumerates it because the phone
+    sheet has no space picker; the terminal names the space key instead), and
+    the ``lang`` alias routes to the same branch.
     """
     from types import SimpleNamespace
 
@@ -653,7 +654,7 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     setting = settings_io.resolve_key("language")
     assert setting is not None
 
-    # Bare: the report, word for word with the terminal's.
+    # Bare: this client enumerates the value space (no phone picker).
     bare = await handle._slash_result("language", "", SlashResult)
     assert bare.style == "info"
     assert bare.text == "language: en (English) — auto, en, fr, es, ru, vi, ur, hi"

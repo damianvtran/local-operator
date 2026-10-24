@@ -9829,8 +9829,11 @@ class ServingSessionHandle(SessionHandle):
         from its config watcher (slice C's external-change path announces
         it), which is why this branch writes and receipts but never repaints.
 
-        The receipts mirror the terminal's word for word — the ``/effort``
-        precedent — the option list and the "already" no-op included.
+        The receipts keep the terminal's VOICE but not its bytes: the phone
+        sheet has no argument picker, so this client enumerates the accepted
+        values where the terminal names the space key instead (see the 70-cell
+        notice row in ``OperatorApp._cmd_language``). The "already" no-op stays
+        word for word.
         """
         from local_operator import settings_io
         from local_operator.i18n.resolve import (
