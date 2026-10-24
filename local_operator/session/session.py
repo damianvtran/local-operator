@@ -278,7 +278,13 @@ from local_operator.session.credential_binding import (
 )
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
-from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
+
+# ONE implementation of "what dial does this row state", shared with the
+# runtime-less cold frame so the pane and the first turn cannot disagree.
+from local_operator.session.model_selection import (
+    SELECTED_MODEL_CUSTOM_TYPE,
+    fast_dial_from_row,
+)
 from local_operator.session.naming import (
     CONVERSATION_NAME_CUSTOM_TYPE,
     MAX_TITLE_CHARS,
@@ -3638,11 +3644,13 @@ class Session:
         #: read by ``_build_tool_context`` on every turn, which is what makes
         #: it reach both the createIf checks and the executors.
         self._confinement_root = confinement_root
-        #: Settled model-owned jobs whose auto-delivery was declined because a
-        #: turn was streaming (see ``_on_job_completed``), in settle order. The
-        #: turn's ``finally`` hands them over once it is idle again; see
-        #: ``_deliver_deferred_job_results``. Holds the JOB OBJECT and its
-        #: settled text, not just the id: the manager sweeps a settled row
+        #: Settled model-owned jobs whose results are durably journaled but have
+        #: not yet committed into this turn's model context, in settle order.
+        #: Safe aside boundaries offer the SAME canonical rows to the running
+        #: loop; the turn's ``finally`` handles only leftovers after its last
+        #: safe boundary (see ``_deliver_deferred_job_results``). Holds the JOB
+        #: OBJECT and its settled text, not just the id: the manager sweeps a
+        #: settled row
         #: ``retention_ms`` (5 min) after it settles, on any read, so a turn
         #: that outlives that window would find nothing to re-look-up (review
         #: round 1, R1-1). Holding the object keeps ``consumed`` observable
@@ -6846,7 +6854,7 @@ class Session:
                 withdraw = getattr(self._stream_fn, "withdraw_fallback", None)
                 if callable(withdraw):
                     withdraw()
-                self._journal_effort_if_selection_changed(previous, model, previous_choice)
+                self._journal_knobs_if_selection_changed(previous, model, previous_choice)
                 self.refresh_frontend_state()
                 # The label moved even though the pair did not (the pin came
                 # off), so the baked tier descriptions are stale for the same
@@ -6878,12 +6886,12 @@ class Session:
             # change. The SELECTION row is a different matter and is re-written
             # below: a level the user chose is a durable property of the
             # conversation, not an in-memory knob (see
-            # `_journal_effort_if_selection_in_force`).
+            # `_journal_knobs_if_selection_changed`).
             if self._active_route is not None:
                 refreshed = self._spec_for_route(*self._active_route)
                 if refreshed is not None:
                     self._active_fallback = refreshed
-            self._journal_effort_if_selection_changed(previous, model, previous_choice)
+            self._journal_knobs_if_selection_changed(previous, model, previous_choice)
             self.refresh_frontend_state()
             return
         # A genuine model change is a SELECTION, and selections outlive the
@@ -6995,12 +7003,20 @@ class Session:
         """
         return self._chosen_effort
 
-    def _journal_effort_if_selection_changed(
+    def _journal_knobs_if_selection_changed(
         self, previous: ModelSpec, model: ModelSpec, previous_choice: str | None
     ) -> None:
-        """Re-journal the selection when an effort DECISION moved it.
+        """Re-journal the selection when an EFFORT or FAST decision moved it.
 
-        "Decision" covers both halves the row stores: the level the selected
+        Both dials are SAME-PAIR knob changes (``model_copy(update=...)``), so
+        both take ``set_model``'s same-pair early return and never reach the
+        switch's own journal write. Whatever this method does not re-write, a
+        resume silently reverts — which is the defect each half of the row
+        exists to prevent: an ``/effort max`` decaying to the seed (``#240``,
+        ``#797``) and the fast toggle coming back OFF after a reopen
+        (``damianvtran/local-operator-ui#1266``).
+
+        "Decision" covers both halves the EFFORT stores: the level the selected
         model now expresses, and the level the CONVERSATION chose
         (``effort_choice``). ``/effort auto`` can change only the second one
         when the spec already sits on its seed, and the row must still be
@@ -7033,13 +7049,16 @@ class Session:
 
         Bounded twice, and each bound is load-bearing:
 
-        - **Only an actual effort decision.** A sampling-only override
+        - **Only an actual effort or fast decision.** A sampling-only override
           (temperature / top_p, the server's ``ChatRequest.options`` path)
           rides ``set_model`` on the same pair too, and the journal stores no
           sampling — so re-journalling on those would append identical rows for
-          a change the row cannot even express. The spec level and the chosen
-          level are compared SEPARATELY; a settled call that moved neither is
-          still skipped.
+          a change the row cannot even express. The spec level, the CHOSEN
+          level and the speed dial are compared SEPARATELY; a settled call that
+          moved none of them is still skipped. That is what keeps the write
+          one-per-change rather than one-per-keystroke: the request path calls
+          ``set_model`` for every message, and ``/fast`` cycling re-writes
+          nothing until a toggle settles.
         - **Coalesced, not one append per keystroke.** ``/effort`` cycling
           (``shift+tab``) lands one write per SETTLED level: the writer
           snapshots the spec at write time, and a second change while a write
@@ -7055,6 +7074,7 @@ class Session:
         # the next restart to resurrect (review round 1, M3).
         if (
             previous.reasoning_effort == model.reasoning_effort
+            and previous.fast_mode == model.fast_mode
             and previous_choice == self._chosen_effort
         ):
             return
@@ -16359,13 +16379,33 @@ class Session:
 
         Through :meth:`set_model` so every consumer sees it the way a user's
         ``/fast off`` would be seen: the spec the next request is built from,
-        the frontend state the band repaints from, and a pinned fallback's
-        derived display spec. Not ``explicit`` — this is a knob adjustment on
-        the model that is serving, never a model choice.
+        the frontend state the band repaints from, a pinned fallback's derived
+        display spec, AND the durable row — a refusal is a real change to the
+        conversation's dial, so the journalled snapshot must record it or the
+        next resume would re-arm a tier this account cannot buy. Not
+        ``explicit`` — this is a knob adjustment on the model that is serving,
+        never a model choice.
         """
         if not getattr(self._model, "fast_mode", False):
             return
         self.set_model(self._model.model_copy(update={"fast_mode": False}))
+        # THE RESET IS STATED, from the side that owns the dial. The stream fn
+        # narrates the same edge from its own copy, but it cannot tell a latched
+        # refusal on an already-standard route (nothing to explain) from the
+        # first one, where a toggle the user set has just stopped applying — and
+        # "explain the effective limitation instead of silently losing the saved
+        # preference" is the issue's own wording (ui#1266). One narrator, the one
+        # that knows whether anything moved; emitted AFTER the dial so a host
+        # repainting from this notice reads the post-reset state.
+        await self._emit(
+            _notice(
+                _nt.fast_mode_refused(
+                    selector=selector,
+                    reason=message.strip().rstrip(".") or "no reason given",
+                ),
+                kind="warning",
+            )
+        )
 
     async def _on_route_settled(self, target: Any, reason: str) -> None:
         """The stream fn's effective route moved; record it and tell the host.
@@ -20303,10 +20343,11 @@ class Session:
         """Auto-deliver one settled model-owned job back into the conversation.
 
         WHOSE DELIVERY IS BEING DECIDED, because the two halves now differ.
-        The MODEL's hand-over is idle-only: a running turn already owns the
-        conversation (its model either waited or can 'jobs'), and
-        steering-injecting a result nobody asked for mid-turn is noise. The
-        HUMAN's copy is not: the row is journaled durably the moment the job
+        The MODEL's hand-over waits for a noninterrupting aside/tool or yield
+        boundary: a running tool keeps its pairings and floor, but the next
+        eligible request can incorporate the result instead of publishing a
+        stale final. The HUMAN's copy does not wait: the row is journaled
+        durably the moment the job
         settles even while a turn streams, because a turn can run for many
         hours and holding the row to its end bunched a marathon turn's every
         completion at its tail (2026-09-26 incident; see the streaming branch).
@@ -20324,7 +20365,7 @@ class Session:
         if self._job_id is not None:
             return
         # ``video`` rides this gate as of the video phase (media wave-2): a
-        # settled video job opens the review turn exactly like a child does,
+        # settled video job delivers its review result exactly like a child,
         # and its cancellations never reach here (the manager's task-cancel
         # arm returns before delivery, as for every type).
         if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video"):
@@ -20341,13 +20382,13 @@ class Session:
             await self._deliver_job_results([(job_id, text, job)])
             return
         if self._is_streaming:
-            # DEFERRED for the MODEL, DURABLE for the HUMAN. The batch below
-            # still hands the model one result row per job at the turn's end --
-            # the semantics this path was built for (dropping these, the
-            # pre-deferral behaviour, left a parent idle forever with finished
-            # children: "session wedged waiting on its subagents", reproduced
-            # with two children settling during the parent's own tool call).
-            # What changes here is WHO waits for that end: only the model.
+            # PENDING for the MODEL, DURABLE for the HUMAN. The next safe
+            # aside/tool or yield boundary offers the model this canonical row;
+            # the turn-end batch is only the fallback when no boundary can take
+            # it. Dropping the pending entry would revive the pre-deferral
+            # behaviour that left a parent idle forever with finished children
+            # ("session wedged waiting on its subagents", reproduced with two
+            # children settling during the parent's own tool call).
             #
             # WHY (2026-09-26 incident). One real turn ran 23.5 h (opened
             # 09-25 09:29, ended 09-26 09:06:51). Every completion inside that
@@ -20358,23 +20399,24 @@ class Session:
             # bunched at the end of the conversation; the notices are supposed
             # to appear as the jobs complete.
             #
-            # The batch re-sends THIS message object rather than minting a
-            # twin (see ``_deferred_job_results``), and every write path dedups
-            # by message id, so the early row and the model's batch are one
+            # Both the safe-boundary carrier and the fallback re-send THIS
+            # message object rather than minting a twin, and every write path
+            # dedups by message id, so the early row and model delivery are one
             # row. Deliberately NOT parked in ``_pending_context_journal``:
-            # the batch hands the message to the loop as an INITIAL, and the
-            # loop extends the live context with initials -- parking it here
-            # too would put the same row into the context twice.
+            # aside injection commits into the live context itself, while the
+            # fallback hands the message to the loop as an INITIAL -- parking
+            # it here too would put the same row into the context twice.
             #
             # Best-effort: a failed early write must not fail the settle path
-            # or the deferral, which is still the delivery of record.
+            # or the pending delivery. The safe boundary retries before commit;
+            # the turn-end fallback remains the recovery of last resort.
             message = self._job_result_message(job_id, text, job)
             try:
                 await self._transcript.append_message(message)
             except Exception:  # noqa: BLE001 -- visibility must not fail the delivery
                 logger.warning(
-                    "could not journal job %s's result early; the turn-end batch "
-                    "still delivers it",
+                    "could not journal job %s's result early; a safe boundary "
+                    "or the turn-end batch will retry it",
                     job_id,
                     exc_info=True,
                 )
@@ -20853,12 +20895,14 @@ class Session:
         )
 
     async def _deliver_deferred_job_results(self) -> None:
-        """Hand over job results that settled while a turn was streaming.
+        """Hand over job results no safe boundary committed.
 
         Called from the turn pipeline's ``finally`` AFTER ``_is_streaming`` is
-        cleared, so it runs exactly when ``_on_job_completed`` would have
-        accepted the delivery in the first place. Everything deferred during
-        the turn goes out as ONE ``_prompt_messages`` turn (see
+        cleared. Ordinary boundaries acknowledge and remove their entries on
+        the loop's ``on_commit`` hook, so everything still pending here is a
+        genuine leftover: it arrived after the last boundary, lost a race with
+        abort/budget exhaustion, or the turn had no eligible boundary. The
+        leftovers go out as ONE ``_prompt_messages`` turn (see
         ``_deliver_job_results``), in settle order -- unless the runtime has
         committed to leaving, in which case the batch is HELD durably and opens
         no turn at all (the no-turn arm in ``_deliver_job_results``).
@@ -20899,6 +20943,11 @@ class Session:
         results: list[tuple[str, str, Any]] = []
         messages: list[CustomMessage] = []
         for job_id, (job, text, message) in pending:
+            # The fallback now owns the canonical object. Hooks from an
+            # uncommitted aside attempt must not acknowledge a later delivery
+            # turn (whose INITIAL never passes through the aside commit path).
+            message.on_commit = None
+            message.on_discard = None
             try:
                 if getattr(job, "consumed", False):
                     continue
@@ -21047,12 +21096,18 @@ class Session:
         return self._steering_queue.qsize() > self._courtesy_wake_count
 
     async def _drain_asides(self) -> list[Aside]:
-        """Materialize and durably publish live asides before loop injection.
+        """Materialize durable asides and pending job results for safe injection.
 
         Historically the synchronous thunk scheduled a fire-and-forget append.
         Offloading that write made a child act on context missing from its
         durable transcript. This async boundary now acknowledges the batch
         first; the loop still owns commit/discard hooks and ordered injection.
+
+        A settled job's transcript row is durable, NOT model-acknowledged. Offer
+        that same object here so the next eligible request sees it before a
+        stale final. Its pending entry remains until ``on_commit``: a discarded
+        or aborted carrier therefore leaves the finally fallback responsible
+        for the result, while ``wait`` can still win consumption at any point.
         """
         thunks = self._aside_thunks
         self._aside_thunks = []
@@ -21062,6 +21117,127 @@ class Session:
         await self._transcript.append_messages(
             [message for message in messages if not self._transcript.has_entry(message.id)]
         )
+
+        # Materialize AFTER the awaited writes above: a wait that returned while
+        # durability was in flight has now marked the retained job consumed and
+        # must suppress this carrier. Departure/abort likewise wins over
+        # opening another continuation; finally will hold the pending row.
+        for job_id, (job, _text, message) in list(self._deferred_job_results.items()):
+            if self._leaving_deliveries or self._abort_requested:
+                break
+            current = self._deferred_job_results.get(job_id)
+            if current is None or current[0] is not job or current[2] is not message:
+                continue
+            if getattr(job, "consumed", False):
+                self._deferred_job_results.pop(job_id, None)
+                continue
+            if not self._transcript.has_entry(message.id):
+                try:
+                    # The settle-time best-effort write may have failed. Unlike
+                    # an INITIAL fallback, aside injection has no later journal
+                    # pass: this stable-ID retry must succeed BEFORE the carrier
+                    # can commit, or restart would lose the consumed result.
+                    await self._transcript.append_message(message)
+                except Exception:  # noqa: BLE001 -- fallback retains delivery ownership
+                    logger.warning(
+                        "could not journal job %s's result at a safe boundary; "
+                        "leaving it pending for the turn-end fallback",
+                        job_id,
+                        exc_info=True,
+                    )
+                    continue
+                # The retry awaited I/O. Re-read every ownership signal before
+                # arming hooks: wait may have consumed, a new attempt may have
+                # replaced the entry, or departure may have won meanwhile.
+                current = self._deferred_job_results.get(job_id)
+                if current is None or current[0] is not job or current[2] is not message:
+                    continue
+                if getattr(job, "consumed", False):
+                    self._deferred_job_results.pop(job_id, None)
+                    continue
+                if self._leaving_deliveries or self._abort_requested:
+                    break
+            if any(existing.id == message.id for existing in self._context.messages):
+                # A rebuilt context or an already-admitted INITIAL already owns
+                # this exact row. Re-adding it would duplicate one canonical
+                # event; its presence in live context is the commit we needed.
+                job.consumed = True
+                self._deferred_job_results.pop(job_id, None)
+                self._note_run_input(message)
+                continue
+
+            def commit(
+                job_id: str = job_id,
+                job: Any = job,
+                message: CustomMessage = message,
+            ) -> None:
+                if self._leaving_deliveries or self._abort_requested:
+                    # Departure/abort can win AFTER materialization but before
+                    # the loop's synchronous append+commit. The append is not
+                    # delivery in that state: remove this carrier and leave the
+                    # pending entry for the same finally/durable hold as any
+                    # other pre-commit discard. The loop re-reads cancellation
+                    # after its pending hooks, BEFORE another provider request;
+                    # the leaving latch has its own flag, so join its existing
+                    # graceful cancellation path here rather than merely
+                    # emptying the carrier and buying an empty continuation.
+                    if self._leaving_deliveries:
+                        self.request_graceful_cancel("runtime is leaving")
+                    if self._context.messages and self._context.messages[-1] is message:
+                        self._context.messages.pop()
+                    if message.on_commit is commit:
+                        message.on_commit = None
+                    if message.on_discard is discard:
+                        message.on_discard = None
+                    return
+                current = self._deferred_job_results.get(job_id)
+                owned = current is not None and current[0] is job and current[2] is message
+                consumed_elsewhere = getattr(job, "consumed", False)
+                if owned:
+                    self._deferred_job_results.pop(job_id, None)
+                    if not consumed_elsewhere:
+                        job.consumed = True
+                        # Attention origin is a COMMIT fact, not a settle or
+                        # materialization fact. A peer+job run keeps the job's
+                        # loud completion policy; wait/discard/departure paths
+                        # never reach this registration.
+                        self._note_run_input(message)
+                if not owned or consumed_elsewhere:
+                    # The loop appends before firing on_commit. If wait (or an
+                    # already-committed identical carrier) won during an awaited
+                    # boundary, remove THIS just-appended object before the next
+                    # provider request instead of acknowledging a duplicate.
+                    if self._context.messages and self._context.messages[-1] is message:
+                        self._context.messages.pop()
+                if message.on_commit is commit:
+                    message.on_commit = None
+                if message.on_discard is discard:
+                    message.on_discard = None
+
+            def discard(
+                job_id: str = job_id,
+                job: Any = job,
+                message: CustomMessage = message,
+            ) -> None:
+                # Do NOT consume: budget exhaustion, staleness and abort all
+                # arrive here before context commit. Keeping the entry is the
+                # requeue; the existing finally/hold path retains ownership.
+                current = self._deferred_job_results.get(job_id)
+                if (
+                    current is not None
+                    and current[0] is job
+                    and current[2] is message
+                    and getattr(job, "consumed", False)
+                ):
+                    self._deferred_job_results.pop(job_id, None)
+                if message.on_commit is commit:
+                    message.on_commit = None
+                if message.on_discard is discard:
+                    message.on_discard = None
+
+            message.on_commit = commit
+            message.on_discard = discard
+            messages.append(message)
         return list(messages)
 
     def queue_aside(self, thunk: Callable[[], AsideResult]) -> None:
@@ -27162,6 +27338,12 @@ class Session:
             # target's ladder, so a restore re-derives exactly the level in
             # force — no clamped value is ever replayed as a choice.
             "effort": self._chosen_effort or model.reasoning_effort,
+            # A SNAPSHOT, so the dial is written on BOTH edges. An OFF that was
+            # not journalled leaves the earlier ``"fast": true`` row as the
+            # newest evidence on disk, and the backward scan then resurrects the
+            # toggle the user had already turned off — the same class of defect
+            # as an unjournalled level, one field over.
+            "fast": bool(model.fast_mode),
             "boot": self._boot_selector,
         }
         await self._transcript.append_custom(SELECTED_MODEL_CUSTOM_TYPE, payload)
@@ -27175,9 +27357,11 @@ class Session:
         if (
             f"{current.provider}/{current.model_id}",
             self._chosen_effort or current.reasoning_effort,
+            bool(current.fast_mode),
         ) == (
             payload["selector"],
             payload["effort"],
+            payload["fast"],
         ):
             self._selected_model_dirty = False
         else:
@@ -27263,6 +27447,19 @@ class Session:
             # The row names this very spec, so the birth spec IS the target and
             # its own seed is the right comparison.
             self._chosen_effort = _chosen_level_from(effort, self._model)
+            # The DIAL belongs here too, and this branch is exactly where the
+            # reported reset was NOT observed: the conversation was already on
+            # the row's pair, so nothing below ran and the dial stayed at the
+            # birth spec's ``False`` even after the row learned to carry it.
+            #
+            # BOTH EDGES APPLY: the create path can hand this session a spec
+            # that is already switched on (the marker's seed, ui#1265), so an
+            # OFF row has to clear it or the decision is undone by the next
+            # reopen — the same defect (ui#1266) through the new field. ``None``
+            # is no evidence and leaves the incoming spec alone.
+            dial = fast_dial_from_row(saved.fast, self._model)
+            if dial is not None:
+                self._model = self._model.model_copy(update={"fast_mode": dial})
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`
         # builds the target model's own spec (its base_url, window,
@@ -27302,6 +27499,20 @@ class Session:
                     )
                 }
             )
+        # The DIAL last, against the target the row resolved to, so both halves
+        # of the clamp in ``fast_dial_from_row`` are read from the spec that
+        # will actually serve. Placed after the effort clamp above because the
+        # dial is independent of it (a speed preference is orthogonal to how
+        # hard the model thinks) and before ``self._model`` is published, so no
+        # reader can observe a spec still carrying the previous dial.
+        #
+        # Written for ``False`` as well as ``True``: ``spec_for_target`` builds
+        # the target's own spec and ``build_model_spec`` never seeds the dial, so
+        # this is where an OFF row lands too — an explicit assignment rather than
+        # an OR is what makes the row, not the constructor, the authority.
+        dial = fast_dial_from_row(saved.fast, spec)
+        if dial is not None:
+            spec = spec.model_copy(update={"fast_mode": dial})
         self._model = spec
         # AGAINST THE TARGET SPEC, not the birth spec (review round 2, M5). A
         # withdrawal row now stores the TARGET's seed, so comparing it to the

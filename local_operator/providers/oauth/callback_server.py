@@ -220,6 +220,26 @@ class ConfigurationError(LoginError):
     """Local misconfiguration detected before any browser was opened."""
 
 
+class RefreshNotSentError(LoginError):
+    """A provider refused a refresh BEFORE its first request was written.
+
+    ``LoginError`` alone cannot say that, and the difference is load-bearing:
+    the store arms a write-ahead send marker immediately before it calls a
+    provider's refresh function, so a plain refusal is indistinguishable from
+    an exchange that may have reached the IdP and whose answer never arrived.
+    Classified as the latter, a refusal that never presented the token leaves
+    the marker armed, suppresses the next refresh for its whole bound, and
+    reports a deferral the account does not owe (``RefreshUnconfirmedError``
+    where the provider's own refusal was the truth).
+
+    A provider raises this ONLY where no request could have been written — an
+    issuer binding it cannot trust, a missing token, a pre-flight validation
+    failure — never once a byte has been handed to a socket. Anything that
+    might have reached the wire keeps raising ``LoginError`` so the marker
+    survives: a wrongly-trusted send costs the whole token family.
+    """
+
+
 class InvalidGrantError(LoginError):
     """The stored grant is PERMANENTLY dead — only a fresh login can fix it.
 

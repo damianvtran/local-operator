@@ -2217,6 +2217,43 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
 
 
 @pytest.mark.asyncio
+async def test_a_pair_only_switch_keeps_the_fast_dial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A re-pick of the row in force must not erase the speed the user set.
+
+    ``build_model_spec`` never seeds ``fast_mode`` (it is the one dial billed at a
+    premium, so it cannot arrive on by inference), and ``Session.set_model``
+    assigns the rebuilt spec BEFORE its same-pair early return. So the birth
+    override RPC — the one ``AttachedSession._consume_model_override`` sends on
+    the first send of a draft created with fast on (ui#1265) — rebuilt the spec
+    and reseated the conversation on standard speed at the exact moment the user
+    expected the tier they had just chosen.
+
+    Same rule as the level beside it (#2471): a pair re-pick is not a request to
+    forget a knob. A GENUINE switch does not carry the dial — it is a per-model
+    premium, and re-arming it on a different model is how a switch costs money
+    the user never agreed to.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    fast = build_model_spec("anthropic", "claude-opus-5").model_copy(update={"fast_mode": True})
+    assert fast.supports_fast_mode, "the registry must sell this tier"
+    session.model = fast
+
+    await handle.set_model_effort("anthropic", "claude-opus-5", None)
+    assert applied[-1].fast_mode is True, "the dial the owner was born on must survive the RPC"
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    assert applied[-1].fast_mode is False, "a switch to another model is not a fast re-arm"
+
+
+@pytest.mark.asyncio
 async def test_a_level_less_switch_carries_the_choice_not_the_clamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -309,6 +309,14 @@ async def retry_due_holds(
             outcome = {"action": "hold", "message_id": message_id, "code": "retry_failed"}
         action = outcome.get("action")
         if action in ("delivered", "bounce", "delivered_unadmitted", "skipped"):
+            # A pre-upgrade conversation hold may still use the seven-part
+            # label-bearing key. The spine clears the canonical locator; retire
+            # the exact consumed row too, rather than replaying it forever.
+            if parsed is not None and message_id != parsed.encode():
+                try:
+                    store.delete_hold(owner, message_id)
+                except StoreRefused:
+                    pass
             _RETRY_ATTEMPTS.pop(message_id, None)
         elif action == "hold":
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
@@ -464,7 +472,16 @@ async def run_iteration(
     # One attempt per ref per iteration; re-raising preserves run_forever's
     # bounded failure backoff (including Retry-After), not a new hot retry loop.
     failed_refs = {ref for ref, _ in failures}
-    store.delete_feed_refs(owner, [ref for ref in refs if ref not in failed_refs])
+
+    # Compare canonical identities but delete ORIGINAL keys. An older row
+    # can carry labels that the new projection intentionally discards; comparing
+    # that raw key with a canonical failure would otherwise drop it on a 204
+    # retry (#2835). This is ordinary consumption, never a history migration.
+    def failed(raw: str) -> bool:
+        conversation = _conversation_hold_ref(raw)
+        return (conversation.encode() if conversation is not None else raw) in failed_refs
+
+    store.delete_feed_refs(owner, [ref for ref in refs if not failed(ref)])
     if failures:
         raise failures[0][1]
     # A 204 is still NOT an inbox-resync signal. Keep the existing bootstrap /
