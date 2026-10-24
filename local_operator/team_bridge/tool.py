@@ -14,7 +14,8 @@ WHAT THE COS MAY DO with a delivered bridge message, per contract:
   stealing a successor's claim.
 - **send / reply** — outbound notes/questions/requests through the durable
   outbox (write-intent-first, §6.2). ``reply`` is the §13.5 pairing: thread_id
-  AND to always together.
+  AND to always together. ``state=sent`` means server acceptance into the
+  legacy peer inbox, not conversation delivery or recipient agent execution.
 - **NO decide** — the ``decide`` op does not exist here BY DESIGN: only H5b's
   answer path (a trusted human Approve/Deny) may call ``/decide`` (§10.3,
   #125). The schema omits it and the executor refuses the word if a model
@@ -62,16 +63,26 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
-from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    Content,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
-from .types import CONVERSATION_ID_PATTERN
+from .types import (
+    CONVERSATION_ID_PATTERN,
+    InvalidSendRecipient,
+    validate_send_recipient,
+)
 
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
@@ -146,10 +157,23 @@ class ChannelMemberParams(BaseModel):
     display_label: str = ""
 
 
-class BridgeToolParams(BaseModel):
-    """Bridge args; ``extra="forbid"`` makes a hallucinated field a refusal."""
+def _closed_recipient_schema(schema: dict[str, Any]) -> None:
+    # Derive explicit properties from Pydantic's Literal-key schema instead of
+    # requiring every provider to implement propertyNames. This preserves the
+    # closed key set without a second hand-maintained list or duplicate models.
+    for branch in schema.get("anyOf", [schema]):
+        if branch.get("type") == "object":
+            names = branch.pop("propertyNames")["enum"]
+            value = branch["additionalProperties"]
+            branch["properties"] = {name: value for name in names}
+            branch["additionalProperties"] = False
 
-    model_config = ConfigDict(extra="forbid")
+
+class BridgeToolParams(BaseModel):
+    # Keep implementation guidance in comments, not the model docstring: Pydantic
+    # publishes that prose in every tool call's schema. extra="forbid" already
+    # communicates the closed top-level contract without restating it as prose.
+    model_config = ConfigDict(extra="forbid", title="Bridge")
 
     op: Literal[
         "take_up",
@@ -164,7 +188,13 @@ class BridgeToolParams(BaseModel):
     message_id: str = ""
     body_sha256: str = ""
     state: Literal["working", "done"] | None = None
-    to: dict[str, str] | None = None
+    # Literal keys + cardinality publish the same closed one-of as two named
+    # recipient models, without duplicating object definitions, titles and
+    # descriptions in every prompt. Pydantic and JSON Schema both reject unknown
+    # keys; the shared pre-admission/client guard additionally rejects padding.
+    to: dict[Literal["endpoint_id", "account_id"], Annotated[str, Field(min_length=1)]] | None = (
+        Field(default=None, min_length=1, max_length=1, json_schema_extra=_closed_recipient_schema)
+    )
     type: Literal["note", "question", "request"] = "note"
     text: str = ""
     thread_id: str | None = None
@@ -294,6 +324,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     fence = owner_fence_refusal(runtime)
     if fence is not None:
         return _error(fence["error"], code=fence["code"])
+    # Refuse unsupported destinations before even scheduling admission I/O.
+    # The local authority fence keeps precedence; no invalid destination can
+    # create an outbox intent, send a message, or trigger a status request.
+    recipient: dict[str, str] = {}
+    if op in ("send", "reply"):
+        try:
+            recipient = validate_send_recipient(args.get("to"))
+        except InvalidSendRecipient as failure:
+            return _error(str(failure), code=failure.code)
     # ADMISSION GATE, second: only a SETTLED "admitted" may act. A non-admitted
     # state refuses THIS op typed and schedules the same single-flight boundary
     # read (fire-and-forget — never waits, never posts). ``take_up`` is a FETCH
@@ -377,11 +416,6 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         return {"ok": True, "state": "done", "message_id": params.message_id}
 
     if params.op in ("send", "reply"):
-        if (
-            not params.to
-            or len([k for k in ("endpoint_id", "account_id") if params.to.get(k)]) != 1
-        ):
-            return _error("send/reply name `to` as exactly one of endpoint_id/account_id")
         if not params.text.strip():
             return _error("send/reply need non-empty text")
         if params.op == "reply" and not (params.thread_id or "").strip():
@@ -391,7 +425,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         outbox = Outbox(runtime.config_dir)
         intent = outbox.record_send(
             runtime.key(),
-            to=params.to,
+            to=recipient,
             type=params.type,
             text=params.text,
             thread_id=params.thread_id,
@@ -404,7 +438,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         except Exception as failure:
             return _error(f"the send did not confirm: {failure}", code="send_unconfirmed")
         message = (result or {}).get("message") or {}
-        return {"ok": True, "message_id": str(message.get("id") or ""), "state": "sent"}
+        # Keep the legacy fields/wire semantics, but make their limited meaning
+        # machine-readable in the actual result (including an idempotent reply).
+        # Acceptance is only into the peer inbox, never conversation history or
+        # proof of execution: even a read ACK precedes the local wake handoff.
+        # These are result-only constants, not request/body fields or a new
+        # outbox schema. Errors above must never acquire this success receipt.
+        return {
+            "ok": True,
+            "message_id": str(message.get("id") or ""),
+            "state": "sent",
+            "destination_type": "peer_inbox",
+            "receipt_stage": "server_accepted",
+            "conversation_history": False,
+            "execution_confirmed": False,
+        }
 
     if params.op == "channels":
         if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
@@ -565,7 +613,14 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
     ) -> ToolResult:
         outcome = await execute_bridge(runtime, args)
         if outcome.get("ok"):
-            if outcome.get("content") is not None:
+            peer_receipt = args.get("op") in ("send", "reply")
+            if peer_receipt:
+                # Providers receive TextContent, not necessarily details. Keep
+                # the same receipt in both so "sent" cannot hide the inbox-only
+                # acceptance boundary from a model. The executor's receipt is
+                # closed metadata; never serialize the request or server body.
+                content = json.dumps(outcome, ensure_ascii=False)
+            elif outcome.get("content") is not None:
                 # Read-shaped channel results carry their own model-facing
                 # rendering (JSON page, or the untrusted-wrapped history).
                 content = str(outcome["content"])
@@ -589,12 +644,20 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                     note = str(getter() or "")
                 except Exception:  # noqa: BLE001 — advice only, never a failure
                     note = ""
+            blocks: list[Content] = [TextContent(text=content)]
             if note:
-                content = f"{content}\n\n[bridge guidance — advisory]\n{note}"
+                if peer_receipt:
+                    # Preserve existing advice without appending prose to the
+                    # receipt's JSON block, which must parse on its own.
+                    blocks.append(TextContent(text=f"[bridge guidance — advisory]\n{note}"))
+                else:
+                    blocks = [
+                        TextContent(text=f"{content}\n\n[bridge guidance — advisory]\n{note}")
+                    ]
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="bridge",
-                content=[TextContent(text=content)],
+                content=blocks,
                 details=outcome,
             )
         return ToolResult(
