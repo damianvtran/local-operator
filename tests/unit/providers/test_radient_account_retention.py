@@ -4,19 +4,28 @@ These tests must run only in the granted isolated validation slot. No caller may
 infer an account binding from whichever credential the model cascade selects.
 """
 
+import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
 
 from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
+from local_operator.harness.types import AbortSignal
+from local_operator.providers.account_affinity import (
+    AccountAffinityStore,
+    CacheAffinityHint,
+)
 from local_operator.providers.auth_store import (
     AuthStore,
     AuthStoreError,
+    OAuthAccess,
     StoredCredential,
 )
+from local_operator.providers.oauth.radient import RadientOAuthFlow
 from local_operator.team_bridge.client import TeamBridgeClient
 
 
@@ -25,9 +34,48 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[AuthStore
     # Keep genuine SQL/post-write bookkeeping, but never wake a real tunnel
     # service as a side effect of these synthetic interactive login receipts.
     monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *args, **kwargs: None)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
     auth = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
     yield auth
     auth.close()
+
+
+async def _verified_login_result(
+    account: str = "account-a",
+    *,
+    signal: AbortSignal | None = None,
+    profile_status: int = 200,
+) -> dict[str, Any]:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            assert str(request.url) == DEFAULT_RADIENT_API_BASE_URL + "/auth/oauth/token"
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "verified-test-only",
+                    "refresh_token": "refresh-test-only",
+                    "expires_in": 3600,
+                },
+            )
+        assert str(request.url) == DEFAULT_RADIENT_API_BASE_URL + "/me"
+        assert request.headers["authorization"] == "Bearer verified-test-only"
+        assert request.extensions["timeout"]["read"] == 10.0
+        return httpx.Response(
+            profile_status,
+            json={
+                "result": {
+                    "identity": {"account_id": account},
+                    "account": {"id": account},
+                    "memberships": [],
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        flow = RadientOAuthFlow(http_client=client, signal=signal)
+        await flow.generate_auth_url("state", "http://localhost:54549/callback")
+        return await flow.exchange_token("code", "state", "http://localhost:54549/callback")
 
 
 def _stored(store: AuthStore, row_id: int) -> StoredCredential:
@@ -213,6 +261,9 @@ async def test_default_post_login_access_is_not_shadowed_by_unknown_legacy(
     new = store.upsert_credential(
         "radient", _login("account-a", endpoint=DEFAULT_RADIENT_API_BASE_URL)
     )
+    # Only actual token exchange + authenticated /me completion may admit;
+    # generic metadata writes above deliberately leave the legacy row alone.
+    new = store.complete_radient_login(await _verified_login_result())
     default = await store.get_oauth_access("radient")
     assert default is not None and default.credential_id == new.id
     client = TeamBridgeClient(store=store, base_url=DEFAULT_RADIENT_API_BASE_URL)
@@ -269,6 +320,115 @@ async def test_exact_row_refresh_recovers_presend_failure_without_account_or_hub
     assert captured["account_id"] == "account-a"
     assert captured["api_endpoint"] == "https://hub.example"
     assert _stored(store, other.id).data["account_id"] == "account-b"
+
+
+def test_generic_metadata_upsert_is_not_verified_account_hub_admission(store: AuthStore) -> None:
+    # Background sync uses this same API. Labels and unknown verification fields
+    # must not stand in for authoritative interactive admission evidence.
+    legacy = store.upsert_credential(
+        "radient",
+        {
+            "type": "oauth",
+            "access": "legacy-test-only",
+            "refresh": "legacy-test-only",
+        },
+    )
+    store.upsert_credential(
+        "radient",
+        {
+            **_login("unproven-label", endpoint=DEFAULT_RADIENT_API_BASE_URL),
+            "account_verified": True,
+        },
+    )
+    assert _stored(store, legacy.id).disabled_cause is None
+
+
+@pytest.mark.parametrize(
+    "cause", ["identity_unattributed", "invalidated-token", "operator_disabled"]
+)
+def test_background_rewrite_must_not_undo_disabled_state(store: AuthStore, cause: str) -> None:
+    legacy = store.upsert_credential(
+        "radient",
+        {
+            "type": "oauth",
+            "access": "legacy-test-only",
+            "refresh": "legacy-test-only",
+        },
+    )
+    store.disable_credential(legacy.id, cause)
+    store.upsert_credential("radient", dict(legacy.data))
+    assert _stored(store, legacy.id).disabled_cause == cause
+
+
+@pytest.mark.asyncio
+async def test_quarantine_survives_reopen_forced_refresh_and_record_success(
+    store: AuthStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = store.upsert_credential(
+        "radient",
+        {
+            "type": "oauth",
+            "access": "legacy-test-only",
+            "refresh": "legacy-test-only",
+        },
+    )
+    store.disable_credential(legacy.id, "identity_unattributed")
+    path = store.db_path
+    store.close()
+    reopened = AuthStore(db_path=path, config_dir=path.parent)
+
+    async def refuse_refresh(data: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("quarantined credential reached provider refresh")
+
+    monkeypatch.setattr(reopened, "_refresh_fn", lambda provider: refuse_refresh)
+    # Exercise real affinity persistence, not a success-recording stub. The
+    # request shape supplies only the model id this bookkeeping seam reads;
+    # no model dispatch or real session is created by this call.
+    try:
+        assert await reopened.ensure_oauth_fresh(legacy.id) is None
+        assert await reopened.ensure_oauth_fresh_or_raise(legacy.id, force=True) is None
+        reopened.record_account_success(
+            "radient",
+            "synthetic-session",
+            OAuthAccess("", legacy.id, account_created_at=legacy.created_at),
+            cast(Any, SimpleNamespace(model=SimpleNamespace(model_id="synthetic-model"))),
+            CacheAffinityHint("openai:chat", "synthetic-prefix", 300_000, "bounded-heuristic"),
+            int(time.time() * 1000),
+            time.monotonic(),
+        )
+        assert (
+            AccountAffinityStore(path).get(
+                "synthetic-session", "radient", "synthetic-model", "synthetic-prefix"
+            )
+            is not None
+        )
+        assert _stored(reopened, legacy.id).disabled_cause == "identity_unattributed"
+        assert _stored(reopened, legacy.id).data == legacy.data
+        other = reopened.upsert_credential("radient", _login("account-b"))
+        default = await reopened.get_oauth_access("radient", session_id="synthetic-session")
+        assert default is not None and default.credential_id == other.id
+        assert _stored(reopened, legacy.id).disabled_cause == "identity_unattributed"
+    finally:
+        reopened.close()
+
+
+def test_quarantine_scan_preserves_known_accounts_and_disabled_states(store: AuthStore) -> None:
+    known = store.upsert_credential("radient", _login("account-a"))
+    store.disable_credential(known.id, "operator_disabled")
+    unknown = store.upsert_credential(
+        "radient",
+        {
+            "type": "oauth",
+            "access": "legacy-test-only",
+            "refresh": "legacy-test-only",
+        },
+    )
+    store.disable_credential(unknown.id, "operator_disabled")
+    store.upsert_credential("radient", _login("account-b"))
+    assert _stored(store, known.id).disabled_cause == "operator_disabled"
+    assert _stored(store, unknown.id).disabled_cause == "operator_disabled"
+    assert _stored(store, known.id).data == known.data
 
 
 def test_other_provider_dedupe_is_unchanged(store: AuthStore) -> None:

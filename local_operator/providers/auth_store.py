@@ -1812,6 +1812,21 @@ class AuthStore:
             return creds
         return [c for c in creds if c.disabled_cause is None]
 
+    def retained_radient_login_ids(self) -> tuple[int, ...]:
+        """Safe status references, never a route back into credential selection.
+
+        Read only identity/state columns: retained bearer payloads and guessed
+        labels have no place in the recovery notice, including read-only hosts.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return ()
+        rows = conn.execute(
+            "SELECT id FROM auth_credentials WHERE provider = 'radient' "
+            "AND credential_type = 'oauth' AND disabled_cause = 'identity_unattributed' ORDER BY id"
+        ).fetchall()
+        return tuple(row[0] for row in rows)
+
     def active_local_credential(self, provider: str, endpoint: str) -> StoredCredential | None:
         """The last configured token for this endpoint, without reviving history.
 
@@ -1824,6 +1839,56 @@ class AuthStore:
             if row.credential_type == "api_key" and row.data.get("endpoint") == endpoint:
                 return row if row.disabled_cause is None else None
         return None
+
+    def complete_radient_login(self, result: dict[str, Any]) -> StoredCredential:
+        """Consume one verified interactive result after host cancellation checks.
+
+        Generic metadata/refresh writes cannot enter this transition. The flow
+        receipt rechecks its abort signal and payload before any persistence;
+        serialized flags or a copied dictionary carry no admission authority.
+        """
+        from local_operator.providers.oauth.radient import consume_verified_login
+
+        if self._read_only:
+            raise AuthStoreError("A read-only credential store cannot complete a login")
+        payload = consume_verified_login(result)
+        # Defer the existing parked-service notification until quarantine and
+        # same-account restoration have reached their final durable state.
+        stored = self._upsert_credential_metadata("radient", payload, _notify=False)
+        if stored.data != payload:
+            raise AuthStoreError("Radient login changed before completion")
+        # Fresh authenticated material supersedes automatic identity/token
+        # failures for this exact binding, never an unrelated operator disable.
+        # No unknown row is rebound to the newly verified account.
+        if stored.disabled_cause in {"identity_unattributed", "invalidated-token"}:
+            self._conn.execute(
+                "UPDATE auth_credentials SET disabled_cause = NULL WHERE id = ? "
+                "AND disabled_cause = ? AND data = ?",
+                (stored.id, stored.disabled_cause, json.dumps(stored.data)),
+            )
+            self._conn.commit()
+            stored = self._reread_after_write(stored.id)
+        if stored.disabled_cause is not None:
+            return stored
+        hub = payload["api_endpoint"]
+        for legacy in self.list_credentials("radient"):
+            account = legacy.data.get("account_id")
+            if (
+                legacy.credential_type != "oauth"
+                or (isinstance(account, str) and account.strip())
+                or legacy.data.get("api_endpoint") not in (None, "", hub)
+            ):
+                continue
+            # Preserve contents/id/key and explicit disabled states. Another
+            # login may have attributed this row after the scan; CAS refuses
+            # to quarantine that new identity or a concurrently disabled row.
+            self._conn.execute(
+                "UPDATE auth_credentials SET disabled_cause = ?, updated_at = ? "
+                "WHERE id = ? AND data = ? AND disabled_cause IS NULL",
+                ("identity_unattributed", self._now_ms(), legacy.id, json.dumps(legacy.data)),
+            )
+        self._conn.commit()
+        return self._after_credential_write("radient", stored.id)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Seal Muse secrets before metadata serialization; preserve other providers."""
@@ -1854,12 +1919,13 @@ class AuthStore:
         return row
 
     def _upsert_credential_metadata(
-        self, provider: str, credential: dict[str, Any]
+        self, provider: str, credential: dict[str, Any], *, _notify: bool = True
     ) -> StoredCredential:
         """Insert or update the provider's same identity; preserve other accounts.
 
-        Revives soft-deleted rows for the same identity (re-login), and lifts
-        the row's retry backoff blocks — see :meth:`_after_credential_write`.
+        Non-Radient re-logins revive same-identity soft-deleted rows. Radient
+        disabled states require a verified completion, not this dictionary API.
+        Retry backoff bookkeeping remains in :meth:`_after_credential_write`.
 
         The login path already resolves ``store_credentials_as`` before calling
         here, so this normalization is usually a no-op. It is applied anyway
@@ -1952,12 +2018,20 @@ class AuthStore:
             if row is not None:
                 self._conn.execute(
                     "UPDATE auth_credentials SET credential_type = ?, data = ?, "
-                    "disabled_cause = NULL,"
+                    # Only a future verified Radient completion may release
+                    # a disabled identity. A generic same-key metadata write
+                    # must preserve quarantine and explicit operator disables.
+                    "disabled_cause = CASE WHEN provider = 'radient' "
+                    "THEN disabled_cause ELSE NULL END,"
                     " updated_at = ?, login_incarnation = ? WHERE id = ?",
                     (credential_type, data_json, now, incarnation, row[0]),
                 )
                 self._conn.commit()
-                return self._after_credential_write(provider, row[0])
+                return (
+                    self._after_credential_write(provider, row[0])
+                    if _notify
+                    else self._reread_after_write(row[0])
+                )
 
         cursor = self._conn.execute(
             "INSERT INTO auth_credentials "
@@ -1967,7 +2041,11 @@ class AuthStore:
             (provider, credential_type, data_json, identity, now, now, incarnation),
         )
         self._conn.commit()
-        return self._after_credential_write(provider, cursor.lastrowid)
+        return (
+            self._after_credential_write(provider, cursor.lastrowid)
+            if _notify
+            else self._reread_after_write(cursor.lastrowid)
+        )
 
     @staticmethod
     def native_lifecycle_snapshot(db_path: Path, provider: str) -> list[tuple[Any, ...]] | None:
@@ -2077,34 +2155,9 @@ class AuthStore:
         gate.
         """
         stored = self._reread_after_write(credential_id)
-        if provider == "radient" and stored.credential_type == "oauth":
-            endpoint = stored.data.get("api_endpoint")
-            if (
-                _radient_account_identity(stored.data)
-                and isinstance(endpoint, str)
-                and endpoint.strip()
-            ):
-                # Retention must not leave an unattributed legacy bearer ahead
-                # of a proven login in default selection. Keep its data/id/key
-                # for recovery, but use the existing visible disabled state.
-                # CAS against the captured payload: another login may have
-                # attributed that legacy row while this scan was in flight.
-                for legacy in self.list_credentials("radient"):
-                    account = legacy.data.get("account_id")
-                    if legacy.credential_type == "oauth" and not (
-                        isinstance(account, str) and account.strip()
-                    ):
-                        self._conn.execute(
-                            "UPDATE auth_credentials SET disabled_cause = ?, updated_at = ? "
-                            "WHERE id = ? AND data = ? AND disabled_cause IS NULL",
-                            (
-                                "identity_unattributed",
-                                self._now_ms(),
-                                legacy.id,
-                                json.dumps(legacy.data),
-                            ),
-                        )
-                self._conn.commit()
+        # Identity labels in a generic write are not an interactive admission
+        # receipt. Quarantine belongs after a verified exchange and the host's
+        # cancellation check, never in this shared metadata-write hook.
         self.clear_blocks(stored.id)
         self._rearm_parked_tunnel_login(provider, stored)
         return stored

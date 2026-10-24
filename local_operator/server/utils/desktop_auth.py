@@ -136,6 +136,9 @@ class LoginOperation:
     #: ``config.yml`` for a provider the user had abandoned, possibly after the
     #: newer sign-in set its own defaults (review round 3, MINOR 2).
     signal: AbortSignal = field(default_factory=AbortSignal, repr=False)
+    #: Additive recovery copy, never provider/controller text. Only a successful
+    #: Radient operation publishes it; routing inventories remain unchanged.
+    retained_notice: str | None = None
 
     @property
     def abandoned(self) -> bool:
@@ -147,6 +150,11 @@ class LoginOperation:
             "provider": self.provider,
             "state": self.state,
             "message": self.message,
+            "retained_notice": (
+                self.retained_notice
+                if self.state == "succeeded" and self.provider == "radient"
+                else None
+            ),
             "auth_url": self.auth_url,
             "launch_url": self.launch_url,
             "user_code": self.user_code,
@@ -470,6 +478,7 @@ class DesktopAuth:
             on_flow_details=on_flow_details,
         )
         from local_operator.providers.controller import ProviderController
+        from local_operator.providers.oauth.radient import RadientLoginDisabled
 
         controller = ProviderController(
             self.store, self.config_dir, login_callbacks=lambda _definition: callbacks
@@ -513,7 +522,22 @@ class DesktopAuth:
                 from local_operator.server.utils.desktop_rehome import with_rehome_count
 
                 op.defaults_applied = with_rehome_count(applied, moved, deferred)
+            if definition.id == "radient" and not op.abandoned:
+                from local_operator.providers.auth_cli import (
+                    format_retained_radient_logins,
+                )
+
+                # Only fixed local copy + safe row references cross this
+                # boundary, never a controller return, grant note or raw error.
+                retained = format_retained_radient_logins(self.store.retained_radient_login_ids())
+                op.retained_notice = "\n".join(retained) if retained else None
             settle("succeeded", "Sign-in complete.")
+        except RadientLoginDisabled:
+            settle(
+                "failed",
+                "Sign-in verified; the existing credential remains unavailable. "
+                "Its saved disabled state was preserved.",
+            )
         except asyncio.CancelledError:
             settle("cancelled", "Sign-in cancelled.")
         except (TimeoutError, LoginTimeoutError):
