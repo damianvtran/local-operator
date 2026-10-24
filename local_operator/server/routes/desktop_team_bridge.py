@@ -70,7 +70,11 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
-from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN, is_account_id
+from local_operator.team_bridge.types import (
+    _CONVERSATION_MESSAGE_ID,
+    CONVERSATION_ID_PATTERN,
+    is_account_id,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -91,12 +95,14 @@ _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: cannot change the SHAPE of the upstream URL (`..`, `/`, `?`, `%`), so the
 #: rule is a conservative charset rather than a re-implementation of the
 #: server's mint.
-_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
-
-#: The wire grammar for a thread root. ONE spelling shared by the immediate
-#: send and the scheduled create: two literals would be two grammars, and the
-#: hub would learn about the disagreement from a 400.
-CONVERSATION_REPLY_ROOT_PATTERN = r"^bcmsg_[0-9a-z]{8,64}$"
+#: A conversation MESSAGE id, taken from the package's ONE grammar rather than
+#: re-spelled here. Two literals already drifted once: the desktop copy allowed
+#: eight characters where the agent tool's allowed one, so a thread root the
+#: tool accepted was refused by the desktop send and scheduled routes.
+_MESSAGE_ID = _CONVERSATION_MESSAGE_ID
+#: The wire grammar for a thread root. Same object as ``_MESSAGE_ID`` — one
+#: grammar, two names only because the two call sites read differently.
+CONVERSATION_REPLY_ROOT_PATTERN = _CONVERSATION_MESSAGE_ID.pattern
 # Account guards share the dependency-light is_account_id predicate with reads.
 # A UUID-shaped real account must never be rejected by a legacy acc_-only guard.
 
