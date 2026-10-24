@@ -14,7 +14,15 @@ a test that never commits is not testing the route.
 Two fixtures exist because the allowlist spans two checkouts: ``_public_repo``
 models this repository's copy roots and ``_ui_repo`` models the companion UI
 checkout's (``src/i18n/...``).  A UI path is only ever read from a checkout whose
-working directory is that checkout, which is what the second fixture pins.
+working directory is that checkout and whose ``origin`` names the UI repository,
+which is what the second fixture pins.
+
+Review round 2 (security) measured five boundary holes these tests now pin: a
+``src/i18n/`` tree in any other checkout served unredacted (S-1: checkout
+identity), a pattern widening with the glob tuple untouched (S-2: the patterns
+are pinned too), a symlinked audit log suppressing the record (S-3), a
+``git replace`` ref substituting the served blob (S-4), and a workspace below
+the checkout root validating one file while ``git show`` served another (S-5).
 """
 
 from __future__ import annotations
@@ -28,12 +36,16 @@ import pytest
 
 from local_operator.harness.types import ToolContext
 from local_operator.tools.public_copy import (
+    _PUBLIC_COPY_PATTERNS,
     PUBLIC_COPY_GLOBS,
     _matches_public_copy,
     execute_read_public_copy,
 )
 
 FAKE_GITHUB = "ghp_" + "A" * 36
+FAKE_API_KEY = "sk_live_" + "B" * 24
+UI_ORIGIN_SSH = "git@github.com:damianvtran/local-operator-ui.git"
+UI_ORIGIN_HTTPS = "https://github.com/damianvtran/local-operator-ui.git"
 
 #: Every reviewed root, with one representative file.  ``PUBLIC_COPY_GLOBS`` is
 #: asserted against :data:`ACCEPTED_PUBLIC_COPY_GLOBS` below, and each sample is
@@ -59,6 +71,18 @@ ACCEPTED_PUBLIC_COPY_PATHS: tuple[str, ...] = (
     "local_operator/mobile/web/src/i18n/bundled.gen.ts",
     UI_CATALOGUE,
     UI_KEYS,
+)
+
+#: The enforcement list, verbatim.  The glob tuple alone is not the gate: a
+#: pattern can widen while the globs stay untouched (review S-2 measured exactly
+#: that), so both lists are pinned and a mutation has to move this tuple.
+ACCEPTED_PUBLIC_COPY_PATTERNS: tuple[str, ...] = (
+    r"local_operator/i18n/catalogues/[^/]+/[^/]+\.json",
+    r"local_operator/i18n/keys/[^/]+\.py",
+    r"local_operator/mobile/web/src/i18n/keys\.gen\.ts",
+    r"local_operator/mobile/web/src/i18n/bundled\.gen\.ts",
+    r"src/i18n/catalogues/[^/]+/[^/]+\.json",
+    r"src/i18n/keys\.gen\.ts",
 )
 
 
@@ -101,7 +125,7 @@ def _context(root: Path, tmp_path: Path) -> ToolContext:
     return ToolContext(cwd=str(root), session_dir=str(tmp_path / "sessions" / "abc123"))
 
 
-def _ui_repo(tmp_path: Path) -> Path:
+def _ui_repo(tmp_path: Path, origin: str | None = UI_ORIGIN_SSH) -> Path:
     """A committed miniature UI checkout with the companion repo's copy roots."""
     root = tmp_path / "ui"
     catalogue = root / "src/i18n/catalogues/en"
@@ -125,14 +149,21 @@ def _ui_repo(tmp_path: Path) -> Path:
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "test@example.com")
     _git(root, "config", "user.name", "Test")
+    if origin is not None:
+        _git(root, "remote", "add", "origin", origin)
     _git(root, "add", "-A")
     _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "ui fixture")
     return root
 
 
 def test_the_allowlist_is_exactly_the_reviewed_set() -> None:
-    """A future widening has to edit this tuple and show up as a reviewed diff."""
+    """A future widening has to edit these tuples and show up as a reviewed diff."""
     assert PUBLIC_COPY_GLOBS == ACCEPTED_PUBLIC_COPY_GLOBS
+    # The enforcement list, not just the human-readable one: a pattern is what
+    # actually admits a path (review S-2).
+    assert (
+        tuple(pattern.pattern for pattern in _PUBLIC_COPY_PATTERNS) == ACCEPTED_PUBLIC_COPY_PATTERNS
+    )
 
 
 @pytest.mark.parametrize("path", ACCEPTED_PUBLIC_COPY_PATHS)
@@ -151,6 +182,9 @@ def test_every_reviewed_root_is_accepted(path: str) -> None:
         "src/i18n/catalogues/en/deep/x.json",
         # A name that merely ends like the generated map.
         "src/i18n/keys.gen.ts.bak",
+        # A name beside the generated map; a widening to ``src/i18n/*`` would
+        # admit it, which is why the compiled patterns are pinned (review S-2).
+        "src/i18n/private.secrets.ts",
         # The same spelling nested somewhere else in the tree.
         "vendor/src/i18n/keys.gen.ts",
     ],
@@ -185,7 +219,8 @@ async def test_a_ui_catalogue_key_is_served(
 async def test_a_ui_generated_key_map_is_served(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = _ui_repo(tmp_path)
+    # HTTPS is the other spelling the identity parser must accept.
+    root = _ui_repo(tmp_path, origin=UI_ORIGIN_HTTPS)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 
     result = await execute_read_public_copy(
@@ -285,6 +320,163 @@ async def test_an_absolute_ui_path_outside_the_checkout_is_refused(
 
     assert result.is_error
     assert "not inside this session's workspace" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_src_shaped_tree_in_another_checkout_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-1: a ``src/i18n/`` tree is not the UI checkout until its origin says so.
+
+    The reproduced bypass: any repository containing these spellings served an
+    unredacted ``sk_live_``-shaped value.  The fixture is otherwise identical to
+    the accepted UI repo, so only the origin differs.
+    """
+    root = _ui_repo(tmp_path, origin="git@github.com:damianvtran/other-product.git")
+    (root / UI_CATALOGUE).write_text(
+        json.dumps({"wire.slash.credential": FAKE_API_KEY}), encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "decoy")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-s1-1",
+        {"path": UI_CATALOGUE, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "companion UI checkout" in result.text
+    assert "damianvtran/local-operator-ui" in result.text
+    assert FAKE_API_KEY not in result.text
+    assert not (tmp_path / "config" / "audit" / "public-copy-reads.jsonl").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin",
+    [
+        None,
+        # A lookalike name in another namespace is not the UI repository.
+        "git@github.com:someone-else/local-operator-ui.git",
+    ],
+    ids=["no-origin", "lookalike-owner"],
+)
+async def test_a_ui_tree_without_the_ui_identity_is_refused(
+    origin: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _ui_repo(tmp_path, origin=origin)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-s1-2",
+        {"path": UI_CATALOGUE, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "companion UI checkout" in result.text
+    assert UI_VALUE not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_below_the_checkout_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-5: ``show HEAD:<path>`` is toplevel-relative, ``ls-files`` is cwd-relative.
+
+    The measured split: a workspace that is a subdirectory of a larger checkout
+    validates the workspace-relative file with ``ls-files``/``diff`` but serves
+    the toplevel-relative blob of the same spelling.  The fixture puts a secret
+    in the toplevel file and public copy in the workspace file.
+    """
+    parent = tmp_path / "monorepo"
+    workspace = parent / "sub"
+    workspace_catalogue = workspace / "local_operator/i18n/catalogues/en"
+    workspace_catalogue.mkdir(parents=True)
+    (workspace_catalogue / "wire.slash.json").write_text(
+        json.dumps({"wire.slash.credential": "workspace copy"}), encoding="utf-8"
+    )
+    top_catalogue = parent / "local_operator/i18n/catalogues/en"
+    top_catalogue.mkdir(parents=True)
+    (top_catalogue / "wire.slash.json").write_text(
+        json.dumps({"wire.slash.credential": FAKE_API_KEY}), encoding="utf-8"
+    )
+    _git(parent, "init", "-q")
+    _git(parent, "config", "user.email", "test@example.com")
+    _git(parent, "config", "user.name", "Test")
+    _git(parent, "add", "-A")
+    _git(parent, "-c", "commit.gpgsign=false", "commit", "-qm", "monorepo")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-s5-1",
+        {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+            "key": "wire.slash.credential",
+        },
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert "not the checkout root" in result.text
+    assert FAKE_API_KEY not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_replace_ref_cannot_change_the_served_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-4: ``git replace`` must not substitute the blob the route serves."""
+    root = _public_repo(tmp_path)
+    catalogue = "local_operator/i18n/catalogues/en/wire.slash.json"
+    replacement = json.dumps({"wire.slash.credential": FAKE_GITHUB}).encode("utf-8")
+    replacement_blob = (
+        subprocess.run(
+            ["git", "-C", str(root), "hash-object", "-w", "--stdin"],
+            input=replacement,
+            check=True,
+            capture_output=True,
+        )
+        .stdout.strip()
+        .decode()
+    )
+    original_blob = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", f"HEAD:{catalogue}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(root, "replace", original_blob, replacement_blob)
+    plain = subprocess.run(
+        ["git", "-C", str(root), "show", f"HEAD:{catalogue}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    # The control: without the flag, this checkout really does serve the
+    # replacement — so the passing read below is the flag doing its work.
+    assert FAKE_GITHUB in plain
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-s4-1",
+        {"path": catalogue, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert not result.is_error, result.text
+    assert "Type or paste a secret after a space; masked" in result.text
+    assert FAKE_GITHUB not in result.text
 
 
 @pytest.mark.asyncio
@@ -520,3 +712,96 @@ async def test_every_read_appends_and_the_audit_is_not_truncated(
     assert len(records) == 2
     assert records[0]["sha256"] == records[1]["sha256"]
     assert os.stat(log).st_mode & 0o777 == 0o600
+    assert os.stat(log.parent).st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_audit_log_refuses_the_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-3: a log symlink (measured with ``/dev/null``) suppressed the record."""
+    root = _public_repo(tmp_path)
+    audit = tmp_path / "config" / "audit"
+    audit.mkdir(parents=True)
+    redirect = tmp_path / "redirect.jsonl"
+    redirect.write_text("", encoding="utf-8")
+    (audit / "public-copy-reads.jsonl").symlink_to(redirect)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-s3-1",
+        {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+            "key": "wire.slash.credential",
+        },
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "audit record could not be written" in result.text
+    assert "Type or paste a secret" not in result.text
+    assert redirect.read_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_audit_dir_refuses_the_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-3: a symlinked ``audit`` directory redirected the records."""
+    root = _public_repo(tmp_path)
+    config = tmp_path / "config"
+    config.mkdir()
+    redirected = tmp_path / "redirected-audit"
+    redirected.mkdir()
+    (config / "audit").symlink_to(redirected, target_is_directory=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+
+    result = await execute_read_public_copy(
+        "call-s3-2",
+        {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+            "key": "wire.slash.credential",
+        },
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "audit record could not be written" in result.text
+    assert "Type or paste a secret" not in result.text
+    assert list(redirected.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not the Windows control")
+async def test_an_existing_permissive_audit_log_is_tightened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-3: an existing 0644 log is made 0600 (and the directory 0700)."""
+    root = _public_repo(tmp_path)
+    audit = tmp_path / "config" / "audit"
+    audit.mkdir(parents=True)
+    log = audit / "public-copy-reads.jsonl"
+    log.write_text("", encoding="utf-8")
+    os.chmod(log, 0o644)
+    os.chmod(audit, 0o755)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-s3-3",
+        {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+            "key": "wire.slash.credential",
+        },
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert not result.is_error, result.text
+    assert os.stat(log).st_mode & 0o777 == 0o600
+    assert os.stat(audit).st_mode & 0o777 == 0o700
+    assert len(log.read_text().splitlines()) == 1
