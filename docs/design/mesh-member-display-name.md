@@ -284,16 +284,34 @@ One module constant each, validated in the primitive so every caller inherits it
   through the picker token it is printed in.
 - Refuse a string that is exactly a device id (`d_` + 32 lowercase hex): it would
   make `_resolve_device`'s id-first branch indistinguishable from a name match.
-- Allow Unicode, store it unfolded. Case-fold only for the collision **warning**
+- Allow Unicode, store it unfolded. Case-fold only for the collision refusal
   below.
-- **No uniqueness rule.** `mesh-transport-identity.md` §16 Q8 already decided
-  that names are not unique and that resolution is by id; `mesh-ui.md:938-939`
-  states that two devices may knowingly present the same human name and that the
-  device id is the key. Adding a refusal here cannot be enforced (a hostile build
-  ignores it), would block a documented legitimate case, and would create a rule
-  a peer can bypass — so it is a **warning**, printed by the renaming device when
-  another active member of the same network already carries the name (it holds
-  the table to check), and nothing more.
+- **A local refusal and a receiving-side discard — not a uniqueness rule.** The
+  accepted decision is that `lop network identity set-name` **refuses** a name
+  that another row in the SAME network already carries: case-folded, tombstones
+  included, because a removed row's name is still what a later `_resolve_device`
+  query can answer (the M1 finding). The scope is one network because every
+  device-taking verb resolves inside one; a row in another network cannot
+  collide with anything a query there answers.
+- **The same validator runs on RECEIVE.** A mesh cannot make every build obey:
+  a modified client can send any string as its own name, including another
+  member's id, and admission text arrives inside a signature that proves *who*
+  said it and nothing about whether the label is usable. So `admit` and
+  `adopt_members` run this rule over every inbound name and **discard** one that
+  fails — the row is kept, the previous name is kept or the row stays unnamed,
+  and the event is logged at debug. A cosmetic label is never a reason to refuse
+  a frame or drop a member; losing a working link over a name would be the worse
+  outcome. Together the two halves are the guard: refuse at the writer, discard
+  at the reader, claim nothing about the whole mesh.
+- `mesh-ui.md:938-939` — "two devices may knowingly present the same human name,
+  and the device id is the key" — is the counter-argument this rule answers.
+  That statement stays true of the mesh, and this change neither prevents it nor
+  pretends otherwise: a device that joins under a name chosen on that device
+  still arrives with it, this device never refuses a member over it, Rule N1
+  still applies it, and resolution is still by id. What changes is that a
+  duplicate can no longer be produced *by accident on a device that can see the
+  collision*: the operator is told to pick another name, or to rename the other
+  device from itself.
 
 ### 3.3 What makes peers agree — one acceptance rule, no new op
 

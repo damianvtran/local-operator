@@ -1443,6 +1443,13 @@ def adopt_members(
             if retired:
                 _retire_superseded_rows(record, retired, survivor=incoming)
                 _take_over_standing(retired[-1], incoming)
+            # AN ADOPTED ROW'S NAME IS PEER-SUPPLIED TOO, including one this device
+            # has never held: the row is added as the frame carries it (so the member
+            # is not invisible), but a name that fails the rule is discarded rather
+            # than stored — the same receive-time guard ``admit`` applies.
+            incoming.name = _accepted_name(
+                incoming.name, "", source=sender_device_id or "a peer table"
+            )
             # An observation is THIS device's own (``observed_endpoint``); one
             # relayed in a third party's table is where that party saw it from.
             incoming.observed_endpoint = ""
@@ -1464,10 +1471,11 @@ def adopt_members(
             sender_device_id
             and incoming.device_id == sender_device_id
             and incoming.name
-            and incoming.name != existing.name
         ):
-            existing.name = incoming.name
-            changed = True
+            accepted = _accepted_name(incoming.name, existing.name, source=sender_device_id)
+            if accepted != existing.name:
+                existing.name = accepted
+                changed = True
         # THE SAME RETIREMENT RUNS HERE, against the row this record already holds as
         # the successor: a record that learned the rotated row before it had the
         # proof (or from a build without one) still retires the row the proof covers
@@ -1698,6 +1706,34 @@ def membership_conflict(record: NetworkRecord, device_id: str, public_key: str =
     return ""
 
 
+def _accepted_name(incoming: str, held: str, *, source: str) -> str:
+    """The name this record will store: the sender's, only if it passes the rule.
+
+    THE GUARD IS DUAL (review round 1, F1), and the RECEIVING side is the half that
+    actually holds: ``set_name`` refuses a bad name at the writer, but a mesh cannot
+    make every peer obey — a modified client can send any string as its own name,
+    including another member's id. ``adopt_members`` and ``admit`` therefore run the
+    same validator over every incoming name, and a rejected one is DISCARDED, never
+    propagated: the previous value is kept (or the row stays unnamed when it had
+    none), and the row itself is kept too. A cosmetic label is never a reason to
+    drop a member or refuse a frame — losing a working link over a name would be a
+    far worse outcome than showing an id tail.
+
+    ``source`` is only for the debug line: nothing here is authority-bearing, and a
+    name never changes what a device may do (``mesh-transport-identity.md`` §3.1).
+    """
+    text = str(incoming or "").strip()
+    if not text:
+        return held
+    from local_operator.network import identity as identity_mod
+
+    try:
+        return identity_mod.validate_member_name(text)
+    except ValueError as exc:
+        logger.debug("discarding an inbound device name from %s: %s", source, exc)
+        return held
+
+
 def admit(
     record: NetworkRecord,
     *,
@@ -1731,7 +1767,11 @@ def admit(
         existing = MemberRecord(device_id=device_id)
         record.members.append(existing)
     existing.public_key = public_key or existing.public_key
-    existing.name = name or existing.name
+    # THE JOIN NAME IS PEER-SUPPLIED TEXT (F1): it arrives inside a signed
+    # transcript, which proves WHO said it, never that it is a usable label. So the
+    # receiving side applies the same rule ``set_name`` does and keeps the row's
+    # previous name when this one fails.
+    existing.name = _accepted_name(name, existing.name, source=added_by or device_id)
     existing.kind = kind  # type: ignore[assignment]
     existing.lifecycle = "active"
     existing.role = role
@@ -1962,15 +2002,24 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
     rebuild re-reads — a row that moved while the file did not would be undone by
     the next admission.
 
-    THE COLLISION GUARD IS A LOCAL POLICY, NOT A MESH-WIDE ONE. It refuses a name
-    already carried by a DIFFERENT row this device holds, tombstones included: a
-    removed device's name or id staying visible is exactly what makes a later
-    ``_resolve_device`` query answer the wrong device (the deferred M1 finding on
-    PR #2869). It cannot promise the mesh has no duplicate — a joiner still picks
-    its own name from its own identity, which this device cannot refuse — so a
-    duplicate arriving over the wire converges as two rows sharing a name, and
-    resolution stays by id. That is the warning-versus-refusal line: THIS command
-    refuses to create a duplicate it can see; it does not claim names are unique.
+    THE COLLISION GUARD IS A LOCAL POLICY, NOT A MESH-WIDE ONE, and it is scoped to
+    ONE NETWORK (review round 1, F2): device-taking verbs resolve inside a network,
+    so a row in a different network cannot collide with anything a query here
+    answers. Within that network it refuses a name already carried by a DIFFERENT
+    row, tombstones included — a removed device's name staying visible is exactly
+    what makes a later ``_resolve_device`` query answer the wrong device (the M1
+    finding deferred on PR #2869). It cannot promise the mesh has no duplicate: a
+    joiner picks its own name from its own identity, which this device cannot
+    refuse. That is why the guard is DUAL — this command refuses a collision it can
+    see, and every receiving path (``admit``, ``adopt_members``) discards an
+    inbound label that fails the rule — and still not a uniqueness claim: two rows
+    may share a name, and resolution stays by id.
+
+    A PARTIAL WRITE IS REPORTED AS ONE (review round 1, F3). The identity file is
+    written first, so a row write that fails afterwards leaves file=new,
+    rows=old — the one state where ``identity show`` and the member list disagree.
+    That is raised as ``rename_partial`` naming both halves and the remedy; it is
+    never reported as success, and it is never silently retried.
 
     Callers hold no lock: the identity write is its own file, and each record is
     read and saved inside ``store.mutate`` so a live relay's writers are not
@@ -1990,31 +2039,30 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
             "identity_missing",
             "this device has no mesh identity yet; create a network here first",
         )
-    # THE WHOLE ROW SET, not ``active_members()``: a tombstoned row is still a name
-    # this device can be asked about, and its id still burns.
-    taken: list[tuple[str, str]] = []
+    # THE WHOLE ROW SET OF THIS NETWORK, not ``active_members()``: a tombstoned row
+    # is still a name this device can be asked about, and its id still burns.
     for listed in store.list_networks(root):
         if listed.self_device_id != current.device_id:
             continue
         for row in listed.members:
             if str(row.device_id) == current.device_id:
                 continue
-            if str(row.name or "").casefold() == fresh.casefold():
-                taken.append((str(listed.name or listed.network_id), str(row.device_id)))
-    if taken:
-        network, device = taken[0]
-        raise MeshRefusal(
-            "name_taken",
-            f"{fresh!r} is already the name of {device[:8]} in {network}; pick another name — a "
-            "name is each device's own statement about itself, so the other device has to "
-            "be renamed from itself",
-        )
+            if str(row.name or "").casefold() != fresh.casefold():
+                continue
+            raise MeshRefusal(
+                "name_taken",
+                f"{fresh!r} is already the name of {str(row.device_id)[:8]} in "
+                f"{listed.name or listed.network_id}; pick another name — a name is each "
+                "device's own statement about itself, so the other device has to be renamed "
+                "from itself",
+            )
 
     # The identity write is the primitive's (0600, staged, validated again there —
     # one rule, one implementation), and it returns the name it replaced.
     _, previous = identity_mod.set_name(fresh, root=root)
 
     updated: list[str] = []
+    failed: list[str] = []
     for listed in store.list_networks(root):
         if listed.self_device_id != current.device_id:
             continue
@@ -2030,6 +2078,9 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
             # A network forgotten between the listing and this write is not a reason
             # to abandon the rest of them (the rotation path's rule).
             continue
+        except Exception as exc:  # noqa: BLE001 — reported as a partial write, below
+            logger.debug("rename_self could not rewrite %s: %s", listed.network_id, exc)
+            failed.append(str(listed.name or listed.network_id))
 
     # THE AUDIT RECORD IS BESIDE THE WRITE, not a second source of truth: the rows
     # and the identity file are the record, and ``AuditLog.record`` never raises, so
@@ -2044,10 +2095,22 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
             actor=current.device_id,
             subject=current.device_id,
             actor_kind="device",
-            detail={"previous": previous, "name": fresh, "networks": updated},
+            detail={"previous": previous, "name": fresh, "networks": updated, "failed": failed},
         )
     )
     log.close()
+
+    if failed:
+        # THE FILE MOVED, THE ROWS DID NOT — say exactly that, because every other
+        # surface reads one of the two and they now disagree. Retrying is safe: the
+        # identity already says the new name, so the next run rewrites only rows
+        # whose value differs.
+        raise MeshRefusal(
+            "rename_partial",
+            f"the identity file now says {fresh!r}, but this device's member row was NOT "
+            f"updated in {', '.join(failed)}; retry when that relay is reachable — until "
+            "then peers keep showing the old name",
+        )
 
     return RenameReceipt(
         device_id=current.device_id,
