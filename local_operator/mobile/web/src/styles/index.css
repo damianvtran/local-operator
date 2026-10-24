@@ -186,6 +186,14 @@
 		-webkit-tap-highlight-color: transparent;
 	}
 
+	/* Technical content keeps storage and reading order even inside Urdu copy.
+	   `start` remains physical left here because the island itself is LTR. */
+	:where(code, pre, [data-ltr], [dir="ltr"]:not(html)) {
+		direction: ltr;
+		unicode-bidi: isolate;
+		text-align: start;
+	}
+
 	/* The focus ring, deliberately unlayered-adjacent via :where() in the
 	   layered half and a plain rule below — the phone is a touch surface,
 	   but a keyboard (hardware, switch control) must still see one ring. */
@@ -205,6 +213,15 @@
 			scroll-behavior: auto !important;
 		}
 	}
+}
+
+/* Navigation glyphs describe travel, not text: mirror only the marked glyphs,
+   never media, brand marks, send/up icons, or the whole technical island. */
+.lo-directional {
+	display: inline-block;
+}
+[dir="rtl"] .lo-directional {
+	transform: scaleX(-1);
 }
 
 /* WIDE VIEW (issue #1870, `lib/viewport.ts`): the screens' column is capped at
@@ -265,7 +282,7 @@ html :focus-visible {
 	display: inline-block;
 	width: 0.55em;
 	height: 1em;
-	margin-left: 2px;
+	margin-inline-start: 2px;
 	vertical-align: text-bottom;
 	background-color: var(--color-accent);
 	animation: lo-caret-blink 1s steps(1) infinite;
@@ -350,8 +367,19 @@ html :focus-visible {
 		transform: translateX(300%);
 	}
 }
+@keyframes lo-loadbar-rtl {
+	from {
+		transform: translateX(100%);
+	}
+	to {
+		transform: translateX(-300%);
+	}
+}
 .lo-loadbar-fill {
 	animation: lo-loadbar 1.1s ease-in-out infinite;
+}
+[dir="rtl"] .lo-loadbar-fill {
+	animation-name: lo-loadbar-rtl;
 }
 @media (prefers-reduced-motion: reduce) {
 	.lo-loadbar-fill {

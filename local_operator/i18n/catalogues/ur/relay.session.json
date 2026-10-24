@@ -1,0 +1,19 @@
+{
+  "relay.session.list.search_placeholder": "گفتگوؤں میں تلاش کریں…",
+  "relay.session.list.empty_hint": "نیچے یا اپنے کمپیوٹر کے TUI سے ایک شروع کریں",
+  "relay.session.list.no_matches": "کوئی مماثل گفتگو نہیں",
+  "relay.session.list.start_idle": "نیا سیشن",
+  "relay.session.list.start_busy": "شروع ہو رہا ہے…",
+  "relay.session.view.back": "سیشنز پر واپس",
+  "relay.session.view.empty_title": "ابھی کوئی پیغام نہیں",
+  "relay.session.view.empty_hint": "شروع کرنے کے لیے نیچے پیغام بھیجیں",
+  "relay.session.past.back": "واپس",
+  "relay.session.past.heading": "پچھلے سیشنز",
+  "relay.session.past.search_placeholder": "ناموں اور گفتگوؤں میں تلاش کریں…",
+  "relay.session.past.loading": "لوڈ ہو رہا ہے…",
+  "relay.session.directory.sheet_title": "ورکنگ ڈائریکٹری",
+  "relay.session.directory.path_placeholder": "یا کوئی اور پاتھ لکھیں…",
+  "relay.session.model.sheet_title": "ماڈل",
+  "relay.session.model.filter_placeholder": "ماڈلز فلٹر کریں",
+  "relay.session.model.loading": "لوڈ ہو رہا ہے…"
+}

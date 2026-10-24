@@ -202,7 +202,7 @@ export function agentConversationEntries(detail: SubagentDetail): TranscriptEntr
 function Outcome({ detail }: { detail: SubagentDetail }) {
 	if (detail.status === "completed") {
 		return (
-			<section aria-live="polite" className="mt-2 border-l-2 border-success pl-3">
+			<section aria-live="polite" className="mt-2 border-s-2 border-success ps-3">
 				<p className="mb-1 text-meta font-medium text-success">
 					✓ Result from {detail.label}
 				</p>
@@ -216,7 +216,7 @@ function Outcome({ detail }: { detail: SubagentDetail }) {
 	}
 	if (detail.status === "failed") {
 		return (
-			<section role="alert" className="mt-2 border-l-2 border-danger pl-3">
+			<section role="alert" className="mt-2 border-s-2 border-danger ps-3">
 				<p className="mb-1 text-meta font-medium text-danger">✕ Agent failed</p>
 				{detail.error_text ? (
 					<Markdown text={detail.error_text} />
@@ -313,7 +313,7 @@ function AgentHeader({
 				aria-label="back to parent conversation"
 				className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 			>
-				‹
+				<span aria-hidden className="lo-directional">‹</span>
 			</button>
 			<div className="min-w-0 flex-1">
 				<p className="truncate text-body-sm font-medium">{shown?.label || "Agent"}</p>

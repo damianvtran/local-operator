@@ -35,7 +35,7 @@ export function Chevron({ open, className }: { open: boolean; className?: string
 	return (
 		<span
 			aria-hidden
-			className={cn("inline-block w-4 text-center text-ink-dim select-none", className)}
+			className={cn("lo-directional w-4 text-center text-ink-dim select-none", className)}
 		>
 			{open ? "▾" : "▸"}
 		</span>
@@ -97,7 +97,7 @@ export function Disclosure({
 				className={cn(
 					/* The compact label stays unchanged while the hit box matches the
 					   navigation controls users alternate with on a phone. */
-					"flex min-h-11 w-full items-center gap-1 text-left select-none",
+					"flex min-h-11 w-full items-center gap-1 text-start select-none",
 					headerClassName,
 				)}
 			>

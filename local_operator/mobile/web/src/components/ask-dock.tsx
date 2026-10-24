@@ -80,7 +80,7 @@ export function AskDock({
 			   asked is the most legible mark on the line (design round 1, D3). */
 			className={cn(
 				"mx-2 mb-1 flex min-h-11 items-center gap-2",
-				"rounded-md border px-3 py-1.5 text-left active:bg-elevated",
+				"rounded-md border px-3 py-1.5 text-start active:bg-elevated",
 				quiet ? "border-hairline bg-surface" : "border-accent bg-accent-wash",
 			)}
 		>

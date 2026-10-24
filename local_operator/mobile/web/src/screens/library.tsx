@@ -204,7 +204,7 @@ export function LibraryScreen() {
 					aria-label="back to sessions"
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
-					‹
+					<span aria-hidden className="lo-directional">‹</span>
 				</button>
 				<h1 className="min-w-0 flex-1 truncate px-1 text-heading text-ink">library</h1>
 				<button
@@ -350,7 +350,7 @@ export function LibraryScreen() {
 								setSortOpen(false);
 							}}
 							aria-pressed={filters.sort === option.id}
-							className="flex min-h-11 items-center justify-between gap-2 rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center justify-between gap-2 rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							{option.label}
 							{filters.sort === option.id ? (
@@ -467,7 +467,7 @@ export function LibraryScreen() {
 						<button
 							type="button"
 							onClick={() => askAbout(menuAsset)}
-							className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							ask about this asset
 						</button>
@@ -475,7 +475,7 @@ export function LibraryScreen() {
 							<button
 								type="button"
 								onClick={() => openSource(menuAsset)}
-								className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+								className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 							>
 								open source conversation
 							</button>
@@ -483,21 +483,21 @@ export function LibraryScreen() {
 						<button
 							type="button"
 							onClick={() => void patchFavorite(menuAsset)}
-							className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							{menuAsset.favorite ? "remove from favorites" : "add to favorites"}
 						</button>
 						<a
 							href={libraryBytesUrl(menuAsset.id, true)}
 							onClick={() => setMenuAsset(null)}
-							className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							download
 						</a>
 						<button
 							type="button"
 							onClick={() => void copyId(menuAsset)}
-							className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							copy asset id
 						</button>

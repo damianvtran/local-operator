@@ -42,6 +42,7 @@ function renderInline(text: string): ReactNode[] {
 			out.push(
 				<code
 					key={key()}
+					dir="ltr"
 					className="rounded-xs bg-sunken px-0.5 font-mono text-mono-sm"
 				>
 					{code.slice(1, -1)}
@@ -262,6 +263,7 @@ export function Markdown({ text }: { text: string }) {
 							   pushing the chat sideways. */
 							<pre
 								key={key()}
+								dir="ltr"
 								className="lo-scroll max-w-full overflow-x-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre"
 							>
 								{b.lines.join("\n")}
@@ -282,7 +284,7 @@ export function Markdown({ text }: { text: string }) {
 						);
 					case "ul":
 						return (
-							<ul key={key()} className="flex list-disc flex-col gap-0.5 pl-5">
+							<ul key={key()} className="flex list-disc flex-col gap-0.5 ps-5">
 								{b.lines.map((li) => (
 									<li key={key()}>{renderInline(li)}</li>
 								))}
@@ -292,7 +294,7 @@ export function Markdown({ text }: { text: string }) {
 						return (
 							<ol
 								key={key()}
-								className="flex list-decimal flex-col gap-0.5 pl-5"
+								className="flex list-decimal flex-col gap-0.5 ps-5"
 							>
 								{b.lines.map((li) => (
 									<li key={key()}>{renderInline(li)}</li>
@@ -303,7 +305,7 @@ export function Markdown({ text }: { text: string }) {
 						return (
 							<div
 								key={key()}
-								className="border-l-2 border-control pl-3 text-ink-muted"
+								className="border-s-2 border-control ps-3 text-ink-muted"
 							>
 								{b.lines.map((q) => (
 									<div key={key()}>{renderInline(q)}</div>
@@ -324,7 +326,7 @@ export function Markdown({ text }: { text: string }) {
 											{head.map((cell) => (
 												<th
 													key={key()}
-													className="border-b border-hairline px-2 py-1 text-left font-semibold text-ink"
+													className="border-b border-hairline px-2 py-1 text-start font-semibold text-ink"
 												>
 													{renderInline(cell)}
 												</th>

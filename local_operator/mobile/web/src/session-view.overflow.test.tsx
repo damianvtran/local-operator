@@ -437,7 +437,7 @@ describe("ask card reachability", () => {
 		);
 		// The action row ends clear of the overlay scrollbar's paint band, which
 		// was drawn inside `deny` at gapToContentEdge 0 (D3).
-		expect(approve.parentElement?.parentElement?.className).toContain("pr-1.5");
+		expect(approve.parentElement?.parentElement?.className).toContain("pe-1.5");
 	});
 
 	it("pins the stale-tap error outside the scroller, where it cannot land below the fold", async () => {
@@ -511,7 +511,7 @@ describe("ask card reachability", () => {
 		expect(scroller.contains(input as HTMLElement)).toBe(false);
 		// ...and they stay together, or one could move without the other.
 		expect(send.parentElement).toBe(input?.parentElement);
-		expect(send.parentElement?.parentElement?.className).toContain("pr-1.5");
+		expect(send.parentElement?.parentElement?.className).toContain("pe-1.5");
 	});
 });
 

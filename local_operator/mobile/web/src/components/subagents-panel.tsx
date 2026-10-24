@@ -72,7 +72,7 @@ export function AgentRow({
 					`/s/${encodeURIComponent(sessionId)}/a/${encodeURIComponent(agent.job_id)}`,
 				);
 			}}
-			className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-left active:bg-elevated"
+			className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-start active:bg-elevated"
 		>
 			<span
 				className={cn(

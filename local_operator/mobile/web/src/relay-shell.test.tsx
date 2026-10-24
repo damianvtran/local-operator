@@ -21,9 +21,23 @@
  * design QA for the relay SPA is intentionally blocked from this session (the
  * browser tool cannot reach a live host here) and is tracked separately.
  */
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { messageRuntime, useLocaleSnapshot } from "./store";
+import { messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
+import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+
+class FakeEventSource {
+	static instances: FakeEventSource[] = [];
+	onopen: (() => void) | null = null;
+	onerror: (() => void) | null = null;
+	listeners = new Map<string, (event: MessageEvent) => void>();
+	closed = false;
+	constructor(readonly url: string) { FakeEventSource.instances.push(this); }
+	addEventListener(name: string, listener: EventListenerOrEventListenerObject) {
+		this.listeners.set(name, listener as (event: MessageEvent) => void);
+	}
+	close() { this.closed = true; }
+}
 
 /** The exact copy the shell hardcoded BEFORE this slice (the identity target). */
 const BEFORE = {
@@ -49,12 +63,13 @@ describe("relay.shell extraction", () => {
 		}
 	});
 
-	it("keeps the document EN/LTR under a French backend, because the copy is English", () => {
+	it("follows the actual owned-copy language, not the backend preference", () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-		// language (uiLocale), not the backend preference. With only an English
-		// owned bundle, a French backend still paints EN/LTR.
+		// language (uiLocale), not the backend preference. French has no owned
+		// relay bundle, so it still paints EN/LTR; Urdu's audited relay bundle is
+		// shipped, so an Urdu backend paints ur/RTL.
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
-		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		expect(result.current.uiLocale).toBe("en");
 		expect(result.current.direction).toBe("ltr");
@@ -88,5 +103,50 @@ describe("relay.shell extraction", () => {
 		expect(after).toBeGreaterThan(before);
 		expect(result.current.backendLocale).toBeNull(); // untouched: not a wire change
 		unmount();
+	});
+
+	it("switches the real document en→ur→en only after every owned synthetic bundle is complete", async () => {
+		// These values are fixtures, not Urdu translations. They exercise the same
+		// generated manifest, registration, config event and root metadata path.
+		vi.stubGlobal("EventSource", FakeEventSource);
+		vi.stubGlobal("fetch", vi.fn(async () => ({
+			ok: true,
+			status: 200,
+			headers: new Headers({ "content-type": "text/event-stream" }),
+			body: { cancel: vi.fn() },
+		})));
+		const englishBefore = messageRuntime.t("relay.shell.list.empty");
+		for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
+			const english = locales.en;
+			expect(english).toBeTruthy();
+			messageRuntime.registerBundle(namespace, "ur", Object.fromEntries(
+				Object.keys(english).map(key => [key, `UR-FIXTURE ${key}`]),
+			));
+		}
+		const { result, unmount } = renderHook(() => useLocaleSnapshot());
+		const release = retainConfigStream();
+		await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+		const source = FakeEventSource.instances.at(-1)!;
+		const emit = (language: string) => act(() => {
+			source.listeners.get("config")?.({ data: JSON.stringify({ changed_keys: ["language"], language }) } as MessageEvent);
+		});
+		try {
+			emit("ur");
+			expect(result.current).toMatchObject({ backendLocale: "ur", uiLocale: "ur", direction: "rtl" });
+			expect(document.documentElement.lang).toBe("ur");
+			expect(document.documentElement.dir).toBe("rtl");
+			expect(messageRuntime.t("relay.shell.list.empty")).toBe("UR-FIXTURE relay.shell.list.empty");
+			emit("en");
+			expect(result.current).toMatchObject({ backendLocale: "en", uiLocale: "en", direction: "ltr" });
+			expect(document.documentElement.lang).toBe("en");
+			expect(document.documentElement.dir).toBe("ltr");
+			expect(messageRuntime.t("relay.shell.list.empty")).toBe(englishBefore);
+		} finally {
+			emit("en");
+			release();
+			unmount();
+			messageRuntime.registerBundle("relay.shell", "en", { ...BEFORE });
+			FakeEventSource.instances = [];
+		}
 	});
 });

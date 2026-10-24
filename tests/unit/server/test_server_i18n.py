@@ -264,7 +264,7 @@ async def test_a_shipped_locale_with_no_wire_files_is_an_empty_bundle(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("locale", ["ur", "zh-CN"])
+@pytest.mark.parametrize("locale", ["zh-CN"])
 async def test_an_unshipped_locale_bundle_is_404(test_app_client, locale: str) -> None:
     # Zero-file locales must not answer 200-empty: eligibility is the same
     # gate the per-namespace route applies, before any disk work.

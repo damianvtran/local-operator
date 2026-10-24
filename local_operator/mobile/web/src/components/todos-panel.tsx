@@ -161,9 +161,9 @@ export function TodosPanel({
 			>
 				{headerless
 					? todos[0].items.map((t, i) => (
-							/* pl-5 aligns items with the panel gutter, same as
+							/* ps-5 aligns items with the panel gutter, same as
 							   the pre-phase flat list. */
-							<div key={i} className="pl-5">
+							<div key={i} className="ps-5">
 								<TodoRow t={t} />
 							</div>
 						))
@@ -177,22 +177,22 @@ export function TodosPanel({
 									   own `tasks n/n` summary text column, not the
 									   panel's left edge (D2). The summary sits
 									   after the chevron (`w-4`) + `gap-1` = 20px,
-									   i.e. `pl-5`; at `pl-1` the header poked out
+									   i.e. `ps-5`; at `ps-1` the header poked out
 									   LEFT of the control that owns it while items
 									   aligned under the summary, so the group read
 									   as floating outside the panel. Header at
-									   `pl-5` nests it under the summary; items sit
-									   one step deeper (`pl-7`) so they read as
+									   `ps-5` nests it under the summary; items sit
+									   one step deeper (`ps-7`) so they read as
 									   belonging to the phase, not as siblings of
 									   its header. */}
-									<div className="pl-5 pt-1 text-body-sm text-ink-muted">
+									<div className="ps-5 pt-1 text-body-sm text-ink-muted">
 										{phase.name}{" "}
 										<span className="font-mono text-mono-sm text-ink-dim">
 											{phaseDone}/{phase.items.length}
 										</span>
 									</div>
 									{phase.items.map((t, i) => (
-										<div key={i} className="pl-7">
+										<div key={i} className="ps-7">
 											<TodoRow t={t} />
 										</div>
 									))}

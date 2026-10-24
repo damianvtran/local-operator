@@ -115,6 +115,28 @@ def test_bundled_spa_module_is_empty_when_no_owned_namespace_is_present(
     assert "relay.login" not in shell_bundle and "wire." not in shell_bundle
 
 
+def test_bundled_spa_module_emits_only_shipped_localized_owned_copy(
+    generated, i18n_generate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audited locale files become namespace/locale bundles; held bytes do not.
+
+    The synthetic Urdu text is a generation fixture, not a translation or an
+    audit. An unshipped locale beside it must not leak into the client package.
+    """
+    root, emitted = generated
+    monkeypatch.setattr(i18n_generate, "_shipped_locales", lambda: ("en", "ur"))
+    for locale, text in (("en", "English"), ("ur", "اردو"), ("fr", "Français")):
+        target = root / locale
+        target.mkdir(exist_ok=True)
+        (target / "relay.shell.json").write_text(json.dumps({"relay.shell.list.empty": text}))
+    planned = i18n_generate._planned_files(emitted)
+    bundle = planned[i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"]
+    assert bundle.index('"relay.shell": {') < bundle.index('"en": {')
+    assert bundle.index('"en": {') < bundle.index('"ur": {')
+    assert json.dumps("اردو") in bundle
+    assert json.dumps("Français") not in bundle
+
+
 def test_committed_bundle_carries_exactly_the_owned_shell_namespace() -> None:
     """Drift/ownership pin against the COMMITTED tree (not a fixture).
 

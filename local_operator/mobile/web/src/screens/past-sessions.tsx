@@ -78,7 +78,7 @@ export function PastSessionsScreen() {
 					aria-label={messageRuntime.t("relay.session.past.back")}
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
-					‹
+					<span aria-hidden className="lo-directional">‹</span>
 				</button>
 				<h1 className="text-heading">{messageRuntime.t("relay.session.past.heading")}</h1>
 			</header>
@@ -131,18 +131,18 @@ export function PastSessionsScreen() {
 									   title is kept beside it because it is the only
 									   thing saying what this branched from. */}
 									{s.forked ? (
-										<span className="mr-1.5 text-meta text-ink-dim">
+										<span className="me-1.5 text-meta text-ink-dim">
 											[fork]
 										</span>
 									) : null}
 									{s.name || "untitled"}
 									{s.body_match ? (
-										<span className="ml-1.5 text-meta text-info">
+										<span className="ms-1.5 text-meta text-info">
 											in conversation
 										</span>
 									) : null}
 								</span>
-								<span className="block truncate font-mono text-mono-sm text-ink-dim">
+								<span dir="ltr" className="block truncate font-mono text-mono-sm text-ink-dim">
 									{s.id}
 								</span>
 								{/* The same static tag line the live list carries, and

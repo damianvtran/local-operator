@@ -357,7 +357,7 @@ export function SessionTagsSheet({
 										    56px cell spills left across the 44px radio column; min-w-14 is
 										    a floor and whitespace-nowrap lets the cell take its max-content
 										    width while the flex-1 tag label absorbs the difference. */}
-										<span className="min-w-14 shrink-0 whitespace-nowrap text-right text-meta text-ink-dim">
+										<span className="min-w-14 shrink-0 whitespace-nowrap text-end text-meta text-ink-dim">
 											{rowPending
 												? messageRuntime.t("relay.session.tags.saving")
 												: ""}
@@ -402,7 +402,7 @@ export function SessionTagsSheet({
 					<button
 						type="button"
 						onClick={onClose}
-						className="ml-auto min-h-11 rounded-sm border border-control bg-surface px-4 text-body-sm text-ink active:bg-accent-wash"
+						className="ms-auto min-h-11 rounded-sm border border-control bg-surface px-4 text-body-sm text-ink active:bg-accent-wash"
 					>
 						{messageRuntime.t("relay.session.tags.done")}
 					</button>

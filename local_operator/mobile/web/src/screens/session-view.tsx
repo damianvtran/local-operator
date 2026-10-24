@@ -219,7 +219,7 @@ function Header({
 				aria-label={messageRuntime.t("relay.session.view.back")}
 				className={cn(HEADER_CONTROL, "text-ink-muted")}
 			>
-				‹
+				<span aria-hidden className="lo-directional">‹</span>
 			</button>
 			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
@@ -758,7 +758,7 @@ export function SessionScreen({
 							aria-label={messageRuntime.t("relay.session.view.back")}
 							className={cn(HEADER_CONTROL, "text-ink-muted")}
 						>
-							‹
+							<span aria-hidden className="lo-directional">‹</span>
 						</button>
 						{/* The title's own slot, empty: `truncate` + `flex-1` in a row whose
 						    height is set by the control beside it. */}

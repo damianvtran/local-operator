@@ -184,10 +184,10 @@ function QuestionField({
 						}}
 						aria-pressed={on}
 						className={cn(
-							"flex min-h-11 flex-col justify-center rounded-sm border border-l-2 px-3 py-2 text-left",
+							"flex min-h-11 flex-col justify-center rounded-sm border border-s-2 px-3 py-2 text-start",
 							on
-								? "border-accent border-l-accent bg-accent-wash"
-								: "border-control border-l-accent bg-elevated active:bg-accent-wash",
+								? "border-accent border-s-accent bg-accent-wash"
+								: "border-control border-s-accent bg-elevated active:bg-accent-wash",
 							"disabled:opacity-50",
 						)}
 					>
@@ -748,7 +748,7 @@ export function AskCard({
 											}
 											onClick={() => dismiss(reason)}
 											className={cn(
-												"flex w-full flex-col items-start gap-0.5 rounded-sm border border-control px-3 py-2 text-left active:bg-elevated disabled:opacity-50",
+												"flex w-full flex-col items-start gap-0.5 rounded-sm border border-control px-3 py-2 text-start active:bg-elevated disabled:opacity-50",
 												sentReason === reason && busy === "dismiss"
 													? "text-ink"
 													: "text-ink-muted",

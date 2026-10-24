@@ -259,7 +259,7 @@ export function Sheet({
 			/>
 			<div
 				className={cn(
-					"lo-sheet-panel absolute right-0 bottom-0 left-0",
+					"lo-sheet-panel absolute inset-x-0 bottom-0",
 					"flex flex-col rounded-t-lg border-t border-control bg-elevated shadow-overlay",
 					/* The panel clears the home indicator; content sits above it. */
 					"pb-[env(safe-area-inset-bottom)]",

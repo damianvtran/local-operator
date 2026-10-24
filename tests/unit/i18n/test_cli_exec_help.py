@@ -191,7 +191,7 @@ def test_bootstrap_kill_switch_and_eligibility(tmp_path, monkeypatch):
         ("ru", "ru"),
         ("vi", "vi"),
         ("hi", "hi"),
-        ("ur", "en"),
+        ("ur", "ur"),
         ("zh-CN", "en"),
         ("unknown", "en"),
     ],
