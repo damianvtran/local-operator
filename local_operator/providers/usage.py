@@ -122,6 +122,13 @@ ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OPENAI_WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
 #: Kimi coding-plan usage (OAuth).
+#:
+#: The .com API host is deliberately NOT split alongside the OAuth hosts: a
+#: kimi.ai login only changes the IdP that mints the grant, not where the
+#: coding plan is served. Measured 2026-10-24 with a stored overseas grant
+#: (JWT region=overseas): /coding/v1/usages on api.kimi.com AND api.kimi.ai
+#: both answered 200 with the same quota window, and the .com host accepted the
+#: .ai-issued grant. See providers/registry.py ``oauth_base_url``.
 KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
 
 #: Moonshot/Kimi account balance, reachable with the PLAIN API key the registry

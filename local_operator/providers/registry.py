@@ -570,6 +570,40 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # path: it is where the subscription's models live (`k3`, `k3-256k`,
         # `kimi-for-coding`), and the mainland host rejects the OAuth bearer
         # with 401 "Invalid Authentication". Confirmed live against both hosts.
+        #
+        # 2026-10-24: a stored overseas grant (JWT region=overseas) was called
+        # against api.kimi.com/coding/v1 AND api.kimi.ai/coding/v1 — /models and
+        # /usages on both — and every call answered 200 with an identical first
+        # model and an identical quota window. The .ai login host therefore
+        # needs no .ai API variant: .com accepts the grant for inference. Only
+        # the OAuth host is region-specific; see providers/oauth/kimi.py.
+        oauth_base_url="https://api.kimi.com/coding/v1",
+    ),
+    ProviderDefinition(
+        id="kimi-wechat",
+        search_aliases=(
+            "kimi-cn",
+            "moonshot-cn",
+            "wechat",
+        ),
+        name="Kimi (WeChat sign-in)",
+        brand="Kimi WeChat",
+        # The SAME two login entries are alternative sign-ins for ONE Kimi
+        # credential: `store_credentials_as="kimi"` puts the row in kimi's
+        # slot, and auth_store._identity_key_for dedupes OAuth payloads to
+        # `oauth:kimi`. Signing in here replaces a kimi.ai row (and vice versa)
+        # rather than adding a second account; the login that ran last records
+        # its `auth_host`, which is what refresh then follows.
+        #
+        # Deliberately no `refresh_token`: the STORAGE id (`kimi`) owns the
+        # refresh callable, and auth_store._refresh_fn resolves that first. A
+        # second path here would be a fork of refresh semantics (host
+        # recording, legacy default, discovery) that could drift.
+        login=_lazy_login("local_operator.providers.oauth.kimi", "login_kimi_wechat"),
+        get_api_key=_oauth_api_key,
+        store_credentials_as="kimi",
+        env_keys="KIMI_API_KEY",
+        base_url="https://api.moonshot.cn/v1",
         oauth_base_url="https://api.kimi.com/coding/v1",
     ),
     ProviderDefinition(
