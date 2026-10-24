@@ -56,6 +56,7 @@ from typing import Any, Mapping, Protocol
 from local_operator.team_bridge.client import (
     SCREENING_TEMPLATES,
     SCREENING_VERSION_V1,
+    SCREENING_VERSION_V3,
     screening_template_sha256,
 )
 from local_operator.team_bridge.store import Store, StoreRefused
@@ -129,7 +130,11 @@ _MAX_REASON_CHARS = 200
 _NONCE_BYTES = 16
 _VERDICT_LINE = re.compile(r"^VERDICT: (deliver|hold|bounce)$")
 _REASON_LINE = re.compile(r"^REASON: (\S.*)$")
-_PLACEHOLDER = re.compile(r"\{\{(nonce|body|sender|organization|type)\}\}")
+_PLACEHOLDER = re.compile(r"\{\{(nonce|body|sender|organization|type|attachments)\}\}")
+#: The hub's per-message image bound; a carrier claiming more is malformed.
+_ATTACHMENTS_MAX = 4
+_ATTACHMENT_MIMES = ("image/png", "image/jpeg")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ScreeningPolicy(Protocol):
@@ -229,6 +234,19 @@ class ScreenResult:
     hold_code: str | None = None
     retry_at: float | None = None
     screened_bytes: int | None = None
+    #: The image set this verdict SAW, or ``None`` when no image reached the
+    #: screener. Only a deliver carrying it may admit images (the connector
+    #: sends it as ``attachments_hash`` with the v3 template hash); every
+    #: text-only verdict leaves it ``None``, so the images stay withheld.
+    attachments_hash: str | None = None
+    #: The template that ACTUALLY rendered this screen (review R1-07). The
+    #: stored receipt keeps the served policy's template because every store
+    #: fence compares receipt == policy; for an image envelope the render is
+    #: v3, and this is where that fact is carried to the connector's outcome
+    #: (the hub's admission row records the v3 hash durably). ``None`` for a
+    #: cache hit, which rendered nothing.
+    rendered_version: str | None = None
+    rendered_template_sha256: str | None = None
 
     def __post_init__(self) -> None:
         self._private_reason: str | None = None
@@ -260,6 +278,62 @@ def _body_sha256_bytes(body_bytes: bytes) -> str:
 
 
 @dataclass(frozen=True)
+class ScreeningImage:
+    """One image attachment as the SCREENER sees it — metadata public, bytes private.
+
+    ``mime``/``width``/``height`` are the HUB's sniffed metadata and are the
+    only values the listing line renders: never a filename, id or hash (the
+    v3 template's contract). The bytes are the screen-purpose fetch, already
+    verified against the bound sha256 and bounded for a model; they live on a
+    private attribute so ``repr``/``asdict``/JSON can never export them, and
+    their ONLY reader is the isolated screening dispatch.
+    """
+
+    mime: str
+    width: int
+    height: int
+
+    def private_payload(self) -> tuple[bytes, str]:
+        """``(bounded_bytes, wire_mime)`` for the single screening dispatch."""
+
+        return self._private_payload  # type: ignore[attr-defined]
+
+
+def screening_image(
+    mime: str, width: int, height: int, payload: bytes, wire_mime: str
+) -> ScreeningImage:
+    """Build a :class:`ScreeningImage` with its bytes on the private carrier."""
+
+    image = ScreeningImage(mime=mime, width=width, height=height)
+    object.__setattr__(image, "_private_payload", (bytes(payload), wire_mime))
+    return image
+
+
+@dataclass(frozen=True)
+class ScreeningAttachments:
+    """A message's verified image set, riding the item as ``item["attachments"]``.
+
+    ``attachments_hash`` is the hub's binding over the exact set (recomputed
+    and checked by the connector before this object exists). It joins the
+    envelope digest, so a verdict reached WITHOUT these images — a text-only
+    screen of the same body — can never be reused as an image admission, and
+    one image set's verdict never covers another.
+    """
+
+    attachments_hash: str
+    images: tuple[ScreeningImage, ...]
+
+    def listing(self) -> str:
+        """The v3 ``{{attachments}}`` line: count, type and size of each image."""
+
+        parts = "; ".join(
+            f"{index}: {image.mime} {image.width}x{image.height}"
+            for index, image in enumerate(self.images, start=1)
+        )
+        return f"Images: {len(self.images)} ({parts})"
+
+
+@dataclass(frozen=True)
 class Envelope:
     """Validated, bounded admission input derived from the fetched item.
 
@@ -280,6 +354,15 @@ class Envelope:
     organization: str
     delivery_state: str | None
     envelope_digest: str
+    #: The verified image set's binding hash, or ``None`` for a text-only
+    #: envelope. Public (a hash, not content); the images themselves ride the
+    #: private carrier read by :meth:`private_images`.
+    attachments_hash: str | None = None
+
+    def private_images(self) -> ScreeningAttachments | None:
+        """The image set for the single dispatch, or ``None`` (text-only)."""
+
+        return getattr(self, "_private_images", None)
 
     def private_body(self) -> str:
         """The raw body: a PRIVATE carrier, never a dataclass field (H3-Q7).
@@ -427,6 +510,32 @@ def validate_envelope(
         if len(type_label) > _TYPE_LABEL_MAX:
             return None, "size_exceeded"
 
+    # Image attachments: ONLY the typed carrier the connector builds after
+    # verifying every image against the hub's binding. A raw mapping/list here
+    # is a caller asserting images it did not verify, and refuses.
+    attachments: ScreeningAttachments | None = None
+    if "attachments" in item:
+        raw_attachments = item.get("attachments")
+        if (
+            not isinstance(raw_attachments, ScreeningAttachments)
+            or not raw_attachments.images
+            or len(raw_attachments.images) > _ATTACHMENTS_MAX
+            or not _SHA256_HEX.fullmatch(raw_attachments.attachments_hash)
+            or any(
+                not isinstance(image, ScreeningImage)
+                or image.mime not in _ATTACHMENT_MIMES
+                or isinstance(image.width, bool)
+                or isinstance(image.height, bool)
+                or not isinstance(image.width, int)
+                or not isinstance(image.height, int)
+                or image.width <= 0
+                or image.height <= 0
+                for image in raw_attachments.images
+            )
+        ):
+            return None, "envelope_malformed"
+        attachments = raw_attachments
+
     digest_payload = json.dumps(
         {
             "sender": sender_account,
@@ -437,6 +546,18 @@ def validate_envelope(
             "organization": organization,
             "type": message_type,
             "request": request_canonical,
+            # Present ONLY for an image envelope, so every text-only digest
+            # (and every cached text-only receipt) is byte-identical to the
+            # pre-attachment build, while an image envelope can never share a
+            # digest with the text-only screen of the same body.
+            **(
+                {
+                    "attachments_hash": attachments.attachments_hash,
+                    "attachments": attachments.listing(),
+                }
+                if attachments is not None
+                else {}
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -451,9 +572,12 @@ def validate_envelope(
         organization=organization,
         delivery_state=delivery_state,
         envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
+        attachments_hash=attachments.attachments_hash if attachments is not None else None,
     )
     # Private carrier: never a field, so repr/asdict/JSON stay content-free.
     object.__setattr__(envelope, "_private_body", body_text)
+    if attachments is not None:
+        object.__setattr__(envelope, "_private_images", attachments)
     return envelope, None
 
 
@@ -465,6 +589,7 @@ def render_prompt(
     msg_type: str,
     nonce: str | None = None,
     version: str = SCREENING_VERSION_V1,
+    attachments: str | None = None,
 ) -> RenderedPrompt:
     """Single-pass substitution over an EMBEDDED template — the ONLY renderer.
 
@@ -478,18 +603,30 @@ def render_prompt(
     contains ``{{nonce}}`` (or an imitated closing tag) stays inert data.
     The template's three nonce occurrences are asserted, so a future template
     edit cannot silently change the delimiter contract.
+
+    ``attachments`` is the v3 listing line and is required EXACTLY when the
+    selected template has the ``{{attachments}}`` slot: an image envelope can
+    never render through a template that does not tell the screener images
+    follow, and a text-only template never silently drops a listing.
     """
 
     template = SCREENING_TEMPLATES.get(version)
     if template is None:
         raise ValueError(f"no embedded screening template for version {version!r}")
     token = nonce if nonce is not None else secrets.token_hex(_NONCE_BYTES)
+    has_slot = "{{attachments}}" in template
+    if has_slot != (attachments is not None):
+        raise ValueError("attachments listing and template slot must match")
     values = {
         "sender": sender,
         "organization": organization,
         "type": msg_type,
         "body": body_text,
     }
+    if attachments is not None:
+        if template.count("{{attachments}}") != 1:
+            raise ValueError("embedded template delimiter contract changed")
+        values["attachments"] = attachments
     for name, value in values.items():
         if token in value:
             # A forged nonce literal inside untrusted data would let the
@@ -936,6 +1073,9 @@ async def _screen_core(
                 disposition,
                 receipt=receipt,
                 screened_bytes=len(envelope.private_body().encode("utf-8")),
+                # The cache key includes the envelope digest, which binds the
+                # image set: a hit here IS a prior screen of these images.
+                attachments_hash=envelope.attachments_hash,
             )
 
     # 7. Account breaker: an open breaker is a hold with its own retry time,
@@ -1059,6 +1199,7 @@ async def _screen_core(
 
     # 10. Fresh nonce render. A polluted token or a changed delimiter
     #     contract refuses; regeneration is bounded (H3 hostile-input control).
+    images = envelope.private_images()
     rendered: RenderedPrompt | None = None
     for _ in range(8):
         try:
@@ -1068,7 +1209,14 @@ async def _screen_core(
                 organization=envelope.organization,
                 msg_type=envelope.type_label,
                 nonce=nonce,
-                version=snapshot.screening_version,
+                # An image envelope ALWAYS renders under v3 — the only
+                # embedded template whose wrapper tells the screener that
+                # the images which follow are submission data. The served
+                # policy (v1/v2) still governs the text-only path and the
+                # local policy/receipt binding; the image set is bound by
+                # the envelope digest instead (see validate_envelope).
+                version=SCREENING_VERSION_V3 if images is not None else snapshot.screening_version,
+                attachments=images.listing() if images is not None else None,
             )
             break
         except ValueError:
@@ -1095,7 +1243,14 @@ async def _screen_core(
     #     running under a lease a successor now holds (fencing, not luck).
     lost = {"flag": False}
     try:
-        outcome = _invoke_runner(runner, rendered.private_text(), snapshot.default_model)
+        outcome = _invoke_runner(
+            runner,
+            rendered.private_text(),
+            snapshot.default_model,
+            images=(
+                [image.private_payload() for image in images.images] if images is not None else None
+            ),
+        )
         if inspect.isawaitable(outcome):
             dispatch = asyncio.ensure_future(_maybe_await(outcome))
             keepalive = asyncio.ensure_future(_keep_turn_alive(store, owner, turn, dispatch, lost))
@@ -1189,7 +1344,14 @@ async def _screen_core(
         verdict="allow" if disposition == "deliver" else "reject",
         model=actual_model,
         prompt_version=snapshot.screening_version,
-        template_sha256=rendered.template_sha256,
+        # The LOCAL receipt binds the served policy's template (the store
+        # fences receipts, jobs and cache hits on policy == receipt template).
+        # For an image envelope the rendered template is v3 by construction
+        # and the image set is bound through the envelope digest; the v3 hash
+        # the hub requires is added by the connector at admit time. Text-only
+        # envelopes render the policy template, so this equals
+        # ``rendered.template_sha256`` exactly as before.
+        template_sha256=snapshot.template_sha256,
         body_sha256=envelope.body_sha256,
         categories=categories,
     )
@@ -1217,6 +1379,9 @@ async def _screen_core(
         disposition,
         receipt=receipt,
         screened_bytes=rendered.screened_bytes,
+        attachments_hash=envelope.attachments_hash,
+        rendered_version=SCREENING_VERSION_V3 if images is not None else snapshot.screening_version,
+        rendered_template_sha256=rendered.template_sha256,
     ).set_private_reason(reason)
 
 
@@ -1300,7 +1465,13 @@ async def _keep_turn_alive(
             return
 
 
-def _invoke_runner(runner: Any, prompt: str, default_model: str) -> Any:
+def _invoke_runner(
+    runner: Any,
+    prompt: str,
+    default_model: str,
+    *,
+    images: "list[tuple[bytes, str]] | None" = None,
+) -> Any:
     """Call the runner through its PUBLIC async interface when it has one.
 
     The production runner is a ScreenModelRunner whose sync ``__call__``
@@ -1310,10 +1481,16 @@ def _invoke_runner(runner: Any, prompt: str, default_model: str) -> Any:
     are awaited through ``_maybe_await``.
     """
 
+    # ``images`` is passed ONLY when present, so every text-only runner —
+    # including fixtures that predate attachments — keeps its exact signature;
+    # an image screen against a runner that cannot take images raises
+    # TypeError, which the dispatch site turns into a typed hold, never a
+    # silent text-only allow of an image message.
+    extra: dict[str, Any] = {"images": images} if images is not None else {}
     acall = getattr(runner, "acall", None)
     if callable(acall):
-        return acall(prompt, default_model=default_model)
-    return runner(prompt, default_model=default_model)
+        return acall(prompt, default_model=default_model, **extra)
+    return runner(prompt, default_model=default_model, **extra)
 
 
 async def _maybe_await(value: Any) -> Any:

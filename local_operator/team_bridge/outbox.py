@@ -24,8 +24,10 @@ DDL is not repair), and only then is the table created.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -259,13 +261,32 @@ async def send_from_outbox(
         # attempt replays this row's client_ref.
         raise
     except BridgeRefusal as refusal:
+        if refusal.code == "bridge_invalid_response":
+            # The shared client refuses a missing/non-mapping result before
+            # this send-specific boundary sees it. That is still an unknown
+            # send outcome, not a server verdict: preserve the frozen intent.
+            raise OutboxRefused("send_receipt_invalid", "send_receipt_invalid") from None
         # A server refusal is a verdict, not a transport hiccup: settle the
         # intent so the retry pool never re-sends a rejected request.
         outbox.refuse(intent.intent_id, refusal.code)
         raise
-    message = body.get("message") if isinstance(body, dict) else None
-    message_id = str((message or {}).get("id") or "") or None
-    outbox.confirm(intent.intent_id, message_id or "")
+    # A 2xx envelope alone does not prove which legacy message was accepted.
+    # Validate at this send-specific settlement boundary, not the generic
+    # envelope parser shared by other operations. Reuse the existing legacy ID
+    # grammar rather than coercing a missing/numeric/canonical-conversation ID.
+    # Import locally: read_context owns that grammar but has read-path imports
+    # that must not widen the outbox's module-import surface.
+    from .read_context import MESSAGE_ID_PATTERN
+
+    message = body.get("message") if isinstance(body, Mapping) else None
+    message_id = message.get("id") if isinstance(message, Mapping) else None
+    if not isinstance(message_id, str) or re.fullmatch(MESSAGE_ID_PATTERN, message_id) is None:
+        # This is NOT a definitive server refusal. The original send may have
+        # committed, so keep the frozen intent pending with its original ref
+        # and body. Outside the BridgeRefusal catch above, no terminal state is
+        # written; the fixed code carries no server text or body into errors.
+        raise OutboxRefused("send_receipt_invalid", "send_receipt_invalid")
+    outbox.confirm(intent.intent_id, message_id)
     return body
 
 

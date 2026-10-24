@@ -38,6 +38,15 @@ from typing import Any
 
 from local_operator.redaction_shapes import scrub_shapes
 
+#: Tool identities whose results are PUBLIC COPY by policy and therefore must
+#: reach the model verbatim. This is deliberately a set of TOOL NAMES, never a
+#: flag a caller can supply: ``read_public_copy`` validates its own path against
+#: an allowlist and records every read, so the exemption cannot be borrowed by
+#: ``bash``/``read``/``grep`` or turned on for an arbitrary call. The policy that
+#: defines the allowlist and the audit duty is
+#: ``docs/security/redaction-policy.md``.
+PUBLIC_COPY_TOOLS: frozenset[str] = frozenset({"read_public_copy"})
+
 #: ``(tool name, one-line argument summary)`` for the call whose result is being
 #: redacted. Empty when nothing published one, which is the honest answer for a
 #: hook called from a test or from a surface that has no call in hand.

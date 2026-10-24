@@ -586,6 +586,14 @@ def test_run_login_passes_the_result_shape_as_the_flavour(
     from local_operator.providers.auth_store import AuthStore
 
     async def login(_callbacks, **_kwargs):
+        if oauth:
+            # Radient now requires the actual exchange/profile completion,
+            # not an ordinary OAuth-looking dictionary, before defaults move.
+            from tests.unit.providers.test_radient_account_retention import (
+                _verified_login_result,
+            )
+
+            return await _verified_login_result(signal=_kwargs.get("signal"))
         return result
 
     definition = registry.get_provider_definition("radient")
@@ -595,6 +603,7 @@ def test_run_login_passes_the_result_shape_as_the_flavour(
     monkeypatch.setattr(
         auth_cli, "_apply_login_defaults", lambda pid, *, oauth=None: seen.append((pid, oauth))
     )
+    monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *args, **kwargs: None)
     store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
     try:
         assert auth_cli.run_login("radient", tmp_path, store) == 0

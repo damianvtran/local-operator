@@ -1,0 +1,107 @@
+{
+  "old_commit": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+  "new_commit": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "changed_namespaces": [
+    {
+      "namespace": "wire.errors.settings",
+      "namespace_total_keys": 12,
+      "changed_key_count": 1,
+      "changed_keys": [
+        "wire.errors.settings.inline_credentials"
+      ],
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "e5a010a1dbe5698c96b92d35f616e7dfc557c801b5e1eca1a6c84a543b92c91e",
+      "context_sha256": null,
+      "key_set_parity": true
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "namespace_total_keys": 43,
+      "changed_key_count": 1,
+      "changed_keys": [
+        "wire.remote_compute.finished_exit_code"
+      ],
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "836d3410761ea771d3201602418322a8577b98681dbc946d590f9a8d48c6e509",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "key_set_parity": true
+    },
+    {
+      "namespace": "wire.settings",
+      "namespace_total_keys": 818,
+      "changed_key_count": 16,
+      "changed_keys": [
+        "wire.settings.compaction_wire_bytes_trigger.label",
+        "wire.settings.display_rail.help",
+        "wire.settings.network_audit_max_bytes.help",
+        "wire.settings.proactive.description",
+        "wire.settings.remote_compute.description",
+        "wire.settings.remote_compute_enabled.help",
+        "wire.settings.retry_connectivitybackoffcapms.help",
+        "wire.settings.session_cleanup_max_total_bytes.help",
+        "wire.settings.subagents_max_running.label",
+        "wire.settings.subagents_model_choice.help",
+        "wire.settings.supplements_denyprefixes.help",
+        "wire.settings.supplements_maxcostusd.help",
+        "wire.settings.supplements_timeouts.help",
+        "wire.settings.tui_theme.help",
+        "wire.settings.wakes_triggers_project_staleness_enabled.help",
+        "wire.settings.web_fetch_max_bytes.label"
+      ],
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "0bb60816444bcf86a6c2d93e9c6ee7211fd377dd080e8cb39ae7f7d39ec30840",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "key_set_parity": true
+    },
+    {
+      "namespace": "wire.slash",
+      "namespace_total_keys": 52,
+      "changed_key_count": 1,
+      "changed_keys": [
+        "wire.slash.hub"
+      ],
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "e1897b69d355d05d44dd6761affb866749fa431630234421dfb31c65141c8cb1",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "key_set_parity": true
+    }
+  ],
+  "changed_key_count": 19,
+  "direct_neighbors": [
+    {
+      "key": "wire.errors.settings.credential_retrieve_failed",
+      "reason": "Established native plural credential noun reused by the redaction remediation."
+    },
+    {
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.label",
+      "reason": "Direct label neighbor for the settled-state trigger help."
+    },
+    {
+      "key": "wire.settings.supplements_denyprefixes.label",
+      "reason": "Direct label neighbor for the neither-listed-nor-sent safety help."
+    },
+    {
+      "key": "wire.settings.subagents_model_choice.choice.operator.label",
+      "reason": "Direct visible choice label for operator terminology."
+    },
+    {
+      "key": "wire.settings.display_rail.label",
+      "reason": "Direct label neighbor for the display-rail factual rule."
+    },
+    {
+      "key": "wire.settings.display_turn_answer_rail.help",
+      "reason": "Direct neighboring rule-drawing help; imperative Draw need not match factual marks."
+    },
+    {
+      "key": "wire.settings.proactive.title",
+      "reason": "Direct section-title neighbor for the proactive settings subject."
+    },
+    {
+      "key": "wire.settings.retry_connectivitymaxretries.help",
+      "reason": "Direct connectivity-retry family neighbor."
+    }
+  ],
+  "direct_neighbor_count": 8,
+  "review_key_count": 27,
+  "english_or_context_delta_files": []
+}

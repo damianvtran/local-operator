@@ -23,20 +23,19 @@ Roster members are the same roles/specialists `/agent` exposes: authoring an age
 
 ## Reuse before you create
 
-A team is a durable roster for a function or product domain, not scaffolding for
-a single task. Check the registry (`team list`) before authoring one: if a
-registered team already covers the work, use it. An existing team is almost
-always the right home, and a parallel one costs a roster to own and maintain
-for one job.
+Check the registry (`team list`) before authoring one: if a registered team
+already covers the work, use it. An existing team is almost always the right
+home, and a parallel one costs a roster to own and maintain for one job.
 
-- **Never create a team ad-hoc for a one-off task** — an investigation, a
-  review, a migration, a release. The domain's existing team covers it: `lopdev`
-  for anything in the local-operator/harness code, the product team for a
-  service, and so on.
-- **New teams are for materially new functions or product domains** with no good
-  existing coverage — a genuinely new product, organisation, or standing
-  responsibility. Unsure whether the bar is cleared? It is not; default to the
-  existing team.
+- **Prefer a conversation-scoped team for a one-time grouping; do not author an
+  account team for a single task.** For an investigation, review, migration or
+  release, use the domain's existing team — `lopdev` for anything in the
+  local-operator/harness code, the product team for a service. That is reuse,
+  not a new team.
+- **An account team is for a materially new function or product domain** with no
+  good existing coverage — a genuinely new product, organisation, or standing
+  responsibility. It is the user's decision. Unsure whether that bar is
+  cleared? It is not; default to the existing team.
 - **To parallelize a one-off, spawn a session, not a team.** Use the `sessions`
   tool with the existing team attached (`team=<name>`) and hand it the brief;
   it runs to completion without the initiator owning a new roster or managing
@@ -44,22 +43,29 @@ for one job.
 
 ## Scope: this conversation or the account
 
-`team(op='create')` with no `scope` authors a CONVERSATION-SCOPED team: the roster
+`team(op='create')` with no `scope` authors a CONVERSATION-SCOPED team where the host has a conversation store: the roster
 and its briefs live in this conversation, usable until it ends, invisible in every
 other one, and removed with it. A fork starts with a COPY of this conversation's
 teams, after which the two sets are independent: editing or deleting one never
-touches the other. Prefer it for a grouping this task needs once. A
-team saved for every conversation is the user's decision — `scope='global'`
-requires their confirmation, and this host may not be able to ask: the refusal
-names the desktop Teams editor, the TUI `/team` form and `lop teams`, plus the
-retry without `scope`. `team_delete` removes a conversation team; an account team
-must be deleted from a user surface, which asks its own confirmation.
+touches the other. A team saved for every conversation is the user's decision —
+`scope='global'` requires their confirmation, and this host may not be able to
+ask: the refusal offers the conversation-only retry (omit `scope`, or use
+`scope='session'`) and, to change the account, names the TUI `/team` form. An
+`update` retry with no `scope` changes nothing — the store of an existing row does
+not move — so that refusal names the TUI `/team` form alone. On a host with no
+conversation store there is no conversation scope: omitting `scope` writes the
+account there. `team_delete` removes a conversation team; an account team must be
+deleted from a user surface, which asks its own confirmation.
 
 A conversation team may roster ACCOUNT roles and specialists: those are not
 copied, and they resolve from the account in every conversation. A conversation
-TEAM nested on another roster does travel with its parent only inside this
-conversation; promoting one to the account is a separate step (not in this
-slice).
+TEAM nested on another roster travels with its parent only inside this
+conversation. When the user asks for that team to be available elsewhere,
+`team(op='promote')` copies it into their account: conversation-scoped members
+are copied in the same call and the receipt names them, and the account copy is
+independent from then on — this conversation keeps its own. Promotion needs the
+user's own confirmation; without it the refusal names only the TUI
+`/team promote <name>` verb, which they must run themselves.
 
 ## When the user asks to create a team
 
@@ -200,9 +206,8 @@ A team OWNS this session's agent slot, so the two identities can never run at on
 - `/team chart <name>` charts that team.
 - `/team chart` (bare) charts the team currently attached to this session, or explains how to name one.
 - `/team chart chart` charts a team literally named `chart` (the second token is the `[name]`).
-- `/team =chart <request>` TALKS to a team named `chart` — a leading `=` on the first token means "literal team name, never a subcommand" (`=` cannot appear in a real team name, so it never collides).
-- `/team clear <anything>` is a mistyped attach (only the bare verb detaches) and is reported as the unknown name it is.
-- The `=` escape covers `chart` only: `clear`/`none` is matched AFTER the escape is stripped (the `/agent =none` precedent), so a team literally named `clear` or `none` cannot be addressed from the first token at all — rename it, or reach it from a session that already has it attached.
+- A leading `=` on the first token means "literal name, never a verb": `/team =chart <request>` talks to a team named `chart` instead of charting it, and `/team =clear` (or `/team =none`) talks to a team literally named `clear`/`none` while the bare word detaches. `=` cannot appear in a validated team name, so the escape can never collide with a real one — which also means a team name starting with `=` cannot exist, and there is no `==` form to reach one. The same grammar holds for `/agent =clear`/`/agent =none`, locally and in an attached session's owner runtime; agent profile names MAY start with `=`, and such a profile is reached by doubling the escape (`/agent ==foo` reaches the profile literally named `=foo`).
+- `/team clear <anything>` is an ordinary attach of a team named `clear` — only the bare verb detaches — so it talks to that team when one exists and otherwise reports `no team named 'clear'`.
 
 Inside the chart: `+`/`-` change zoom tier (outline → standard → detailed), `f` fits to the viewport width (never collapsing past where the members are visible), `e` expands/collapses the whole canvas, `?` toggles a glyph legend (◆ manager, `?` unresolved, `↩` cycle, `⋯` depth-limit, `·N` members, `×N` copies). Arrows scroll a line; `shift+←/→` page horizontally and `PageUp/PageDown` vertically; `Home`/`End` jump to the top-left / bottom-right corner; `Esc` leaves. The chart is wide, so horizontal scroll (the `↔↕` footer hint) is the primary way to reach members off the right edge.
 

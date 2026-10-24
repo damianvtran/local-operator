@@ -1,0 +1,1 @@
+wire.remote_compute.finished_exit_code	ROLE=changed	EN="exit code: {exit_code}"	UR="ایگزٹ کوڈ: {exit_code}"	OLD="خروجی کوڈ: {exit_code}"

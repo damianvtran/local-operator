@@ -106,6 +106,12 @@ def static_feature_flags() -> dict[str, Any]:
         # a conversation-scoped row. A client that predates it keeps the fields it
         # already parsed.
         "profile_scope": 1,
+        # PROMOTION (LOH-9 S4): `POST /v1/desktop/sessions/{session_id}/promote`
+        # copies one conversation-scoped role or team into the account. Its own key
+        # beside `profile_scope`, by the rule below: a renderer that does not see
+        # it keeps rendering conversation rows without an action, and a renderer
+        # that does may offer "use in all conversations" on exactly those rows.
+        "profile_promote": 1,
         "team_catalogue": 1,
         # Agent Hub update availability: GET /v1/desktop/hub/updates (a store read,
         # no network) plus check/apply/apply-all/retry. A renderer gates the
@@ -237,6 +243,18 @@ def static_feature_flags() -> dict[str, Any]:
         # field, and a pick that silently did nothing would be worse than
         # a chip that never offered itself).
         "draft_selection": 1,
+        # Whether a draft may be born on the FAST tier: `fast_mode` on
+        # `DraftModel`, accepted by create and reported by preview
+        # (ui#1265). Its own key rather than a bump of `draft_selection`,
+        # by that entry's rule — and because the two gate different
+        # controls: a renderer on a backend without this one keeps its
+        # model and effort chips exactly as they are and holds the SPEED
+        # toggle inert. The hazard it removes is the same one, one field
+        # over: `DraftModel` is `extra="forbid"`, so an unknown field
+        # refuses the WHOLE create body — a toggle that dispatched into it
+        # would take the pair and level the user had just picked down with
+        # it, where a toggle that never offered itself costs nothing.
+        "draft_fast": 1,
         # The provider registry VIEW: `brand` / `capabilities` / `state` /
         # `identity` / `account_count` on the rows of
         # `GET /v1/auth/providers` (a.k.a. the census), AND the licence
@@ -362,6 +380,14 @@ def static_feature_flags() -> dict[str, Any]:
         # live body read, never a cached one. The server dark gate still answers
         # 503, which the status route renders as a state.
         "team_bridge_conversations": 1,
+        # Optional captured DATA-owner receipts on conversation create/send
+        # (including retry), join/read+notify/consent/admit, archive/unarchive,
+        # member add/remove and leave. New renderers require this capability AND
+        # supply expected_account_id + explicit target tenant_id on every write.
+        # Legacy omission remains compatible. Threads/reactions are not present
+        # in this runtime: feature branches must adopt the same guard before
+        # advertising their mutations alongside this capability.
+        "team_bridge_conversation_owner_guard": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -818,6 +844,23 @@ def static_feature_flags() -> dict[str, Any]:
         # daemon that serves this route, so this key being present does not prove
         # the owner behind a given session can keep the pictures).
         "ask_attachments": 1,
+        # PUTTING A QUEUED ASK AWAY from the desktop: `dismiss` + `reason` on the
+        # `POST /v1/desktop/sessions/{id}/answers` body, accepted on an OPEN ask
+        # while the agent is running (SA-D5, design §15, 2026-10-23).
+        #
+        # WHY A KEY -- the `ask_attachments` argument verbatim: `Answer` is
+        # `extra="forbid"`, so a renderer that offered Dismiss against an older
+        # backend would 422 the user's own tap. Gated, the card draws no Dismiss
+        # affordance and behaves exactly as today, which is also the pre-feature
+        # state for an operator whose runtime predates the engine half.
+        #
+        # THE OWNER-SIDE HALF is not negotiated separately, and that is deliberate
+        # rather than an omission: unlike an answer's attachments (which a runtime
+        # must be able to keep, so `ask-attachments-v1` rides the owner record),
+        # the dismissal is settled by whichever door answers -- the no-boot cold
+        # door on this device, or the live op on the owner -- and an older owner
+        # simply refuses in the queue's own words, which the card shows inline.
+        "ask_dismiss": 1,
         # THE SPEECH SURFACE: `GET /v1/stt/paths` (the ordered cascade report)
         # and `POST /v1/stt/transcriptions` (the executor, with its 409
         # `stt_unavailable` structured refusal), plus the audio-accepting

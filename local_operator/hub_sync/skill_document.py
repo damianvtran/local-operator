@@ -19,9 +19,12 @@ import unicodedata
 from collections.abc import Hashable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 import yaml
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; the runtime import is lazy below
+    from local_operator.hub_sync.skill_bundle import SkillBundleManifest
 
 MAX_FILES = 64
 MAX_FILE_BYTES = 200 * 1024
@@ -465,3 +468,36 @@ class SkillDocument:
             raise _invalid("skill source requires SKILL.md")
         meta = parse_frontmatter(skill.content)
         return cls(meta["name"], meta["description"], tuple(files))
+
+
+# -- form dispatch ----------------------------------------------------------------
+#
+# A hub skill row is published in exactly ONE of two forms: a text DOCUMENT
+# (this module) or a BUNDLE (``skill_bundle``). Both validate through their own
+# strict manifest; callers that only care that "this is a canonical skill
+# manifest" use these two functions so the dispatch key lives exactly once.
+# ``bundle`` is the discriminator because the two key sets are disjoint by
+# construction (a document manifest refuses ``bundle``; a bundle manifest
+# refuses ``files``).
+
+
+def skill_manifest_from_json(value: Any) -> "SkillDocument | SkillBundleManifest":
+    """Build whichever manifest FORM these canonical client fields describe."""
+
+    # Lazy import: ``skill_bundle`` imports THIS module for the frontmatter
+    # parser, so a module-level import here would be a cycle.
+    if isinstance(value, Mapping) and "bundle" in value:
+        from local_operator.hub_sync.skill_bundle import SkillBundleManifest
+
+        return SkillBundleManifest.from_json(value)
+    return SkillDocument.from_json(value)
+
+
+def skill_manifest_from_remote(value: Any) -> "SkillDocument | SkillBundleManifest":
+    """As above for a hub DETAIL payload (tolerant envelope, strict manifest)."""
+
+    if isinstance(value, Mapping) and "bundle" in value:
+        from local_operator.hub_sync.skill_bundle import SkillBundleManifest
+
+        return SkillBundleManifest.from_remote(value)
+    return SkillDocument.from_remote(value)

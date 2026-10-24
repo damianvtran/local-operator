@@ -1,0 +1,108 @@
+tui.tags.added
+EN "Added “{name}”."
+UR "“{name}” شامل کی گئی۔"
+CX {}
+tui.tags.applied
+EN "applied"
+UR "لاگو"
+CX {}
+tui.tags.cap_applied
+EN "8 tags applied. Remove one before adding another."
+UR "8 ٹیگز لاگو ہیں۔ دوسری شامل کرنے سے پہلے ایک ہٹائیں۔"
+CX {}
+tui.tags.cap_registry
+EN "32 tags exist. Use an existing tag or manage tags to remove one."
+UR "32 ٹیگز موجود ہیں۔ کوئی موجودہ ٹیگ استعمال کریں یا ٹیگز کا انتظام کر کے ایک ہٹائیں۔"
+CX {}
+tui.tags.create
+EN "Create and apply “{name}”"
+UR "“{name}” بنائیں اور لاگو کریں"
+CX {}
+tui.tags.create_help
+EN "Creates a shared tag and applies it here."
+UR "مشترکہ ٹیگ تیار کر کے یہاں لاگو کی جاتی ہے۔"
+CX {}
+tui.tags.created_applied
+EN "Created and applied “{name}”."
+UR "“{name}” تیار کر کے لاگو کی گئی۔"
+CX {}
+tui.tags.current
+EN "current"
+UR "موجودہ"
+CX {}
+tui.tags.empty
+EN "No tags yet. Type a name to create and apply one."
+UR "ابھی کوئی ٹیگ نہیں۔ تیار کر کے لاگو کرنے کے لیے نام لکھیں۔"
+CX {}
+tui.tags.failed
+EN "Couldn't update tags: {error}"
+UR "ٹیگز میں تبدیلی نہیں ہو سکی: {error}"
+CX {}
+tui.tags.grouping_off
+EN "Sidebar tag groups off — sections are flat again."
+UR "سائیڈ بار ٹیگ گروپس بند — سیکشنز دوبارہ سادہ فہرست میں ہیں۔"
+CX {}
+tui.tags.grouping_on
+EN "Sidebar tag groups on — sections now split by primary tag."
+UR "سائیڈ بار ٹیگ گروپس چالو — سیکشنز اب بنیادی ٹیگ کے مطابق تقسیم ہیں۔"
+CX {}
+tui.tags.header
+EN "Tags for this conversation · {count}/8 applied"
+UR "اس گفتگو کے ٹیگز · {count}/8 لاگو"
+CX {}
+tui.tags.invalid
+EN "Tag names are 1–24 characters, with no control characters; Untagged is reserved."
+UR "ٹیگ کے نام 1–24 حروف کے ہوں، کنٹرول حروف کے بغیر؛ Untagged مخصوص ہے۔"
+CX {}
+tui.tags.none_applied
+EN "No tags applied to this conversation."
+UR "اس گفتگو پر کوئی ٹیگ لاگو نہیں۔"
+CX {}
+tui.tags.not_applied
+EN "not applied"
+UR "لاگو نہیں"
+CX {}
+tui.tags.off
+EN "off"
+UR "بند"
+CX {}
+tui.tags.on
+EN "on"
+UR "چالو"
+CX {}
+tui.tags.partial_create
+EN "Tag created, but couldn't apply it. Retry applying."
+UR "ٹیگ بن گئی، مگر لاگو نہیں ہو سکی۔ دوبارہ لاگو کرنے کی کوشش کریں۔"
+CX {}
+tui.tags.primary
+EN "Primary"
+UR "بنیادی"
+CX {}
+tui.tags.removed
+EN "Removed “{name}”."
+UR "“{name}” ہٹا دی گئی۔"
+CX {}
+tui.tags.slash_tag
+EN "Tag this conversation; Enter toggles a tag"
+UR "اس گفتگو کو ٹیگ کریں؛ Enter سے ٹیگ لاگو یا ہٹائیں"
+CX {}
+tui.tags.slash_tags
+EN "Group the sidebar by primary tag (on/off)"
+UR "سائیڈ بار کو بنیادی ٹیگ سے گروپ کریں (on/off)"
+CX {}
+tui.tags.status
+EN "Sidebar tag groups: {state} — /tags on or /tags off"
+UR "سائیڈ بار ٹیگ گروپس: {state} — /tags on یا /tags off"
+CX {}
+tui.tags.unavailable
+EN "Tags aren't available for this conversation."
+UR "اس گفتگو کے لیے ٹیگز دستیاب نہیں۔"
+CX {}
+tui.tags.untagged
+EN "Untagged"
+UR "بغیر ٹیگ"
+CX {}
+tui.tags.usage
+EN "Use /tags on or /tags off"
+UR "/tags on یا /tags off استعمال کریں"
+CX {}

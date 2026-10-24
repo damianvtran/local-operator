@@ -1,0 +1,5 @@
+relay.ask.dismiss.open | dismiss… | خارج کریں…
+relay.ask.dismiss.receipt | Dismissed — no reply sent | خارج کیا گیا — کوئی جواب نہیں بھیجا گیا
+relay.ask.dismiss.receipt_answered_in_chat | Dismissed — answered in chat | خارج کیا گیا — گفتگو میں جواب موجود ہے
+relay.ask.dismiss.receipt_moot | Dismissed — no longer needed | خارج کیا گیا — اب ضرورت نہیں
+relay.ask.dismiss.title | Dismiss this ask | یہ سوال خارج کریں

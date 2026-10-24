@@ -143,10 +143,13 @@ def test_actual_policy_cas_and_language_writer_preserve_both_values(tmp_path: Pa
     real_write = first._write_config
     errors = []
 
-    def paused_write(config) -> None:
+    def paused_write(config, *, drop=None) -> None:
+        # `drop` forwarded like the real writer: `set_config_value` passes it as a
+        # keyword (deep preservation, PR #2819), and a stub that dropped it would
+        # silently turn the write under test into a no-op.
         ready.set()
         assert release.wait(10)
-        real_write(config)
+        real_write(config, drop=drop)
 
     first._write_config = paused_write
 
@@ -310,3 +313,52 @@ def test_skill_creation_default_follows_the_agents_switch() -> None:
     assert creation_policy(unset, "skill").subscribe is True
     odd = {"hub": {"auto_update": {"agents": "yes"}}}
     assert creation_policy(odd, "skill").subscribe is True
+
+
+def test_revert_removes_the_staged_policy_and_grant_it_reports_removed(tmp_path: Path) -> None:
+    """The revert's return value must match the file, not the caller's intent.
+
+    ``revert_policy_if_unchanged`` is the initial-install cleanup: it removes the
+    staged entry after a REFUSED or crashed install, and the hub service treats
+    whatever is left as authoritative. Under deep preservation an undeclared
+    removal is copied straight back off disk — and a surviving
+    ``public_egress_grants[link_id]`` satisfies both consent checks, so a grant
+    staged by a failed attempt would be re-used instead of minted deliberately by
+    the next one. There was no test for this function at all (review round 1, B1).
+    """
+    from local_operator.hub_sync.identity import LinkPolicy, PublicEgressGrant
+    from local_operator.hub_sync.policies import (
+        revert_policy_if_unchanged,
+        stored_link_policy,
+    )
+
+    manager = ConfigManager(tmp_path)
+    link = identity()
+    # Exactly what the initial install stages: an explicit entry and the public
+    # grant that came with it. Seeded directly because `update_policy` refuses an
+    # automatic public publication for this synthetic origin — the staging path
+    # uses its own consent carve-out, which is the code under test's neighbour.
+    manager.set_config_value(
+        "hub",
+        {
+            "links": {link.link_id: LinkPolicy(subscribe=True, auto_push=True).to_json()},
+            "public_egress_grants": {link.link_id: PublicEgressGrant(link.link_id).to_json()},
+        },
+    )
+    staged = read_policy(read_config_values(tmp_path) or {}, link)
+    seeded = read_config_values(tmp_path) or {}
+    assert stored_link_policy(seeded, link.link_id) is not None
+    assert seeded["hub"]["public_egress_grants"][link.link_id]["link_id"] == link.link_id
+
+    assert revert_policy_if_unchanged(manager, link, expected_revision=staged.revision) is True
+
+    # Through a FRESH manager, so the assertion cannot be satisfied by the writer's
+    # own in-memory snapshot.
+    fresh = ConfigManager(tmp_path)
+    values = fresh.get_config().values
+    assert stored_link_policy(values, link.link_id) is None
+    assert link.link_id not in (values.get("hub", {}).get("public_egress_grants") or {})
+    assert read_policy(values, link).revision != staged.revision
+
+    # ...and a second call on the now-absent entry reports the truth.
+    assert revert_policy_if_unchanged(fresh, link, expected_revision=staged.revision) is False

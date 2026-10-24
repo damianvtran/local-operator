@@ -304,7 +304,11 @@ def test_pairing_admits_the_joiner_after_both_people_confirm(
     assert wire.sas_display(str(parked["sas"])) in str(parked["prompt"])
     assert "YOUR screen shows" in str(parked["prompt"])
 
-    events = _events(server_a)
+    # The success frame follows the admission row but PRECEDES member_admitted's
+    # audit append on the relay worker. _pair() returning therefore proves the
+    # admission, not that this final event is readable yet. Wait on that event
+    # within the helper's existing bound; a permanently missing event still fails.
+    events = _await_event(server_a, "member_admitted")
     assert "pairing_awaiting_confirmation" in events
     assert "pairing_confirmed" in events
     assert "member_admitted" in events

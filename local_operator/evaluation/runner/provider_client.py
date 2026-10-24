@@ -3120,6 +3120,10 @@ class ProviderModelClient:
             # bought two summaries and folded observations 0-2 into a marker
             # on a prefix the prune had already fixed (#836 round 2, F5).
             respect_threshold=not token_due,
+            # An evaluation session is not confined, so the manifest renders
+            # paths unfiltered; a confined host passes its boundary here
+            # (contract amendment 8).
+            world_root=None,
         )
         # The pass returns the pruned list even when it refused to summarize; either
         # way it is the prefix to send from now on.

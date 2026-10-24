@@ -1,0 +1,13 @@
+{
+  "tui.asks.context.messages": "{count, plural, one {# message de votre part depuis cette question (dernier {time})} many {# de messages de votre part depuis cette question (dernier {time})} other {# messages de votre part depuis cette question (dernier {time})}}",
+  "tui.asks.dismiss.answered_in_chat": "Répondu dans la conversation",
+  "tui.asks.dismiss.answered_in_chat_note": "vous avez déjà répondu dans la conversation",
+  "tui.asks.dismiss.fleet_gone": "la question a disparu du journal de cette conversation.",
+  "tui.asks.dismiss.hint": "enter ignorer · esc annuler",
+  "tui.asks.dismiss.moot": "Plus nécessaire",
+  "tui.asks.dismiss.moot_note": "l’agent n’attendra plus de réponse",
+  "tui.asks.dismiss.notice_answered_in_chat": "Ignorée — répondue dans la conversation",
+  "tui.asks.dismiss.notice_moot": "Ignorée — plus nécessaire",
+  "tui.asks.dismiss.notice_no_reply": "Ignorée — aucune réponse envoyée",
+  "tui.asks.dismiss.title": "Ignorer cette question"
+}

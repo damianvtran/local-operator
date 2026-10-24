@@ -10,6 +10,14 @@ __pycache__/
 .DS_Store
 dist/
 node_modules/
+# …and the symlink form, which the trailing slash does NOT match: a checked-out
+# `extension/node_modules -> ../somewhere` was committed by a lane that linked
+# its dependency tree, and every other checkout then owned a path that resolves
+# to nothing. ANCHORED on purpose: an unanchored rule here would have to be
+# mirrored in every nested package's `.gitignore` (the Tailwind scanner's
+# exception), and this incident was one path. The second package root gets its
+# own line below rather than a rule that reaches it by accident.
+/extension/node_modules
 # pnpm's content-addressable store. Normally it lives once under ~/Library or
 # ~/.local/share and never appears here — but pnpm hard-links from the store
 # into node_modules, and hard links cannot cross filesystems, so a checkout on

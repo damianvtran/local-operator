@@ -79,11 +79,13 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 
 from __future__ import annotations
 
+import logging
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.config import ConfigManager
@@ -93,7 +95,12 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
-from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN
+from local_operator.team_bridge.types import (
+    _CONVERSATION_MESSAGE_ID,
+    ATTACHMENT_ID_PATTERN,
+    CONVERSATION_ID_PATTERN,
+    is_account_id,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -114,11 +121,115 @@ _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: cannot change the SHAPE of the upstream URL (`..`, `/`, `?`, `%`), so the
 #: rule is a conservative charset rather than a re-implementation of the
 #: server's mint.
-_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
+#: A conversation MESSAGE id, taken from the package's ONE grammar rather than
+#: re-spelled here. Two literals already drifted once: the desktop copy allowed
+#: eight characters where the agent tool's allowed one, so a thread root the
+#: tool accepted was refused by the desktop send and scheduled routes.
+_MESSAGE_ID = _CONVERSATION_MESSAGE_ID
+#: The wire grammar for a thread root. Same object as ``_MESSAGE_ID`` — one
+#: grammar, two names only because the two call sites read differently.
+CONVERSATION_REPLY_ROOT_PATTERN = _CONVERSATION_MESSAGE_ID.pattern
 #: Mirrors ``read_context.ACCOUNT_ID_PATTERN``. Spelled here rather than imported
 #: because that module rides the httpx boot path this file must not pull at
 #: module scope; ``test_account_grammar_matches_the_reader`` pins the two equal.
 _ACCOUNT_ID = re.compile(r"^acc_[A-Za-z0-9_-]{1,64}$")
+#: Image attachment ids (``team_bridge.types.ATTACHMENT_ID_PATTERN``), checked
+#: before interpolation exactly like the conversation id above.
+_ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
+#: Spelled here rather than imported from the client: that module rides the
+#: httpx boot path this file must not pull at module scope. Pinned equal to
+#: ``client.ATTACHMENT_MAX_BYTES`` / ``ATTACHMENT_MIME_TYPES`` by a test.
+_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+_ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
+#: ``attachment_ids`` on a send or schedule: the hub's per-message bound and id
+#: grammar, enforced before the request leaves the machine.
+_ATTACHMENT_IDS = Field(default=None, min_length=1, max_length=4)
+
+
+# -- access-log redaction ----------------------------------------------------
+#
+# WHY: uvicorn's access logger writes the REQUEST PATH, and the three attachment
+# routes carry the conversation, message and attachment ids in it. The desktop
+# backend's log captures those lines (QA on local-operator-ui#1314, Q2), and the
+# attachment contract (D9) keeps ids out of logs; the hub already logs these
+# routes by template (``:attachmentid``). This filter rewrites the logged path to
+# the same template form so the two ends agree.
+#
+# Scope: ONLY ``/v1/desktop/team-bridge/conversations/.../attachments...`` paths.
+# Other team-bridge paths (e.g. scheduled ids) are out of this change. The
+# filter sits on the ``uvicorn.access`` LOGGER, not on a handler, so it applies
+# whatever handler config uvicorn or the launcher installs, and dictConfig
+# (which uvicorn runs) leaves logger filters in place. The request itself is
+# untouched — only the record's text changes.
+# The optional trailing ``/`` (review R4-01): Starlette's ``redirect_slashes``
+# answers a slash-suffixed variant with a 307, and that line is access-logged
+# too, so the non-canonical form must template exactly like the canonical one.
+_ATTACHMENT_ROUTE_PATH = re.compile(
+    r"^(?P<prefix>/v1/desktop/team-bridge/conversations/)[^/?#]+"
+    r"(?P<middle>(?:/messages/[^/?#]+)?/attachments)(?P<tail>(?:/[^/?#]+)?)"
+    r"(?P<slash>/?)(?P<query>[?#].*)?$"
+)
+#: A Team Bridge id in a QUERY value. The routes accept only ``tenant_id``, but
+#: a request refused for an extra or unknown parameter is still access-logged
+#: with the query exactly as sent (R4-01), so any id-shaped value there is
+#: templated too rather than trusting the caller to have sent none.
+_BRIDGE_ID_IN_QUERY = re.compile(r"(?:batt|bcmsg|bcv)_[0-9A-Za-z-]+")
+
+
+def _template_attachment_path(path: str) -> str:
+    """``path`` with its id segments replaced by route placeholders.
+
+    The query string is kept for diagnosis, minus any id-shaped value: the
+    routes accept only ``tenant_id``, but a refused request logs its query
+    verbatim, so ids are templated there as well.
+    """
+
+    match = _ATTACHMENT_ROUTE_PATH.match(path)
+    if match is None:
+        return path
+    middle = match["middle"]
+    if middle.startswith("/messages/"):
+        middle = "/messages/:messageid/attachments"
+    tail = "/:attachmentid" if match["tail"] else ""
+    query = _BRIDGE_ID_IN_QUERY.sub(":id", match["query"] or "")
+    return f"{match['prefix']}:conversationid{middle}{tail}{match['slash']}{query}"
+
+
+class _AttachmentPathRedaction(logging.Filter):
+    """Template the attachment routes' ids out of uvicorn access records.
+
+    uvicorn logs ``'%s - "%s %s HTTP/%s" %d'`` with the path as ``args[2]``;
+    only that argument is rewritten so the line keeps its format. A filter
+    must never raise (``Logger.handle`` consults it before any handler's
+    error handling), so anything unexpected passes the record through.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            args = record.args
+            if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+                templated = _template_attachment_path(args[2])
+                if templated != args[2]:
+                    record.args = (*args[:2], templated, *args[3:])
+        except Exception:  # noqa: BLE001 — never break the caller's logging
+            pass
+        return True
+
+
+_ACCESS_LOG_REDACTION = _AttachmentPathRedaction()
+
+
+def install_access_log_redaction() -> None:
+    """Attach the filter to ``uvicorn.access``; idempotent."""
+
+    access = logging.getLogger("uvicorn.access")
+    if _ACCESS_LOG_REDACTION not in access.filters:
+        access.addFilter(_ACCESS_LOG_REDACTION)
+
+
+# Installed when the router is imported, i.e. whenever the app that serves these
+# routes is built — no separate wiring step a launcher could forget.
+install_access_log_redaction()
 
 
 class _Strict(BaseModel):
@@ -223,15 +334,11 @@ class TeamBridgeMessageQuery(_Strict):
 
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeMessageQuery":
-        from local_operator.team_bridge.read_context import (
-            ACCOUNT_ID_PATTERN,
-            TENANT_ID_PATTERN,
-        )
+        from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 
-        checks = (
-            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
-            (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
-        )
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        checks = ((self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),)
         for value, pattern, name in checks:
             # ``fullmatch``, not ``match`` (review R-5): these patterns are
             # anchored ``^…$``, and ``$`` also matches BEFORE a trailing newline,
@@ -268,19 +375,22 @@ class TeamBridgeInboxQuery(_Strict):
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeInboxQuery":
         from local_operator.team_bridge.read_context import (
-            ACCOUNT_ID_PATTERN,
             CURSOR_PATTERN,
             DELIVERY_STATES,
             TENANT_ID_PATTERN,
             THREAD_ID_PATTERN,
         )
 
+        for value, name in (
+            (self.expected_account_id, "expected_account_id"),
+            (self.sender_account_id, "sender_account_id"),
+        ):
+            if value is not None and not is_account_id(value):
+                raise ValueError(f"{name} is outside the accepted grammar")
         checks = (
-            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
             (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
             (self.after, CURSOR_PATTERN, "after"),
             (self.thread_id, THREAD_ID_PATTERN, "thread_id"),
-            (self.sender_account_id, ACCOUNT_ID_PATTERN, "sender_account_id"),
         )
         for value, pattern, name in checks:
             # ``fullmatch``, not ``match`` (review R-5): these patterns are
@@ -507,6 +617,7 @@ async def status(
     """
 
     from local_operator.team_bridge.client import (
+        attachments_capability,
         consent_for_display,
         default_on_in_force,
         get_status_discipline,
@@ -606,7 +717,12 @@ async def status(
         #: Served-text slots refused on this answer — a surface refreshes
         #: rather than rendering refused or stale bytes (review round 1, R3).
         "texts_rejected": sorted(check.rejected),
-        "status": check.payload,
+        # The raw hub payload, except ``attachments``: that block is the one
+        # field a renderer switches behaviour on (show image affordances, send
+        # ``attachment_ids``), so it passes through the client's ONE capability
+        # reading (review R1-06) — malformed/disabled/no usable type is
+        # removed, never forwarded for the UI to second-guess. Absent = off.
+        "status": _status_with_attachments(check.payload, attachments_capability),
         "consent": (
             {"version": consent[0], "text": consent[1], "source": consent[2]}
             if consent is not None
@@ -1163,6 +1279,183 @@ async def get_message(
 # deliberately no store call in this section: conversations are read live.
 
 
+# Schedules are server-owned: this proxy returns the author's unsent body only
+# for the current request, never writes it to the local conversation store, and
+# never starts a timer. The server alone arbitrates tenant/author access and the
+# edit/cancel race with its delivery worker.
+_SCHEDULED_ID = re.compile(r"^bsch_[0-9a-f]{32}$")
+_RFC3339 = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+    r"(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+)
+
+
+def _validate_attachment_ids(ids: list[str] | None) -> None:
+    # Same grammar the routes use for path ids: an id that could reshape the
+    # hub's URL never leaves, and a duplicate would silently change the bound
+    # set (and its attachments_hash), so it is refused rather than deduped.
+    if not ids:
+        return
+    if len(set(ids)) != len(ids) or any(_ATTACHMENT_ID.fullmatch(i) is None for i in ids):
+        raise ValueError("attachment_ids must be distinct batt_ ids")
+
+
+def _validate_schedule_time(value: str) -> None:
+    # Keep the moving 1-minute/120-day window authoritative on the server, whose
+    # clock will also fire the message; only reject malformed wire dates here.
+    if _RFC3339.fullmatch(value) is None:
+        raise ValueError("send_at must be RFC3339")
+    datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+class ScheduledMentionIn(_Strict):
+    kind: Literal["human", "agent"]
+    account_id: str = Field(min_length=1, max_length=128)
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ScheduledCreateIn(_Strict):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str = Field(pattern=CONVERSATION_ID_PATTERN)
+    client_ref: str = Field(min_length=1, max_length=128)
+    #: May be empty only when ``attachment_ids`` carries at least one image
+    #: (an image-only message); the hub applies the same rule.
+    body: str = ""
+    send_at: str
+    mentions: list[ScheduledMentionIn] = Field(default_factory=list)
+    attachment_ids: list[str] | None = _ATTACHMENT_IDS
+    #: Reply in this root message's thread once the schedule fires. SAME
+    #: spelling and SAME canonical grammar as ``ConversationSendIn`` — the hub
+    #: receives one wire field name, so a scheduled message and an immediate
+    #: one cannot drift apart. Without it a scheduled thread reply was simply
+    #: impossible: ``_Strict`` rejected the field, so callers could not ask.
+    thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
+
+    @model_validator(mode="after")
+    def _date(self) -> "ScheduledCreateIn":
+        _validate_schedule_time(self.send_at)
+        _validate_attachment_ids(self.attachment_ids)
+        if not self.body and not self.attachment_ids:
+            raise ValueError("a scheduled message needs body or attachment_ids")
+        return self
+
+
+class ScheduledUpdateIn(_Strict):
+    #: An empty body is accepted here only as part of an image-only edit; the
+    #: hub's PreflightSend decides against the row's resulting attachment set.
+    body: str | None = None
+    send_at: str | None = None
+    #: The schedule's COMPLETE replacement image set; ``[]`` removes every
+    #: image (the hub releases them). Omitted = images unchanged.
+    attachment_ids: list[str] | None = Field(default=None, max_length=4)
+
+    @model_validator(mode="after")
+    def _edit(self) -> "ScheduledUpdateIn":
+        if not self.model_fields_set or any(
+            getattr(self, name) is None for name in self.model_fields_set
+        ):
+            raise ValueError("a schedule edit requires body, send_at or attachment_ids")
+        if self.send_at is not None:
+            _validate_schedule_time(self.send_at)
+        _validate_attachment_ids(self.attachment_ids)
+        if (
+            self.body == ""
+            and "attachment_ids" in self.model_fields_set
+            and not self.attachment_ids
+        ):
+            raise ValueError("a schedule edit cannot clear both body and images")
+        return self
+
+
+def _scheduled_selector(request: Request, scheduled_id: str | None = None) -> str:
+    # Reject duplicate/unknown selectors rather than letting a URL parser choose
+    # a tenant differently from the upstream server.
+    values = request.query_params.getlist("tenant_id")
+    if (
+        set(request.query_params) != {"tenant_id"}
+        or len(values) != 1
+        or not values[0].strip()
+        or len(values[0]) > 128
+        or (scheduled_id is not None and _SCHEDULED_ID.fullmatch(scheduled_id) is None)
+    ):
+        _raise_read("invalid_request")
+    return values[0]
+
+
+async def _scheduled_body(request: Request, model: Any) -> Any:
+    # Parse explicitly so validation errors never echo an unsent body (or a
+    # custom validator's input) into FastAPI's default 422 response.
+    try:
+        return model.model_validate(await request.json())
+    except ValueError:
+        _raise_read("invalid_request")
+
+
+@router.get("/v1/desktop/team-bridge/scheduled", response_model=CRUDResponse[Any])
+async def scheduled_list(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_list(tenant_id=tenant_id)
+        )
+    )
+
+
+@router.post("/v1/desktop/team-bridge/scheduled", response_model=CRUDResponse[Any])
+async def scheduled_create(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    if request.query_params:
+        _raise_read("invalid_request")
+    body = await _scheduled_body(request, ScheduledCreateIn)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_create(
+                # ``body`` always travels (possibly "" for an image-only
+                # schedule); everything else only when the caller set it, so a
+                # text-only schedule stays the pre-attachment wire.
+                # ``exclude_none`` too (review R1-04): an explicit
+                # ``attachment_ids: null`` is "no images", and an old hub
+                # refuses the unknown key even when its value is null.
+                {"body": body.body, **body.model_dump(exclude_unset=True, exclude_none=True)}
+            )
+        )
+    )
+
+
+@router.patch("/v1/desktop/team-bridge/scheduled/{scheduled_id}", response_model=CRUDResponse[Any])
+async def scheduled_update(
+    scheduled_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request, scheduled_id)
+    body = await _scheduled_body(request, ScheduledUpdateIn)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_update(
+                scheduled_id, tenant_id=tenant_id, body=body.model_dump(exclude_unset=True)
+            )
+        )
+    )
+
+
+@router.delete("/v1/desktop/team-bridge/scheduled/{scheduled_id}", response_model=CRUDResponse[Any])
+async def scheduled_cancel(
+    scheduled_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request, scheduled_id)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_cancel(scheduled_id, tenant_id=tenant_id)
+        )
+    )
+
+
 class ConversationMemberIn(_Strict):
     account_id: str = Field(min_length=1, max_length=128)
     kind: Literal["human", "agent"] = "human"
@@ -1170,8 +1463,29 @@ class ConversationMemberIn(_Strict):
     display_label: str = Field(min_length=1, max_length=64)
 
 
-class ConversationCreateIn(_Strict):
+class ConversationOwnerIn(_Strict):
+    """Optional anti-replay receipt, separate from upstream authorization.
+
+    Older clients may omit the receipt. A guarded mutation must name the tenant
+    of the captured DATA, not the current picker/default OAuth organization: one
+    account can legitimately belong to several organizations. The client checks
+    the owner against the exact bearer snapshot; the server checks membership.
+    """
+
+    expected_account_id: str | None = Field(default=None, min_length=1, max_length=128)
     tenant_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _guard_target(self) -> "ConversationOwnerIn":
+        if self.expected_account_id is not None:
+            if not self.expected_account_id.strip():
+                raise ValueError("expected_account_id must be nonempty")
+            if self.tenant_id is None or not self.tenant_id.strip():
+                raise ValueError("a guarded mutation needs an explicit tenant_id")
+        return self
+
+
+class ConversationCreateIn(ConversationOwnerIn):
     kind: Literal["dm", "group", "channel"]
     name: str | None = Field(default=None, max_length=128)
     topic: str | None = Field(default=None, max_length=512)
@@ -1180,21 +1494,32 @@ class ConversationCreateIn(_Strict):
     members: list[ConversationMemberIn] = Field(default_factory=list, max_length=500)
 
 
-class ConversationSendIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationSendIn(ConversationOwnerIn):
     client_ref: str = Field(min_length=1, max_length=128)
-    body: str = Field(min_length=1)
+    #: Empty only for an image-only message (``attachment_ids`` non-empty).
+    body: str = ""
     agent_label: str | None = Field(default=None, max_length=64)
+    #: Staged uploads to bind to this message, in display order. Forwarded only
+    #: when present, so a text-only send is the unchanged pre-attachment wire.
+    attachment_ids: list[str] | None = _ATTACHMENT_IDS
+    #: Reply in this root message's thread (agent-server threads). Held to the
+    #: minted message-id grammar here so a malformed id never reaches the hub;
+    #: the hub owns the real rule (same conversation, root not a reply).
+    thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
+
+    @model_validator(mode="after")
+    def _content(self) -> "ConversationSendIn":
+        _validate_attachment_ids(self.attachment_ids)
+        if not self.body and not self.attachment_ids:
+            raise ValueError("a message needs body or attachment_ids")
+        return self
 
 
-class ConversationJoinIn(_Strict):
-    #: The organization the join targets. Required for a caller with more than one
-    #: eligible membership; the server answers ``invalid_request`` without it.
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationJoinIn(ConversationOwnerIn):
+    """A guarded join always names the captured target organization."""
 
 
-class ConversationReadIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationReadIn(ConversationOwnerIn):
     seq: int | None = Field(default=None, ge=0)
     muted: bool | None = None
     #: The per-member notification policy (agent-server #148). `muted` is the
@@ -1211,16 +1536,56 @@ class ConversationReadIn(_Strict):
         return self
 
 
-class ConversationConsentIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationConsentIn(ConversationOwnerIn):
     decision: Literal["accept", "decline"]
     consent_version: str = Field(min_length=1, max_length=128)
 
 
-class ConversationAdmitIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationAdmitIn(ConversationOwnerIn):
     verdict: Literal["allow", "reject"]
     body_hash: str = Field(min_length=1, max_length=128)
+
+
+class ConversationReactIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+
+
+#: The hub's reaction-key byte bound (agent-server §10.2: NFC, <=128 UTF-8
+#: bytes, one fully-qualified RGI sequence). Only the BOUND is mirrored here,
+#: as a cheap pre-flight: the RGI allowlist is the hub's, and keeping a second
+#: copy in the runtime would be a second opinion that drifts with Unicode.
+_REACTION_EMOJI_MAX_BYTES = 128
+
+
+def _require_reaction_emoji(emoji: str) -> str:
+    """Refuse an empty or over-long reaction key before any upstream I/O.
+
+    The value is percent-encoded with no safe characters by the client, so it
+    can never reshape the upstream path; this guard only stops obviously
+    non-emoji input (text, pasted paragraphs) from costing a hub round trip.
+    """
+
+    key = unicodedata.normalize("NFC", emoji)
+    if not key or len(key.encode("utf-8")) > _REACTION_EMOJI_MAX_BYTES:
+        _raise_read("invalid_request")
+    return key
+
+
+def _conversation_owner_query(request: Request) -> ConversationOwnerIn:
+    """Receipt for bodyless writes and the legacy list-body member invitation.
+
+    Keep the member list's wire shape intact. Query and body receipts use the
+    same validation; never silently discard a supplied owner or guess a tenant.
+    The receipt is local-only and must not be forwarded to the service.
+    """
+
+    try:
+        return ConversationOwnerIn(
+            expected_account_id=request.query_params.get("expected_account_id"),
+            tenant_id=request.query_params.get("tenant_id"),
+        )
+    except ValueError:
+        _raise_read("invalid_request")
 
 
 def _conversation_client(config_manager: ConfigManager):
@@ -1254,7 +1619,7 @@ def _require_message_id(message_id: str) -> None:
 def _require_account_id(account_id: str) -> None:
     """Refuse an account id carrying URL syntax. See above."""
 
-    if _ACCOUNT_ID.fullmatch(account_id) is None:
+    if not is_account_id(account_id):
         _raise_read("invalid_request")
 
 
@@ -1340,11 +1705,13 @@ async def create_conversation(
     client = _conversation_client(config_manager)
     payload = {
         key: value
-        for key, value in body.model_dump().items()
+        for key, value in body.model_dump(exclude={"expected_account_id"}).items()
         if value is not None and not (key == "members" and not value)
     }
     payload["members"] = [member.model_dump(exclude_none=True) for member in body.members]
-    result = await _conversation_reply(client.create_conversation(payload))
+    result = await _conversation_reply(
+        client.create_conversation(payload, expected_account_id=body.expected_account_id)
+    )
     return reply(result)
 
 
@@ -1385,7 +1752,11 @@ async def conversation_archive(
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_lifecycle(conversation_id, "archive"))
+        await _conversation_reply(
+            client.conversation_lifecycle(
+                conversation_id, "archive", **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1403,7 +1774,11 @@ async def conversation_unarchive(
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_lifecycle(conversation_id, "unarchive"))
+        await _conversation_reply(
+            client.conversation_lifecycle(
+                conversation_id, "unarchive", **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1415,7 +1790,6 @@ async def add_conversation_members(
     conversation_id: str,
     request: Request,
     members: list[ConversationMemberIn],
-    tenant_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Invite members. Humans are invited; agents stay invited until their owner consents."""
@@ -1426,7 +1800,9 @@ async def add_conversation_members(
     payload = [member.model_dump(exclude_none=True) for member in members]
     return reply(
         await _conversation_reply(
-            client.conversation_members(conversation_id, payload, tenant_id=tenant_id)
+            client.conversation_members(
+                conversation_id, payload, **_conversation_owner_query(request).model_dump()
+            )
         )
     )
 
@@ -1448,7 +1824,11 @@ async def remove_conversation_member(
 
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_remove_member(conversation_id, account_id))
+        await _conversation_reply(
+            client.conversation_remove_member(
+                conversation_id, account_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1477,6 +1857,7 @@ async def conversation_consent(
                 decision=body.decision,
                 consent_version=body.consent_version,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
             )
         )
     )
@@ -1499,7 +1880,11 @@ async def conversation_join(
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(
-            client.conversation_join(conversation_id, tenant_id=body.tenant_id if body else None)
+            client.conversation_join(
+                conversation_id,
+                tenant_id=body.tenant_id if body else None,
+                expected_account_id=body.expected_account_id if body else None,
+            )
         )
     )
 
@@ -1518,7 +1903,13 @@ async def conversation_leave(
     _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
-    return reply(await _conversation_reply(client.conversation_leave(conversation_id)))
+    return reply(
+        await _conversation_reply(
+            client.conversation_leave(
+                conversation_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
 
 
 @router.get(
@@ -1605,7 +1996,255 @@ async def send_conversation_message(
                 client_ref=body.client_ref,
                 text=body.body,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
                 agent_label=body.agent_label,
+                thread_root_id=body.thread_root_id,
+                attachment_ids=body.attachment_ids,
+            )
+        )
+    )
+
+
+def _status_with_attachments(payload: Any, read_capability: Any) -> Any:
+    """``payload`` with ``attachments`` replaced by its normalized reading.
+
+    Copies rather than mutates: the payload is the discipline's cached
+    last-good answer shared by every caller.
+    """
+
+    if not isinstance(payload, dict) or "attachments" not in payload:
+        return payload
+    out = dict(payload)
+    capability = read_capability(payload)
+    if capability is None:
+        out.pop("attachments", None)
+    else:
+        out["attachments"] = capability
+    return out
+
+
+def _attachment_query(request: Request) -> tuple[str | None, str]:
+    """The attachment routes' accepted query names, closed and validated.
+
+    Closed-table like every route here: ``scope`` (and anything else) is
+    refused rather than dropped, and a duplicated name would let the URL parser
+    pick a value differently from the hub.
+
+    ``expected_account_id`` is the CAPTURED-ACCOUNT receipt and it is
+    REQUIRED. These routes once forwarded only the already-resolved ``access``
+    snapshot, so a chip staged under account A could be fetched or deleted
+    while the machine was signed in as B. Optional, the guard would regress the
+    first time a new renderer forgot the parameter — a guard whose reach
+    depends on every caller remembering is not a guard — so an omission is
+    refused HERE, at the route, instead of silently taking the unguarded path.
+    The client compares the receipt against the exact dispatch snapshot before
+    any bytes move.
+    """
+
+    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
+        _raise_read("invalid_request")
+    tenants = request.query_params.getlist("tenant_id")
+    if len(tenants) > 1 or (tenants and (not tenants[0].strip() or len(tenants[0]) > 128)):
+        _raise_read("invalid_request")
+    expected = request.query_params.getlist("expected_account_id")
+    if len(expected) != 1 or not expected[0].strip() or len(expected[0]) > 128:
+        # Absent, repeated or blank all mean "no captured owner", and a route
+        # that proceeds without one cannot enforce its own guard.
+        _raise_read("invalid_request")
+    if not is_account_id(expected[0]):
+        _raise_read("invalid_request")
+    return (tenants[0] if tenants else None), expected[0]
+
+
+def _require_attachment_id(attachment_id: str) -> None:
+    if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+        _raise_read("invalid_request")
+
+
+async def _bounded_upload(request: Request) -> bytes:
+    """Read the raw upload body, refusing past the hub's ceiling.
+
+    Streamed and counted rather than ``await request.body()``: a declared
+    ``Content-Length`` is checked first (cheap refusal), and the running count
+    still stops a chunked or lying sender at the bound, so this loopback route
+    never buffers more than one image. Nothing touches disk; the bytes are
+    forwarded once and dropped with the request.
+    """
+
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > _ATTACHMENT_MAX_BYTES:
+                raise HTTPException(
+                    413, {"code": "attachment_too_large", "message": "The image is too large."}
+                )
+        except ValueError:
+            _raise_read("invalid_request")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > _ATTACHMENT_MAX_BYTES:
+            raise HTTPException(
+                413, {"code": "attachment_too_large", "message": "The image is too large."}
+            )
+        chunks.append(chunk)
+    if not size:
+        raise HTTPException(422, {"code": "attachment_invalid", "message": "The image is empty."})
+    return b"".join(chunks)
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/attachments",
+    response_model=CRUDResponse[Any],
+    status_code=201,
+)
+async def upload_conversation_attachment(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Stage one image for a later send; the hub sniffs, bounds and stores it.
+
+    The body is the raw image (any declared Content-Type is ignored, exactly
+    as the hub ignores it). The answer is the hub's ``{attachment: {...}}``
+    descriptor, passed through; the bytes are never kept here.
+    """
+
+    _require_conversation_id(conversation_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    data = await _bounded_upload(request)
+    client = _conversation_client(config_manager)
+    result = await _conversation_reply(
+        client.upload_attachment(
+            conversation_id,
+            data,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    return CRUDResponse(status=201, message="Attachment staged.", result=result)
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/attachments/{attachment_id}",
+    status_code=204,
+)
+async def delete_conversation_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Discard one staged upload (a composer chip removed before send)."""
+
+    _require_conversation_id(conversation_id)
+    _require_attachment_id(attachment_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    client = _conversation_client(config_manager)
+    await _conversation_reply(
+        client.delete_attachment(
+            conversation_id,
+            attachment_id,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    return Response(status_code=204)
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}"
+    "/attachments/{attachment_id}"
+)
+async def get_conversation_attachment(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One bound image's bytes for the HUMAN reader (the renderer's blob cache).
+
+    No ``endpoint_id``/``purpose`` is accepted: those name an AGENT read, and
+    the agent's screen/context fetches happen inside the runtime, never through
+    this renderer-facing route. Response headers follow the attachment route in
+    ``desktop_sessions`` and the hub: a closed type map (the client already
+    refused anything but png/jpeg), ``nosniff`` so the browser never
+    re-decides the type, a sandboxing CSP for a direct navigation, and
+    ``private, no-store`` so no shared or disk cache keeps a teammate's image.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _require_attachment_id(attachment_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    client = _conversation_client(config_manager)
+    data, mime = await _conversation_reply(
+        client.fetch_attachment(
+            conversation_id,
+            message_id,
+            attachment_id,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    if mime not in _ATTACHMENT_SERVABLE:  # the client refuses first; defence in depth
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/replies",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_replies(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One thread (root + replies, oldest-first) under the history route's gate.
+
+    Mirrors ``conversation_history``'s discipline: the id grammar is checked
+    before any I/O, an unknown query key is refused rather than dropped, and the
+    numeric hints are parsed (never interpolated) so a caller-controlled value
+    is a 422, not a 500.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if set(request.query_params) - {"tenant_id", "limit", "after_seq", "endpoint_id"}:
+        _raise_read("invalid_request")
+    try:
+        parsed_limit = int(limit) if limit is not None else None
+        parsed_after = int(after_seq) if after_seq else None
+    except ValueError:
+        _raise_read("invalid_request")
+    if parsed_after is not None and parsed_after < 0:
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_replies(
+                conversation_id,
+                message_id,
+                tenant_id=tenant_id,
+                limit=parsed_limit,
+                after_seq=parsed_after,
+                endpoint_id=endpoint_id,
             )
         )
     )
@@ -1664,7 +2303,81 @@ async def conversation_admit(
                 verdict=body.verdict,
                 body_hash=body.body_hash,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
                 endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_add(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    body: ConversationReactIn | None = None,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Add the signed-in person's reaction; idempotent upstream.
+
+    The desktop reacts as the HUMAN only: an agent reaction goes through the
+    agent's own ``bridge`` tool (``react``), which carries the actor endpoint
+    from the runtime and is screened like every agent write. There is no
+    ``actor_endpoint_id`` on this body, so the renderer cannot act as an agent.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _refuse_write_scope(request)
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id,
+                message_id,
+                key,
+                active=True,
+                tenant_id=body.tenant_id if body else None,
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_remove(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None, max_length=128),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Remove the signed-in person's reaction; removing an unset one is a no-op.
+
+    ``tenant_id`` is a query parameter here (not a body) because a DELETE body
+    is not reliably carried by every client and proxy; the hub accepts both.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if set(request.query_params) - {"tenant_id"}:
+        _raise_read("invalid_request")
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id, message_id, key, active=False, tenant_id=tenant_id
             )
         )
     )
@@ -1693,6 +2406,7 @@ async def conversation_read(
                 muted=body.muted,
                 notify=body.notify,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
             )
         )
     )

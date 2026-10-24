@@ -816,8 +816,13 @@ def test_probe_reports_missing_ready_and_stale(tmp_path):
     assert ti.probe_index(tmp_path, SID).state == "missing"
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
     assert ti.probe_index(tmp_path, SID).state == "stale"
+    # The stale answer carries the journal's size, which is what the view's
+    # budget wager reads (one stat, no second syscall).
+    assert ti.probe_index(tmp_path, SID).journal_bytes == journal_path(tmp_path).stat().st_size
     refreshed(tmp_path)
-    assert ti.probe_index(tmp_path, SID).state == "ready"
+    probe = ti.probe_index(tmp_path, SID)
+    assert probe.state == "ready"
+    assert probe.journal_bytes == journal_path(tmp_path).stat().st_size
     write_rows(tmp_path, [assistant("a2", 1.2)])
     assert ti.probe_index(tmp_path, SID).state == "stale"
 
@@ -863,6 +868,135 @@ async def test_checkpoints_view_builds_in_background_then_settles(tmp_path, monk
     assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1"]
     assert view["checkpoints"][1]["outcome"] == "complete"
     assert view["checkpoints"][1]["naming"]["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_journal_too_large_for_the_budget_is_not_waited_on(tmp_path, monkeypatch):
+    """The first-paint budget is a wager the scan lands inside it — don't stake it.
+
+    A cold open of a 20k-entry conversation answered ``building`` 819.8 ms into
+    ``GET .../checkpoints`` (an UPPER BOUND: host at ~92% swap). In-process that
+    path is 204.0 ms nominal, 200 ms of which is this budget spent on a journal
+    that scans in 943.5 ms — so the wait could not have produced ``ready``, and
+    the caller paid for nothing. Pinned STRUCTURALLY like its neighbour: a spy
+    records every timeout ``checkpoints_view`` passes to ``asyncio.wait``, and a
+    journal over ``_FIRST_PAINT_SCAN_BYTES_PER_S * wait_s`` must pass NONE.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1),
+            assistant("a1", 1.2, "x" * (2 << 20)),
+            marker("m1", 1.3, "t1"),
+        ],
+    )
+    assert journal_path(tmp_path).stat().st_size > ti._FIRST_PAINT_SCAN_BYTES_PER_S * 0.05
+    entered, release = threading.Event(), threading.Event()
+    real = ti.refresh_index
+
+    def slow(config_dir, session_id):
+        entered.set()
+        assert release.wait(30), "test never released the build"
+        return real(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", slow)
+
+    timeouts: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def spying_wait(fs, *, timeout=None, **kwargs):
+        timeouts.append(timeout)
+        return await real_wait(fs, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", spying_wait)
+    try:
+        view = await ti.checkpoints_view(tmp_path, SID, wait_s=0.05)
+        assert view["index"]["state"] == "building"
+        assert timeouts == [], "a journal too large for the budget was still waited on"
+        assert await asyncio.to_thread(entered.wait, 30)
+    finally:
+        release.set()
+
+    deadline = asyncio.get_running_loop().time() + 30.0
+    while True:
+        view = await ti.checkpoints_view(tmp_path, SID, wait_s=0.05)
+        if view["index"]["state"] == "ready":
+            break
+        assert asyncio.get_running_loop().time() < deadline, view
+        await asyncio.sleep(0.02)
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1"]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_cache_with_one_appended_row_still_waits(tmp_path, monkeypatch):
+    """A usable previous index must still get the budget (review MAJOR-1 / QA Q1).
+
+    A conversation that gained a row since its cache was written is the common
+    open, not the rare one, and `refresh_index` resumes from the recorded offset
+    (measured 2.1-2.4 ms for a one-row append) so the wait returns at the
+    build's own time rather than at the budget. Gating that on TOTAL bytes
+    refused a wait that always pays and answered `building` where the old answer
+    was `ready` — and the consumer does not re-read a `building`: the rail's
+    poll is armed only while naming ids are pending (`use-checkpoints.ts`), so
+    it kept painting the previous tick set.
+
+    The fixture is deliberately larger than the COLD gate, so this test fails
+    if the gate is keyed on total bytes again.
+    """
+    rows: list[dict[str, Any]] = [start("s1", 1.0, "t1")]
+    for index in range(1, 76):
+        if index % 2 == 0:
+            rows.append(user(f"u{index}", 1.0 + index / 100))
+        else:
+            rows.append(assistant(f"a{index}", 1.0 + index / 100, "x" * 150_000))
+    rows.append(marker("m1", 2.0, "t1"))
+    write_rows(tmp_path, rows)
+    refreshed(tmp_path)
+    assert journal_path(tmp_path).stat().st_size > ti._FIRST_PAINT_SCAN_BYTES_PER_S * (
+        ti._FIRST_PAINT_WAIT_S
+    ), "fixture must exceed the cold gate or this test proves nothing"
+
+    # One row lands after the cache was written — the state every open after a
+    # turn is in.
+    write_rows(tmp_path, [user("late", 3.0, "one more turn")])
+
+    timeouts: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def spying_wait(fs, *, timeout=None, **kwargs):
+        timeouts.append(timeout)
+        return await real_wait(fs, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", spying_wait)
+    view = await ti.checkpoints_view(tmp_path, SID)  # the route's own default
+    assert timeouts == [ti._FIRST_PAINT_WAIT_S], "a usable previous index lost the wait"
+    assert view["index"]["state"] == "ready"
+    # Freshness, not just state: the appended row is in the manifest this ask
+    # answered with, checked against a full scan of the same journal.
+    expected = [checkpoint.id for checkpoint in refreshed(tmp_path).checkpoints]
+    assert [entry["id"] for entry in view["checkpoints"]] == expected
+    assert "late" in expected
+
+
+@pytest.mark.asyncio
+async def test_a_small_journal_still_pays_the_budget(tmp_path, monkeypatch):
+    """The other half of the rule: a scan that CAN land inside the budget still
+    gets the chance to, so a small cold conversation keeps answering ``ready``
+    in one round trip rather than making the rail poll for its own ticks."""
+    write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
+    assert journal_path(tmp_path).stat().st_size <= ti._FIRST_PAINT_SCAN_BYTES_PER_S * 5
+    timeouts: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def spying_wait(fs, *, timeout=None, **kwargs):
+        timeouts.append(timeout)
+        return await real_wait(fs, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", spying_wait)
+    view = await ti.checkpoints_view(tmp_path, SID, wait_s=5)
+    assert view["index"]["state"] == "ready"
+    assert timeouts == [5]
 
 
 @pytest.mark.asyncio

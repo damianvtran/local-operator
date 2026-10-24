@@ -122,6 +122,42 @@ def test_hosting_rule_waived() -> bool:
     return bool((os.environ.get(ENV_ALLOW_TEST_HOSTING_NOTIFY) or "").strip())
 
 
+def fast_dial_from_row(stored: bool | None, spec: Any) -> bool | None:
+    """The speed dial a journal row states for ``spec``, ``None`` when silent.
+
+    ONE implementation for the two readers that must agree — the owner's restore
+    (``Session._restore_selected_model``) and the runtime-less cold frame
+    (``cold_model.resolve_saved_model``). A second copy is how the frame a
+    reopened pane paints and the spec the first turn sends come to disagree,
+    which is the reported defect (ui#1266) rather than a hypothetical.
+
+    Three answers, and the third is why this is not a ``bool``:
+
+    * ``True`` — the row recorded the dial ON and the route sells the tier;
+    * ``False`` — the row recorded it OFF, OR the route cannot serve it (the
+      clamp below). A row is a SNAPSHOT of a live dial, so an OFF is a DECISION
+      and a restore must CLEAR a spec that arrived switched on: the create path
+      can hand one over (``DraftModel.fast_mode``, ui#1265), and a restore that
+      only ever ORs ``True`` brings a conversation the user turned off back on
+      premium pricing at the next reopen;
+    * ``None`` — the row predates the field (every row written before the dial
+      was journalled) and says NOTHING. Reading absence as OFF would silently
+      disable fast mode on every conversation older than the fix; reading it as
+      ON would arm a premium tier nobody chose. The caller leaves the incoming
+      spec's own answer alone.
+
+    The clamp is the conjunction the failover carry uses
+    (``providers.failover.spec_for_target``) and the OPPOSITE failure mode from
+    the OFF edge: a row that says ``fast`` on a route that does not sell the
+    tier puts the speed key on a request the provider 400s — the turn the
+    restore exists to open. Both halves are read from the spec that will
+    actually serve, never from the pair the row names.
+    """
+    if stored is None:
+        return None
+    return bool(stored) and bool(getattr(spec, "supports_fast_mode", False))
+
+
 @dataclass(frozen=True)
 class StoredModelSelection:
     provider: str
@@ -132,13 +168,28 @@ class StoredModelSelection:
     # This is the conversation's birth selector, not the pair configured while
     # constructing a resumed owner. Existing /effort journalling depends on it.
     boot_selector: str | None = None
+    #: The FAST dial the row recorded, or ``None`` on a row that has no opinion.
+    #:
+    #: ``None`` is "no evidence", never "off". Every row written before the dial
+    #: was journalled carries it, and reading those as a decision to keep the
+    #: dial off would silently disable fast mode on every conversation that
+    #: predates the fix — the same defect one layer down. ``False`` is a real
+    #: snapshot (the user turned it off), so the two spellings cannot collapse.
+    fast: bool | None = None
 
     @property
     def selector(self) -> str:
         return f"{self.provider}/{self.model_id}"
 
 
-def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot: Any = None):
+def _selection(
+    selector: Any,
+    effort: Any,
+    *,
+    authoritative: bool = False,
+    boot: Any = None,
+    fast: Any = None,
+):
     if not isinstance(selector, str) or "/" not in selector:
         return None
     provider, model_id = selector.split("/", 1)
@@ -183,6 +234,10 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
         boot_selector=(
             boot if isinstance(boot, str) and "/" in boot and all(boot.split("/", 1)) else None
         ),
+        # Only a real boolean is evidence. A hand-edited row spelling ``"yes"``
+        # says nothing this reader may act on, and the wire's own gate
+        # (``supports_fast_mode``) is what decides whether it may ever be sent.
+        fast=fast if isinstance(fast, bool) else None,
     )
 
 
@@ -203,6 +258,7 @@ def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSe
                 details.get("effort"),
                 authoritative=version == SELECTION_VERSION,
                 boot=details.get("boot"),
+                fast=details.get("fast"),
             )
             if selected is not None:
                 if selected.authoritative:
@@ -249,8 +305,11 @@ def _forward_payloads(directory: Path) -> Iterable[dict[str, Any]]:
     exactly the journals whose fold here is expensive), and this is the shape it
     must stay in step with.
     """
+    path = _journal_for_read(directory)
+    if path is None:
+        return
     try:
-        with (directory / "transcript.jsonl").open(encoding="utf-8") as handle:
+        with path.open(encoding="utf-8") as handle:
             for line in handle:
                 # Large transcripts mostly contain messages. Do not parse
                 # their payloads just to recover a two-field selector.
@@ -315,7 +374,9 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
     Journals this build writes cannot contain such a byte: every append encodes
     the whole row before writing it.
     """
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -355,6 +416,7 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
                     details.get("effort"),
                     authoritative=True,
                     boot=details.get("boot"),
+                    fast=details.get("fast"),
                 )
                 if selected is not None:
                     return replace(selected, recovered=unusable)
@@ -364,6 +426,24 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
                 # what this flag does on the way toward the head.
                 unusable = True
     return None
+
+
+def _journal_for_read(directory: Path) -> Path | None:
+    """A readable journal for ``directory``, archive included, or ``None``.
+
+    THE RESOLVER, so a resumed session keeps the model its journal names: a
+    compressed session stores its selector rows inside the archive, and reading
+    the plain name would answer "no stored selection" and silently resume on the
+    configured hosting instead. Every reader below opens the path this returns,
+    and the memo keys stat it — so the cache stays keyed on the bytes actually
+    read.
+    """
+    from local_operator.session import compression
+
+    try:
+        return compression.transcript_for_read(directory)
+    except (OSError, compression.ArchiveError):
+        return None
 
 
 def _memoised(
@@ -425,7 +505,9 @@ def read_model_selection(directory: Path) -> StoredModelSelection | None:
     this module's audit measured (see ``_SELECTION_MEMO``'s comment).
     """
     return _memoised(
-        _SELECTION_MEMO, directory / "transcript.jsonl", lambda: _read_selection(directory)
+        _SELECTION_MEMO,
+        _journal_for_read(directory) or (directory / "transcript.jsonl"),
+        lambda: _read_selection(directory),
     )
 
 
@@ -473,7 +555,9 @@ def refused_decision_only_selection(directory: Path) -> str | None:
     ``_SELECTION_MEMO``).
     """
     return _memoised(
-        _SELECTION_REFUSAL_MEMO, directory / "transcript.jsonl", lambda: _read_refusal(directory)
+        _SELECTION_REFUSAL_MEMO,
+        _journal_for_read(directory) or (directory / "transcript.jsonl"),
+        lambda: _read_refusal(directory),
     )
 
 
@@ -485,7 +569,9 @@ def _read_refusal(directory: Path) -> str | None:
         is_speech_only,
     )
 
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -635,7 +721,9 @@ def session_uses_test_hosting(directory: Path) -> bool:
         # only direction the escape can move, and the kill switch still wins
         # because every leg asks it first.
         return False
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return False
     try:
         info = path.stat()
     except OSError:
@@ -708,7 +796,10 @@ def _read_test_hosting(directory: Path) -> bool | None:
     try:
         from local_operator.providers.registry import is_mock_provider
 
-        with (directory / "transcript.jsonl").open("rb"):
+        path = _journal_for_read(directory)
+        if path is None:
+            return None
+        with path.open("rb"):
             pass
         settled = _settled_selection(directory)
         return settled is not None and is_mock_provider(settled.provider)

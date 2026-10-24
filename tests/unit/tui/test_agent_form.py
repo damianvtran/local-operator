@@ -164,7 +164,9 @@ async def test_reserved_and_escaped_names_and_autocomplete(tmp_path, monkeypatch
         await _boot(pilot, app)
         rows = app._agent_argument_choices(_PickerEditor("/agent "))
         names = [row.name for row in rows]
-        assert names[-3:] == ["class", "new", "edit"]
+        # Four reserved verbs since LOH-9 S4 added `promote`; they stay LAST so
+        # a bare Tab still completes a profile.
+        assert names[-4:] == ["class", "new", "edit", "promote"]
         assert "=new" in names and "=edit" in names and "==foo" in names
         assert not app._agent_argument_choices(_PickerEditor("/agent new "))
         edit = app._agent_argument_choices(_PickerEditor("/agent edit "))
@@ -384,7 +386,14 @@ async def test_removed_tier_noop_and_label_edit_preserve_historical_pin(tmp_path
         creating=True,
         scope="global",
     )
-    config.set_config_value("subagents", {"models": {}, "model_choice": "operator"})
+    # "No tiers configured" is a DELETION now: a mapping write merges into the file
+    # (PR #2819), so the emptied subtree is declared rather than implied by
+    # `models: {}` — which the write treats as "keep what is on disk".
+    config.set_config_value(
+        "subagents",
+        {"model_choice": "operator"},
+        drop={("subagents", "models"): "no tiers configured for this test"},
+    )
     async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)
         page = await open_form(app, pilot, "/agent edit historic")

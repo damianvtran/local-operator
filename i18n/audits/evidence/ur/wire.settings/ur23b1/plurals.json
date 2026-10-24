@@ -1,0 +1,295 @@
+[
+  {
+    "namespace": "relay.ask",
+    "key": "relay.ask.context.messages",
+    "en": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+    "ur": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}",
+    "context": {
+      "role": "phone ask card, context line",
+      "tone": "plain, factual",
+      "maxCells": 60,
+      "note": "The line under an OPEN ask's state line on the phone, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the card draws no line at all for 0 or when an older runtime sends no count) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. It wraps onto more than one line on a narrow phone, so short words and a natural break after 'asked' are welcome."
+    },
+    "en_cells": 139,
+    "ur_cells": 118,
+    "pseudo_30pct_cells": 154,
+    "mechanical_flags": [
+      "actual_overflow:118>60",
+      "pseudo_30pct_overflow:154>60"
+    ]
+  },
+  {
+    "namespace": "relay.session.tags",
+    "key": "relay.session.tags.more",
+    "en": "{count, plural, one {# more tag} other {# more tags}}",
+    "ur": "{count, plural, one {# مزید ٹیگ} other {# مزید ٹیگز}}",
+    "context": {
+      "role": "accessible name of the row's +N mark",
+      "tone": "ICU plural on count; lowercase.",
+      "note": "Owned relay SPA session copy. The visible mark is only +N, so this is the whole sentence assistive tech gets."
+    },
+    "en_cells": 53,
+    "ur_cells": 53,
+    "pseudo_30pct_cells": 69,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.asks",
+    "key": "tui.asks.context.messages",
+    "en": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+    "ur": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}",
+    "context": {
+      "role": "queued-ask list row, context line",
+      "tone": "plain, factual",
+      "maxCells": 78,
+      "note": "The line under an OPEN ask in the terminal's ask list, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the caller draws no line at all for 0 or for an uncountable ask) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. This line is CLIPPED to the list's width with an ellipsis, so keep the opening words (the count and 'from you') first: the tail may be cut. The list paints one line per ask plus this line on stale open rows only, so the string must never contain a newline."
+    },
+    "en_cells": 139,
+    "ur_cells": 134,
+    "pseudo_30pct_cells": 175,
+    "mechanical_flags": [
+      "actual_overflow:134>78",
+      "pseudo_30pct_overflow:175>78"
+    ]
+  },
+  {
+    "namespace": "tui.review",
+    "key": "tui.review.age_days",
+    "en": "{amount, plural, one {updated # d ago} other {updated # d ago}}",
+    "ur": "{amount, plural, one {# d پہلے اپ ڈیٹ ہوا} other {# d پہلے اپ ڈیٹ ہوا}}",
+    "context": {
+      "note": "updated tail in days; # is the count; `d` stays short",
+      "role": "TUI code-review ledger page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 63,
+    "ur_cells": 71,
+    "pseudo_30pct_cells": 93,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.review",
+    "key": "tui.review.age_hours",
+    "en": "{amount, plural, one {updated # h ago} other {updated # h ago}}",
+    "ur": "{amount, plural, one {# h پہلے اپ ڈیٹ ہوا} other {# h پہلے اپ ڈیٹ ہوا}}",
+    "context": {
+      "note": "updated tail in hours; # is the count; `h` stays short",
+      "role": "TUI code-review ledger page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 63,
+    "ur_cells": 71,
+    "pseudo_30pct_cells": 93,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.review",
+    "key": "tui.review.age_minutes",
+    "en": "{amount, plural, one {updated # min ago} other {updated # min ago}}",
+    "ur": "{amount, plural, one {# min پہلے اپ ڈیٹ ہوا} other {# min پہلے اپ ڈیٹ ہوا}}",
+    "context": {
+      "note": "updated tail in minutes; # is the count",
+      "role": "TUI code-review ledger page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 67,
+    "ur_cells": 75,
+    "pseudo_30pct_cells": 98,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.review",
+    "key": "tui.review.ci_failing",
+    "en": "{count, plural, one {# failing} other {# failing}}",
+    "ur": "{count, plural, one {# ناکام} other {# ناکام}}",
+    "context": {
+      "note": "CI clause when the host reported a failing count",
+      "role": "TUI code-review ledger page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 50,
+    "ur_cells": 46,
+    "pseudo_30pct_cells": 60,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.review",
+    "key": "tui.review.comments_count",
+    "en": "{count, plural, one {# comment} other {# comments}}",
+    "ur": "{count, plural, one {# تبصرہ} other {# تبصرے}}",
+    "context": {
+      "note": "comment total beside the other meta figures",
+      "role": "TUI code-review ledger page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 51,
+    "ur_cells": 46,
+    "pseudo_30pct_cells": 60,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.schedule",
+    "key": "tui.schedule.ends_left",
+    "en": "{count, plural, one {# left} other {# left}}",
+    "ur": "{count, plural, one {# باقی} other {# باقی}}",
+    "context": {
+      "note": "Remaining fires under a `limit`; ICU plural, # is the count.",
+      "role": "TUI /schedule page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 44,
+    "ur_cells": 44,
+    "pseudo_30pct_cells": 58,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.schedule",
+    "key": "tui.schedule.fired",
+    "en": "{count, plural, one {# fired} other {# fired}}",
+    "ur": "{count, plural, one {# بار چلی} other {# بار چلی}}",
+    "context": {
+      "note": "Delivered count with no bound; ICU plural, # is the count.",
+      "role": "TUI /schedule page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 46,
+    "ur_cells": 50,
+    "pseudo_30pct_cells": 65,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.schedule",
+    "key": "tui.schedule.fired_of",
+    "en": "{count, plural, one {# of {limit} fired} other {# of {limit} fired}}",
+    "ur": "{count, plural, one {# / {limit} چلی} other {# / {limit} چلی}}",
+    "context": {
+      "note": "Delivered count against a limit; ICU plural, # is the count and {limit} the budget.",
+      "role": "TUI /schedule page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 68,
+    "ur_cells": 62,
+    "pseudo_30pct_cells": 81,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.schedule",
+    "key": "tui.schedule.subtitle",
+    "en": "{count, plural, one {# wake in this conversation} other {# wakes in this conversation}}",
+    "ur": "{count, plural, one {# بیداری اس گفتگو میں} other {# بیداریاں اس گفتگو میں}}",
+    "context": {
+      "note": "Count of wakes under the page title; ICU plural, # is the count.",
+      "role": "TUI /schedule page",
+      "tone": "terse, operator-facing, one fact per sentence"
+    },
+    "en_cells": 87,
+    "ur_cells": 76,
+    "pseudo_30pct_cells": 99,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.status",
+    "key": "tui.status.agents",
+    "en": "{count, plural, one {# agent} other {# agents}}",
+    "ur": "{count, plural, one {# ایجنٹ} other {# ایجنٹس}}",
+    "context": {
+      "note": "ICU plural (RFC §2.9 digits policy: Latin numerals): the count is the raw integer of live subagents. Zero never reaches this key — format_agents returns the empty string so the segment disappears rather than reporting '0 agents'. No fixed cell cap: the band's drop ladder (drop_ladder) sheds whole segments by width.",
+      "role": "status band segment",
+      "tone": "plain count"
+    },
+    "en_cells": 47,
+    "ur_cells": 47,
+    "pseudo_30pct_cells": 62,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.status",
+    "key": "tui.status.jobs",
+    "en": "{count, plural, one {# job} other {# jobs}}",
+    "ur": "{count, plural, one {# جاب} other {# جاب}}",
+    "context": {
+      "note": "ICU plural (RFC §2.9 digits policy: Latin numerals): the count is the raw integer of backgrounded shell jobs. Zero never reaches this key — format_jobs returns the empty string so the segment disappears. A job is a process this session started, distinct from a subagent, which is why the two counters are separate segments.",
+      "role": "status band segment",
+      "tone": "plain count"
+    },
+    "en_cells": 43,
+    "ur_cells": 42,
+    "pseudo_30pct_cells": 55,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.transcript",
+    "key": "tui.transcript.attach.receipt",
+    "en": "↑ {count, plural, one {# image} other {# images}} attached",
+    "ur": "↑ {count, plural, one {# تصویر} other {# تصویریں}} منسلک",
+    "context": {
+      "note": "The receipt row under a prompt with pasted attachments: the app confirming BYTES were attached, not repeating the pasted marker (which the user could have typed). ICU plural; the leading arrow is the receipt mark and is part of the value.",
+      "role": "prompt receipt row",
+      "tone": "plain confirmation"
+    },
+    "en_cells": 58,
+    "ur_cells": 56,
+    "pseudo_30pct_cells": 73,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.transcript",
+    "key": "tui.transcript.catchup.missed",
+    "en": "{count, plural, one {# missed wake} other {# missed wakes}}",
+    "ur": "{count, plural, one {# چھوٹی ہوئی بیداری} other {# چھوٹی ہوئی بیداریاں}}",
+    "context": {
+      "note": "The missed-wakes count that fills catchup.headline's `{label}`. ICU plural. Rides a one-row receipt on the transcript spine; 'wake' is the product term for a scheduled session wake.",
+      "role": "wake receipt label",
+      "tone": "plain count"
+    },
+    "en_cells": 59,
+    "ur_cells": 72,
+    "pseudo_30pct_cells": 94,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.transcript",
+    "key": "tui.transcript.group.actions",
+    "en": "{count, plural, one {{label} action} other {{label} actions}}",
+    "ur": "{count, plural, one {{label} کارروائی} other {{label} کارروائیاں}}",
+    "context": {
+      "note": "Actions count actual tool work, never incoming receipts, quiet no_reply calls or total group members. English singular is '1 action'; other counts retain 'actions'. {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals.",
+      "role": "quiet group summary",
+      "tone": "terse advisory"
+    },
+    "en_cells": 61,
+    "ur_cells": 66,
+    "pseudo_30pct_cells": 86,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.transcript",
+    "key": "tui.transcript.group.reply_requested",
+    "en": "{count, plural, one {{label} reply requested} other {{label} reply requested}}",
+    "ur": "{count, plural, one {{label} جواب کی درخواست} other {{label} جواب کی درخواستیں}}",
+    "context": {
+      "note": "Requested agent intent only, not outstanding operator attention or an action count. Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members.  {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English so reviewed frames stay byte-identical. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals.",
+      "role": "quiet group summary",
+      "tone": "terse advisory"
+    },
+    "en_cells": 78,
+    "ur_cells": 80,
+    "pseudo_30pct_cells": 104,
+    "mechanical_flags": []
+  },
+  {
+    "namespace": "tui.transcript",
+    "key": "tui.transcript.group.steered",
+    "en": "{count, plural, one {{label} steered} other {{label} steered}}",
+    "ur": "{count, plural, one {{label} رخ بدلنے والا پیغام} other {{label} رخ بدلنے والے پیغامات}}",
+    "context": {
+      "note": "Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members.  {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English so reviewed frames stay byte-identical. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals.",
+      "role": "quiet group summary",
+      "tone": "terse advisory"
+    },
+    "en_cells": 62,
+    "ur_cells": 88,
+    "pseudo_30pct_cells": 115,
+    "mechanical_flags": []
+  }
+]

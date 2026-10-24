@@ -124,7 +124,16 @@ class SavedPreview:
 
 
 def read_saved_preview(directory: Path) -> SavedPreview:
-    path = directory / "transcript.jsonl"
+    # ``transcript_for_read``: a compressed session's preview must come from the
+    # archive, not from the absent plain name. ``None`` is raised as the same
+    # ``FileNotFoundError`` this reader has always raised for a session with no
+    # journal — the caller's contract ("missing is not evidence of empty") is
+    # unchanged, and it is now true for the archive case as well.
+    from local_operator.session import compression
+
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
     # A missing journal is not evidence of an empty conversation. The caller
     # may separately prove an unmaterialised live owner exists; this reader
     # never invents that authority from an absent path.

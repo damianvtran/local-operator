@@ -2569,6 +2569,45 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
             await store._ensure_oauth_fresh(self._current(store, wrapped_row.id))
         assert REFRESH_SEND_UNCONFIRMED_KEY not in self._current(store, wrapped_row.id).data
 
+    async def test_a_pre_send_provider_refusal_clears_the_marker(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refusal raised before any socket write must not defer the account.
+
+        ``refresh_radient_token`` rejects an issuer it cannot bind to a stored
+        trusted hub BEFORE it builds a request. The store has already armed its
+        write-ahead marker by then, and the generic arm treated that refusal as
+        an ANSWER that proved nothing: the row was suppressed for the answered
+        bound and the next call raised ``RefreshUnconfirmedError`` — a deferral
+        the account did not owe, in place of the guard's own refusal. Measured
+        on the e2e refusals suite at 525a81cfa9: 502 ``credential_unavailable``
+        where a typed refusal belonged, and a 60 s peer timeout because the POST
+        the test waited for was never sent.
+        """
+        from local_operator.providers.auth_store import (
+            REFRESH_SEND_UNCONFIRMED_KEY,
+            RefreshUnconfirmedError,
+        )
+        from local_operator.providers.oauth import radient as oauth
+
+        row = self._row(store, expires=0)
+        # An endpoint the guard cannot bind to the row's hub: it refuses before
+        # httpx is even constructed, so nothing can have reached the wire.
+        monkeypatch.setattr(oauth, "TOKEN_URL", "https://untrusted.example/token")
+        monkeypatch.setattr(
+            AuthStore, "_refresh_fn", lambda self_, provider: oauth.refresh_radient_token
+        )
+        with pytest.raises(AuthStoreError, match="refused before sending"):
+            await store._ensure_oauth_fresh(self._current(store, row.id))
+        assert REFRESH_SEND_UNCONFIRMED_KEY not in self._current(store, row.id).data
+
+        # The row asks again rather than deferring: the second refusal is the
+        # guard's, never the marker's.
+        with pytest.raises(AuthStoreError) as again:
+            await store._ensure_oauth_fresh(self._current(store, row.id))
+        assert not isinstance(again.value, RefreshUnconfirmedError)
+        assert "refused before sending" in str(again.value)
+
     @staticmethod
     def _ok_refresh(access: str = "access-2") -> Any:
         import time as _time

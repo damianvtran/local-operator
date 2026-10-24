@@ -1,0 +1,92 @@
+[
+  {
+    "finding_id": "UR-R1-001",
+    "severity": "major",
+    "status": "resolved",
+    "affected_keys": 5,
+    "changed_keys": 5,
+    "exact_proposed_matches": 5,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  },
+  {
+    "finding_id": "UR-R1-002",
+    "severity": "major",
+    "status": "resolved",
+    "affected_keys": 1,
+    "changed_keys": 1,
+    "exact_proposed_matches": 1,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "status": "resolved",
+    "affected_keys": 9,
+    "changed_keys": 9,
+    "exact_proposed_matches": 8,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  },
+  {
+    "finding_id": "UR-R1-004",
+    "severity": "major",
+    "status": "resolved",
+    "affected_keys": 1,
+    "changed_keys": 1,
+    "exact_proposed_matches": 1,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  },
+  {
+    "finding_id": "UR-R1-005",
+    "severity": "major",
+    "status": "resolved",
+    "affected_keys": 5,
+    "changed_keys": 5,
+    "exact_proposed_matches": 4,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  },
+  {
+    "finding_id": "UR-R1-006",
+    "severity": "minor",
+    "status": "resolved",
+    "affected_keys": 1,
+    "changed_keys": 1,
+    "exact_proposed_matches": 1,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  },
+  {
+    "finding_id": "UR-R1-007",
+    "severity": "minor",
+    "status": "resolved",
+    "affected_keys": 1,
+    "changed_keys": 1,
+    "exact_proposed_matches": 1,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  },
+  {
+    "finding_id": "UR-R1-008",
+    "severity": "minor",
+    "status": "resolved",
+    "affected_keys": 2,
+    "changed_keys": 0,
+    "exact_proposed_matches": 0,
+    "resolution": "resolved_by_masculine_tag_standardization_in_tui.tags; unchanged relay.session.tags is now consistent"
+  },
+  {
+    "finding_id": "UR-R1-009",
+    "severity": "minor",
+    "status": "resolved",
+    "affected_keys": 2,
+    "changed_keys": 2,
+    "exact_proposed_matches": 2,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  },
+  {
+    "finding_id": "UR-R1-010",
+    "severity": "minor",
+    "status": "resolved",
+    "affected_keys": 1,
+    "changed_keys": 1,
+    "exact_proposed_matches": 0,
+    "resolution": "remediated; alternate wording accepted where it is semantically and idiomatically equivalent"
+  }
+]

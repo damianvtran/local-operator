@@ -1,0 +1,4 @@
+wire.errors.settings.credential_key_empty	EN="Credential key cannot be empty"	UR="کریڈینشل کی کلید خالی نہیں ہو سکتی"	OLD="کریڈینشل key خالی نہیں ہو سکتی"
+wire.errors.settings.inline_credentials	EN="Use an endpoint without inline credentials or query parameters."	UR="ایسا اینڈ پوائنٹ استعمال کریں جس میں ان لائن [redacted]ز یا کوئری پیرامیٹرز نہ ہوں۔"	OLD="ایسا [redacted] استعمال کریں جس میں inline credentials یا query parameters نہ ہوں۔"
+wire.errors.settings.no_update_fields	EN="No valid update fields provided"	UR="اپڈیٹ کے لیے کوئی درست فیلڈ نہیں دی گئی"	OLD="اپڈیٹ کے لیے کوئی درست field نہیں دی گئی"
+wire.errors.settings.not_registered	EN="This setting is not registered."	UR="یہ ترتیب رجسٹرڈ نہیں ہے۔"	OLD="یہ ترتیب رجسٹر نہیں ہے۔"
