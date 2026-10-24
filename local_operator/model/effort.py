@@ -27,6 +27,18 @@ thought that is not in force:
   2026-08-11) for the value set, and the per-model pages for the subsets
   (``gpt-5.4``: "Reasoning.effort supports: none (default), low, medium, high
   and xhigh").
+- Kimi (Moonshot) — https://platform.kimi.ai/docs/guide/use-reasoning-effort
+  (read 2026-10-24). The K3 family takes a top-level ``reasoning_effort`` in
+  low|high|max, and every rung was honoured live the same day against
+  ``api.kimi.com/coding/v1/chat/completions`` on ``k3.1-pro``. The DEFAULT is
+  disputed: the doc says ``max``, the coding-plan listing states
+  ``think_efforts.default_effort: "high"``, and repeated samples of OMITTING
+  the key place it nowhere consistent — bottom of the ladder once (low 16 /
+  max 49 / omitted 116), between the rungs another time (low 21 / max 148 /
+  omitted 54), and near ``max`` in a median-of-3 run (high 31 / max 482 /
+  omitted 396). The family row therefore seeds NO default: ``/effort auto``
+  means "omit", today's behaviour, and seeding either stated default would be
+  a guess at the depth of every untouched turn.
 
 One cost the same Anthropic page names, and this app pays: effort shapes the
 rendered prompt, so changing it between turns does not preserve cached prefixes
@@ -45,10 +57,9 @@ Families NOT here offer nothing, which is the honest answer rather than a gap:
   thinking as a token budget instead. Offering "medium" with no name-to-wire
   mapping would put a level on the band that never reaches the request, so
   Gemini reports ``reasoning`` and ``/effort`` says there is nothing to pick.
-- DeepSeek's reasoner, Kimi's thinking models, xAI. They reason at a depth the
-  API does not expose as a named tier, or expose it under a key we have not
-  verified against a live request. An unverified key is a 400 on a turn the
-  user did not ask to risk.
+- DeepSeek's reasoner, xAI. They reason at a depth the API does not expose as
+  a named tier, or expose it under a key we have not verified against a live
+  request. An unverified key is a 400 on a turn the user did not ask to risk.
 """
 
 from __future__ import annotations
@@ -213,6 +224,12 @@ def cheapest_real_rung(levels: "Sequence[str]") -> str | None:
 #: undocumented default, and it is one press from either end. The ends are both
 #: wrong for a key someone pressed to FIND the control: ``none`` silently
 #: lobotomises the model, ``max`` silently multiplies the bill.
+#:
+#: That argument is about the POSITION in the ladder, not about the word
+#: ``medium``: a ladder staged by a listing can omit ``medium`` entirely (Kimi
+#: K3 is ``low/high/max``), and ``next_effort`` then takes the middle of that
+#: ladder's real rungs. This constant remains the preferred spelling whenever
+#: the model states it.
 FALLBACK_START = "medium"
 
 
@@ -258,6 +275,12 @@ _ANTHROPIC_OPUS_5_5 = EffortSupport(("low", "medium", "high", "xhigh", "max"), d
 _OPENAI_GPT5 = EffortSupport(("none", "low", "medium", "high", "xhigh"))
 _OPENAI_GPT6 = EffortSupport(("low", "medium", "high", "xhigh", "max"))
 _OPENAI_O_SERIES = EffortSupport(("low", "medium", "high"))
+
+# Kimi's K3 family (see the doc bullet above for the measurements). No default:
+# the vendor doc and the coding-plan listing name different defaults and
+# measured omission settles neither, so seeding one would guess at the depth of
+# every turn nobody touched the dial.
+_KIMI_K3 = EffortSupport(("low", "high", "max"))
 
 #: First match wins, so the narrower Anthropic generations are listed before the
 #: forward-reading ``5 and above`` arm. Patterns are ``search``ed against the
@@ -311,6 +334,22 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     (re.compile(r"gpt-5(?!\d)"), _OPENAI_GPT5),
     (re.compile(r"gpt-(?:[6-9]|\d{2,})"), _OPENAI_GPT6),
     (re.compile(r"(?:^|[/:-])o[1-9](?:-|$)"), _OPENAI_O_SERIES),
+    # Kimi K3, and the row the coding-plan host actually serves (``k3.1-pro``) is
+    # absent from the registry, so this arm is its ONLY offline ladder. The
+    # optional ``kimi-`` prefix covers both hosts' spellings — ``k3`` /
+    # ``k3.1-pro`` on api.kimi.com, ``kimi-k3`` / ``kimi-k3.1-pro`` on
+    # api.moonshot.cn — and ``(?:^|/)`` keeps it off an unrelated id that merely
+    # embeds the letters. The generation digit is pinned to 3, so ``kimi-k2*``
+    # keeps its empty ladder: Kimi's 2.x rows reason without a named tier.
+    # ``kimi-for-coding*`` rides along because the coding-plan listing states the
+    # same ``think_efforts`` shape for those rows (the K2.8 Preview alias).
+    # ``(?:[.:-]|$)`` also admits the aggregator's batched spelling
+    # (``moonshotai/kimi-k3:batch``); ``:`` is route tag, not a different
+    # generation, and the same allowance is already made on the Anthropic arms.
+    (
+        re.compile(r"(?:^|/)(?:kimi-for-coding|(?:kimi-)?k3(?:[.:-]|$))"),
+        _KIMI_K3,
+    ),
 )
 
 
@@ -498,10 +537,10 @@ def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     """The level one cycle step above ``current``, wrapping at the top.
 
     ``None`` in (nothing selected) starts at :data:`FALLBACK_START` when the
-    model has it, else the lowest rung ABOVE ``none`` — never at whatever
-    happens to sit at index 0, which on OpenAI is ``none``: a user pressing the
-    key to find the control would have turned reasoning OFF with their first
-    press.
+    model has it, else at the MIDDLE of the ladder's real rungs — never at
+    whatever happens to sit at index 0, which on OpenAI is ``none``: a user
+    pressing the key to find the control would have turned reasoning OFF with
+    their first press.
 
     That guard used to be spelled ``FALLBACK_START in levels``, falling through
     to ``levels[0]``, and it was insufficient the moment ladders stopped coming
@@ -510,8 +549,12 @@ def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     of 153 stated ladders start at ``none`` and 8 of those lack ``medium``
     (``mistralai/mistral-small-2603`` is ``('none','high')``), so the fallthrough
     landed the discovery press on precisely the rung the docstring promised it
-    would never pick. Skipping ``none`` restores the stated property for any
-    ladder shape rather than for the two the table happened to contain.
+    would never pick. Skipping ``none`` restored the never-``none`` property,
+    but it still picked the CHEAPEST rung (Kimi's ``low/high/max`` answered
+    ``low``), which is the same undocumented claim at the other end. The middle
+    of the real rungs is the only answer that asserts nothing about a default
+    nobody stated; an even count takes the upper middle, so ``low/high/max`` and
+    ``none/low/high/max`` both answer ``high``.
 
     ``none`` stays fully reachable — by cycling round to it, and by an explicit
     ``/effort none``. It is a legitimate choice; it is just not one to make on
@@ -524,5 +567,10 @@ def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     if current is None or current.lower() not in levels:
         if FALLBACK_START in levels:
             return FALLBACK_START
-        return next((level for level in levels if level != "none"), levels[0])
+        ranked = [level for level in real_rungs(levels) if level != "none"]
+        if ranked:
+            # Upper middle on an even count: of the two candidates, one rung
+            # above the midpoint is the smaller escalation to make unseen.
+            return ranked[len(ranked) // 2]
+        return levels[0]
     return levels[(levels.index(current.lower()) + 1) % len(levels)]
