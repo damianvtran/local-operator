@@ -1,0 +1,15 @@
+# cli.monitor_help — sampled en/zh pairs for attestation zhca1
+# 3/6 keys; all >120 chars and all plurals included
+
+## cli.monitor_help.cancel  [104 chars]
+EN: cancel a monitor on a session with no runtime open (a live session changes its own monitors from inside)
+ZH: 取消没有运行时打开的会话中的监控（活动会话在内部更改自己的监控）
+
+## cli.monitor_help.monitor  [60 chars]
+EN: Inspect standing monitors and cancel one on a closed session
+ZH: 检查持续监控，并取消已关闭会话中的某项监控
+
+## cli.monitor_help.monitor_id  [22 chars]
+EN: monitor id (m1, m2, …)
+ZH: 监控ID（m1、m2、……）
+

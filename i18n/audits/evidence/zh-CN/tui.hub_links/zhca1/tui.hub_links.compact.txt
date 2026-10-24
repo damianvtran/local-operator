@@ -1,0 +1,11 @@
+tui.hub_links.action.pull	Pull now	立即pull
+tui.hub_links.action.retry	Retry	重试
+tui.hub_links.confirm.private	Future changes to {item} may be published to {organization} without asking each time. Only people allowed to access that organization can receive them.	今后对{item}的更改可发布到{organization}，不再逐次询问。只有获准访问该组织的人才能接收。
+tui.hub_links.confirm.public	Future changes to {item} may be published publicly without asking each time. Changes from private sources are paused for review.	今后对{item}的更改可公开发布，不再逐次询问。来自私有来源的更改会暂停，等待审查。
+tui.hub_links.hint.engage	↑↓ to begin	↑↓开始
+tui.hub_links.mark.retry	Retry {direction} for {item} at {source}	重试{direction}：{item}，来源为{source}
+tui.hub_links.refusal.resolve_first	Resolve this link's source before acting on it.	先解决此链接的来源问题，再执行操作。
+tui.hub_links.refusal.revision_moved	This link changed while you were reviewing it. Reopen the prompt to confirm the latest.	你审查期间此链接发生了更改。重新打开提示框，确认最新内容。
+tui.hub_links.state.empty	Not linked to the hub.	未链接到hub。
+tui.hub_links.state.loading	Loading hub links…	正在加载hub链接……
+tui.hub_links.state.updated	Updated from {source}	已从{source}更新

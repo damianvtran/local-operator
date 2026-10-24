@@ -1,0 +1,2 @@
+cli.install_help.keep	How many unreferenced generations to keep (default: %(default)s; 0 or more). A generation named by a live or saved session, and the one `current` points at, are never removed	保留多少个未被引用的代次（默认：%(default)s；不小于0）。活动或已保存会话引用的代次，以及`current`指向的代次，均不会被移除
+cli.install_help.migrate	Copy this install into the generation layout and point `current` at it	将此安装复制到代次布局，并让`current`指向它

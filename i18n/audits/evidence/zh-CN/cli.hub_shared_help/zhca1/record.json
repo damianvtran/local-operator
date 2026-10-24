@@ -1,0 +1,64 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "audit_kind": "independent_carried_namespace_attestation",
+ "locale": "zh-CN",
+ "namespace": "cli.hub_shared_help",
+ "round": 1,
+ "audit_date": "2026-10-24",
+ "key_count": 12,
+ "source_audit_revision": "ebb70df3a887aa7e9b448560e0546c2cf817b133",
+ "attested_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+ "current_byte_round_for_ledger": true,
+ "current_bytes_match_audited_hashes": true,
+ "attestation_record": "i18n/audits/evidence/zh-CN/cli.hub_shared_help/zhca1/attestation.json",
+ "translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session": "d9e49690d15d",
+  "model": "deepseek/deepseek-flash",
+  "date": "2026-10-24",
+  "independent_from_translator_session": true,
+  "actual_model_source": "Local Operator session header: Model: deepseek/deepseek-flash; no fallback used. The prior translator is a different agent/session."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/cli.hub_shared_help.json",
+   "sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/cli.hub_shared_help.context.json",
+   "sha256": "02ae159c824a12eac802c42bc679565a23f427c7788b1aab969418650e2f7ca5"
+  },
+  "zh-CN": {
+   "path": "local_operator/i18n/catalogues/zh-CN/cli.hub_shared_help.json",
+   "sha256": "dd9ec71770eae3ebdb4c627b6ead10336f0d182c3917e13d79777295e8fb538c"
+  },
+  "prior_held_target_sha256": "dd9ec71770eae3ebdb4c627b6ead10336f0d182c3917e13d79777295e8fb538c",
+  "policy": [
+   {
+    "path": "i18n/glossary.md",
+    "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+   },
+   {
+    "path": "i18n/style-guides/zh-CN.md",
+    "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+   }
+  ]
+ },
+ "current_report_verdict": {
+  "status": "carried",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "findings_total": 0,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "audit_notes_not_execution_log": "attestation.json is the primary record; report.md is the reading aid; audit.log is newly executed verifier output, not a historical transcript."
+}

@@ -1,0 +1,155 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "audit_kind": "independent_carried_namespace_attestation",
+ "locale": "zh-CN",
+ "namespace": "wire.settings.hub_defaults",
+ "audit_date": "2026-10-24",
+ "verdict": "not_carried",
+ "verdict_reason": "NOT CARRIED: the current source sha256 and/or target sha256 differ from the held-candidate audit row's recorded source and the held candidate's committed target bytes. The namespace changed after the prior audit and needs a fresh audit; no semantic attestation is made here.",
+ "attested_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+ "held_candidate_revision": "ebb70df3a887aa7e9b448560e0546c2cf817b133",
+ "change_since_held_candidate": {
+  "en_keys_before": 9,
+  "en_keys_after": 9,
+  "zh_keys_before": 9,
+  "zh_keys_after": 9,
+  "en_keys_added": [],
+  "zh_keys_added": [],
+  "zh_keys_removed": [],
+  "zh_values_changed": [
+   "wire.settings.hub_defaults.agents.help",
+   "wire.settings.hub_defaults.agents.label",
+   "wire.settings.hub_defaults.agents.off.description",
+   "wire.settings.hub_defaults.agents.on.description"
+  ]
+ },
+ "prior_audit": {
+  "ledger_path": "i18n/ledger.json",
+  "status": "passed",
+  "auditor": {
+   "agent": "i18n-auditor",
+   "model": "openai/gpt-6.1-sol",
+   "date": "2026-10-19",
+   "result": "passed",
+   "findings": 0
+  },
+  "translator": {
+   "agent": "i18n-translator",
+   "model": "openai/gpt-6.1-sol",
+   "date": "2026-10-19"
+  },
+  "note": "zh-CN core held-candidate wave 2026-10-19. 9 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+ },
+ "hash_equality_proof": {
+  "source": {
+   "prior_ledger_row_sha256": "9e785003bab2f7c01f32bae9b2cb114a240a82bac509c05bc55266585a41241d",
+   "held_candidate_sha256": "9e785003bab2f7c01f32bae9b2cb114a240a82bac509c05bc55266585a41241d",
+   "current_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+   "equal": false
+  },
+  "target": {
+   "prior_ledger_row_sha256": null,
+   "held_candidate_sha256": "2ba72847cff17089eaf641666b2ea7602a4e27bbc585a97da01d1e400ef25197",
+   "current_sha256": "b547b9730d78a81e840746de723e8a44597a3dcb175cd7e0200a143bb4972c13",
+   "equal": false,
+   "note": "The held-candidate ledger row schema records source_sha256 only. The held candidate's committed zh-CN bytes differ from the current target, so this namespace is NOT CARRIED."
+  },
+  "context_sidecar": {
+   "path": "local_operator/i18n/catalogues/en/wire.settings.hub_defaults.context.json",
+   "held_candidate_sha256": "96d7ac1732662bfb6b2690cf154af17823d36d6c5bd5062b81cbf97aebe3e17c",
+   "current_sha256": "a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba",
+   "equal": false
+  },
+  "policy_unchanged_since_held_candidate": true,
+  "policy": {
+   "glossary": {
+    "path": "i18n/glossary.md",
+    "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd",
+    "held_candidate_sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+   },
+   "style_guide": {
+    "path": "i18n/style-guides/zh-CN.md",
+    "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+    "held_candidate_sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+   }
+  },
+  "whole_file_target_bytes_equal_held_candidate": false
+ },
+ "key_set_and_order": {
+  "en_key_count": 9,
+  "zh_key_count": 9,
+  "set_equal": true,
+  "order_equal": true,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 9,
+  "parse_errors": [],
+  "argument_set_mismatches": [],
+  "plural_category_failures": [],
+  "plural_note": "zh-CN uses the 'other' category only; every plural keeps an 'other' branch and English's argument tuple."
+ },
+ "technical_tokens": {
+  "patterns": [
+   "angle_token",
+   "ansi_escape",
+   "backtick_span",
+   "home_or_absolute_path",
+   "long_flag",
+   "percent_token",
+   "url_scheme"
+  ],
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder.",
+  "note": "Flags, backticks, angle tokens, ANSI escapes, URLs, paths and %-tokens are compared literally; kept-English identifiers are checked against the style-guide list; ALL-CAPS emphasis is not a placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width": {
+  "declared_max_cells_keys": [
+   {
+    "key": "wire.settings.hub_defaults.agents.help",
+    "maxCells": 72,
+    "zh_cells": 55,
+    "fits": true
+   },
+   {
+    "key": "wire.settings.hub_defaults.teams.help",
+    "maxCells": 72,
+    "zh_cells": 44,
+    "fits": true
+   }
+  ],
+  "over_budget": [],
+  "note": "Cells counted as 2 for East Asian W/F, 1 for ASCII, 0 for combining marks."
+ },
+ "sample_review": null,
+ "findings": [],
+ "finding_counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "evidence_files": [
+  "attestation.json",
+  "record.json",
+  "report.md",
+  "audit.log",
+  "mechanical-raw.json",
+  "runtime-mechanical.json",
+  "pseudo-evidence.json",
+  "wire.settings.hub_defaults.pairs.txt",
+  "wire.settings.hub_defaults.compact.txt",
+  "receipt.json"
+ ],
+ "not_claimed": "No native TUI, relay, desktop, rendered-fit or design sign-off is claimed. This record attests byte carry and a sampled semantic read; it does not re-translate or re-audit the namespace from scratch."
+}

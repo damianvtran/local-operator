@@ -1,0 +1,3 @@
+wire.tunnel_setup.checking	Checking the selected account and required preparation before changes.	正在检查所选账户及所需准备工作，尚未作更改。
+wire.tunnel_setup.corrupt_intent	The saved phone setup request is invalid. Leave create.json unchanged and ask your agent to recover the original request before retrying. No setup changes were made.	已保存的手机设置请求无效。保持create.json不变，让智能体恢复原始请求后再重试。未作任何设置更改。
+wire.tunnel_setup.unavailable	Phone access setup could not finish this response. Check the current state before retrying; do not assume rollback.	手机访问设置无法在本次响应中完成。重试前检查当前状态；不要假定已经回滚。

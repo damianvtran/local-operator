@@ -1,0 +1,3 @@
+cli.exec_runtime.error	Error: {sentence}	错误：{sentence}
+cli.exec_runtime.model_switched	[dim]switched to {selector}[/dim]	[dim]已切换至{selector}[/dim]
+cli.exec_runtime.output_check_failed	! output check failed ({format}, attempt {attempt}/{max_attempts}): {reason}	! 输出检查失败（{format}，第{attempt}/{max_attempts}次尝试）：{reason}

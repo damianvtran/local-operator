@@ -1,0 +1,15 @@
+# cli.serve_help — sampled en/zh pairs for attestation zhca1
+# 3/5 keys; all >120 chars and all plurals included
+
+## cli.serve_help.host  [221 chars, LONG>120]
+EN: Host address (default: 127.0.0.1). Loopback-only by policy: every non-loopback bind is refused. File serving is unclamped on loopback connections; reach this API remotely through an explicit tunnel or an SSH port-forward.
+ZH: 主机地址（默认：127.0.0.1）。策略仅允许回环地址：拒绝所有非回环绑定。回环连接上的文件服务不受范围限制；通过显式隧道或SSH端口转发远程访问此API。
+
+## cli.serve_help.listener_fd  [226 chars, LONG>120]
+EN: Adopt an already-bound listening socket instead of binding one. Set by a daemon replacing its own process image onto a new build (`server/reload`), so the port never has a moment with nothing behind it. Not a user-facing flag.
+ZH: 接管已绑定的监听套接字，而非自行绑定。由将自身进程映像替换为新构建的守护进程（`server/reload`）设置，确保端口始终有服务承接。非面向用户的标志。
+
+## cli.serve_help.reload  [32 chars]
+EN: Enable hot reload for the server
+ZH: 启用服务器热重载
+

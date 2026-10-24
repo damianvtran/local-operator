@@ -1,0 +1,48 @@
+wire.exec.approval_advisory	Warning: this run cannot ask for approval (no terminal attached), so any tool call that needs approval will be denied.
+  Remedies: --control parks cards for a supervisor; --yolo auto-approves every tier; --tools NAME[,NAME] pre-approves the listed tools and bounds this run's reach to them; tool_approval_mode: auto in the config answers every call the same way for every run.	警告：本次运行无法请求审批（未连接终端），因此需要审批的工具调用都会被拒绝。
+  处理方式：--control挂起审批卡片，等待监督者处理；--yolo自动批准所有级别的操作；--tools NAME[,NAME]预先批准列出的工具，并将本次运行可用的工具限定为这些工具；配置中的tool_approval_mode: auto对所有运行中的每次调用都采用同样的自动审批方式。
+wire.exec.clear_goal_needs_start	--clear-goal adjusts a run, it does not start one. Pair it with --resume SESSION_ID plus a prompt or --loop.	--clear-goal只调整运行，不会启动运行。需与--resume SESSION_ID一起使用，并提供提示词或加上--loop。
+wire.exec.error_line	Error: {error}	错误：{error}
+wire.exec.exec_epilog	Examples:
+  lop exec 'Review the change' --team release --background
+  printf 'Inspect this report' | lop exec --profile reviewer
+  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'
+  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'
+  lop exec --status JOB_ID
+
+Resume restores the transcript, team, profile, goal and name first; explicit
+startup flags override their own slots. Team and profile may coexist. A loop
+runs after the optional initial prompt; --loop N counts continuations only.
+Saved loop progress is visible on resume, but iterations never replay automatically.
+A goal alone does not run a model. Prompts are literal, not slash commands.
+--goal only SETS the objective; unlike the TUI's /goal it does not also
+send that text as a message, because the prompt is exec's message channel.
+--agent/--agent-id select legacy agent data and are mutually exclusive.
+Default non-TTY approvals deny. --control may wait for a supervisor; --yolo
+is an explicit override, never implied by --background or --team.
+--tools bounds what the run can reach: excluded tools are unreachable.
+Foreground events/text use stdout; receipts use stderr. Detached runs log
+both streams and print distinct job/session IDs. Use lop --resume SESSION_ID
+to view a live run or resume a finished one; exec refuses a live owner.	示例：
+  lop exec 'Review the change' --team release --background
+  printf 'Inspect this report' | lop exec --profile reviewer
+  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'
+  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'
+  lop exec --status JOB_ID
+
+恢复时先还原会话记录、团队、配置档、目标和名称；显式指定的启动参数覆盖各自对应的设置。
+团队和配置档可同时使用。循环在可选的初始提示词之后运行；--loop N只计算后续轮次。
+恢复时可查看已保存的循环进度，但不会自动重跑任何轮次。
+仅设置目标不会运行模型。提示词按原文处理，不作为斜杠命令执行。
+--goal只设置目标；与TUI的/goal不同，它不会同时将目标文本作为消息发送，
+因为exec通过提示词接收消息。
+--agent/--agent-id选择旧版智能体数据，两者互斥。
+无TTY时默认拒绝审批。--control可能等待监督者；--yolo是显式放行，
+不会因使用--background或--team而隐式启用。
+--tools限定本次运行可用的工具：被排除的工具无法调用。
+前台事件和文本写入stdout；回执写入stderr。后台运行将这两种流写入日志，
+并输出彼此不同的任务ID和会话ID。使用lop --resume SESSION_ID查看正在运行的会话，
+或恢复已结束的会话；exec拒绝接管仍有执行方运行的会话。
+wire.exec.exec_help	Execute a task or goal loop in a persisted session without starting the TUI	在持久保存的会话中执行任务或目标循环，不启动TUI
+wire.exec.goal_only_sets_objective	--goal sets the objective but does not start work (unlike the TUI's /goal). Add a prompt, pipe one on stdin (or '-'), or run a loop with --loop N.	--goal只设置目标，不会开始工作（与TUI的/goal不同）。需提供提示词、通过stdin（或'-'）传入提示词，或使用--loop N运行循环。
+wire.exec.receipt_suffix	 (execution receipt)	 （执行回执）

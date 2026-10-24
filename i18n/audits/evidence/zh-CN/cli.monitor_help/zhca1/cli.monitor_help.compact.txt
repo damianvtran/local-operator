@@ -1,0 +1,3 @@
+cli.monitor_help.cancel	cancel a monitor on a session with no runtime open (a live session changes its own monitors from inside)	取消没有运行时打开的会话中的监控（活动会话在内部更改自己的监控）
+cli.monitor_help.monitor	Inspect standing monitors and cancel one on a closed session	检查持续监控，并取消已关闭会话中的某项监控
+cli.monitor_help.monitor_id	monitor id (m1, m2, …)	监控ID（m1、m2、……）

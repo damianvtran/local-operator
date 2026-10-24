@@ -1,0 +1,23 @@
+# tui.welcome — sampled en/zh pairs for attestation zhca1
+# 5/30 keys; all >120 chars and all plurals included
+
+## tui.welcome.hint.other_provider  [36 chars]
+EN: another provider, including API keys
+ZH: 其他提供商，包括API密钥
+
+## tui.welcome.status.login_required.short  [13 chars]
+EN: not logged in
+ZH: 未登录
+
+## tui.welcome.tip.classification_off  [57 chars maxCells=57]
+EN: lop config edit classification.auto false turns hints off
+ZH: lop config edit classification.auto false关闭提示
+
+## tui.welcome.tip.fork_placement  [52 chars maxCells=57]
+EN: /settings → Fork → Where a fork opens sets placement
+ZH: /settings → 分叉 → “分叉打开位置”决定分叉去向
+
+## tui.welcome.tip.model  [49 chars maxCells=57]
+EN: /model <provider>/<id> switches this session only
+ZH: /model <provider>/<id>仅切换本会话的模型
+
