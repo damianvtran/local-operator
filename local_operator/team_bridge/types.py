@@ -471,6 +471,13 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     elif len(positional) > 1:
         return None
 
+    if "thread_root" in tags and "legacy_alias" in tags:
+        # REFUSED ON PURPOSE. A reply is written by the threads path, which
+        # never mints migration aliases; a ref carrying both is a combination
+        # no released writer can produce. Accepting it would quietly widen the
+        # grammar to every tag combination, and a widened grammar is how a
+        # reader starts honouring shapes nobody ever meant to persist.
+        return None
     thread_root_id = tags.get("thread_root") or None
     try:
         return ConversationFeedRef(
