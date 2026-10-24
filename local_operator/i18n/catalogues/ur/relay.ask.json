@@ -5,9 +5,9 @@
   "relay.ask.dismiss.cancel": "منسوخ کریں",
   "relay.ask.dismiss.moot": "اب ضرورت نہیں",
   "relay.ask.dismiss.moot_note": "اب جواب کا انتظار نہیں ہوگا",
-  "relay.ask.dismiss.open": "ختم کریں…",
-  "relay.ask.dismiss.receipt": "ختم کر دیا گیا — کوئی جواب نہیں بھیجا",
-  "relay.ask.dismiss.receipt_answered_in_chat": "ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا",
-  "relay.ask.dismiss.receipt_moot": "ختم کر دیا گیا — اب ضرورت نہیں",
-  "relay.ask.dismiss.title": "یہ سوال ختم کریں"
+  "relay.ask.dismiss.open": "خارج کریں…",
+  "relay.ask.dismiss.receipt": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
+  "relay.ask.dismiss.receipt_answered_in_chat": "خارج کیا گیا — گفتگو میں جواب موجود ہے",
+  "relay.ask.dismiss.receipt_moot": "خارج کیا گیا — اب ضرورت نہیں",
+  "relay.ask.dismiss.title": "یہ سوال خارج کریں"
 }

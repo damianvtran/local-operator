@@ -2,12 +2,12 @@
   "cli.exec_remote_help.budget_usd": "اس رن کے لیے امریکی ڈالر میں اخراجات کی حد (ڈیفالٹ: سرور کی طے شدہ حد)",
   "cli.exec_remote_help.cancel": "ریموٹ رن منسوخ کر کے باہر نکلیں",
   "cli.exec_remote_help.detach": "رن id اور idempotency key پرنٹ کریں، پھر نگرانی کے بجائے باہر نکلیں",
-  "cli.exec_remote_help.idempotency_key": "نئی key بنانے کے بجائے استعمال کرنے کے لیے idempotency key، تاکہ جمع شدہ رن کو retry کرنے پر وہ دوبارہ نہ چلے",
+  "cli.exec_remote_help.idempotency_key": "نئی کلید بنانے کے بجائے موجودہ idempotency key استعمال کریں، تاکہ جمع شدہ رن کی دوبارہ کوشش پر وہ دوبارہ نہ چلے",
   "cli.exec_remote_help.max_hours": "سرور کے روکنے سے پہلے ریموٹ رن کے چلنے کے گھنٹے (ڈیفالٹ: 2؛ سرور زیادہ سے زیادہ حد مقرر کرتا ہے)",
   "cli.exec_remote_help.network": "رن جمع کرانے کا نیٹ ورک، نام یا id سے۔ اس ڈیوائس کے ایک سے زیادہ نیٹ ورکس میں ہونے پر درکار",
   "cli.exec_remote_help.remote": "اس کام کو اس مشین کے بجائے Radient ریموٹ کمپیوٹ پر چلائیں (tier 1: قلیل مدتی رنز)",
-  "cli.exec_remote_help.repo": "Git URL جسے ریموٹ رن checkout کرے گا۔ --remote کے ساتھ درکار: مقامی فائلیں کبھی upload نہیں ہوتیں",
+  "cli.exec_remote_help.repo": "Git URL جسے ریموٹ رن checkout کرے گا۔ --remote کے ساتھ درکار: مقامی فائلیں کبھی اپلوڈ نہیں ہوتیں",
   "cli.exec_remote_help.sha": "--repo میں checkout کرنے والا commit۔ --remote کے ساتھ درکار",
-  "cli.exec_remote_help.size": "ریموٹ رن کا compute size: s، m یا l (ڈیفالٹ: m)",
+  "cli.exec_remote_help.size": "ریموٹ رن کا کمپیوٹ سائز: s، m یا l (ڈیفالٹ: m)",
   "cli.exec_remote_help.status": "ایک ریموٹ رن JSON میں پرنٹ کر کے باہر نکلیں"
 }
