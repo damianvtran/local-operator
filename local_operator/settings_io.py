@@ -1336,7 +1336,21 @@ def _language_choices() -> tuple[Choice, ...]:
     """
     from local_operator.i18n.resolve import language_options
 
-    return tuple(Choice(value, label) for value, label in language_options())
+    return tuple(
+        Choice(
+            value,
+            label,
+            # Terminal capability guidance is deliberately not catalogue copy:
+            # it describes the TUI renderer, not the audited language package.
+            (
+                # i18n: ignore renderer capability note (English, not catalogue copy)
+                "Terminal: best effort; requires bidi and Arabic shaping."
+                if value == "ur"
+                else ""
+            ),
+        )
+        for value, label in language_options()
+    )
 
 
 #: One-line meaning for each rung of :data:`EFFORT_ORDER`, for the

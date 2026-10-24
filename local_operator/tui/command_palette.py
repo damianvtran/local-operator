@@ -44,9 +44,23 @@ from textual.command import CommandPalette, DiscoveryHit, Hit, Hits, Provider
 from textual.content import Content
 
 from local_operator.i18n.keys import tui_palette as _p
-from local_operator.i18n.text import tr
+from local_operator.tui.i18n_status import (
+    display_tr,
+    localized_display,
+    technical_display,
+)
 
-_t = tr("tui.palette")
+_t = display_tr("tui.palette")
+
+
+def _label_display(entry: "PaletteEntry") -> Text:
+    """Commands are LTR islands; names and settings retain prose direction."""
+    if entry.kind == KIND_COMMAND:
+        return technical_display(entry.label)
+    # Settings labels are registry English and session/agent names are user
+    # data; neither is catalogue prose, so neither may acquire RLI (M-2).
+    return localized_display(entry.label, source_locale="en")
+
 
 #: What a palette row IS. The value is also the i18n key suffix for the dim tag
 #: drawn beside the label, so the two cannot disagree about the vocabulary.
@@ -118,7 +132,12 @@ class PaletteEntry:
         tag = self.kind_label
         if not self.description:
             return escape(tag)
-        return escape(f"{tag} · {self.description}")
+        description = (
+            technical_display(self.description)
+            if self.kind == KIND_SESSION
+            else localized_display(self.description, source_locale="en")
+        )
+        return escape(f"{tag} · {description.plain}")
 
 
 def build_palette_entries(
@@ -233,7 +252,7 @@ def build_palette_entries(
     return entries
 
 
-def highlight_label(matcher: Any, label: str) -> Content:
+def highlight_label(matcher: Any, label: str, *, entry: PaletteEntry | None = None) -> Content:
     """The label with the matcher's ranges styled, built WITHOUT markup parsing.
 
     NOT `Matcher.highlight`. That method parses its candidate with
@@ -244,13 +263,17 @@ def highlight_label(matcher: Any, label: str) -> Content:
     highlight. Names are user data: `Content(label)` is literal text, and the
     same ranges are stylized onto it exactly as the framework does.
     """
-    content = Content(label)
+    painted = _label_display(entry).plain if entry is not None else label
+    content = Content(painted)
     score, offsets = matcher.fuzzy_search.match(matcher.query, label)
     if not score:
         return content
     for offset in offsets:
         if not label[offset].isspace():
-            content = content.stylize(matcher.match_style, offset, offset + 1)
+            # Bidi controls prefix/suffix the whole painted label; match offsets
+            # still refer to the raw label used by the fuzzy matcher.
+            start = offset + (painted.find(label) if entry is not None else 0)
+            content = content.stylize(matcher.match_style, start, start + 1)
     return content
 
 
@@ -365,7 +388,7 @@ class OperatorCommandProvider(Provider):
                 # such as ``fix [/] thing`` raised MarkupError inside the
                 # gather worker (a query that never finishes) and ``[WIP]``
                 # silently lost its brackets. Names are user data, not markup.
-                display=Text(entry.label),
+                display=_label_display(entry),
                 command=self._hit_command(entry),
                 text=entry.label,
                 help=entry.help_text,
@@ -378,7 +401,7 @@ class OperatorCommandProvider(Provider):
         for entry, score in rank_entries(await self._catalogue(), matcher):
             yield Hit(
                 score,
-                highlight_label(matcher, entry.label),
+                highlight_label(matcher, entry.label, entry=entry),
                 self._hit_command(entry),
                 text=entry.label,
                 help=entry.help_text,
