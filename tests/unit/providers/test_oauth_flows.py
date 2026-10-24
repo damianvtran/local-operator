@@ -1364,7 +1364,7 @@ def test_kimi_wechat_is_a_login_flavour_of_one_kimi_credential_slot() -> None:
     assert catalog.picker_label("kimi-wechat") == "Kimi WeChat"
     # ONE refresh path: the base definition, which _refresh_fn resolves from
     # the STORAGE id. A flavour refresh would be a second, drifting fork of the
-    # host-recording and discovery semantics.
+    # host-recording and one-host refresh semantics.
     assert wechat.refresh_token is None
     owners = [
         definition.id
@@ -1381,9 +1381,10 @@ def test_kimi_wechat_is_a_login_flavour_of_one_kimi_credential_slot() -> None:
         # A recorded host outranks both the env override and today's default.
         ("https://auth.kimi.ai", "https://auth.kimi.com", "https://auth.kimi.ai"),
         ("https://auth.kimi.com", "https://auth.kimi.ai", "https://auth.kimi.com"),
-        # No recorded host + no env is a PRE-SPLIT row: .com, never the new .ai
-        # default, because .com is the only host that could have issued it.
+        # No recorded host + no env retains the historical .com default.
         (None, None, "https://auth.kimi.com"),
+        # A hostless explicit override can select .ai and is persisted on success.
+        (None, "https://auth.kimi.ai", "https://auth.kimi.ai"),
     ],
 )
 async def test_kimi_refresh_uses_the_recorded_host_then_env_then_legacy(
@@ -1415,46 +1416,25 @@ async def test_kimi_refresh_uses_the_recorded_host_then_env_then_legacy(
     assert merged[AUTH_HOST_KEY] == expected
 
 
-async def test_a_hostless_kimi_row_discovers_the_sibling_host_once(
+async def test_a_hostless_kimi_row_never_discovers_a_sibling_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy .com rejects the grant definitively; .ai accepts and is persisted."""
-    from local_operator.providers.oauth.kimi import AUTH_HOST_KEY, TOKEN_PATH
+    """A terminal refusal cannot send the grant to a second guessed IdP."""
+    from local_operator.providers.oauth.kimi import LEGACY_AUTH_HOST, TOKEN_PATH
 
     _clear_kimi_host_env(monkeypatch)
     urls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         urls.append(str(request.url))
-        if request.url.host == "auth.kimi.com":
-            return httpx.Response(
-                400,
-                json={
-                    "error": "invalid_grant",
-                    "error_description": "The provided authorization grant is invalid",
-                },
-            )
-        assert request.url.host == "auth.kimi.ai"
-        # No refresh_token: the retry must not lose the old one either.
-        return httpx.Response(200, json={"access_token": "new-access", "expires_in": 3600})
+        assert request.url.host == "auth.kimi.com"
+        return httpx.Response(400, json={"error": "invalid_grant"})
 
-    creds: dict[str, Any] = {
-        "refresh": "legacy-r",
-        "access": "old-access",
-        "type": "oauth",
-        "authorized_at": 123,
-    }
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        merged = await refresh_kimi_token(creds, http_client=client)
+        with pytest.raises(InvalidGrantError):
+            await refresh_kimi_token({"refresh": "r"}, http_client=client)
 
-    assert urls == [
-        f"https://auth.kimi.com{TOKEN_PATH}",
-        f"https://auth.kimi.ai{TOKEN_PATH}",
-    ]
-    assert merged[AUTH_HOST_KEY] == "https://auth.kimi.ai"
-    assert merged["refresh"] == "legacy-r"
-    assert merged["access"] == "new-access"
-    assert merged["authorized_at"] == 123
+    assert urls == [f"{LEGACY_AUTH_HOST}{TOKEN_PATH}"]
 
 
 @pytest.mark.parametrize("status", [500, 429])
@@ -1480,7 +1460,7 @@ async def test_a_transient_failure_never_probes_the_sibling_host(
 
 
 async def test_a_recorded_host_is_never_repointed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Discovery is for hostless rows only; a recorded .com grant stays .com."""
+    """A recorded .com grant stays .com even when the token is rejected."""
     from local_operator.providers.oauth.kimi import (
         AUTH_HOST_KEY,
         TOKEN_PATH,
@@ -1527,6 +1507,78 @@ async def test_a_tampered_auth_host_is_never_contacted(
 
     assert urls == [f"{LEGACY_AUTH_HOST}{TOKEN_PATH}"]
     assert merged[AUTH_HOST_KEY] == LEGACY_AUTH_HOST
+
+
+@pytest.mark.parametrize("env_host", [None, "https://auth.kimi.ai"])
+async def test_a_tampered_auth_host_uses_the_override_or_legacy_host(
+    monkeypatch: pytest.MonkeyPatch, env_host: str | None
+) -> None:
+    from local_operator.providers.oauth.kimi import AUTH_HOST_KEY, TOKEN_PATH
+
+    _clear_kimi_host_env(monkeypatch)
+    if env_host is not None:
+        monkeypatch.setenv("KIMI_CODE_OAUTH_HOST", env_host)
+    expected = env_host or "https://auth.kimi.com"
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"access_token": "a", "expires_in": 3600})
+
+    creds = {"refresh": "r", AUTH_HOST_KEY: "https://evil.example"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        merged = await refresh_kimi_token(creds, http_client=client)
+    assert urls == [f"{expected}{TOKEN_PATH}"]
+    assert merged[AUTH_HOST_KEY] == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "terminal"),
+    [(400, '{"error":"invalid_grant"}', True), (503, "upstream unavailable", False)],
+)
+async def test_kimi_store_preserves_one_host_grant_classification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, status: int, body: str, terminal: bool
+) -> None:
+    """Through AuthStore, no sibling result can misattribute or create a tombstone."""
+    from local_operator.providers.auth_store import (
+        AuthStore,
+        AuthStoreError,
+        CredentialInvalidError,
+    )
+    from local_operator.providers.oauth.kimi import LEGACY_AUTH_HOST, TOKEN_PATH
+
+    _clear_kimi_host_env(monkeypatch)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        assert request.url.host == "auth.kimi.com"
+        return httpx.Response(status, text=body)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(transport=transport),
+    )
+    store = AuthStore(tmp_path / "auth.db")
+    try:
+        row = store.upsert_credential(
+            "kimi", {"refresh": "synthetic-r", "access": "stale", "expires": 0}
+        )
+        with pytest.raises(AuthStoreError) as caught:
+            await store.ensure_oauth_fresh_or_raise(row.id)
+        assert isinstance(caught.value, CredentialInvalidError) is terminal
+        if not terminal:
+            assert isinstance(caught.value.__cause__, LoginError)
+        assert calls == [f"{LEGACY_AUTH_HOST}{TOKEN_PATH}"]
+        assert store.grant_is_dead(row.id) is terminal
+        stored = store.get_credential(row.id)
+        assert stored is not None
+        assert (stored.data.get("grant_dead_at") is not None) is terminal
+    finally:
+        store.close()
 
 
 async def test_kimi_refresh_keeps_the_old_refresh_token_when_response_omits_one(

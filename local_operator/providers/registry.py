@@ -571,12 +571,12 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # `kimi-for-coding`), and the mainland host rejects the OAuth bearer
         # with 401 "Invalid Authentication". Confirmed live against both hosts.
         #
-        # 2026-10-24: a stored overseas grant (JWT region=overseas) was called
-        # against api.kimi.com/coding/v1 AND api.kimi.ai/coding/v1 — /models and
-        # /usages on both — and every call answered 200 with an identical first
-        # model and an identical quota window. The .ai login host therefore
-        # needs no .ai API variant: .com accepts the grant for inference. Only
-        # the OAuth host is region-specific; see providers/oauth/kimi.py.
+        # 2026-10-24: a stored overseas grant (JWT region=overseas; this does
+        # not prove its issuing host) was called against api.kimi.com/coding/v1
+        # AND api.kimi.ai/coding/v1 — /models and /usages on both — and every
+        # call answered 200 with an identical first model and quota window. The
+        # .ai login host therefore needs no .ai API variant: .com accepts that
+        # grant for inference. See providers/oauth/kimi.py for OAuth host choice.
         oauth_base_url="https://api.kimi.com/coding/v1",
     ),
     ProviderDefinition(
@@ -597,8 +597,8 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         #
         # Deliberately no `refresh_token`: the STORAGE id (`kimi`) owns the
         # refresh callable, and auth_store._refresh_fn resolves that first. A
-        # second path here would be a fork of refresh semantics (host
-        # recording, legacy default, discovery) that could drift.
+        # second path here would be a fork of refresh semantics (host recording
+        # and the legacy default) that could drift.
         login=_lazy_login("local_operator.providers.oauth.kimi", "login_kimi_wechat"),
         get_api_key=_oauth_api_key,
         store_credentials_as="kimi",

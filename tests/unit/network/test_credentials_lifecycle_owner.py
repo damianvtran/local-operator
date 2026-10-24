@@ -127,8 +127,9 @@ def test_no_row_is_absent(rig):
     assert _read(rig)["entries"][0]["state"] == "absent"
 
 
-def test_device_bound_provider_is_non_portable(rig):
-    detail = _read(rig, key="kimi")
+@pytest.mark.parametrize("key", ["kimi", "kimi-wechat"])
+def test_device_bound_provider_is_non_portable(rig, key):
+    detail = _read(rig, key=key)
     assert detail["entries"][0]["state"] == "non_portable"
 
 

@@ -455,6 +455,11 @@ class ProviderViewRow:
     #: The ``credential_type`` of each stored row, in store order -- what a
     #: ``/logout`` row's detail column says it will remove.
     credential_types: tuple[str, ...]
+    #: Optional surface copy for a distinction the machine ``state`` cannot make.
+    #: Kimi's two sign-ins share ONE account; the sibling that did not issue the
+    #: recorded grant says ``shared Kimi login`` instead of looking like a second
+    #: connected account. The wire's state enum remains unchanged.
+    state_detail: str | None = None
 
 
 class ReadOnlyUsageMetadataStore(Protocol):
@@ -623,6 +628,23 @@ class ProviderController:
                 state = "env_key"
             else:
                 state = "needs_login"
+            state_detail = None
+            if definition.id in {"kimi", "kimi-wechat"} and count > 0:
+                # Only a shared OAuth grant records an issuer. A pasted Kimi key
+                # (and every other provider) keeps its ordinary state; choosing
+                # by raw provider id here would hide this distinction behind a
+                # presentation special case rather than the stored credential.
+                from local_operator.providers.oauth.kimi import AUTH_HOST_KEY, DEFAULT_AUTH_HOST
+
+                oauth_rows = [row for row in mine if row.credential_type == "oauth"]
+                if len(oauth_rows) == 1:
+                    auth_host = str(oauth_rows[0].data.get(AUTH_HOST_KEY) or "").rstrip("/")
+                    # Match only a complete host, never an arbitrary suffix or
+                    # path. Missing/tampered hosts take the legacy .com default;
+                    # they do not become an excuse to claim a second login.
+                    active_id = "kimi" if auth_host == DEFAULT_AUTH_HOST else "kimi-wechat"
+                    if definition.id != active_id:
+                        state_detail = "shared Kimi login"
             rows.append(
                 ProviderViewRow(
                     definition=definition,
@@ -639,6 +661,7 @@ class ProviderController:
                     has_credential=count > 0 or env_key,
                     usable=usable,
                     credential_types=tuple(row.credential_type for row in mine),
+                    state_detail=state_detail,
                 )
             )
         return rows

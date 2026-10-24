@@ -48703,7 +48703,7 @@ class OperatorApp(App[None]):
                 # a dash and had to guess whether it meant unknown, unsupported
                 # or absent.
                 row = view.get(definition.id)
-                state = _VIEW_STATE_COPY[row.state] if row is not None else ""
+                state = (row.state_detail or _VIEW_STATE_COPY[row.state]) if row is not None else ""
                 marker = "*" if definition.store_credentials_as else " "
                 items.append((f"{marker}{definition.id}", f"{definition.name} · {state}"))
             use = self._provider_usage_state()
@@ -52025,7 +52025,13 @@ class OperatorApp(App[None]):
                     # question is "what do I show beside this row", and a blank
                     # is honest; there it is "what will this switch do", and the
                     # note must SAY something (design review round 1, D4).
-                    detail=_VIEW_STATE_COPY[row.state] if row is not None else "",
+                    detail=(
+                        (
+                            (row.state_detail or _VIEW_STATE_COPY[row.state])
+                            if row is not None
+                            else ""
+                        )
+                    ),
                 )
             )
         # A controller offering a row the catalogue does not know (an embedder's
@@ -52048,7 +52054,13 @@ class OperatorApp(App[None]):
                     display=definition.name,
                     description=_provider_summary(definition.id, definition.name),
                     aliases=tuple(definition.search_aliases),
-                    detail=_VIEW_STATE_COPY[row.state] if row is not None else "",
+                    detail=(
+                        (
+                            (row.state_detail or _VIEW_STATE_COPY[row.state])
+                            if row is not None
+                            else ""
+                        )
+                    ),
                 )
             )
         return choices

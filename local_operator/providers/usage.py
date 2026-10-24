@@ -123,12 +123,11 @@ OPENAI_WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
 #: Kimi coding-plan usage (OAuth).
 #:
-#: The .com API host is deliberately NOT split alongside the OAuth hosts: a
-#: kimi.ai login only changes the IdP that mints the grant, not where the
-#: coding plan is served. Measured 2026-10-24 with a stored overseas grant
-#: (JWT region=overseas): /coding/v1/usages on api.kimi.com AND api.kimi.ai
-#: both answered 200 with the same quota window, and the .com host accepted the
-#: .ai-issued grant. See providers/registry.py ``oauth_base_url``.
+#: The .com API host is deliberately NOT split alongside the OAuth hosts: the
+#: login host does not determine where the coding plan is served. Measured
+#: 2026-10-24 with a stored overseas grant (JWT region=overseas, issuer not
+#: proven): /coding/v1/usages on api.kimi.com AND api.kimi.ai both answered 200
+#: with the same quota window. See providers/registry.py ``oauth_base_url``.
 KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
 
 #: Moonshot/Kimi account balance, reachable with the PLAIN API key the registry
@@ -1878,7 +1877,14 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
     ``detail`` and its window length across ``window``, neither of which the old
     flat read reached.
     """
-    payload = await _get_json(client, KIMI_USAGE_URL, _bearer(access_token))
+    # OAuth binds the bearer to this device's fingerprint. The usage endpoint
+    # enforces the same identity as login and inference, so Authorization alone
+    # is an authenticated-looking 401 that _get_json would hide as no report.
+    # Import locally to keep provider startup and the OAuth module acyclic.
+    from local_operator.providers.oauth.kimi import kimi_common_headers
+
+    headers = {**kimi_common_headers(), **_bearer(access_token)}
+    payload = await _get_json(client, KIMI_USAGE_URL, headers)
     if payload is None:
         return None
     # An envelope is tolerated but not required: some deployments wrap the body

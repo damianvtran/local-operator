@@ -12,8 +12,9 @@ Traps preserved:
 - Refresh reuses the old refresh token when the response omits a new one.
 - A grant refreshes against the host that ISSUED it (``auth_host`` in the
   payload), never against whatever the login default happens to be today. Rows
-  written before the host split carry no host and were all issued by
-  auth.kimi.com, so their fallback is the legacy host, not the new default.
+  written before the host split carry no host: their explicit env override is
+  retained, otherwise the historical .com default applies. Exactly one refresh
+  request is made; a sibling host is never guessed from a failed response.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ from local_operator.procstate import O_BINARY
 from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
-    is_terminal_grant_response,
     maybe_await,
     raise_for_refresh_failure,
     report_flow_details,
@@ -53,10 +53,9 @@ CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 #: site behind it) differs.
 DEFAULT_AUTH_HOST = "https://auth.kimi.ai"
 WECHAT_AUTH_HOST = "https://auth.kimi.com"
-#: Compatibility fact, not a preference: every Kimi credential written before
-#: the host split was minted by auth.kimi.com, because that was the only host
-#: this module contacted. A stored payload with no ``auth_host`` is therefore a
-#: .com grant and must keep refreshing there.
+#: Compatibility default, not an assertion about issuance: hostless rows from
+#: before the split normally used .com, but an explicit env override could have
+#: selected .ai or a custom host. Preserve such an override; otherwise use .com.
 LEGACY_AUTH_HOST = WECHAT_AUTH_HOST
 #: The only hosts a STORED payload may name. See :func:`_normalise_known_host`
 #: for why the set is closed rather than a URL-syntax check.
@@ -102,35 +101,31 @@ def _normalise_known_host(value: Any) -> str | None:
     stored value. The env override is read separately because it is the
     operator's explicit instruction rather than data from a credential.
     """
+    # Accept legacy runtime mappings that predate the typed credential model;
+    # absent/malformed values still resolve through env/legacy, never as hosts.
     if not isinstance(value, str):
         return None
     host = value.strip().rstrip("/")
     return host if host in KNOWN_AUTH_HOSTS else None
 
 
-def _refresh_host(creds: dict[str, Any]) -> tuple[str, bool]:
-    """``(host, may_rediscover)`` for refreshing ``creds``.
+def _refresh_host(creds: dict[str, Any]) -> str:
+    """The ONE host whose token endpoint may receive this refresh grant.
 
-    Resolution order, and it is the backward-compatibility contract:
-
-    1. the recorded ``auth_host`` — but only when it is a known host;
-    2. the env override, for rows written before hosts were recorded;
-    3. :data:`LEGACY_AUTH_HOST`, because those hostless rows were ALL issued by
-       auth.kimi.com and defaulting them to the new .ai address would present
-       their refresh token to an IdP that never minted it.
-
-    ``may_rediscover`` is true only for the hostless paths: a row that RECORDED
-    a host states a fact, and a rejection from it is the grant dying — not a
-    routing mistake worth retrying elsewhere. A recorded host is never
-    re-pointed.
+    A valid recorded host wins over env. A hostless row retains an explicit
+    override, because old overrides could legitimately select .ai or a custom
+    host; absent one, .com is the historical default rather than a claim about
+    where every old grant was issued. A rejected response never triggers a
+    second-host guess: operators who deliberately used a non-default host must
+    keep that override until a new login records its issuer.
     """
     recorded = _normalise_known_host(creds.get(AUTH_HOST_KEY))
     if recorded is not None:
-        return recorded, False
+        return recorded
     override = os.environ.get("KIMI_CODE_OAUTH_HOST") or os.environ.get("KIMI_OAUTH_HOST")
     if override:
-        return override.rstrip("/"), True
-    return LEGACY_AUTH_HOST, True
+        return override.rstrip("/")
+    return LEGACY_AUTH_HOST
 
 
 def _config_dir() -> Path:
@@ -341,21 +336,20 @@ async def refresh_kimi_token(
     """Refresh against the host that ISSUED the grant, not today's login default.
 
     The host is recorded on the credential at login/refresh and resolved by
-    :func:`_refresh_host`. Hostless rows (written before the split) default to
-    auth.kimi.com and get ONE sibling-host retry when that host definitively
-    rejects the grant — the one-time discovery that lets an early .ai grant
-    self-heal without ever re-pointing a row that recorded its issuer.
+    :func:`_refresh_host`. Exactly ONE token POST is made: a failed response
+    must not send the grant to a guessed second IdP or let that sibling's
+    transient failure reclassify the original terminal/transient verdict.
 
     Form-encoded refresh; reuses the old refresh token when none returns.
     """
-    host, may_rediscover = _refresh_host(creds)
+    host = _refresh_host(creds)
     headers = kimi_common_headers()
     owns_client = http_client is None
     http = http_client or httpx.AsyncClient(timeout=30.0)
 
-    async def _post(candidate: str) -> httpx.Response:
-        return await http.post(
-            f"{candidate}{TOKEN_PATH}",
+    try:
+        response = await http.post(
+            f"{host}{TOKEN_PATH}",
             data={
                 "grant_type": "refresh_token",
                 "client_id": CLIENT_ID,
@@ -363,39 +357,17 @@ async def refresh_kimi_token(
             },
             headers=headers,
         )
-
-    try:
-        response = await _post(host)
-        if (
-            response.status_code != 200
-            and may_rediscover
-            and host in KNOWN_AUTH_HOSTS
-            and is_terminal_grant_response(response.status_code, response.text)
-        ):
-            # A definitive rejection from the historical guess means this row's
-            # grant belongs to the sibling host. Retry ONCE. Note the guard:
-            # 5xx/429 are the provider having a bad minute, never evidence that
-            # the grant lives elsewhere, and spraying the refresh token at a
-            # second host on a transient error is how a retry becomes an
-            # outage-amplifier.
-            other = WECHAT_AUTH_HOST if host == DEFAULT_AUTH_HOST else DEFAULT_AUTH_HOST
-            alternate = await _post(other)
-            if alternate.status_code == 200:
-                host, response = other, alternate
     finally:
         if owns_client:
             await http.aclose()
     if response.status_code != 200:
-        # The ORIGINAL failure is what a failed retry raises: a terminal
-        # verdict from the host the grant most likely belongs to is the
-        # actionable message, and the sibling's failure adds no information.
+        # Preserve the selected host's own terminal/transient classification.
         raise_for_refresh_failure("Kimi", response.status_code, response.text)
     merged = dict(creds)
     merged.update(_credentials_from_token(response.json(), old_refresh=creds.get("refresh")))
     # Preserve the original authorization timestamp across refreshes.
     merged["authorized_at"] = creds.get("authorized_at", merged["authorized_at"])
-    # Self-heal: a hostless row leaves with the host that actually answered, so
-    # discovery happens at most once per credential. A recorded host is echoed
-    # back unchanged (it was the one used).
+    # Record the host that answered so later refreshes do not depend on env or
+    # the legacy default. A recorded host is echoed back unchanged.
     merged[AUTH_HOST_KEY] = host
     return merged
