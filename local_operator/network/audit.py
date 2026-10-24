@@ -732,7 +732,20 @@ STREAM_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
 )
 
 OUTCOMES = ("ok", "refused", "failed", "partial")
-ACTOR_KINDS = ("human", "agent", "relay", "unknown")
+#: Who an event's actor IS, as far as this log can say. A CLOSED set, because an
+#: unlisted value is rewritten to "unknown" on the way in — the field is for reading,
+#: and a free-form one would make every consumer guess.
+#:
+#: ``device`` IS HERE BECAUSE SEVEN EMITTERS ALREADY PASS IT (the credential
+#: reconcile/github/sync/lifecycle/owner paths, the relay's rename and rotate
+#: records, and the CLI's placement audit). Before this value existed, every one of
+#: those rows silently rendered ``actor_kind: "unknown"`` — the audit recorded that
+#: SOMETHING happened and lost the fact that a DEVICE did it. The alternative fix
+#: (stop passing it, let those rows say ``human`` or ``unknown``) would erase a
+#: distinction every emitter clearly intends, so the set was widened instead. Do not
+#: "clean up" the emitters back to three values: "device" is a peer acting under its
+#: own key, which is neither a person at this keyboard nor an agent process here.
+ACTOR_KINDS = ("human", "agent", "relay", "device", "unknown")
 
 
 def _resolve(name: str, explicit: Any, default: Any, cast: Any, root: Path | None = None) -> Any:
@@ -775,7 +788,8 @@ class AuditEvent:
     network_name: str = ""
     actor_name: str = ""
     #: A HINT, not an attestation: from ``LOP_ACTOR`` when a harness sets it, else
-    #: ``unknown``. Never presented as proof of who typed a command.
+    #: ``unknown``. Never presented as proof of who typed a command. The closed set is
+    #: :data:`ACTOR_KINDS`; a value outside it is stored as ``unknown``.
     actor_kind: str = "unknown"
     ts: float = field(default_factory=time.time)
 
