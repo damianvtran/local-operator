@@ -1,0 +1,18 @@
+$ git -C /Users/damian/local-operator/.worktrees/zh-cn-core rev-parse HEAD
+c4ba95919dbea27fcf990101f9e48ed21e977e10
+# Transcript of the audit run at this revision. The run script is preserved byte-identically as audit.py.txt; the command below is its reproduction form.
+$ python3 i18n/audits/evidence/zh-CN/tui.team_authoring/zh24a1/audit.py.txt --ns tui.team_authoring --out i18n/audits/evidence/zh-CN/tui.team_authoring/zh24a1
+namespace=tui.team_authoring keys=36 revision=c4ba95919dbea27fcf990101f9e48ed21e977e10
+key_parity: missing=0 extra=0 order_identical=True
+nfc=0 control=0 bidi=0 zero_width=0 fullwidth_latin_digits=0 cjk_latin_space=0
+icu_arguments: mismatches=0; plural_structure_errors=0
+technical_tokens_missing=0
+width: keys_with_budget=0 over_budget=0
+render: plural_samples=0 static_samples=36 failures=0 plural_keys=0 select_keys=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+$ sha256sum (en, context, target)
+b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c  local_operator/i18n/catalogues/en/tui.team_authoring.json
+40e81d7469be5fb0da215e96d77189b218ed6a9879b13e4d4dc9f7b5f6c188ce  local_operator/i18n/catalogues/en/tui.team_authoring.context.json
+75eba5f7cc799eff089ce537d2597c843013655e999015852f70f0a8c278bdd9  local_operator/i18n/catalogues/zh-CN/tui.team_authoring.json

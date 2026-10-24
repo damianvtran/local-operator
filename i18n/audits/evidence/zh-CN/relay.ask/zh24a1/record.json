@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "audit_kind": "independent_translation_audit",
+  "locale": "zh-CN",
+  "namespace": "relay.ask",
+  "round": 1,
+  "audit_date": "2026-10-24",
+  "key_count": 11,
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "0c7aebe462e8",
+    "model": "deepseek/deepseek-flash",
+    "audit_date": "2026-10-24",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Session metadata for 0c7aebe462e8 reports the served model deepseek/deepseek-flash; no fallback was observed during this audit.",
+    "tooling": "Read-only: local_operator.i18n.runtime.render_message for ICU rendering, audit.py in this bundle for mechanics; no catalogue or source file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/relay.ask.json",
+      "sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/relay.ask.context.json",
+      "sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42"
+    },
+    "target": {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/relay.ask.json",
+      "sha256": "f57ce252403652914ec7817fab373940dd3e22687788b8c45c931d826044f9a7"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/audit.log",
+      "sha256": "1916fde31e246acc333faeb58d12c1c86ee68f2e2650452e84c26cba046958da"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/mechanical-raw.json",
+      "sha256": "356e0d54cee0e2aeeb1f02495a7220b1334e48ad8d04ba11cd71a1d456e7da23"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/runtime-mechanical.json",
+      "sha256": "4ea4f3c8ccad2d16f1e3096fe6001bf072dd6c11d6ed0a015ede99e2d32021ee"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/pseudo-evidence.json",
+      "sha256": "ba905d12032b7b6112c1cb75a9adaad5a497f20ec0db96d180da9c1a0327cec5"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/report.md",
+      "sha256": "28135f8794d36fcfa7d850166e49707ecebc3ab36c3604c34923fd511ed9d24d"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/relay.ask.pairs.txt",
+      "sha256": "d9c1c7e885cc9d94482e18ed707a73653173c8ed2100001c0e2b21eacc198b20"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/relay.ask.compact.txt",
+      "sha256": "cd0c1d8d71f7ec80d31fc7e71d59096342830d2dcb12a1b2c51f11491ec73e17"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/audit.py.txt",
+      "sha256": "5282b48a93e70222416f7c5fc6a11e7fd22b11e4d0321b8c14614f897a3d34cd"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed-with-minor-findings",
+    "verdict": "clean-with-findings",
+    "findings_total": 2,
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0,
+    "finding_ids": [
+      "ZH-02",
+      "ZH-03"
+    ],
+    "unresolved_blocker_major_count": 0
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report; audit.log is the executed command transcript for this namespace; mechanical-raw.json, runtime-mechanical.json and pseudo-evidence.json are the machine output. String-level audit only: no native terminal, relay SPA or rendered-frame pass is claimed."
+}

@@ -1,0 +1,25 @@
+$ git -C /Users/damian/local-operator/.worktrees/zh-cn-core rev-parse HEAD
+c4ba95919dbea27fcf990101f9e48ed21e977e10
+# Transcript of the audit run at this revision. The run script is preserved byte-identically as audit.py.txt; the command below is its reproduction form.
+$ python3 i18n/audits/evidence/zh-CN/tui.palette/zh24a1/audit.py.txt --ns tui.palette --out i18n/audits/evidence/zh-CN/tui.palette/zh24a1
+namespace=tui.palette keys=7 revision=c4ba95919dbea27fcf990101f9e48ed21e977e10
+key_parity: missing=0 extra=0 order_identical=True
+nfc=0 control=0 bidi=0 zero_width=0 fullwidth_latin_digits=0 cjk_latin_space=0
+icu_arguments: mismatches=0; plural_structure_errors=0
+technical_tokens_missing=0
+width: keys_with_budget=7 over_budget=0
+  width tui.palette.kind_agent max=12 zh_static=6 zh_rendered=6 zh_wide=6 over=-6
+  width tui.palette.kind_command max=12 zh_static=4 zh_rendered=4 zh_wide=4 over=-8
+  width tui.palette.kind_session max=12 zh_static=4 zh_rendered=4 zh_wide=4 over=-8
+  width tui.palette.kind_setting max=12 zh_static=4 zh_rendered=4 zh_wide=4 over=-8
+  width tui.palette.kind_team max=12 zh_static=4 zh_rendered=4 zh_wide=4 over=-8
+  width tui.palette.no_matches max=24 zh_static=12 zh_rendered=12 zh_wide=12 over=-12
+  width tui.palette.placeholder max=48 zh_static=30 zh_rendered=30 zh_wide=30 over=-18
+render: plural_samples=0 static_samples=7 failures=0 plural_keys=0 select_keys=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+$ sha256sum (en, context, target)
+e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f  local_operator/i18n/catalogues/en/tui.palette.json
+edd5a12c66ec852e65e9afb4eee92f1b9436a3a148683b8d756a002b68ff06f7  local_operator/i18n/catalogues/en/tui.palette.context.json
+bcb2dffd6eedfe6acf7af781312c12f15488ff9f09d5d1b3e6b03a7ff3ad76da  local_operator/i18n/catalogues/zh-CN/tui.palette.json

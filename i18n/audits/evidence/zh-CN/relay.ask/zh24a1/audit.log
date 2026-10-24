@@ -1,0 +1,29 @@
+$ git -C /Users/damian/local-operator/.worktrees/zh-cn-core rev-parse HEAD
+c4ba95919dbea27fcf990101f9e48ed21e977e10
+# Transcript of the audit run at this revision. The run script is preserved byte-identically as audit.py.txt; the command below is its reproduction form.
+$ python3 i18n/audits/evidence/zh-CN/relay.ask/zh24a1/audit.py.txt --ns relay.ask --out i18n/audits/evidence/zh-CN/relay.ask/zh24a1
+namespace=relay.ask keys=11 revision=c4ba95919dbea27fcf990101f9e48ed21e977e10
+key_parity: missing=0 extra=0 order_identical=True
+nfc=0 control=0 bidi=0 zero_width=0 fullwidth_latin_digits=0 cjk_latin_space=0
+icu_arguments: mismatches=0; plural_structure_errors=0
+technical_tokens_missing=0
+width: keys_with_budget=11 over_budget=0
+  width relay.ask.context.messages max=60 zh_static=58 zh_rendered=32 zh_wide=34 over=-28
+  width relay.ask.dismiss.answered_in_chat max=34 zh_static=14 zh_rendered=14 zh_wide=14 over=-20
+  width relay.ask.dismiss.answered_in_chat_note max=44 zh_static=16 zh_rendered=16 zh_wide=16 over=-28
+  width relay.ask.dismiss.cancel max=12 zh_static=4 zh_rendered=4 zh_wide=4 over=-8
+  width relay.ask.dismiss.moot max=34 zh_static=8 zh_rendered=8 zh_wide=8 over=-26
+  width relay.ask.dismiss.moot_note max=44 zh_static=14 zh_rendered=14 zh_wide=14 over=-30
+  width relay.ask.dismiss.open max=12 zh_static=6 zh_rendered=6 zh_wide=6 over=-6
+  width relay.ask.dismiss.receipt max=44 zh_static=19 zh_rendered=19 zh_wide=19 over=-25
+  width relay.ask.dismiss.receipt_answered_in_chat max=44 zh_static=23 zh_rendered=23 zh_wide=23 over=-21
+  width relay.ask.dismiss.receipt_moot max=44 zh_static=17 zh_rendered=17 zh_wide=17 over=-27
+  width relay.ask.dismiss.title max=24 zh_static=10 zh_rendered=10 zh_wide=10 over=-14
+render: plural_samples=7 static_samples=10 failures=0 plural_keys=1 select_keys=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+$ sha256sum (en, context, target)
+2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7  local_operator/i18n/catalogues/en/relay.ask.json
+85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42  local_operator/i18n/catalogues/en/relay.ask.context.json
+f57ce252403652914ec7817fab373940dd3e22687788b8c45c931d826044f9a7  local_operator/i18n/catalogues/zh-CN/relay.ask.json

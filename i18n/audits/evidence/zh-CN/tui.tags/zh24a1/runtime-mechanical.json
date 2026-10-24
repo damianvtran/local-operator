@@ -1,0 +1,257 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.tags",
+  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "generated_utc": "2026-10-24T23:21:22Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 27,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "tui.tags.added",
+      "zh_render": "已添加“release-notes”。",
+      "en_render": "Added “release-notes”.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.applied",
+      "zh_render": "已应用",
+      "en_render": "applied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.cap_applied",
+      "zh_render": "已应用8个标签。移除一个才能再添加。",
+      "en_render": "8 tags applied. Remove one before adding another.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.cap_registry",
+      "zh_render": "已有32个标签。使用现有标签，或管理标签以移除一个。",
+      "en_render": "32 tags exist. Use an existing tag or manage tags to remove one.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.create",
+      "zh_render": "创建并应用“release-notes”",
+      "en_render": "Create and apply “release-notes”",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.create_help",
+      "zh_render": "创建一个共享标签并在此应用。",
+      "en_render": "Creates a shared tag and applies it here.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.created_applied",
+      "zh_render": "已创建并应用“release-notes”。",
+      "en_render": "Created and applied “release-notes”.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.current",
+      "zh_render": "当前",
+      "en_render": "current",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.empty",
+      "zh_render": "尚无标签。输入名称即可创建并应用。",
+      "en_render": "No tags yet. Type a name to create and apply one.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.failed",
+      "zh_render": "无法更新标签：permission denied",
+      "en_render": "Couldn't update tags: permission denied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.grouping_off",
+      "zh_render": "侧边栏标签分组已关闭 — 各区块恢复平铺。",
+      "en_render": "Sidebar tag groups off — sections are flat again.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.grouping_on",
+      "zh_render": "侧边栏标签分组已开启 — 各区块现按主标签拆分。",
+      "en_render": "Sidebar tag groups on — sections now split by primary tag.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.header",
+      "zh_render": "本会话的标签 · 已应用3/8",
+      "en_render": "Tags for this conversation · 3/8 applied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.invalid",
+      "zh_render": "标签名为1–24个字符，不含控制字符；“未标记”为保留名称。",
+      "en_render": "Tag names are 1–24 characters, with no control characters; Untagged is reserved.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.none_applied",
+      "zh_render": "本会话尚未应用任何标签。",
+      "en_render": "No tags applied to this conversation.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.not_applied",
+      "zh_render": "未应用",
+      "en_render": "not applied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.off",
+      "zh_render": "关闭",
+      "en_render": "off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.on",
+      "zh_render": "开启",
+      "en_render": "on",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.partial_create",
+      "zh_render": "标签已创建，但未能应用。重试应用。",
+      "en_render": "Tag created, but couldn't apply it. Retry applying.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.primary",
+      "zh_render": "主标签",
+      "en_render": "Primary",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.removed",
+      "zh_render": "已移除“release-notes”。",
+      "en_render": "Removed “release-notes”.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.slash_tag",
+      "zh_render": "为此会话添加标签；Enter切换标签",
+      "en_render": "Tag this conversation; Enter toggles a tag",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.slash_tags",
+      "zh_render": "按主标签对侧边栏分组（开启/关闭）",
+      "en_render": "Group the sidebar by primary tag (on/off)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.status",
+      "zh_render": "侧边栏标签分组：开启 — /tags on或/tags off",
+      "en_render": "Sidebar tag groups: 开启 — /tags on or /tags off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.unavailable",
+      "zh_render": "此会话无法使用标签。",
+      "en_render": "Tags aren't available for this conversation.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.untagged",
+      "zh_render": "未标记",
+      "en_render": "Untagged",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.tags.usage",
+      "zh_render": "使用/tags on或/tags off",
+      "en_render": "Use /tags on or /tags off",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{2,}(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]+",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

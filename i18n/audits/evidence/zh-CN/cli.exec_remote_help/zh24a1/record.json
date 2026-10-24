@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "audit_kind": "independent_translation_audit",
+  "locale": "zh-CN",
+  "namespace": "cli.exec_remote_help",
+  "round": 1,
+  "audit_date": "2026-10-24",
+  "key_count": 11,
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "0c7aebe462e8",
+    "model": "deepseek/deepseek-flash",
+    "audit_date": "2026-10-24",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Session metadata for 0c7aebe462e8 reports the served model deepseek/deepseek-flash; no fallback was observed during this audit.",
+    "tooling": "Read-only: local_operator.i18n.runtime.render_message for ICU rendering, audit.py in this bundle for mechanics; no catalogue or source file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.exec_remote_help.json",
+      "sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.exec_remote_help.context.json",
+      "sha256": "fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f"
+    },
+    "target": {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.exec_remote_help.json",
+      "sha256": "f683a8903a41fff7f2a7c6da00dfe1a84af7582f0ab2b6904a1fd21e778da4e1"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/audit.log",
+      "sha256": "0ba01e13eb9a99672706edda89dd75f7f573a20b7cb6fad4533a489b291b8efe"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/mechanical-raw.json",
+      "sha256": "14f922980af7f4655aafcb2165e212290db43069c7f041837f5da5ca727dddb2"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/runtime-mechanical.json",
+      "sha256": "800cb3a25cad60d14ffb139756ddcb04d1d2d97e5d809f6236db1379891c9530"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/pseudo-evidence.json",
+      "sha256": "5e8c4faa3a16d4f755e218d191bcbf32fe118d9bb430b1bab52ddefe10b2ae34"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/report.md",
+      "sha256": "a30d17721be631fcae6baeb8457585ae6efa8e519769d00f8eb788e0b6398a99"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/cli.exec_remote_help.pairs.txt",
+      "sha256": "2b264e1fd9583e171b6ad64ee57fddc7525ce7bdcf585873adcfe4931ee516b3"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/cli.exec_remote_help.compact.txt",
+      "sha256": "4430bb7131177fc19df131a05c56d5205112c0b8670c64cdfe175af89ed20776"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/audit.py.txt",
+      "sha256": "5282b48a93e70222416f7c5fc6a11e7fd22b11e4d0321b8c14614f897a3d34cd"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed-with-minor-findings",
+    "verdict": "clean-with-findings",
+    "findings_total": 1,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0,
+    "finding_ids": [
+      "ZH-01"
+    ],
+    "unresolved_blocker_major_count": 0
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report; audit.log is the executed command transcript for this namespace; mechanical-raw.json, runtime-mechanical.json and pseudo-evidence.json are the machine output. String-level audit only: no native terminal, relay SPA or rendered-frame pass is claimed."
+}

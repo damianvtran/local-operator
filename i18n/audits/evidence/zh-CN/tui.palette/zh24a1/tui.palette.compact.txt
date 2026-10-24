@@ -1,0 +1,7 @@
+tui.palette.kind_agent | agent | 智能体
+tui.palette.kind_command | command | 命令
+tui.palette.kind_session | session | 会话
+tui.palette.kind_setting | setting | 设置
+tui.palette.kind_team | team | 团队
+tui.palette.no_matches | No matches found | 未找到匹配项
+tui.palette.placeholder | Search commands, settings, sessions, agents… | 搜索命令、设置、会话、智能体……

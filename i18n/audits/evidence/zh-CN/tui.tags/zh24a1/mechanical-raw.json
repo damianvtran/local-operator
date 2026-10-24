@@ -1,0 +1,325 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.tags",
+  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "generated_utc": "2026-10-24T23:21:22Z",
+  "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.tags.json",
+      "sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd"
+    },
+    "context": null,
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.tags.json",
+      "sha256": "bb1f9d1a64fa3b97ab2071fd68e44d9e360fad1a9b116a7baee34037542bbdfc"
+    }
+  },
+  "checks": {
+    "key_parity": {
+      "key_count_en": 27,
+      "key_count_zh": 27,
+      "missing": [],
+      "extra": [],
+      "order_identical": true,
+      "order_mismatch": [],
+      "ok": true
+    },
+    "non_nfc": [],
+    "control_chars": [],
+    "bidi_controls": [],
+    "zero_width": [],
+    "fullwidth_latin_or_digits": [],
+    "cjk_latin_space": [],
+    "icu_arguments": {
+      "mismatches": [],
+      "ok": true
+    },
+    "plural_structure": {
+      "rows": [],
+      "errors": [],
+      "ok": true
+    },
+    "technical_tokens": {
+      "missing": [],
+      "ok": true
+    },
+    "width": {
+      "over_budget": [],
+      "ok": true
+    }
+  },
+  "width_rows": [
+    {
+      "key": "tui.tags.added",
+      "maxCells": null,
+      "en_cells": 15,
+      "zh_cells": 16,
+      "zh_rendered_cells": 23,
+      "over": null,
+      "ratio": 1.067,
+      "zh_wide_cells": 37
+    },
+    {
+      "key": "tui.tags.applied",
+      "maxCells": null,
+      "en_cells": 7,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "over": null,
+      "ratio": 0.857,
+      "zh_wide_cells": 6
+    },
+    {
+      "key": "tui.tags.cap_applied",
+      "maxCells": null,
+      "en_cells": 49,
+      "zh_cells": 35,
+      "zh_rendered_cells": 35,
+      "over": null,
+      "ratio": 0.714,
+      "zh_wide_cells": 35
+    },
+    {
+      "key": "tui.tags.cap_registry",
+      "maxCells": null,
+      "en_cells": 64,
+      "zh_cells": 50,
+      "zh_rendered_cells": 50,
+      "over": null,
+      "ratio": 0.781,
+      "zh_wide_cells": 50
+    },
+    {
+      "key": "tui.tags.create",
+      "maxCells": null,
+      "en_cells": 25,
+      "zh_cells": 18,
+      "zh_rendered_cells": 25,
+      "over": null,
+      "ratio": 0.72,
+      "zh_wide_cells": 39
+    },
+    {
+      "key": "tui.tags.create_help",
+      "maxCells": null,
+      "en_cells": 41,
+      "zh_cells": 28,
+      "zh_rendered_cells": 28,
+      "over": null,
+      "ratio": 0.683,
+      "zh_wide_cells": 28
+    },
+    {
+      "key": "tui.tags.created_applied",
+      "maxCells": null,
+      "en_cells": 29,
+      "zh_cells": 22,
+      "zh_rendered_cells": 29,
+      "over": null,
+      "ratio": 0.759,
+      "zh_wide_cells": 43
+    },
+    {
+      "key": "tui.tags.current",
+      "maxCells": null,
+      "en_cells": 7,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.571,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.tags.empty",
+      "maxCells": null,
+      "en_cells": 49,
+      "zh_cells": 34,
+      "zh_rendered_cells": 34,
+      "over": null,
+      "ratio": 0.694,
+      "zh_wide_cells": 34
+    },
+    {
+      "key": "tui.tags.failed",
+      "maxCells": null,
+      "en_cells": 29,
+      "zh_cells": 21,
+      "zh_rendered_cells": 31,
+      "over": null,
+      "ratio": 0.724,
+      "zh_wide_cells": 70
+    },
+    {
+      "key": "tui.tags.grouping_off",
+      "maxCells": null,
+      "en_cells": 49,
+      "zh_cells": 39,
+      "zh_rendered_cells": 39,
+      "over": null,
+      "ratio": 0.796,
+      "zh_wide_cells": 39
+    },
+    {
+      "key": "tui.tags.grouping_on",
+      "maxCells": null,
+      "en_cells": 58,
+      "zh_cells": 45,
+      "zh_rendered_cells": 45,
+      "over": null,
+      "ratio": 0.776,
+      "zh_wide_cells": 45
+    },
+    {
+      "key": "tui.tags.header",
+      "maxCells": null,
+      "en_cells": 46,
+      "zh_cells": 30,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.652,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "tui.tags.invalid",
+      "maxCells": null,
+      "en_cells": 80,
+      "zh_cells": 54,
+      "zh_rendered_cells": 54,
+      "over": null,
+      "ratio": 0.675,
+      "zh_wide_cells": 54
+    },
+    {
+      "key": "tui.tags.none_applied",
+      "maxCells": null,
+      "en_cells": 37,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.649,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "tui.tags.not_applied",
+      "maxCells": null,
+      "en_cells": 11,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "over": null,
+      "ratio": 0.545,
+      "zh_wide_cells": 6
+    },
+    {
+      "key": "tui.tags.off",
+      "maxCells": null,
+      "en_cells": 3,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 1.333,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.tags.on",
+      "maxCells": null,
+      "en_cells": 2,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 2.0,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.tags.partial_create",
+      "maxCells": null,
+      "en_cells": 51,
+      "zh_cells": 34,
+      "zh_rendered_cells": 34,
+      "over": null,
+      "ratio": 0.667,
+      "zh_wide_cells": 34
+    },
+    {
+      "key": "tui.tags.primary",
+      "maxCells": null,
+      "en_cells": 7,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "over": null,
+      "ratio": 0.857,
+      "zh_wide_cells": 6
+    },
+    {
+      "key": "tui.tags.removed",
+      "maxCells": null,
+      "en_cells": 17,
+      "zh_cells": 16,
+      "zh_rendered_cells": 23,
+      "over": null,
+      "ratio": 0.941,
+      "zh_wide_cells": 37
+    },
+    {
+      "key": "tui.tags.slash_tag",
+      "maxCells": null,
+      "en_cells": 42,
+      "zh_cells": 31,
+      "zh_rendered_cells": 31,
+      "over": null,
+      "ratio": 0.738,
+      "zh_wide_cells": 31
+    },
+    {
+      "key": "tui.tags.slash_tags",
+      "maxCells": null,
+      "en_cells": 41,
+      "zh_cells": 33,
+      "zh_rendered_cells": 33,
+      "over": null,
+      "ratio": 0.805,
+      "zh_wide_cells": 33
+    },
+    {
+      "key": "tui.tags.status",
+      "maxCells": null,
+      "en_cells": 51,
+      "zh_cells": 45,
+      "zh_rendered_cells": 42,
+      "over": null,
+      "ratio": 0.882,
+      "zh_wide_cells": 42
+    },
+    {
+      "key": "tui.tags.unavailable",
+      "maxCells": null,
+      "en_cells": 44,
+      "zh_cells": 20,
+      "zh_rendered_cells": 20,
+      "over": null,
+      "ratio": 0.455,
+      "zh_wide_cells": 20
+    },
+    {
+      "key": "tui.tags.untagged",
+      "maxCells": null,
+      "en_cells": 8,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "over": null,
+      "ratio": 0.75,
+      "zh_wide_cells": 6
+    },
+    {
+      "key": "tui.tags.usage",
+      "maxCells": null,
+      "en_cells": 25,
+      "zh_cells": 23,
+      "zh_rendered_cells": 23,
+      "over": null,
+      "ratio": 0.92,
+      "zh_wide_cells": 23
+    }
+  ]
+}

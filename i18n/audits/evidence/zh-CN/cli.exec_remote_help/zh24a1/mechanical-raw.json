@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.exec_remote_help",
+  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "generated_utc": "2026-10-24T23:21:17Z",
+  "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.exec_remote_help.json",
+      "sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.exec_remote_help.context.json",
+      "sha256": "fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.exec_remote_help.json",
+      "sha256": "f683a8903a41fff7f2a7c6da00dfe1a84af7582f0ab2b6904a1fd21e778da4e1"
+    }
+  },
+  "checks": {
+    "key_parity": {
+      "key_count_en": 11,
+      "key_count_zh": 11,
+      "missing": [],
+      "extra": [],
+      "order_identical": true,
+      "order_mismatch": [],
+      "ok": true
+    },
+    "non_nfc": [],
+    "control_chars": [],
+    "bidi_controls": [],
+    "zero_width": [],
+    "fullwidth_latin_or_digits": [],
+    "cjk_latin_space": [],
+    "icu_arguments": {
+      "mismatches": [],
+      "ok": true
+    },
+    "plural_structure": {
+      "rows": [],
+      "errors": [],
+      "ok": true
+    },
+    "technical_tokens": {
+      "missing": [],
+      "ok": true
+    },
+    "width": {
+      "over_budget": [],
+      "ok": true
+    }
+  },
+  "width_rows": [
+    {
+      "key": "cli.exec_remote_help.budget_usd",
+      "maxCells": null,
+      "en_cells": 81,
+      "zh_cells": 58,
+      "zh_rendered_cells": 58,
+      "over": null,
+      "ratio": 0.716,
+      "zh_wide_cells": 58
+    },
+    {
+      "key": "cli.exec_remote_help.cancel",
+      "maxCells": null,
+      "en_cells": 28,
+      "zh_cells": 22,
+      "zh_rendered_cells": 22,
+      "over": null,
+      "ratio": 0.786,
+      "zh_wide_cells": 22
+    },
+    {
+      "key": "cli.exec_remote_help.detach",
+      "maxCells": null,
+      "en_cells": 75,
+      "zh_cells": 42,
+      "zh_rendered_cells": 42,
+      "over": null,
+      "ratio": 0.56,
+      "zh_wide_cells": 42
+    },
+    {
+      "key": "cli.exec_remote_help.idempotency_key",
+      "maxCells": null,
+      "en_cells": 103,
+      "zh_cells": 56,
+      "zh_rendered_cells": 56,
+      "over": null,
+      "ratio": 0.544,
+      "zh_wide_cells": 56
+    },
+    {
+      "key": "cli.exec_remote_help.max_hours",
+      "maxCells": null,
+      "en_cells": 101,
+      "zh_cells": 71,
+      "zh_rendered_cells": 71,
+      "over": null,
+      "ratio": 0.703,
+      "zh_wide_cells": 71
+    },
+    {
+      "key": "cli.exec_remote_help.network",
+      "maxCells": null,
+      "en_cells": 103,
+      "zh_cells": 64,
+      "zh_rendered_cells": 64,
+      "over": null,
+      "ratio": 0.621,
+      "zh_wide_cells": 64
+    },
+    {
+      "key": "cli.exec_remote_help.remote",
+      "maxCells": null,
+      "en_cells": 90,
+      "zh_cells": 64,
+      "zh_rendered_cells": 64,
+      "over": null,
+      "ratio": 0.711,
+      "zh_wide_cells": 64
+    },
+    {
+      "key": "cli.exec_remote_help.repo",
+      "maxCells": null,
+      "en_cells": 89,
+      "zh_cells": 59,
+      "zh_rendered_cells": 59,
+      "over": null,
+      "ratio": 0.663,
+      "zh_wide_cells": 59
+    },
+    {
+      "key": "cli.exec_remote_help.sha",
+      "maxCells": null,
+      "en_cells": 53,
+      "zh_cells": 40,
+      "zh_rendered_cells": 40,
+      "over": null,
+      "ratio": 0.755,
+      "zh_wide_cells": 40
+    },
+    {
+      "key": "cli.exec_remote_help.size",
+      "maxCells": null,
+      "en_cells": 55,
+      "zh_cells": 38,
+      "zh_rendered_cells": 38,
+      "over": null,
+      "ratio": 0.691,
+      "zh_wide_cells": 38
+    },
+    {
+      "key": "cli.exec_remote_help.status",
+      "maxCells": null,
+      "en_cells": 37,
+      "zh_cells": 28,
+      "zh_rendered_cells": 28,
+      "over": null,
+      "ratio": 0.757,
+      "zh_wide_cells": 28
+    }
+  ]
+}

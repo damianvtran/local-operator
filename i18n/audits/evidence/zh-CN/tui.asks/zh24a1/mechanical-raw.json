@@ -1,0 +1,183 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.asks",
+  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "generated_utc": "2026-10-24T23:21:19Z",
+  "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.asks.json",
+      "sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.asks.context.json",
+      "sha256": "e09cd8e796359ab8c4d8de2fd5a59bb990c76f8488c28846cfb1623610507362"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.asks.json",
+      "sha256": "2c638dcdcfcb8db67804dc8a4bc884cace86e074e5f047a4fdd85146b7511c86"
+    }
+  },
+  "checks": {
+    "key_parity": {
+      "key_count_en": 11,
+      "key_count_zh": 11,
+      "missing": [],
+      "extra": [],
+      "order_identical": true,
+      "order_mismatch": [],
+      "ok": true
+    },
+    "non_nfc": [],
+    "control_chars": [],
+    "bidi_controls": [],
+    "zero_width": [],
+    "fullwidth_latin_or_digits": [],
+    "cjk_latin_space": [],
+    "icu_arguments": {
+      "mismatches": [],
+      "ok": true
+    },
+    "plural_structure": {
+      "rows": [
+        {
+          "key": "tui.asks.context.messages",
+          "en_selectors": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh_selectors": [
+            [
+              "other"
+            ]
+          ]
+        }
+      ],
+      "errors": [],
+      "ok": true
+    },
+    "technical_tokens": {
+      "missing": [],
+      "ok": true
+    },
+    "width": {
+      "over_budget": [],
+      "ok": true
+    }
+  },
+  "width_rows": [
+    {
+      "key": "tui.asks.context.messages",
+      "maxCells": 78,
+      "en_cells": 139,
+      "zh_cells": 58,
+      "zh_rendered_cells": 32,
+      "over": -46,
+      "ratio": 0.417,
+      "zh_wide_cells": 34
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "maxCells": 34,
+      "en_cells": 16,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": -20,
+      "ratio": 0.875,
+      "zh_wide_cells": 14
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat_note",
+      "maxCells": 44,
+      "en_cells": 39,
+      "zh_cells": 16,
+      "zh_rendered_cells": 16,
+      "over": -28,
+      "ratio": 0.41,
+      "zh_wide_cells": 16
+    },
+    {
+      "key": "tui.asks.dismiss.fleet_gone",
+      "maxCells": 60,
+      "en_cells": 48,
+      "zh_cells": 28,
+      "zh_rendered_cells": 28,
+      "over": -32,
+      "ratio": 0.583,
+      "zh_wide_cells": 28
+    },
+    {
+      "key": "tui.asks.dismiss.hint",
+      "maxCells": 40,
+      "en_cells": 26,
+      "zh_cells": 19,
+      "zh_rendered_cells": 19,
+      "over": -21,
+      "ratio": 0.731,
+      "zh_wide_cells": 19
+    },
+    {
+      "key": "tui.asks.dismiss.moot",
+      "maxCells": 34,
+      "en_cells": 16,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "over": -26,
+      "ratio": 0.5,
+      "zh_wide_cells": 8
+    },
+    {
+      "key": "tui.asks.dismiss.moot_note",
+      "maxCells": 44,
+      "en_cells": 18,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": -30,
+      "ratio": 0.778,
+      "zh_wide_cells": 14
+    },
+    {
+      "key": "tui.asks.dismiss.notice_answered_in_chat",
+      "maxCells": 44,
+      "en_cells": 28,
+      "zh_cells": 23,
+      "zh_rendered_cells": 23,
+      "over": -21,
+      "ratio": 0.821,
+      "zh_wide_cells": 23
+    },
+    {
+      "key": "tui.asks.dismiss.notice_moot",
+      "maxCells": 44,
+      "en_cells": 28,
+      "zh_cells": 17,
+      "zh_rendered_cells": 17,
+      "over": -27,
+      "ratio": 0.607,
+      "zh_wide_cells": 17
+    },
+    {
+      "key": "tui.asks.dismiss.notice_no_reply",
+      "maxCells": 44,
+      "en_cells": 25,
+      "zh_cells": 19,
+      "zh_rendered_cells": 19,
+      "over": -25,
+      "ratio": 0.76,
+      "zh_wide_cells": 19
+    },
+    {
+      "key": "tui.asks.dismiss.title",
+      "maxCells": 60,
+      "en_cells": 16,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": -50,
+      "ratio": 0.625,
+      "zh_wide_cells": 10
+    }
+  ]
+}

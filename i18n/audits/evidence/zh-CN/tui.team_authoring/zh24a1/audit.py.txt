@@ -1,0 +1,559 @@
+"""Independent zh-CN translation audit — mechanical evidence producer.
+
+Read-only over the worktree. For one namespace it writes, into the audit
+evidence bundle directory:
+
+  <ns>.pairs.txt         key / EN / ZH / context block triplets
+  <ns>.compact.txt       one line per key: key | EN | ZH
+  mechanical-raw.json    parity, encoding, ICU structure, token and width checks
+  runtime-mechanical.json  render evidence produced by the repo's own ICU runtime
+  pseudo-evidence.json   deterministic wide-substitution fit probe
+
+The runtime renderer is imported from the worktree being audited so the
+evidence is what this build actually renders, not a reimplementation.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import unicodedata
+from datetime import datetime, timezone
+
+REPO = "/Users/damian/local-operator/.worktrees/zh-cn-core"
+LOCALE = "zh-CN"
+sys.path.insert(0, REPO)
+
+from local_operator.i18n import format as i18n_format  # noqa: E402
+from local_operator.i18n import runtime  # noqa: E402
+
+CAT = os.path.join(REPO, "local_operator", "i18n", "catalogues")
+
+# Representative substitution values for fit probing. Conservative: typical
+# user data, not the longest possible string.
+SAMPLES = {
+    "count": 3,
+    "time": "19:36",
+    "name": "release-notes",
+    "path": "/Users/damian/workspace/notes/today.md",
+    "size": "1,234",
+    "status": "running",
+    "run_id": "01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+    "network_id": "net_01J8Z3K4M5N6P7Q8R9S0",
+    "idempotency_key": "01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+    "max_hours": 2,
+    "max_bytes": 4096,
+    "flag": "--size",
+    "error": "permission denied",
+    "reason": "write failed",
+    "amount": "$0.12",
+    "exit_code": 1,
+    "answered": "01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+    "asked_for": "01J8Z3K4M5N6P7Q8R9S0T1U2V4",
+    "detail": "3 名成员",
+    "state": "开启",
+    "tier": "1.0x",
+}
+
+# Wide-substitution probe: a deliberately generous value per placeholder, used
+# only to test the keys that carry a maxCells budget.
+WIDE = dict(SAMPLES)
+WIDE.update(
+    {
+        "name": "release-notes-and-changelog",
+        "path": "/Users/damian/workspace/projects/release-notes/2026/october.md",
+        "error": "connection reset by peer while reading the response body",
+        "reason": "the server refused the write twice",
+        "run_id": "01J8Z3K4M5N6P7Q8R9S0T1U2V3W4",
+        "network_id": "net_01J8Z3K4M5N6P7Q8R9S0T1",
+        "count": 128,
+        "time": "19:36",
+    }
+)
+
+TOKEN_PATTERNS = {
+    "backtick_span": re.compile(r"`[^`\n]+`"),
+    "long_flag": re.compile(r"(?<![\w/])--[a-zA-Z][a-zA-Z0-9_-]*"),
+    "slash_command": re.compile(r"(?<![\w/])/[a-zA-Z][a-zA-Z0-9_-]*"),
+    "env_or_constant": re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{2,}(?![A-Za-z0-9_])"),
+    "url_scheme": re.compile(r"(?:https?|ssh)://[^\s，。；：]+"),
+    "ipv4": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+    "ipv6_loopback": re.compile(r"::1(?![\w:])"),
+    "hostname": re.compile(r"\blocalhost\b"),
+    "home_path": re.compile(r"~/[\w./-]+"),
+    "abs_path": re.compile(r"/(?:bin|Users|Volumes|tmp|var|etc)/[\w./-]+"),
+    "percent_token": re.compile(r"%[sdif]"),
+}
+# Literal words that must survive verbatim (product and format vocabulary).
+LITERALS = (
+    "lop",
+    "lop-update",
+    "Radient",
+    "Local Operator",
+    "Git",
+    "JSON",
+    "ASCII",
+    "MiB",
+    "SHA",
+    "API",
+    "URL",
+    "TUI",
+)
+
+BIDI = set("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c")
+ZERO_WIDTH = set("\u200b\u200c\u200d\u2060\ufeff\u00ad")
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def cells(text: str) -> int:
+    """Display cells per the zh-CN style guide: CJK/fullwidth 2, ASCII 1."""
+    total = 0
+    for ch in text:
+        if unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+            continue
+        total += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return total
+
+
+def visible(text: str) -> str:
+    """One-line, unambiguous rendering of a value for evidence files."""
+    return (
+        text.replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
+
+
+def load(ns: str):
+    en_path = os.path.join(CAT, "en", f"{ns}.json")
+    zh_path = os.path.join(CAT, LOCALE, f"{ns}.json")
+    ctx_path = os.path.join(CAT, "en", f"{ns}.context.json")
+    en = json.load(open(en_path, encoding="utf-8"))
+    zh = json.load(open(zh_path, encoding="utf-8"))
+    ctx = (
+        json.load(open(ctx_path, encoding="utf-8"))
+        if os.path.exists(ctx_path)
+        else {}
+    )
+    return en, zh, ctx, en_path, zh_path, (ctx_path if os.path.exists(ctx_path) else None)
+
+
+def arg_names(source: str) -> list[tuple[str, str]]:
+    return list(runtime.message_arguments(source))
+
+
+def render(source: str, locale: str, params: dict) -> tuple[str | None, str | None]:
+    try:
+        return runtime.render_message(source, params, locale), None
+    except Exception as exc:  # evidence records the failure verbatim
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def params_for(source: str, table: dict) -> dict:
+    return {
+        name: table.get(name, f"<{name}>")
+        for name, _kind in runtime.message_arguments(source)
+    }
+
+
+def check_namespace(ns: str, outdir: str) -> dict:
+    en, zh, ctx, en_path, zh_path, ctx_path = load(ns)
+    os.makedirs(outdir, exist_ok=True)
+
+    missing = [k for k in en if k not in zh]
+    extra = [k for k in zh if k not in en]
+    order_ok = list(en) == list(zh)
+    order_mismatch = [] if order_ok else [
+        {"index": i, "en": ek, "zh": zk}
+        for i, (ek, zk) in enumerate(zip(en, zh))
+        if ek != zk
+    ]
+
+    non_nfc, control, bidi, zero, fullwidth_ld, cjk_latin_space = [], [], [], [], [], []
+    for side, table in (("en", en), ("zh", zh)):
+        for key, value in table.items():
+            if not isinstance(value, str):
+                control.append({"key": key, "side": side, "issue": "not a string"})
+                continue
+            if unicodedata.normalize("NFC", value) != value:
+                non_nfc.append({"key": key, "side": side})
+            for ch in value:
+                cp = ord(ch)
+                if ch in ("\n", "\t"):
+                    continue
+                if unicodedata.category(ch) == "Cc":
+                    control.append(
+                        {"key": key, "side": side, "codepoint": f"U+{cp:04X}"}
+                    )
+                if ch in BIDI:
+                    bidi.append({"key": key, "side": side, "codepoint": f"U+{cp:04X}"})
+                if ch in ZERO_WIDTH:
+                    zero.append({"key": key, "side": side, "codepoint": f"U+{cp:04X}"})
+                if 0xFF21 <= cp <= 0xFF3A or 0xFF41 <= cp <= 0xFF5A or 0xFF10 <= cp <= 0xFF19:
+                    fullwidth_ld.append(
+                        {"key": key, "side": side, "codepoint": f"U+{cp:04X}"}
+                    )
+        if side == "zh":
+            for key, value in table.items():
+                if not isinstance(value, str):
+                    continue
+                for m in re.finditer(r"[\u4e00-\u9fff] +[A-Za-z0-9]|[A-Za-z0-9] +[\u4e00-\u9fff]", value):
+                    cjk_latin_space.append(
+                        {"key": key, "match": m.group(0), "at": m.start()}
+                    )
+
+    arg_mismatch, plural_rows, plural_errors = [], [], []
+    for key in en:
+        if key not in zh or not isinstance(en[key], str) or not isinstance(zh[key], str):
+            continue
+        ea, za = arg_names(en[key]), arg_names(zh[key])
+        if ea != za:
+            arg_mismatch.append({"key": key, "en": ea, "zh": za})
+        en_sel, zh_sel = runtime.plural_selectors(en[key]), runtime.plural_selectors(zh[key])
+        if len(en_sel) != len(zh_sel):
+            plural_errors.append(
+                {"key": key, "issue": "plural count differs", "en": en_sel, "zh": zh_sel}
+            )
+        allowed = set(i18n_format.plural_categories(LOCALE))
+        for selectors in zh_sel:
+            for sel in selectors:
+                if not sel.startswith("=") and sel not in allowed:
+                    plural_errors.append(
+                        {"key": key, "issue": f"selector {sel!r} not a zh-CN category",
+                         "zh": selectors}
+                    )
+            if "other" not in selectors:
+                plural_errors.append(
+                    {"key": key, "issue": "missing other selector", "zh": selectors}
+                )
+        if en_sel:
+            plural_rows.append(
+                {
+                    "key": key,
+                    "en_selectors": [list(s) for s in en_sel],
+                    "zh_selectors": [list(s) for s in zh_sel],
+                }
+            )
+
+    token_missing = []
+    for key in en:
+        if key not in zh or not isinstance(en[key], str) or not isinstance(zh[key], str):
+            continue
+        ev, zv = en[key], zh[key]
+        found = []
+        for name, pattern in TOKEN_PATTERNS.items():
+            for token in pattern.findall(ev):
+                found.append((name, token))
+        for literal in LITERALS:
+            if re.search(r"(?<![\w-])" + re.escape(literal) + r"(?![\w-])", ev):
+                found.append(("literal", literal))
+        for name, token in sorted(set(found)):
+            if token not in zv:
+                token_missing.append({"key": key, "kind": name, "token": token})
+
+    width_rows = []
+    for key in en:
+        if key not in zh or not isinstance(en[key], str) or not isinstance(zh[key], str):
+            continue
+        budget = (ctx.get(key) or {}).get("maxCells")
+        zh_cells = cells(zh[key])
+        en_cells = cells(en[key])
+        params = params_for(zh[key], SAMPLES)
+        rendered, err = render(zh[key], LOCALE, params)
+        row = {
+            "key": key,
+            "maxCells": budget,
+            "en_cells": en_cells,
+            "zh_cells": zh_cells,
+            "zh_rendered_cells": cells(rendered) if rendered is not None else None,
+            "over": (cells(rendered) - budget) if (budget and rendered is not None) else None,
+            "ratio": round(zh_cells / en_cells, 3) if en_cells else None,
+        }
+        if err:
+            row["render_error"] = err
+        wide_rendered, wide_err = render(zh[key], LOCALE, params_for(zh[key], WIDE))
+        row["zh_wide_cells"] = cells(wide_rendered) if wide_rendered is not None else None
+        if wide_err:
+            row["wide_render_error"] = wide_err
+        width_rows.append(row)
+
+    # ------------------------------------------------------------------
+    # pairs / compact
+    # ------------------------------------------------------------------
+    pairs, compact = [], []
+    for key in en:
+        pairs.append(key)
+        pairs.append(f"EN {json.dumps(en.get(key), ensure_ascii=False)}")
+        pairs.append(f"ZH {json.dumps(zh.get(key), ensure_ascii=False)}")
+        if key in ctx:
+            pairs.append(f"CX {json.dumps(ctx[key], ensure_ascii=False, sort_keys=True)}")
+        compact.append(
+            f"{key} | {visible(en.get(key, '<missing>'))} | {visible(zh.get(key, '<missing>'))}"
+        )
+    with open(os.path.join(outdir, f"{ns}.pairs.txt"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(pairs) + "\n")
+    with open(os.path.join(outdir, f"{ns}.compact.txt"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(compact) + "\n")
+
+    revision = os.popen(f"git -C {REPO} rev-parse HEAD").read().strip()
+
+    mechanical = {
+        "schema": 1,
+        "locale": LOCALE,
+        "namespace": ns,
+        "revision": revision,
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "method": (
+            "Audit-local read-only checks over the two catalogues. Width counts follow the "
+            "zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); "
+            "zh_rendered_cells substitutes representative values for placeholders."
+        ),
+        "inputs": {
+            "en": {"path": os.path.relpath(en_path, REPO), "sha256": sha256_file(en_path)},
+            "context": (
+                {"path": os.path.relpath(ctx_path, REPO), "sha256": sha256_file(ctx_path)}
+                if ctx_path
+                else None
+            ),
+            "zh-CN": {"path": os.path.relpath(zh_path, REPO), "sha256": sha256_file(zh_path)},
+        },
+        "checks": {
+            "key_parity": {
+                "key_count_en": len(en),
+                "key_count_zh": len(zh),
+                "missing": missing,
+                "extra": extra,
+                "order_identical": order_ok,
+                "order_mismatch": order_mismatch,
+                "ok": not missing and not extra and order_ok,
+            },
+            "non_nfc": non_nfc,
+            "control_chars": control,
+            "bidi_controls": bidi,
+            "zero_width": zero,
+            "fullwidth_latin_or_digits": fullwidth_ld,
+            "cjk_latin_space": cjk_latin_space,
+            "icu_arguments": {"mismatches": arg_mismatch, "ok": not arg_mismatch},
+            "plural_structure": {
+                "rows": plural_rows,
+                "errors": plural_errors,
+                "ok": not plural_errors,
+            },
+            "technical_tokens": {"missing": token_missing, "ok": not token_missing},
+            "width": {
+                "over_budget": [
+                    r for r in width_rows if r["over"] is not None and r["over"] > 0
+                ],
+                "ok": not any(r["over"] is not None and r["over"] > 0 for r in width_rows),
+            },
+        },
+        "width_rows": width_rows,
+    }
+
+    # ------------------------------------------------------------------
+    # runtime-mechanical: render everything with the repo's own runtime
+    # ------------------------------------------------------------------
+    plural_samples, static_samples, render_failures = [], [], []
+    select_keys = [
+        key
+        for key in en
+        if key in zh
+        and any(kind == "select" for _name, kind in runtime.message_arguments(en[key]))
+    ]
+    for key in en:
+        if key not in zh or not isinstance(zh[key], str):
+            continue
+        zh_source = zh[key]
+        en_source = en[key]
+        if runtime.plural_selectors(zh_source):
+            # Every arm: zh has one arm (`other`); en has `one` and `other`, so
+            # counts 1 and 2 exercise both en arms and the single zh arm.
+            for count in (0, 1, 2, 5, 11, 21, 100):
+                params = params_for(zh_source, {**SAMPLES, "count": count})
+                zh_out, zh_err = render(zh_source, LOCALE, params)
+                en_out, en_err = render(en_source, "en", params)
+                if zh_err:
+                    render_failures.append({"key": key, "count": count, "error": zh_err})
+                plural_samples.append(
+                    {
+                        "key": key,
+                        "count": count,
+                        "zh_category": i18n_format.plural_category(LOCALE, count),
+                        "en_category": i18n_format.plural_category("en", count),
+                        "zh_render": zh_out,
+                        "en_render": en_out,
+                        "zh_error": zh_err,
+                        "en_error": en_err,
+                    }
+                )
+        else:
+            params = params_for(zh_source, SAMPLES)
+            zh_out, zh_err = render(zh_source, LOCALE, params)
+            en_out, en_err = render(en_source, "en", params)
+            if zh_err:
+                render_failures.append({"key": key, "error": zh_err})
+            static_samples.append(
+                {
+                    "key": key,
+                    "zh_render": zh_out,
+                    "en_render": en_out,
+                    "zh_error": zh_err,
+                    "en_error": en_err,
+                }
+            )
+    select_arms = select_keys
+
+    runtime_doc = {
+        "schema": 1,
+        "locale": LOCALE,
+        "namespace": ns,
+        "revision": revision,
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+        "plural_categories": {
+            LOCALE: list(i18n_format.plural_categories(LOCALE)),
+            "en": list(i18n_format.plural_categories("en")),
+        },
+        "arguments": {
+            "keys_checked": len(en),
+            "mismatches": arg_mismatch,
+        },
+        "plural_selector_parity": {
+            "rows": plural_rows,
+            "errors": plural_errors,
+        },
+        "plural_render_samples": plural_samples,
+        "plural_render_failures": render_failures,
+        "static_render_samples": static_samples,
+        "select_render_samples": [],
+        "technical_tokens": {
+            "patterns": {k: v.pattern for k, v in TOKEN_PATTERNS.items()},
+            "literals": list(LITERALS),
+            "missing": token_missing,
+        },
+        "width": {
+            "over_budget": [
+                r for r in width_rows if r["over"] is not None and r["over"] > 0
+            ],
+            "checked_keys_with_budget": sum(1 for r in width_rows if r["maxCells"]),
+        },
+        "review_disposition": {
+            "mechanical_status": "passed"
+            if (
+                not missing
+                and not extra
+                and order_ok
+                and not non_nfc
+                and not control
+                and not bidi
+                and not zero
+                and not fullwidth_ld
+                and not arg_mismatch
+                and not plural_errors
+                and not token_missing
+                and not render_failures
+            )
+            else "failed",
+            "note": (
+                "Mechanical only: no native terminal, relay SPA or rendered-frame pass is "
+                "claimed by this document. Semantic findings are in report.md."
+            ),
+        },
+    }
+
+    pseudo = {
+        "schema": 1,
+        "locale": LOCALE,
+        "namespace": ns,
+        "revision": revision,
+        "method": (
+            "Deterministic wide-substitution fit probe: every placeholder is replaced with a "
+            "deliberately generous representative value and the result measured in display "
+            "cells against the en sidecar maxCells. zh-CN is LTR CJK, so the ur bundle's "
+            "Arabic tatweel stretch probe has no counterpart here; this is the analogue. "
+            "No source or catalogue files are written. This is a synthetic fit probe, not "
+            "native or rendered proof."
+        ),
+        "argument_parity_errors": arg_mismatch,
+        "plural_render_count": len(plural_samples),
+        "plural_render_errors": [
+            {"key": s["key"], "count": s["count"], "error": s["zh_error"]}
+            for s in plural_samples
+            if s.get("zh_error")
+        ],
+        "width_rows": [
+            {
+                "key": r["key"],
+                "maxCells": r["maxCells"],
+                "zh_cells": r["zh_cells"],
+                "zh_rendered_cells": r["zh_rendered_cells"],
+                "zh_wide_cells": r["zh_wide_cells"],
+                "over": r["over"],
+            }
+            for r in width_rows
+            if r["maxCells"]
+        ],
+        "static_or_reserved_over_budget": [
+            r["key"]
+            for r in width_rows
+            if r["maxCells"]
+            and r["zh_wide_cells"] is not None
+            and r["zh_wide_cells"] > r["maxCells"]
+        ],
+    }
+
+    for name, doc in (
+        ("mechanical-raw.json", mechanical),
+        ("runtime-mechanical.json", runtime_doc),
+        ("pseudo-evidence.json", pseudo),
+    ):
+        with open(os.path.join(outdir, name), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, ensure_ascii=False, indent=2, sort_keys=False)
+            fh.write("\n")
+
+    # console summary (captured verbatim into audit.log)
+    print(f"namespace={ns} keys={len(en)} revision={revision}")
+    print(f"key_parity: missing={len(missing)} extra={len(extra)} order_identical={order_ok}")
+    print(f"nfc={len(non_nfc)} control={len(control)} bidi={len(bidi)} zero_width={len(zero)}"
+          f" fullwidth_latin_digits={len(fullwidth_ld)} cjk_latin_space={len(cjk_latin_space)}")
+    print(f"icu_arguments: mismatches={len(arg_mismatch)}; plural_structure_errors={len(plural_errors)}")
+    print(f"technical_tokens_missing={len(token_missing)}")
+    for row in token_missing:
+        print(f"  token-missing {row['key']} kind={row['kind']} token={row['token']!r}")
+    budgets = [r for r in width_rows if r["maxCells"]]
+    over = [r for r in budgets if r["over"] is not None and r["over"] > 0]
+    print(f"width: keys_with_budget={len(budgets)} over_budget={len(over)}")
+    for r in budgets:
+        print(
+            f"  width {r['key']} max={r['maxCells']} zh_static={r['zh_cells']}"
+            f" zh_rendered={r['zh_rendered_cells']} zh_wide={r['zh_wide_cells']}"
+            f" over={r['over']}"
+        )
+    print(f"render: plural_samples={len(plural_samples)} static_samples={len(static_samples)}"
+          f" failures={len(render_failures)} plural_keys={len(plural_rows)}"
+          f" select_keys={len(select_arms)}")
+    return mechanical
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ns", required=True)
+    parser.add_argument("--out", required=True)
+    args = parser.parse_args()
+    check_namespace(args.ns, args.out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,320 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.team_authoring",
+  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "generated_utc": "2026-10-24T23:21:23Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 36,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "tui.team_authoring.create",
+      "zh_render": "新建团队",
+      "en_render": "new team",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.edit",
+      "zh_render": "编辑团队 · release-notes",
+      "en_render": "edit team · release-notes",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.name",
+      "zh_render": "名称",
+      "en_render": "name",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.label",
+      "zh_render": "标签",
+      "en_render": "label",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.description",
+      "zh_render": "使用场景",
+      "en_render": "when to use",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.manager",
+      "zh_render": "管理者",
+      "en_render": "manager",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.members",
+      "zh_render": "成员",
+      "en_render": "members",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.aliases",
+      "zh_render": "别名",
+      "en_render": "aliases",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.instructions",
+      "zh_render": "指令",
+      "en_render": "instructions",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.project",
+      "zh_render": "项目简报",
+      "en_render": "project brief",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.members_hint",
+      "zh_render": "逗号分隔：coder、coder:2、team:pod",
+      "en_render": "comma-separated: coder, coder:2, team:pod",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.aliases_hint",
+      "zh_render": "逗号分隔的名称 · 留空即清除别名",
+      "en_render": "comma-separated names · empty clears aliases",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.instructions_hint",
+      "zh_render": "常驻团队指引 · Tab跳至下一字段",
+      "en_render": "standing team guidance · Tab moves to the next field",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.overrides_hint",
+      "zh_render": "现有成员覆盖项将保留。在桌面端编辑覆盖项。",
+      "en_render": "Existing member overrides are preserved. Edit overrides on the desktop.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.legend",
+      "zh_render": "ctrl+s保存 · tab移动 · esc取消",
+      "en_render": "ctrl+s save · tab move · esc cancel",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.discard",
+      "zh_render": "放弃更改？y放弃 · n继续编辑",
+      "en_render": "Discard changes? y discard · n keep editing",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.invalid_name",
+      "zh_render": "团队名称不能含空格或路径分隔符。",
+      "en_render": "Use a team name without spaces or path separators.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.required_manager",
+      "zh_render": "必须指定管理者。",
+      "en_render": "A manager is required.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.required_instructions",
+      "zh_render": "新团队必须填写指令。",
+      "en_render": "Instructions are required for a new team.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.invalid_members",
+      "zh_render": "成员项用逗号分隔，格式为role、role:2或team:pod。",
+      "en_render": "Use comma-separated role, role:2 or team:pod entries.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.invalid_aliases",
+      "zh_render": "别名用逗号分隔，不能含空格或空项。",
+      "en_render": "Use comma-separated names without spaces or empty entries.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.saved",
+      "zh_render": "已保存团队release-notes",
+      "en_render": "saved team release-notes",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.no_change",
+      "zh_render": "没有更改需要保存",
+      "en_render": "no changes to save",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.revision_changed",
+      "zh_render": "其他人已修改此团队，重新打开后再编辑。",
+      "en_render": "Someone else changed this team; reopen to edit.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.missing",
+      "zh_render": "未安装名为release-notes的团队。",
+      "en_render": "No installed team named release-notes.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.usage_edit",
+      "zh_render": "使用/team edit <name>。",
+      "en_render": "Use /team edit <name>.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.usage_new",
+      "zh_render": "使用/team new，不带额外参数。",
+      "en_render": "Use /team new with no extra arguments.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.registry_missing",
+      "zh_render": "本会话未连接团队注册表。",
+      "en_render": "No team registry is attached to this session.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.footer",
+      "zh_render": "/team chart <name> · /team new · /team edit <name>",
+      "en_render": "/team chart <name> · /team new · /team edit <name>",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.save_error",
+      "zh_render": "无法保存：write failed",
+      "en_render": "Could not save: write failed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.notice_read_only",
+      "zh_render": "只读：本会话的运行时位于另一台设备，因此此处无法修改团队。",
+      "en_render": "Read-only: this conversation’s runtime is on another device, so team changes are not available here.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.new_hint",
+      "zh_render": "创建团队",
+      "en_render": "Create a team",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.edit_hint",
+      "zh_render": "编辑已安装的团队",
+      "en_render": "Edit an installed team",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.subcommand",
+      "zh_render": "子命令",
+      "en_render": "subcommand",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.talk_hint",
+      "zh_render": "与团队对话 · 3 名成员",
+      "en_render": "talk to team · 3 名成员",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.team_authoring.promote_hint",
+      "zh_render": "将本会话的团队复制到你的账户",
+      "en_render": "Copy this conversation's team into your account",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{2,}(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]+",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}
