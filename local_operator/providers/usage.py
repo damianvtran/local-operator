@@ -1748,6 +1748,57 @@ def _kimi_row(data: dict[str, Any], now_ms: float) -> tuple[UsageAmount, int | N
     return amount, _kimi_reset_ms(data, now_ms)
 
 
+#: Period words in a ``usages`` key as the plan itself names them. ``month`` is
+#: the membership's monthly total quota and ``week`` survives only on legacy
+#: plans, which quote that window as ``7d``.
+_KIMI_RATIO_WORDS = {"month": "monthly", "week": "weekly", "7d": "weekly", "day": "daily"}
+
+
+def _kimi_ratio_label(key: str) -> str:
+    """A row label derived from a ``usages`` key (``limit_month_total``).
+
+    The body carries no display names for these windows — the KEY is the only
+    name Kimi gives them — so exposing the raw keys would be the sole
+    alternative. Deriving instead of mapping means an unfamiliar but readable
+    future key still renders, which is the difference between a legacy weekly
+    window appearing as "Weekly total" and one that silently vanishes.
+    """
+    tokens = [token for token in key.strip().lower().removeprefix("limit_").split("_") if token]
+    if not tokens:
+        return ""
+    words = [_KIMI_RATIO_WORDS.get(token, token) for token in tokens]
+    label = " ".join(words)
+    # A bare period describes a window, not a quota: "Monthly limit" reads as a
+    # cap, while "Monthly" beside "Monthly total" reads as a fragment.
+    if len(words) == 1:
+        label += " limit"
+    return label[:1].upper() + label[1:]
+
+
+def _kimi_ratio_value(entry: dict[str, Any]) -> float | None:
+    """The consumed fraction from one ``usages`` entry, or None.
+
+    These windows are quoted only as ``used_ratio`` (0.0006 == 0.06% consumed),
+    never as absolute counts. ``usedRatio`` is read beside the documented
+    snake_case field for the same reason :func:`_kimi_reset_ms` reads four reset
+    spellings: this endpoint mixes camelCase and snake_case across its nesting
+    levels.
+
+    A ratio outside 0..1, or a non-finite one, is schema drift rather than a
+    clampable reading: 1.5 and -0.2 do not describe a window, so rendering them
+    as 100% or 0% would state a fact the vendor never sent. The entry is
+    skipped instead.
+    """
+    raw = entry.get("used_ratio", entry.get("usedRatio"))
+    # ``float(True) == 1.0``, so a bool would otherwise claim a full window.
+    if isinstance(raw, bool):
+        return None
+    ratio = _num(raw)
+    if ratio is None or not 0.0 <= ratio <= 1.0:
+        return None
+    return ratio
+
+
 async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
     """Kimi coding-plan usage windows (OAuth).
 
@@ -1784,6 +1835,10 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
                 )
             )
 
+    # Window names the absolute rows above actually rendered, so the ratio
+    # object can be deduplicated against them below.
+    rendered_windows: set[str] = set()
+
     raw_limits = data.get("limits")
     if isinstance(raw_limits, list):
         for index, item in enumerate(raw_limits):
@@ -1793,14 +1848,17 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
             detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else item
             raw_window = item.get("window")
             window_data: dict[str, Any] = raw_window if isinstance(raw_window, dict) else {}
+            window_label = _kimi_window_label(window_data)
             label = (
                 str(item.get("name") or item.get("title") or "").strip()
-                or _kimi_window_label(window_data)
+                or window_label
                 or f"Limit {index + 1}"
             )
             row = _kimi_row(detail, now_ms)
             if row is None:
                 continue
+            if window_label:
+                rendered_windows.add(window_label.casefold())
             amount, detail_reset = row
             # The WINDOW's own reset wins when it has one; Kimi usually leaves it
             # on the detail instead, which is why the fallback exists at all —
@@ -1813,6 +1871,60 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
                     amount=amount,
                     window=_kimi_window_label(window_data) or "window",
                     resets_at_ms=window_reset,
+                    shared=True,
+                )
+            )
+    # The ratio object is a SECOND spelling of some windows, not another quota.
+    # On live accounts its `limit_5h` disagrees with `limits[]`, and the Kimi
+    # website matches `limits[]` — so the map's 5h entry is ignored whenever an
+    # absolute 5h row rendered, never merged or overridden. The same-name rule
+    # below does that: a ratio whose derived label equals a window already
+    # rendered describes the same window.
+    raw_usages = data.get("usages")
+    if isinstance(raw_usages, dict):
+        monthly = raw_usages.get("limit_month_total")
+        if isinstance(monthly, dict):
+            ratio = _kimi_ratio_value(monthly)
+            if ratio is not None:
+                limits.append(
+                    UsageLimit(
+                        id="kimi:monthly-total",
+                        label="Monthly total",
+                        amount=UsageAmount(
+                            used=ratio * 100.0,
+                            remaining=(1.0 - ratio) * 100.0,
+                            used_fraction=ratio,
+                            unit="percent",
+                        ),
+                        window="monthly",
+                        resets_at_ms=_kimi_reset_ms(monthly, now_ms),
+                        shared=True,
+                    )
+                )
+        # `limit_month_code` is the Kimi Code slice INSIDE that same shared
+        # monthly pool, not a second allowance: adding it to the total would
+        # double-count, and printing it as its own window would claim a quota
+        # the plan does not have. ai-usagebar pins this with
+        # `the_code_slice_is_never_added_to_the_monthly_pool`. It is dropped
+        # rather than restored as a "missing" row.
+        for key, entry in raw_usages.items():
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                continue
+            if key in ("limit_month_total", "limit_month_code"):
+                continue
+            label = _kimi_ratio_label(key)
+            if not label or label.casefold() in rendered_windows:
+                continue
+            ratio = _kimi_ratio_value(entry)
+            if ratio is None:
+                continue
+            limits.append(
+                UsageLimit(
+                    id=f"kimi:{key}",
+                    label=label,
+                    amount=UsageAmount(used_fraction=ratio, unit="percent"),
+                    window=label,
+                    resets_at_ms=_kimi_reset_ms(entry, now_ms),
                     shared=True,
                 )
             )

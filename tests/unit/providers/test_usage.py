@@ -1576,6 +1576,142 @@ async def test_kimi_takes_the_window_reset_from_the_limit_detail() -> None:
     assert by_id["kimi:total"].resets_at_ms == 1_784_619_815_355
 
 
+#: The 2026-10-24 live ``/coding/v1/usages`` body, redacted: no account id, no
+#: token, no booster wallet. ``limits[]`` carries the 300-minute window with
+#: absolute counts; ``usages`` repeats that window as a ratio (the two disagree
+#: on a real account — 1/100 against 0.95% — and the Kimi website matches
+#: ``limits[]``) and adds the membership's monthly pool as a ratio.
+KIMI_LIVE_USAGE_BODY: dict[str, Any] = {
+    "limits": [
+        {
+            "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+            "detail": {
+                "limit": "100",
+                "used": "1",
+                "remaining": "99",
+                "resetTime": "2026-10-24T23:09:33Z",
+            },
+        }
+    ],
+    "usages": {
+        "limit_5h": {"used_ratio": 0.0095, "reset_time": "2026-10-24T23:09:33Z"},
+        "limit_month_total": {"used_ratio": 0.0006, "reset_time": "2026-11-25T00:00:00Z"},
+        # The Code slice INSIDE the shared pool, not a second allowance.
+        "limit_month_code": {"used_ratio": 0.0006, "reset_time": "2026-11-25T00:00:00Z"},
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_kimi_live_shape_reports_the_monthly_pool_and_no_duplicate_5h() -> None:
+    """The monthly rows only exist in the plural ``usages`` object, and its
+    ``limit_5h`` is the same window ``limits[]`` already reports — ignoring the
+    map's 5h entry is what stops the popup showing it twice."""
+    client = _client_for(KIMI_LIVE_USAGE_BODY)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    assert [limit.id for limit in report.limits] == ["kimi:0", "kimi:monthly-total"]
+    by_id = {limit.id: limit for limit in report.limits}
+    five_hour = by_id["kimi:0"]
+    assert five_hour.amount.fraction() == pytest.approx(0.01)
+    assert five_hour.resets_at_ms == 1_792_883_373_000
+    monthly = by_id["kimi:monthly-total"]
+    assert monthly.label == "Monthly total"
+    assert monthly.shared is True
+    assert monthly.amount.fraction() == pytest.approx(0.0006)
+    assert monthly.resets_at_ms == 1_795_564_800_000
+
+
+@pytest.mark.asyncio
+async def test_kimi_never_renders_the_code_slice_as_its_own_quota() -> None:
+    """``limit_month_code`` is a breakdown of ``limit_month_total``; a second
+    row would either double-count it or claim a quota the plan does not have.
+    A Code number that differs from the total must not change the total."""
+    body = {
+        "usages": {
+            "limit_month_total": {"used_ratio": 0.2, "reset_time": "2026-11-25T00:00:00Z"},
+            "limit_month_code": {"used_ratio": 0.9, "reset_time": "2026-11-25T00:00:00Z"},
+        }
+    }
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    assert [limit.id for limit in report.limits] == ["kimi:monthly-total"]
+    assert report.limits[0].amount.fraction() == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key", "label"),
+    [("limit_week_total", "Weekly total"), ("limit_7d", "Weekly limit")],
+)
+async def test_kimi_renders_a_legacy_weekly_ratio_as_weekly(key: str, label: str) -> None:
+    """New plans have no weekly window, but legacy plans still report one and
+    it must not vanish: the key is the only name the body gives it."""
+    body = {"usages": {key: {"used_ratio": 0.15, "reset_time": "2026-11-01T00:00:00Z"}}}
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    assert [limit.label for limit in report.limits] == [label]
+    assert report.limits[0].amount.fraction() == pytest.approx(0.15)
+    assert report.limits[0].resets_at_ms == 1_793_491_200_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "not-a-dict",
+        {},
+        {"used_ratio": "bad"},
+        {"used_ratio": True},
+        {"used_ratio": 1.5},
+        {"used_ratio": -0.2},
+        {"used_ratio": float("nan")},
+        {"used_ratio": float("inf")},
+    ],
+)
+async def test_kimi_ratio_entries_that_do_not_describe_a_window_are_skipped(entry) -> None:
+    """Schema drift is skipped, never clamped into a fabricated 0% or 100%."""
+    # A raw body rather than ``json=``: httpx refuses to encode NaN/Infinity,
+    # and those are exactly the non-finite readings this test must feed.
+    body = json.dumps({"usages": {"limit_week_total": entry}})
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "application/json"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is None or report.limits == []
+
+
+@pytest.mark.asyncio
+async def test_kimi_ratio_spellings_and_data_envelope_are_tolerated() -> None:
+    """The endpoint mixes snake_case and camelCase across nesting levels; the
+    envelope tolerance is the existing contract, pinned here for the new map."""
+    body = {
+        "data": {
+            "usages": {
+                "limit_week_total": {
+                    "usedRatio": 0.2,
+                    "resetTime": "2026-11-01T00:00:00Z",
+                }
+            }
+        }
+    }
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    assert report.limits[0].label == "Weekly total"
+    assert report.limits[0].amount.fraction() == pytest.approx(0.2)
+    assert report.limits[0].resets_at_ms == 1_793_491_200_000
+
+
 #: The legacy SuperGrok weekly billing shape (``?format=credits``). Amounts are
 #: WRAPPED objects, which is what the old bare-number read lost.
 XAI_WEEKLY_BODY = {

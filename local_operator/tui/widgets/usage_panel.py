@@ -298,6 +298,22 @@ def format_countdown(ms: int | None) -> str:
 _RESET_PREFIX = "resets in "
 
 
+def _format_percent(value: float) -> str:
+    """A percent for a row, without rounding a real reading down to nothing.
+
+    Percent rows print integers because the vendors quote ``2.0`` and ``100.0``,
+    and a trailing ``.0`` on every row costs cells to say nothing. Kimi's
+    monthly window is the counter-example: it arrives as a ratio like ``0.0006``
+    — 0.06% — and ``:.0f`` would render that ``0%``, which reads as "nothing
+    used" on a window that has started. Anything strictly between 0 and 1
+    prints ``<1`` so the number stays honest and narrow; zero and whole
+    percentages keep the integer form.
+    """
+    if 0 < value < 1:
+        return "<1"
+    return f"{value:.0f}"
+
+
 def format_amount(amount) -> str:  # noqa: ANN001 — see collect_stats
     """The number for one row, or ``""`` when the amount carries none.
 
@@ -319,7 +335,7 @@ def format_amount(amount) -> str:  # noqa: ANN001 — see collect_stats
         if unit == "usd":
             text = f"{value:.2f}"
         elif unit == "percent":
-            text = f"{value:.0f}"
+            text = _format_percent(value)
         else:
             text = f"{value:g}"
         if not label:
@@ -339,7 +355,7 @@ def format_amount(amount) -> str:  # noqa: ANN001 — see collect_stats
     if amount.limit is not None:
         return f"{with_unit(amount.limit)} limit"
     if amount.used_fraction is not None:
-        return f"{amount.used_fraction * 100:.0f}% used"
+        return f"{_format_percent(amount.used_fraction * 100)}% used"
     return ""
 
 
