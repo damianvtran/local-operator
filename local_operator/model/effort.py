@@ -224,6 +224,12 @@ def cheapest_real_rung(levels: "Sequence[str]") -> str | None:
 #: undocumented default, and it is one press from either end. The ends are both
 #: wrong for a key someone pressed to FIND the control: ``none`` silently
 #: lobotomises the model, ``max`` silently multiplies the bill.
+#:
+#: That argument is about the POSITION in the ladder, not about the word
+#: ``medium``: a ladder staged by a listing can omit ``medium`` entirely (Kimi
+#: K3 is ``low/high/max``), and ``next_effort`` then takes the middle of that
+#: ladder's real rungs. This constant remains the preferred spelling whenever
+#: the model states it.
 FALLBACK_START = "medium"
 
 
@@ -337,8 +343,11 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # keeps its empty ladder: Kimi's 2.x rows reason without a named tier.
     # ``kimi-for-coding*`` rides along because the coding-plan listing states the
     # same ``think_efforts`` shape for those rows (the K2.8 Preview alias).
+    # ``(?:[.:-]|$)`` also admits the aggregator's batched spelling
+    # (``moonshotai/kimi-k3:batch``); ``:`` is route tag, not a different
+    # generation, and the same allowance is already made on the Anthropic arms.
     (
-        re.compile(r"(?:^|/)(?:kimi-for-coding|(?:kimi-)?k3(?:[.-]|$))"),
+        re.compile(r"(?:^|/)(?:kimi-for-coding|(?:kimi-)?k3(?:[.:-]|$))"),
         _KIMI_K3,
     ),
 )
@@ -528,10 +537,10 @@ def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     """The level one cycle step above ``current``, wrapping at the top.
 
     ``None`` in (nothing selected) starts at :data:`FALLBACK_START` when the
-    model has it, else the lowest rung ABOVE ``none`` — never at whatever
-    happens to sit at index 0, which on OpenAI is ``none``: a user pressing the
-    key to find the control would have turned reasoning OFF with their first
-    press.
+    model has it, else at the MIDDLE of the ladder's real rungs — never at
+    whatever happens to sit at index 0, which on OpenAI is ``none``: a user
+    pressing the key to find the control would have turned reasoning OFF with
+    their first press.
 
     That guard used to be spelled ``FALLBACK_START in levels``, falling through
     to ``levels[0]``, and it was insufficient the moment ladders stopped coming
@@ -540,8 +549,12 @@ def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     of 153 stated ladders start at ``none`` and 8 of those lack ``medium``
     (``mistralai/mistral-small-2603`` is ``('none','high')``), so the fallthrough
     landed the discovery press on precisely the rung the docstring promised it
-    would never pick. Skipping ``none`` restores the stated property for any
-    ladder shape rather than for the two the table happened to contain.
+    would never pick. Skipping ``none`` restored the never-``none`` property,
+    but it still picked the CHEAPEST rung (Kimi's ``low/high/max`` answered
+    ``low``), which is the same undocumented claim at the other end. The middle
+    of the real rungs is the only answer that asserts nothing about a default
+    nobody stated; an even count takes the upper middle, so ``low/high/max`` and
+    ``none/low/high/max`` both answer ``high``.
 
     ``none`` stays fully reachable — by cycling round to it, and by an explicit
     ``/effort none``. It is a legitimate choice; it is just not one to make on
@@ -554,5 +567,10 @@ def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     if current is None or current.lower() not in levels:
         if FALLBACK_START in levels:
             return FALLBACK_START
-        return next((level for level in levels if level != "none"), levels[0])
+        ranked = [level for level in real_rungs(levels) if level != "none"]
+        if ranked:
+            # Upper middle on an even count: of the two candidates, one rung
+            # above the midpoint is the smaller escalation to make unseen.
+            return ranked[len(ranked) // 2]
+        return levels[0]
     return levels[(levels.index(current.lower()) + 1) % len(levels)]

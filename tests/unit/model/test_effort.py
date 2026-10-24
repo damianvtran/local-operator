@@ -221,7 +221,7 @@ class TestTheCycleOrder:
         assert next_effort(supported_efforts("gpt-5.4"), None) == "medium"
         assert next_effort(supported_efforts("claude-opus-5"), None) == "medium"
 
-    def test_from_unset_it_skips_none_on_a_ladder_without_medium(self) -> None:
+    def test_from_unset_it_lands_on_the_middle_of_the_real_rungs(self) -> None:
         """The `medium`-only guard was insufficient once ladders stopped coming
         only from the table.
 
@@ -232,12 +232,28 @@ class TestTheCycleOrder:
         first `shift+tab` on `none`, silently turning reasoning OFF on a press
         the user made to discover the control, with the status band as the only
         receipt. That is precisely what the guard exists to prevent.
+
+        Skipping `none` fixed that, but it still answered the CHEAPEST rung:
+        Kimi's `low/high/max` landed on `low` for a press that selected nothing
+        (design review D-01). The middle rung is the only answer that asserts
+        nothing about a default the provider did not state; an even count takes
+        the upper middle.
         """
         assert next_effort(("none", "high"), None) == "high"
-        assert next_effort(("none", "low", "high"), None) == "low"
+        assert next_effort(("none", "low"), None) == "low"
+        assert next_effort(("none", "low", "high"), None) == "high"
         # `medium` still wins when the ladder has it, including one starting at
         # `none` — 37 of those 45 ladders are safe for this reason.
         assert next_effort(("none", "low", "medium", "high"), None) == "medium"
+
+    def test_a_ladder_without_medium_starts_on_its_middle_rung(self) -> None:
+        """Kimi's stated ladder is `low/high/max`; design review D-01 measured
+        that the first press landed on `low`, the cheapest rung, for a user who
+        had not chosen anything — an undocumented claim about the default, one
+        rung below the middle.
+        """
+        assert next_effort(("low", "high", "max"), None) == "high"
+        assert next_effort(("none", "low", "high", "max"), None) == "high"
 
     def test_none_stays_reachable_by_cycling_and_when_it_is_the_only_rung(self) -> None:
         """Skipping `none` is about the DISCOVERY press, not about denying it.
@@ -593,6 +609,9 @@ class TestKimiK3:
             "kimi-for-coding-highspeed",
             # An aggregator prefix is route, not model.
             "moonshotai/kimi-k3.1-pro",
+            # OpenRouter's batched spelling of the same row (``:batch`` is a
+            # route tag; the generation is still 3).
+            "moonshotai/kimi-k3:batch",
         ],
     )
     def test_the_k3_family_gets_the_documented_ladder(self, model_id: str) -> None:
@@ -601,7 +620,14 @@ class TestKimiK3:
 
     @pytest.mark.parametrize(
         "model_id",
-        ["kimi-k2", "kimi-k2.6", "kimi-k2-0905-preview", "moonshotai/kimi-k2-thinking"],
+        [
+            "kimi-k2",
+            "kimi-k2.6",
+            "kimi-k2-0905-preview",
+            "moonshotai/kimi-k2-thinking",
+            # A ``:batch`` suffix must not smuggle the 3.x ladder onto a 2.x row.
+            "kimi-k2:batch",
+        ],
     )
     def test_the_kimi_2x_rows_keep_their_empty_ladder(self, model_id: str) -> None:
         """The generation digit is pinned to 3 on purpose: Kimi's 2.x rows reason

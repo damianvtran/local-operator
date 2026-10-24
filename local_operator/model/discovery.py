@@ -1089,6 +1089,26 @@ def _row_from_openai_entry(
             reasoning.get("supported_efforts"), preserve_empty=provider_id == "deepseek"
         )
 
+    # Capability statements are three-state throughout: a stated boolean is
+    # kept — a stated ``false`` is a denial the registry may not overrule — and
+    # an absent key stays ``None`` so the caller can defer to the registry.
+    if kimi:
+        supports_images = kimi_images
+        reasoning_capability = kimi_reasoning
+    elif provider_id == "deepseek":
+        # DeepSeek's live wire has been seen to state ``supports_images``
+        # directly; a non-boolean/absent value defers to the modality arrays.
+        stated_images = _stated_bool(entry.get("supports_images"))
+        supports_images = (
+            stated_images if stated_images is not None else _has_image_input(architecture)
+        )
+        reasoning_capability = _stated_bool(entry.get("reasoning"))
+    else:
+        # Every other wire states image input as modality arrays; none states a
+        # reasoning boolean, so that capability stays unstated for the merge.
+        supports_images = _has_image_input(architecture)
+        reasoning_capability = None
+
     cache_read_price = _per_million(pricing.get("input_cache_read"))
     row = DiscoveredModel(
         id=model_id,
@@ -1131,16 +1151,7 @@ def _row_from_openai_entry(
         ),
         routed=_is_meta_route(model_id, provider_id, pricing),
         cache_read_price=cache_read_price,
-        # Kimi states image input as a native boolean, three-state like every
-        # other image read: a stated ``false`` is a denial the registry may not
-        # overrule, while an absent key defers to it.
-        supports_images=(
-            kimi_images
-            if kimi
-            else _stated_bool(entry.get("supports_images"))
-            if provider_id == "deepseek" and _stated_bool(entry.get("supports_images")) is not None
-            else _has_image_input(architecture)
-        ),
+        supports_images=supports_images,
         # The audio sibling of the read above: same encodings, same three-state
         # discipline. No DeepSeek carve here — no wire in the tree states an
         # audio-support boolean today, so there is nothing to read; if one
@@ -1149,13 +1160,7 @@ def _row_from_openai_entry(
         supports_tools=(
             _stated_bool(entry.get("supports_tools")) if provider_id == "deepseek" else None
         ),
-        reasoning=(
-            kimi_reasoning
-            if kimi
-            else _stated_bool(entry.get("reasoning"))
-            if provider_id == "deepseek"
-            else None
-        ),
+        reasoning=reasoning_capability,
         # A priced cache-read leg is the only machine-readable evidence of prompt
         # caching in these listings; there is no capability flag for it.
         supports_prompt_cache=cache_read_price > 0,
@@ -1168,7 +1173,7 @@ def _row_from_openai_entry(
         # transcribed `gpt-5.4` ladder applied to every `gpt-[5-9]` id — is
         # measurably wrong 34 times in BOTH directions against this listing.
         reasoning_efforts=effort_ladder,
-        # Only the OpenRouter wire states a default here. Kimi states one under
+        # Only the aggregator wires state a default here. Kimi states one under
         # ``think_efforts.default_effort`` and it is DELIBERATELY not read: it
         # disagrees with the vendor's documented default and with measured
         # omission, and none of the three is settled (see the block above).
