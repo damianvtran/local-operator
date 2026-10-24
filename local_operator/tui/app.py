@@ -4701,6 +4701,24 @@ def _offload_target_refusal(
     )
 
 
+def _echo_within_cells(text: str, budget: int = 20) -> str:
+    """The unknown value echoed in a refusal, bounded by DISPLAY CELLS.
+
+    A character cap is not a width cap: twelve CJK characters are 72 cells and
+    twenty backslashes are 88, either of which would push the refusal past the
+    70-cell notice row. Return the longest prefix that leaves room for the
+    ellipsis, or the text unchanged when it already fits.
+    """
+    if cell_len(text) <= budget:
+        return text
+    out = ""
+    for char in text:
+        if cell_len(out + char) > budget - 1:
+            break
+        out += char
+    return out + "…"
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -45966,9 +45984,9 @@ class OperatorApp(App[None]):
         if key not in options:
             # Bound the echoed token so the refusal cannot outgrow the notice
             # row, then name the affordance this client actually has.
-            echo = wanted if len(wanted) <= 20 else wanted[:20] + "…"
             self._system_notice(
-                f"unknown language {echo!r} — press space to list values", "warning"
+                f"unknown language {_echo_within_cells(wanted)!r} — " "press space to list values",
+                "warning",
             )
             return
         if key == self._language_current():
