@@ -270,9 +270,9 @@ async def handle_conversation_available(
     """Screen one conversation message and deliver its card (or hold/skip).
 
     Returns metadata only. ``action`` is one of ``delivered`` (admitted body),
-    ``delivered_unadmitted`` (denied or unverifiable body), ``hold``,
-    ``badge_only``, ``claimed_elsewhere`` or ``skipped`` (the message is no
-    longer in the conversation's history).
+    ``rejected`` (a confirmed moderation refusal: terminal, and it posts NO card
+    and wakes nobody), ``hold``, ``badge_only``, ``claimed_elsewhere`` or
+    ``skipped`` (the message is no longer in the conversation's history).
     """
 
     from ..store import Store, StoreRefused
@@ -315,9 +315,8 @@ async def handle_conversation_available(
 
         client = wire if wire is not None else await _wire_for(owner, config_dir, auth_store)
         # A durable ref is only a locator. No person-membership read or legacy
-        # cached name can supply display provenance; even failure cards remain
-        # IDs-only until the endpoint-authorized bytes pass screen/hash/admit.
-        metadata = _card_metadata(owner, ref, {})
+        # cached name can supply display provenance. Failed admission must not
+        # post even a metadata-only card: that would still wake the recipient.
         sender: Mapping[str, Any] = {}
 
         fetched = await _fetch_body(client, ref, owner, access)
@@ -331,23 +330,13 @@ async def handle_conversation_available(
         except UnicodeEncodeError:
             return {"action": "hold", "message_id": message_id, "code": "body_invalid"}
         if served_digest != body_hash:
-            # The bytes fetched are not the bytes the server bound. Never
-            # screen them, never admit them. The metadata card still wakes —
-            # a wake without an admission is a metadata card, not an
-            # instruction — and the body stays unreadable on the context path.
-            detail = await _deliver_card(
-                owner,
-                metadata,
-                session_id=designation,
-                config_dir=config_dir,
-            )
-            terminal = True
+            # Neither a bad body nor an unscreened metadata notification may
+            # spend a recipient turn. Keep the exact locator pending so a later
+            # authorized fetch can recover; this is not terminal consumption.
             return {
-                "action": "delivered_unadmitted",
+                "action": "hold",
                 "message_id": message_id,
                 "code": "body_hash_mismatch",
-                "session": designation,
-                "detail": detail,
             }
 
         item = _screening_item(
@@ -387,19 +376,14 @@ async def handle_conversation_available(
                 endpoint_id=owner.endpoint_id,
                 access=access,
             )
-            detail = await _deliver_card(
-                owner,
-                metadata,
-                session_id=designation,
-                config_dir=config_dir,
-            )
+            # A confirmed reject retires the notification, not the moderation
+            # boundary. Posting a metadata-only card here would still wake the
+            # CoS for rejected input, even without exposing any body bytes.
             terminal = True
             return {
-                "action": "delivered_unadmitted",
+                "action": "rejected",
                 "message_id": message_id,
                 "code": "screening_bounce",
-                "session": designation,
-                "detail": detail,
             }
         if disposition != "deliver" or receipt is None:
             return {"action": "hold", "message_id": message_id, "code": "screening_unknown"}
@@ -439,9 +423,10 @@ async def handle_conversation_available(
     except StoreRefused as failure:
         return {"action": "hold", "message_id": message_id, "code": failure.code}
     except Exception:  # noqa: BLE001 — a connector turn must not die on one item
-        # The failure text is never surfaced: it can carry provider or wire
-        # detail. The hold code keeps the item visible and retryable.
-        logger.warning("bridge: conversation delivery held", exc_info=True)
+        # This is the first connector error sink: an exception or traceback
+        # can retain fetched body/provider echoes even when its message is not
+        # explicitly interpolated. Emit only a closed structural code here.
+        logger.warning("bridge: conversation delivery held code=conversation_failed")
         return {"action": "hold", "message_id": message_id, "code": "conversation_failed"}
     finally:
         if terminal:
