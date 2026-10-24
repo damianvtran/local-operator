@@ -1027,7 +1027,17 @@ async def test_a_write_from_another_process_reaches_the_running_session(
         retry.pop("accountSelectionPolicy", None)
         retry.pop("account_selection_policy", None)
         retry["usageAwareAccountPick"] = True
-        manager.set_config_value("retry", retry)
+        # The pops are a DELIBERATE removal, and a mapping write now merges into
+        # the file, so they must be declared or the canonical policy is copied
+        # straight back and the row never tests a legacy config (PR #2819).
+        manager.set_config_value(
+            "retry",
+            retry,
+            drop={
+                ("retry", "accountSelectionPolicy"): "seeding a legacy config",
+                ("retry", "account_selection_policy"): "seeding a legacy config",
+            },
+        )
 
     stream = RebindableStream(dict(ConfigManager(config_dir).get_config().values))
     session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())

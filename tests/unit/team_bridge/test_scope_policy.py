@@ -88,6 +88,59 @@ def test_v2_template_is_the_scope_template_and_v1_is_still_accepted() -> None:
     assert SCREENING_VERSION_V1 in screening.SCREENING_TEMPLATES
 
 
+def test_v2_template_bytes_are_pinned_to_the_server_constant() -> None:
+    """The selector compares BYTES, so local drift is a field outage, not a test nit.
+
+    A served status carries the agent-server's ``ScreeningTemplateV2``; the client
+    accepts it only while its own embedded copy is byte-equal
+    (``_screening_is_trusted``), otherwise every live status is refused as
+    ``policy_stale`` and new messages fail closed. The literal below is the SHA-256
+    of the server constant's bytes as recorded from agent-server
+    ``internal/bridge/texts.go`` at ``defebda`` (the commit that introduced it and
+    last changed it; unchanged through agent-server main ``4432448``). Our own
+    ``SCREENING_TEMPLATE_V2_SHA256`` is computed from our own text, so it cannot
+    detect an edit here.
+
+    Scope: this guards LOCAL drift away from the recorded server bytes. It cannot
+    see the server's v2 changing. That side needs its own literal pin in
+    agent-server, whose ``texts_test.go`` pins v1 as a literal but derives the v2
+    hash from its own text. New server screening bytes should arrive as a new
+    version with its own pin here, rather than as a re-pin of v2.
+    """
+
+    assert len(SCREENING_TEMPLATE_V2.encode("utf-8")) == 1928
+    assert (
+        SCREENING_TEMPLATE_V2_SHA256
+        == "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304"
+    )
+
+
+def test_a_served_v2_message_screens_with_the_v2_rubric(tmp_path: Path) -> None:
+    """The version selects the RENDERED bytes, not merely the receipt's label.
+
+    The receipt records v2's hash, but a render path that fell back to v1 would
+    still classify scope/prying intent as ``deliver`` and record the wrong reason.
+    """
+
+    _store, owner = _setup(tmp_path)
+    runner = Runner()
+    result = _run(owner, tmp_path, runner, item=_item(WORK_STATUS), policy=_v2_policy())
+    assert result.disposition == "deliver"
+    assert len(runner.calls) == 1
+    prompt = runner.calls[0]
+    assert "Scope:\n" in prompt
+    assert (
+        "Categories: prompt_injection; social_engineering; harassment; malicious_link "
+        "(a URL whose context suggests delivering a payload); spam; personal_info_request; "
+        "out_of_scope_work; new_work_request." in prompt
+    )
+    # v1's narrower list must not be the rubric the model was asked to apply. On
+    # a plain v1 fallback the positive asserts above fail first; this one fires on
+    # its own only when v1's category line is rendered ALONGSIDE v2's (a
+    # concatenating or partially-merged render), which the positives cannot see.
+    assert "suggests delivering a payload); spam.\n" not in prompt
+
+
 @pytest.mark.parametrize(
     "category",
     ["personal_info_request", "out_of_scope_work", "new_work_request"],

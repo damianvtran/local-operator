@@ -451,6 +451,31 @@ def _project_edit(params: ProjectParams, *, creating: bool) -> ProjectEdit:
     return ProjectEdit(**payload)
 
 
+def _page_note(registry: ProjectRegistry) -> str:
+    """The sentence a PARTIAL listing carries, or ``""`` when the page is whole.
+
+    The store's snapshot is a recency PAGE over the store, not a visibility
+    boundary (see ``projects._MAX_ROWS``): a listing that hides rows must say
+    so, or "not in this list" reads as "does not exist" for a project
+    ``op='show'`` still resolves — the ordinal-502 incident, where the model was
+    told a valid row did not exist. ONE copy here, so the receipt cannot drift
+    from the registry's own counts. The hidden number is the PAGE CUT
+    (``PageCounts.beyond_page``), never ``on_disk - loaded``: a row the load
+    could not read is not hidden-by-page, and promising ``op='show'`` will
+    find it would be a lie (QA Q1).
+    """
+    counts = registry.page_counts
+    hidden = counts.beyond_page
+    if hidden <= 0:
+        return ""
+    noun = "row is" if hidden == 1 else "rows are"
+    return (
+        f"showing the {counts.loaded} most recently active of {counts.total_rows} stored "
+        f"projects — {hidden} {noun} not listed here; op='show' name='<name>' "
+        "resolves any project the store can read."
+    )
+
+
 async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult:
     registry = _registry(context)
     if registry is None:
@@ -473,6 +498,11 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
         _row(project, window=stale_after_s(registry.config_dir), context=context)
         for project in projects
     )
+    note = _page_note(registry)
+    if note:
+        # Before the hint: the reader must learn the set is partial while
+        # reading the rows, not after the sentence that ends the receipt.
+        body += f"\n\n{note}"
     body += "\n\nop='show' name='<name>' has the full record plus its sessions."
     text, spill = spill_truncate(body, "project", context)
     return _text(tool_call_id, "project", text, details=spill or None)
@@ -707,6 +737,16 @@ async def _op_update(
     stored = len(params.attach or ())
     if stored:
         detail += f", {stored} attachment{'s' if stored != 1 else ''} stored"
+    if outcome.dropped:
+        # Only when the cap actually removed something: an ordinary update's
+        # receipt must not mention trimming. The second clause is the point —
+        # the cap never drops an entry that carries evidence, so a reader who
+        # sees this knows the attached files are still there.
+        noun = "entry" if outcome.dropped == 1 else "entries"
+        detail += (
+            f"; history trimmed, {outcome.dropped} oldest text {noun} dropped "
+            "— attached evidence is kept"
+        )
     return _text(
         tool_call_id,
         "project",

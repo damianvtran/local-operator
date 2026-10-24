@@ -254,6 +254,37 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 	}
 }
 
+/** The catalogue key for a DISMISSED row's reason line, or `undefined`.
+ *
+ *  SA-D8 (design §17): a dismissal before the ask's deadline keeps a settled row,
+ *  and the row states WHY the ask was put away — `dismissed` alone cannot tell
+ *  "you already replied in the conversation" from "you stopped waiting". The
+ *  keys are the ones the dismissal receipt already ships (#2841's
+ *  `relay.ask.dismiss.receipt_moot` / `receipt_answered_in_chat`), read through
+ *  the runtime catalogue so the card's line is translated like every other
+ *  `relay.ask.*` sentence on this surface.
+ *
+ *  `undefined` has two meanings and both render the row's ordinary state line:
+ *  a row that is not dismissed, and a dismissal recorded by a runtime that kept
+ *  no reason. Neither may be given a reason it never recorded. */
+export type DismissedReasonKey =
+	| "relay.ask.dismiss.receipt_moot"
+	| "relay.ask.dismiss.receipt_answered_in_chat";
+
+export function dismissedReasonKey(
+	row: PendingAsk | null | undefined,
+): DismissedReasonKey | undefined {
+	if (String(row?.status || "") !== "dismissed") return undefined;
+	switch (String(row?.dismissed_reason || "")) {
+		case "moot":
+			return "relay.ask.dismiss.receipt_moot";
+		case "answered_in_chat":
+			return "relay.ask.dismiss.receipt_answered_in_chat";
+		default:
+			return undefined;
+	}
+}
+
 /** A fold of one conversation's published ask rows (id and status), for "did
  *  this conversation's ask population change?".
  *

@@ -73,7 +73,22 @@ _TESTS_ROOT = Path(__file__).resolve().parents[3]
         ("approvals", "on", "ordinary"),
         ("approvals", "prompt", "ordinary"),
         ("approvals", "", "ordinary"),
-        ("approvals", "default auto", "ordinary"),
+        # ``default <mode>`` is no longer declined by the runtime (2026-10-23):
+        # it writes the machine default through the gate-owning process's
+        # settings facade, which loosens every live session that never chose.
+        # So its auto spellings ARE the same concession as the bare form, while
+        # its ask spellings only ever harden.
+        ("approvals", "default auto", "authority-increasing"),
+        ("approvals", "default off", "authority-increasing"),
+        ("approvals", "default yolo", "authority-increasing"),
+        ("approvals", "  DEFAULT AUTO  ", "authority-increasing"),
+        ("approvals", "default ask", "ordinary"),
+        ("approvals", "default on", "ordinary"),
+        ("approvals", "default prompt", "ordinary"),
+        # A bare `default` decides nothing (the sink refuses it with a usage
+        # notice), and an unknown tail is refused the same way.
+        ("approvals", "default", "ordinary"),
+        ("approvals", "default sometimes", "ordinary"),
         ("approvals", "auto now", "ordinary"),
         ("approvals", "banana", "ordinary"),
         # Every other command, including the neighbours that look similar.

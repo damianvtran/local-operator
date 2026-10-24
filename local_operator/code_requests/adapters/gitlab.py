@@ -57,6 +57,8 @@ _TIMEOUT_S = 15.0
 #: raw value rides along on the CI payload for a reader that wants it.
 _SUCCESS_STATUSES = frozenset({"success"})
 _FAILURE_STATUSES = frozenset({"failed", "canceled"})
+#: A pipeline that completed without running. Settled, and not a pass.
+_SKIPPED_STATUSES = frozenset({"skipped"})
 _PENDING_STATUSES = frozenset(
     {
         "created",
@@ -222,6 +224,8 @@ class GitLabAdapter:
                 "status": "none",
                 "passed": None,
                 "failed": None,
+                "skipped": None,
+                "neutral": None,
                 "pending": None,
                 "total": None,
                 "url": None,
@@ -231,6 +235,8 @@ class GitLabAdapter:
             status = "success"
         elif raw in _FAILURE_STATUSES:
             status = "failure"
+        elif raw in _SKIPPED_STATUSES:
+            status = "skipped"
         elif raw in _PENDING_STATUSES:
             status = "pending"
         else:
@@ -239,6 +245,8 @@ class GitLabAdapter:
             "status": status,
             "passed": None,
             "failed": None,
+            "skipped": None,
+            "neutral": None,
             "pending": None,
             "total": None,
             "url": str(pipeline.get("web_url") or "") or None,

@@ -310,7 +310,7 @@ async def test_the_cold_spool_drain_receives_through_the_real_session(
         bridge_meta=drained,
     )
     assert append_inbox(session.transcript.directory, line) is True
-    await session._drain_spooled_peer_inbox_rows()
+    await session._drain_spooled_peer_inbox()
     assert peek_inbox(session.transcript.directory) == []  # consumed by the drain
     await session.dispose()
 

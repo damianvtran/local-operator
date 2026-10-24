@@ -56,6 +56,7 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
@@ -69,7 +70,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
-from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN
+from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN, is_account_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -91,10 +92,8 @@ _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: rule is a conservative charset rather than a re-implementation of the
 #: server's mint.
 _MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
-#: Mirrors ``read_context.ACCOUNT_ID_PATTERN``. Spelled here rather than imported
-#: because that module rides the httpx boot path this file must not pull at
-#: module scope; ``test_account_grammar_matches_the_reader`` pins the two equal.
-_ACCOUNT_ID = re.compile(r"^acc_[A-Za-z0-9_-]{1,64}$")
+# Account guards share the dependency-light is_account_id predicate with reads.
+# A UUID-shaped real account must never be rejected by a legacy acc_-only guard.
 
 
 class _Strict(BaseModel):
@@ -199,15 +198,11 @@ class TeamBridgeMessageQuery(_Strict):
 
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeMessageQuery":
-        from local_operator.team_bridge.read_context import (
-            ACCOUNT_ID_PATTERN,
-            TENANT_ID_PATTERN,
-        )
+        from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 
-        checks = (
-            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
-            (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
-        )
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        checks = ((self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),)
         for value, pattern, name in checks:
             # ``fullmatch``, not ``match`` (review R-5): these patterns are
             # anchored ``^…$``, and ``$`` also matches BEFORE a trailing newline,
@@ -244,19 +239,22 @@ class TeamBridgeInboxQuery(_Strict):
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeInboxQuery":
         from local_operator.team_bridge.read_context import (
-            ACCOUNT_ID_PATTERN,
             CURSOR_PATTERN,
             DELIVERY_STATES,
             TENANT_ID_PATTERN,
             THREAD_ID_PATTERN,
         )
 
+        for value, name in (
+            (self.expected_account_id, "expected_account_id"),
+            (self.sender_account_id, "sender_account_id"),
+        ):
+            if value is not None and not is_account_id(value):
+                raise ValueError(f"{name} is outside the accepted grammar")
         checks = (
-            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
             (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
             (self.after, CURSOR_PATTERN, "after"),
             (self.thread_id, THREAD_ID_PATTERN, "thread_id"),
-            (self.sender_account_id, ACCOUNT_ID_PATTERN, "sender_account_id"),
         )
         for value, pattern, name in checks:
             # ``fullmatch``, not ``match`` (review R-5): these patterns are
@@ -1235,8 +1233,29 @@ class ConversationMemberIn(_Strict):
     display_label: str = Field(min_length=1, max_length=64)
 
 
-class ConversationCreateIn(_Strict):
+class ConversationOwnerIn(_Strict):
+    """Optional anti-replay receipt, separate from upstream authorization.
+
+    Older clients may omit the receipt. A guarded mutation must name the tenant
+    of the captured DATA, not the current picker/default OAuth organization: one
+    account can legitimately belong to several organizations. The client checks
+    the owner against the exact bearer snapshot; the server checks membership.
+    """
+
+    expected_account_id: str | None = Field(default=None, min_length=1, max_length=128)
     tenant_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _guard_target(self) -> "ConversationOwnerIn":
+        if self.expected_account_id is not None:
+            if not self.expected_account_id.strip():
+                raise ValueError("expected_account_id must be nonempty")
+            if self.tenant_id is None or not self.tenant_id.strip():
+                raise ValueError("a guarded mutation needs an explicit tenant_id")
+        return self
+
+
+class ConversationCreateIn(ConversationOwnerIn):
     kind: Literal["dm", "group", "channel"]
     name: str | None = Field(default=None, max_length=128)
     topic: str | None = Field(default=None, max_length=512)
@@ -1245,21 +1264,21 @@ class ConversationCreateIn(_Strict):
     members: list[ConversationMemberIn] = Field(default_factory=list, max_length=500)
 
 
-class ConversationSendIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationSendIn(ConversationOwnerIn):
     client_ref: str = Field(min_length=1, max_length=128)
     body: str = Field(min_length=1)
     agent_label: str | None = Field(default=None, max_length=64)
+    #: Reply in this root message's thread (agent-server threads). Held to the
+    #: minted message-id grammar here so a malformed id never reaches the hub;
+    #: the hub owns the real rule (same conversation, root not a reply).
+    thread_root_id: str | None = Field(default=None, pattern=r"^bcmsg_[0-9a-z]{8,64}$")
 
 
-class ConversationJoinIn(_Strict):
-    #: The organization the join targets. Required for a caller with more than one
-    #: eligible membership; the server answers ``invalid_request`` without it.
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationJoinIn(ConversationOwnerIn):
+    """A guarded join always names the captured target organization."""
 
 
-class ConversationReadIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationReadIn(ConversationOwnerIn):
     seq: int | None = Field(default=None, ge=0)
     muted: bool | None = None
     #: The per-member notification policy (agent-server #148). `muted` is the
@@ -1276,16 +1295,56 @@ class ConversationReadIn(_Strict):
         return self
 
 
-class ConversationConsentIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationConsentIn(ConversationOwnerIn):
     decision: Literal["accept", "decline"]
     consent_version: str = Field(min_length=1, max_length=128)
 
 
-class ConversationAdmitIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+class ConversationAdmitIn(ConversationOwnerIn):
     verdict: Literal["allow", "reject"]
     body_hash: str = Field(min_length=1, max_length=128)
+
+
+class ConversationReactIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+
+
+#: The hub's reaction-key byte bound (agent-server §10.2: NFC, <=128 UTF-8
+#: bytes, one fully-qualified RGI sequence). Only the BOUND is mirrored here,
+#: as a cheap pre-flight: the RGI allowlist is the hub's, and keeping a second
+#: copy in the runtime would be a second opinion that drifts with Unicode.
+_REACTION_EMOJI_MAX_BYTES = 128
+
+
+def _require_reaction_emoji(emoji: str) -> str:
+    """Refuse an empty or over-long reaction key before any upstream I/O.
+
+    The value is percent-encoded with no safe characters by the client, so it
+    can never reshape the upstream path; this guard only stops obviously
+    non-emoji input (text, pasted paragraphs) from costing a hub round trip.
+    """
+
+    key = unicodedata.normalize("NFC", emoji)
+    if not key or len(key.encode("utf-8")) > _REACTION_EMOJI_MAX_BYTES:
+        _raise_read("invalid_request")
+    return key
+
+
+def _conversation_owner_query(request: Request) -> ConversationOwnerIn:
+    """Receipt for bodyless writes and the legacy list-body member invitation.
+
+    Keep the member list's wire shape intact. Query and body receipts use the
+    same validation; never silently discard a supplied owner or guess a tenant.
+    The receipt is local-only and must not be forwarded to the service.
+    """
+
+    try:
+        return ConversationOwnerIn(
+            expected_account_id=request.query_params.get("expected_account_id"),
+            tenant_id=request.query_params.get("tenant_id"),
+        )
+    except ValueError:
+        _raise_read("invalid_request")
 
 
 def _conversation_client(config_manager: ConfigManager):
@@ -1319,7 +1378,7 @@ def _require_message_id(message_id: str) -> None:
 def _require_account_id(account_id: str) -> None:
     """Refuse an account id carrying URL syntax. See above."""
 
-    if _ACCOUNT_ID.fullmatch(account_id) is None:
+    if not is_account_id(account_id):
         _raise_read("invalid_request")
 
 
@@ -1405,11 +1464,13 @@ async def create_conversation(
     client = _conversation_client(config_manager)
     payload = {
         key: value
-        for key, value in body.model_dump().items()
+        for key, value in body.model_dump(exclude={"expected_account_id"}).items()
         if value is not None and not (key == "members" and not value)
     }
     payload["members"] = [member.model_dump(exclude_none=True) for member in body.members]
-    result = await _conversation_reply(client.create_conversation(payload))
+    result = await _conversation_reply(
+        client.create_conversation(payload, expected_account_id=body.expected_account_id)
+    )
     return reply(result)
 
 
@@ -1450,7 +1511,11 @@ async def conversation_archive(
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_lifecycle(conversation_id, "archive"))
+        await _conversation_reply(
+            client.conversation_lifecycle(
+                conversation_id, "archive", **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1468,7 +1533,11 @@ async def conversation_unarchive(
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_lifecycle(conversation_id, "unarchive"))
+        await _conversation_reply(
+            client.conversation_lifecycle(
+                conversation_id, "unarchive", **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1480,7 +1549,6 @@ async def add_conversation_members(
     conversation_id: str,
     request: Request,
     members: list[ConversationMemberIn],
-    tenant_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Invite members. Humans are invited; agents stay invited until their owner consents."""
@@ -1491,7 +1559,9 @@ async def add_conversation_members(
     payload = [member.model_dump(exclude_none=True) for member in members]
     return reply(
         await _conversation_reply(
-            client.conversation_members(conversation_id, payload, tenant_id=tenant_id)
+            client.conversation_members(
+                conversation_id, payload, **_conversation_owner_query(request).model_dump()
+            )
         )
     )
 
@@ -1513,7 +1583,11 @@ async def remove_conversation_member(
 
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(client.conversation_remove_member(conversation_id, account_id))
+        await _conversation_reply(
+            client.conversation_remove_member(
+                conversation_id, account_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
     )
 
 
@@ -1542,6 +1616,7 @@ async def conversation_consent(
                 decision=body.decision,
                 consent_version=body.consent_version,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
             )
         )
     )
@@ -1564,7 +1639,11 @@ async def conversation_join(
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(
-            client.conversation_join(conversation_id, tenant_id=body.tenant_id if body else None)
+            client.conversation_join(
+                conversation_id,
+                tenant_id=body.tenant_id if body else None,
+                expected_account_id=body.expected_account_id if body else None,
+            )
         )
     )
 
@@ -1583,7 +1662,13 @@ async def conversation_leave(
     _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
-    return reply(await _conversation_reply(client.conversation_leave(conversation_id)))
+    return reply(
+        await _conversation_reply(
+            client.conversation_leave(
+                conversation_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
 
 
 @router.get(
@@ -1670,7 +1755,57 @@ async def send_conversation_message(
                 client_ref=body.client_ref,
                 text=body.body,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
                 agent_label=body.agent_label,
+                thread_root_id=body.thread_root_id,
+            )
+        )
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/replies",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_replies(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One thread (root + replies, oldest-first) under the history route's gate.
+
+    Mirrors ``conversation_history``'s discipline: the id grammar is checked
+    before any I/O, an unknown query key is refused rather than dropped, and the
+    numeric hints are parsed (never interpolated) so a caller-controlled value
+    is a 422, not a 500.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if set(request.query_params) - {"tenant_id", "limit", "after_seq", "endpoint_id"}:
+        _raise_read("invalid_request")
+    try:
+        parsed_limit = int(limit) if limit is not None else None
+        parsed_after = int(after_seq) if after_seq else None
+    except ValueError:
+        _raise_read("invalid_request")
+    if parsed_after is not None and parsed_after < 0:
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_replies(
+                conversation_id,
+                message_id,
+                tenant_id=tenant_id,
+                limit=parsed_limit,
+                after_seq=parsed_after,
+                endpoint_id=endpoint_id,
             )
         )
     )
@@ -1729,7 +1864,81 @@ async def conversation_admit(
                 verdict=body.verdict,
                 body_hash=body.body_hash,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
                 endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_add(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    body: ConversationReactIn | None = None,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Add the signed-in person's reaction; idempotent upstream.
+
+    The desktop reacts as the HUMAN only: an agent reaction goes through the
+    agent's own ``bridge`` tool (``react``), which carries the actor endpoint
+    from the runtime and is screened like every agent write. There is no
+    ``actor_endpoint_id`` on this body, so the renderer cannot act as an agent.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _refuse_write_scope(request)
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id,
+                message_id,
+                key,
+                active=True,
+                tenant_id=body.tenant_id if body else None,
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_remove(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None, max_length=128),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Remove the signed-in person's reaction; removing an unset one is a no-op.
+
+    ``tenant_id`` is a query parameter here (not a body) because a DELETE body
+    is not reliably carried by every client and proxy; the hub accepts both.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if set(request.query_params) - {"tenant_id"}:
+        _raise_read("invalid_request")
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id, message_id, key, active=False, tenant_id=tenant_id
             )
         )
     )
@@ -1758,6 +1967,7 @@ async def conversation_read(
                 muted=body.muted,
                 notify=body.notify,
                 tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
             )
         )
     )

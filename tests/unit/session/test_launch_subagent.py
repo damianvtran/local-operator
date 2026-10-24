@@ -1317,6 +1317,42 @@ async def test_child_system_blocks_advertise_parent_credentials(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_child_never_carries_the_parents_open_asks_reminder(tmp_path, monkeypatch):
+    """SA-D3: the reminder belongs to the session that can SETTLE the asks.
+
+    A delegated child holds no ask queue (``build_ask_tool`` is gated on a hook it
+    never gets), so naming its parent's open asks would send it to a tool it does
+    not have — and its "as of" stamp would be about user messages it never saw.
+    The child builder passes nothing, which is the property this pins.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+
+    parent = make_session(tmp_path, OneShotStream())
+
+    async def hook(questions):  # pragma: no cover — presence is what gates ask
+        return None
+
+    parent.set_ask_handler(hook)
+    queue = parent.ask_queue()
+    assert queue is not None
+    assert queue.enqueue([{"id": "ship", "question": "Ship it?", "options": []}], 3600)["ok"]
+
+    child = await build_child(parent)
+    try:
+        tail = knowledge_tail(child)
+        assert "<open-asks>" not in tail
+        assert "Ship it?" not in tail
+        # The reason, from the child's side: it has no queue to settle from.
+        assert child.ask_queue() is None
+    finally:
+        await child.dispose()
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_child_bash_injects_parent_credential_env(tmp_path, monkeypatch):
     """The child's bash tool reads ``context.variables`` — which must be the
     PARENT's store, so a delegated child can use a secret its parent holds

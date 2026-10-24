@@ -82,6 +82,7 @@ from local_operator.team_bridge.types import (
     MessageRef,
     OwnerSnapshot,
     TeamBridgeTypeError,
+    is_account_id,
     project_inbox_page,
     project_message_ref,
 )
@@ -170,7 +171,8 @@ MAX_PAGE = 100
 #: id)`` (§6.3) — a POSITION only, so nothing here decodes or interprets it.
 MESSAGE_ID_PATTERN = r"^bmsg_[A-Za-z0-9_-]{1,64}$"
 THREAD_ID_PATTERN = r"^bth_[A-Za-z0-9_-]{1,64}$"
-ACCOUNT_ID_PATTERN = r"^acc_[A-Za-z0-9_-]{1,64}$"
+# Account identity uses the shared is_account_id predicate: real account UUIDs
+# and legacy acc_ IDs must pass the same guard on reads and conversation paths.
 #: Tenant ids arrive in two shapes: the legacy minted ``tnt_...`` form and the
 #: account service's UUID (the live Minerva tenant is a UUID). The directory
 #: route used to accept only the first, so a real tenant id was refused 422
@@ -882,7 +884,7 @@ def inbox_view(result: ReadInbox) -> Mapping[str, Any]:
 
 
 __all__ = [
-    "ACCOUNT_ID_PATTERN",
+    "is_account_id",
     "READ_AVAILABILITY",
     "CURSOR_PATTERN",
     "DEFAULT_PAGE",

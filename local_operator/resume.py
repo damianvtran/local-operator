@@ -21,11 +21,17 @@ import logging
 import os
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from local_operator.procstate import is_zombie, pid_liveness, process_sample
+
+# The transcript resolver, also stdlib-only at ITS module scope, and needed by
+# every listing reader below: a compressed transcript is still a transcript, and
+# a plain-name probe or open would report it as absent or empty.
+from local_operator.session import compression
 
 # The archive index is imported at module scope deliberately: it is stdlib-only
 # at ITS module scope (its one local import, of ``session.catalog``, is made
@@ -1117,7 +1123,7 @@ def backfill_session_origins(
         if stamped >= limit:
             break
         try:
-            if not (directory / TRANSCRIPT_NAME).is_file():
+            if not compression.has_transcript(directory):
                 continue
             # Already answered: never re-stamp, so a marker a user removed by
             # hand to un-hide a session is not silently written back.
@@ -1164,8 +1170,8 @@ def backfill_session_origins(
     return stamped
 
 
-def _scan_all_titles(transcript: Path) -> list[tuple[str, bool]]:
-    """Every ``(text, user_set)`` title journalled in ``transcript``, in order.
+def _scan_all_titles(session_dir: Path) -> list[tuple[str, bool]]:
+    """Every ``(text, user_set)`` title journalled in ``session_dir``, in order.
 
     A FULL read, unlike :func:`stored_session_title`'s two windows — which is
     why it lives only on the backfill path and never on the picker's hot path.
@@ -1176,37 +1182,88 @@ def _scan_all_titles(transcript: Path) -> list[tuple[str, bool]]:
 
     Tolerant like every reader here: an unreadable transcript or a half-written
     final line yields what it could parse, never an exception.
+
+    ``compression.iter_lines`` STREAMS a PLAIN journal AND decompresses an
+    ARCHIVE, which is what this must ask for in both cases. A head-window answer
+    for an archive was tried and is unsound: the caller ranks ``titles[-1]`` as
+    the newest, and a rename made late in a long conversation lives in the TAIL,
+    so a head-only list names the session with its OLDEST title and the
+    backfill then writes that as the in-force one. The cost is a decompression
+    per archived session — paid ONCE ever, because the backfill skips any
+    session that already has ``title.json``, and compression writes that sidecar
+    before the plain file goes away (``_ensure_title_sidecar``). So the only
+    archive that reaches this stream is one with no sidecar to read, where a
+    window scan would be wrong for free rather than cheap.
     """
-    titles: list[tuple[str, bool]] = []
     try:
-        with transcript.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line or _TITLE_CUSTOM_TYPE not in line:
-                    # Cheap reject before the JSON parse: title rows are a tiny
-                    # fraction of a transcript, and the substring check skips
-                    # the decode for every message and tool line.
-                    continue
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(entry, dict):
-                    continue
-                payload = entry.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                if payload.get("custom_type") != _TITLE_CUSTOM_TYPE:
-                    continue
-                details = payload.get("details")
-                if not isinstance(details, dict):
-                    continue
-                text = details.get("text")
-                if isinstance(text, str) and text.strip():
-                    titles.append((" ".join(text.split()), bool(details.get("user_set"))))
-    except OSError:
-        return titles
+        return _titles_in_lines(compression.iter_lines(session_dir))
+    except (OSError, compression.ArchiveError):
+        return []
+
+
+def _titles_in_lines(lines: Iterable[str]) -> list[tuple[str, bool]]:
+    """Every ``(text, user_set)`` title row in ``lines``, in the order given."""
+    titles: list[tuple[str, bool]] = []
+    for line in lines:
+        line = line.strip()
+        if not line or _TITLE_CUSTOM_TYPE not in line:
+            # Cheap reject before the JSON parse: title rows are a tiny
+            # fraction of a transcript, and the substring check skips
+            # the decode for every message and tool line.
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("custom_type") != _TITLE_CUSTOM_TYPE:
+            continue
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            continue
+        text = details.get("text")
+        if isinstance(text, str) and text.strip():
+            titles.append((" ".join(text.split()), bool(details.get("user_set"))))
     return titles
+
+
+def title_seed_for_sidecar(session_dir: Path) -> tuple[str, bool, list[str]] | None:
+    """``(text, user_set, past_names)`` for a session with no ``title.json``.
+
+    Called by the compression pass while the transcript is still PLAIN: after
+    compression the title is read from the archive's head window only, so the
+    newest name must be captured while the tail is still a cheap seek. The last
+    ``(text, user_set)`` is the title in force and the rest become
+    ``write_session_title``'s ``past_names``.
+
+    THE ORDER IS HEAD FIRST, THEN TAIL, and that is the whole correctness of
+    this function: each window is in file order, so concatenating them in file
+    order makes the last element the newest row. Tail-first (the first version)
+    put the head's titles last and seeded a renamed session with the name it
+    OPENED under — ``stored_session_title`` ranks the opposite way for exactly
+    this reason ("The tail is searched FIRST and wins: a rename made late in a
+    long session is the newest title"), and the wrong seed is unrecoverable:
+    the title backfill skips a session that has ``title.json``.
+
+    ``None`` when neither window holds a title row; the caller then writes
+    nothing and the opener still names the row from the head window.
+    """
+    try:
+        head = compression.read_head(session_dir, TITLE_SCAN_BYTES)
+        tail = compression.read_tail(session_dir, TITLE_SCAN_BYTES)
+    except (OSError, compression.ArchiveError):
+        return None
+    found = _titles_in_lines(head.decode("utf-8", "replace").splitlines())
+    found += _titles_in_lines(tail.decode("utf-8", "replace").splitlines())
+    if not found:
+        return None
+    text, user_set = found[-1]
+    past_names = list(dict.fromkeys(name for name, _user_set in found[:-1] if name))
+    return text, user_set, past_names
 
 
 def _write_origin_scan_sentinel(session_dir: Path) -> None:
@@ -1323,8 +1380,7 @@ def backfill_session_titles(
         if written >= limit:
             break
         try:
-            transcript = directory / TRANSCRIPT_NAME
-            if not transcript.is_file():
+            if not compression.has_transcript(directory):
                 continue
             # Already answered: never re-stamp. The sidecar is event-sourced
             # from here on, so a rewrite would only risk clobbering a newer
@@ -1337,7 +1393,7 @@ def backfill_session_titles(
                 continue
         except OSError:
             continue
-        titles = _scan_all_titles(transcript)
+        titles = _scan_all_titles(directory)
         if not titles:
             # No journalled title at all (a session that predates title
             # journalling, or one closed before its naming call landed). Leave
@@ -3631,7 +3687,11 @@ def stored_session_title(session_dir: Path) -> str:
                     # The sidecar answered; the transcript was never consulted,
                     # so its stat cannot invalidate this.
                     return cached_title
-                transcript_key, transcript_stable = _stat_key(session_dir / TRANSCRIPT_NAME)
+                # The same PHYSICAL source the miss path records below: an
+                # archive's stat is what proves a compressed session unchanged.
+                transcript_key, transcript_stable = _stat_key(
+                    compression.transcript_source(session_dir)[0]
+                )
                 if transcript_stable and transcript_key == cached_transcript:
                     return cached_title
     sidecar = _read_title_sidecar(session_dir)
@@ -3646,41 +3706,50 @@ def stored_session_title(session_dir: Path) -> str:
         if sidecar_memoizable:
             memo[name] = (sidecar_key, True, None, sidecar.text)
         return sidecar.text
-    transcript = session_dir / TRANSCRIPT_NAME
-    transcript_key, transcript_stable = _stat_key(transcript)
-    try:
-        with transcript.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            if size > TITLE_SCAN_BYTES * 2:
-                # Large enough for two disjoint windows: read the head, then
-                # seek to the last TITLE_SCAN_BYTES for the tail.
-                handle.seek(0)
-                head = handle.read(TITLE_SCAN_BYTES)
-                handle.seek(size - TITLE_SCAN_BYTES)
-                tail = handle.read()
-            else:
-                # Small enough that the two windows would overlap: read the
-                # WHOLE file once and let it serve as both. Splitting it here
-                # is what broke this the first time round -- the head was read,
-                # the handle was left at EOF by the size probe, and the `else`
-                # branch's read returned b"", so files between 1x and 2x the
-                # window (30% of a real store) were searched head-only. That
-                # silently reverted a late rename to the name it was renamed
-                # AWAY from, which is worse than the missing name this function
-                # exists to prevent.
-                handle.seek(0)
-                head = tail = handle.read()
-    except FileNotFoundError:
+    # The PHYSICAL file: the archive when the session has been compressed. The
+    # memo is invalidation, not content, so keying it on the plain name would
+    # memoise "no transcript" for every compressed session and leave the title
+    # sidecar as its only name forever.
+    transcript_key, transcript_stable = _stat_key(compression.transcript_source(session_dir)[0])
+    if not compression.has_transcript(session_dir):
         # Genuinely absent, which is stable: a file that is not there holds no
         # window, so "" is the same answer every scan gives.
         if sidecar_memoizable and transcript_key is None:
             memo[name] = (sidecar_key, False, None, "")
         return ""
-    except OSError:
-        # A file that exists but could not be READ is a fact about this moment,
-        # not about the transcript; answer, never memoise.
+    try:
+        # TWO bounded windows through the codec-aware reader for a PLAIN
+        # journal; HEAD ONLY for an archive.
+        #
+        # An archived session's newest title is in ``title.json``: the
+        # compression pass RESOLVES AND WRITES it before it retires the plain
+        # file (``compression._ensure_title_sidecar``), so the sidecar check
+        # above has already had its chance and a miss means the title is in the
+        # transcript's HEAD (the opener) or nowhere. Reading the tail here would
+        # decompress the WHOLE archive once per listing row — 22 ms and 210 MB of
+        # decode on the 77 MB archive measured in review M1 — for a name the
+        # sidecar already answered.
+        head = compression.read_head(session_dir, TITLE_SCAN_BYTES)
+        tail = (
+            b""
+            if compression.archive_path(session_dir) is not None
+            else compression.read_tail(session_dir, TITLE_SCAN_BYTES)
+        )
+    except compression.ArchiveError:
+        # The archive exists but this build cannot decode it, or it is corrupt.
+        # A fact about the BUILD, not the conversation: answer, never memoise a
+        # miss that would outlive a working decoder.
         return ""
+    if not head and not tail:
+        # ``read_head`` answers b"" for both an empty transcript and one it
+        # could not open. Probe the source once so an unreadable file is not
+        # memoised as nameless for as long as its stat holds (the rule this
+        # module's memo documents).
+        try:
+            with compression.transcript_source(session_dir)[0].open("rb"):
+                pass
+        except OSError:
+            return ""
     # The tail is searched FIRST and wins: a rename made late in a long session
     # is the newest title, and the head can only hold older ones.
     for window in (tail, head):
@@ -3777,28 +3846,33 @@ def _opening_message(session_dir: Path) -> str:
     """
     memo = _session_memo_for(_OPENER_MEMO, session_dir)
     name = session_dir.name
-    transcript = session_dir / TRANSCRIPT_NAME
+    # Keyed on the PHYSICAL source, exactly like the title memo above: for a
+    # compressed session that is the archive, not a plain file that no longer
+    # exists.
+    transcript, _codec = compression.transcript_source(session_dir)
     transcript_key, transcript_stable = _stat_key(transcript)
     if transcript_stable:
         cached = memo.get(name)
         if cached is not None and cached[0] == transcript_key:
             return cached[1]
     try:
-        with transcript.open("r", encoding="utf-8", errors="replace") as handle:
-            # ONE bounded read, not `for line in handle`. Iterating the file
-            # materialises each line in full BEFORE any cap can be checked, so a
-            # transcript whose first line is a pasted file or a base64 image —
-            # exactly the case this cap exists for — allocated the whole line
-            # anyway (measured: an 80 MB first line peaked at 168 MB before the
-            # check that was supposed to prevent it). Reading a fixed window
-            # first makes the bound real.
-            head = handle.read(NAME_SCAN_CHARS)
-    except OSError:
-        # Absent is stable and "" is the answer every scan gives; a file that
-        # exists but could not be opened is not stable, and is not memoised.
-        if transcript_stable and transcript_key is None:
-            memo[name] = (None, "")
+        # ONE bounded read through the codec-aware reader — the same bound, for
+        # the same reason: iterating lines materialises each line in full before
+        # any cap can be checked, and an archive is decompressed only far enough
+        # to fill the window.
+        head = compression.read_head(session_dir, NAME_SCAN_CHARS)
+    except compression.ArchiveError:
+        # Undecodable archive: a fact about the build; never memoised.
         return ""
+    if not head and compression.has_transcript(session_dir):
+        # Present but empty, or present and unreadable? ``read_head`` answers
+        # b"" for both; the probe keeps the "unreadable is never memoised"
+        # contract without re-implementing the plain read.
+        try:
+            with transcript.open("rb"):
+                pass
+        except OSError:
+            return ""
     # A final line with no newline after it is HELD BACK from the strict parse
     # only when the window was actually filled — i.e. the read stopped because
     # of the cap, so that line is a half-READ one and parsing it as JSON would
@@ -3808,9 +3882,9 @@ def _opening_message(session_dir: Path) -> str:
     # rather than discarded because the fragment still carries the opener's
     # text: see ``_text_from_fragment``.
     truncated = len(head) >= NAME_SCAN_CHARS
-    lines = head.splitlines()
+    lines = head.decode("utf-8", errors="replace").splitlines()
     fragment = ""
-    if truncated and lines and not head.endswith("\n"):
+    if truncated and lines and not head.endswith(b"\n"):
         fragment = lines.pop()
     for line in lines:
         line = line.strip()
@@ -3907,17 +3981,23 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
     thing the model actually SAID. Returns ``""`` when the transcript is
     missing, unreadable, or contains no assistant text, and the caller renders
     its own empty state.
+
+    For an ARCHIVE the answer comes from the sidecar compression wrote beside it
+    (:func:`compression.read_listing_preview`) — one stat and a sub-kilobyte
+    read, where reading the transcript's tail would decompress the whole archive
+    once per listing row. The sidecar stores text cut at :data:`PREVIEW_MAX_CHARS`
+    and records that cap, so a caller asking for MORE than it was cut at takes
+    the tail read instead of a silently shorter answer
+    (:func:`_from_listing_sidecar`). An archive from a build that predates the
+    sidecar falls back to the tail window once, which is what this function
+    always cost.
     """
-    for entry in _tail_entries(session_dir):
-        if entry.get("type") != "message":
-            continue
-        payload = entry.get("payload")
-        if not isinstance(payload, dict) or payload.get("role") != "assistant":
-            continue
-        text = _first_text(payload.get("content"))
-        if text.strip():
-            return _condense(text, max_chars)
-    return ""
+    sidecar = compression.read_listing_preview(session_dir)
+    if sidecar is not None:
+        stored = _from_listing_sidecar(sidecar, "preview", max_chars)
+        if stored is not None:
+            return stored
+    return _preview_from_entries(_tail_entries(session_dir), max_chars)
 
 
 def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) -> str:
@@ -3953,8 +4033,85 @@ def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_C
     single bounded read and is independent of transcript size. Returns ``""``
     for a missing, unreadable or incident-free transcript, and the caller falls
     back to the house sentence.
+
+    For an ARCHIVE the answer comes from the sidecar compression wrote beside it
+    (see :func:`session_preview`): one small read instead of a decompression, the
+    same ``max_chars`` ceiling rule, and the same fallback for an archive that
+    predates the sidecar.
     """
-    for entry in _tail_entries(session_dir):
+    sidecar = compression.read_listing_preview(session_dir)
+    if sidecar is not None:
+        stored = _from_listing_sidecar(sidecar, "failure", max_chars)
+        if stored is not None:
+            return stored
+    return _failure_from_entries(_tail_entries(session_dir), max_chars)
+
+
+def _from_listing_sidecar(sidecar: dict[str, Any], key: str, max_chars: int) -> str | None:
+    """One field of an archive's listing sidecar, or ``None`` to read the tail.
+
+    The sidecar stores its text already condensed at ``PREVIEW_MAX_CHARS``, so
+    it can never answer a caller that asks for MORE than that — answering the
+    cut string would make an archived session's row shorter than its plain
+    twin's for the same call. The cap the text was cut at travels beside it
+    (``max_chars``), and a caller above it gets ``None``, which sends the caller
+    to the bounded tail read: slower, and the same answer the plain file gives.
+
+    A sidecar without ``max_chars`` is one this build cannot reason about — an
+    unknown cap is assumed too small, so it falls back too. Correct is worth
+    more than fast here; every current caller asks for 120 or the 200 default,
+    i.e. at or under the cap, so none of them pays for this.
+    """
+    cap = sidecar.get("max_chars")
+    if not isinstance(cap, int) or max_chars > cap:
+        return None
+    return _condense(str(sidecar.get(key) or ""), max_chars)
+
+
+def listing_preview_from_tail(window: bytes, *, truncated: bool) -> dict[str, Any]:
+    """The listing fields, computed from ONE tail window.
+
+    Called by the compression pass before it retires the plain transcript: the
+    sidecar it writes must answer exactly what :func:`session_preview` and
+    :func:`session_failure_summary` answer for that transcript, so both routes
+    run the SAME entry scan and the SAME two field readers. A second copy of
+    these rules is how a compressed row's preview would drift from its plain
+    twin's — the property the surface suite pins.
+
+    ``max_chars`` is part of the answer, not an implementation detail: the two
+    strings are cut at :data:`PREVIEW_MAX_CHARS`, and a reader asking for more
+    than that must know the text cannot serve it and fall back to a tail read
+    (:func:`_from_listing_sidecar`).
+
+    ``truncated`` says whether the window starts mid-row (see
+    :func:`compression.read_tail_window`); passing it in keeps that decision in
+    the reader that knows the source's size.
+    """
+    entries = _entries_from_window(window, truncated)
+    return {
+        "preview": _preview_from_entries(entries, PREVIEW_MAX_CHARS),
+        "failure": _failure_from_entries(entries, PREVIEW_MAX_CHARS),
+        "max_chars": PREVIEW_MAX_CHARS,
+    }
+
+
+def _preview_from_entries(entries: list[dict[str, Any]], max_chars: int) -> str:
+    """The newest assistant text in ``entries`` (newest first), condensed."""
+    for entry in entries:
+        if entry.get("type") != "message":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("role") != "assistant":
+            continue
+        text = _first_text(payload.get("content"))
+        if text.strip():
+            return _condense(text, max_chars)
+    return ""
+
+
+def _failure_from_entries(entries: list[dict[str, Any]], max_chars: int) -> str:
+    """The newest ``session_incident`` raw text in ``entries`` (newest first)."""
+    for entry in entries:
         payload = entry.get("payload")
         if not isinstance(payload, dict):
             continue
@@ -3969,30 +4126,99 @@ def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_C
     return ""
 
 
+#: How many archives' parsed tail windows this process remembers (review round 3,
+#: m-2). Small on purpose: a listing paints rows in one pass, so a handful covers
+#: the store a person scrolls; 32 entries of one bounded window each stay far under
+#: the preview budget's own cost.
+_TAIL_MEMO_MAX = 32
+
+#: ``archive identity -> parsed tail entries`` (see :func:`_tail_memo_key`). Bounded
+#: by ``_TAIL_MEMO_MAX`` and never keyed on a PLAIN transcript, whose tail changes
+#: with every append and whose read is a seek anyway.
+_tail_memo: "OrderedDict[tuple[str, int, int, int, int], list[dict[str, Any]]]" = OrderedDict()
+
+
+def _tail_memo_key(session_dir: Path) -> tuple[str, int, int, int, int] | None:
+    """The memo key for ``session_dir``'s ARCHIVE, or ``None`` when it has none.
+
+    The key is the archive's IDENTITY — device, inode, size, mtime in nanoseconds —
+    so every way the bytes can change (a re-compress, a hand-copied replacement, a
+    restore that removes it) is a different key. Nothing has to clear this memo for
+    correctness; ``restore_for_write`` and the compression pass change the archive,
+    which is exactly what moves the key.
+    """
+    try:
+        archive = compression.archive_path(session_dir)
+        if archive is None:
+            return None
+        info = archive.stat()
+    except OSError:
+        return None
+    return (str(session_dir), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
 def _tail_entries(session_dir: Path) -> list[dict[str, Any]]:
     """Parsed entries from the transcript's tail window, NEWEST FIRST.
 
     Factored out of :func:`session_preview` when
     :func:`session_failure_summary` needed the identical scan: one bounded
-    seek, the first (fragment) line dropped, newest-first iteration, and every
+    window, the first (fragment) line dropped, newest-first iteration, and every
     unparseable line skipped because a live writer may be mid-append. Two
     copies of that would be two places for the window arithmetic to drift.
+
+    ``compression.read_tail_window`` keeps that window the same SIZE for an
+    archive — it streams through a rolling buffer of the budget instead of
+    seeking — so a compressed session's preview is byte-identical to its plain
+    twin's and the memory bound does not change. For a PLAIN transcript the read
+    is a seek, bounded by the budget rather than by the file.
+
+    AN ARCHIVE'S TAIL IS PAID ONCE, NOT ONCE PER ROW (review round 3, m-2). Two
+    things make that true and both are needed: this process keeps the parsed window
+    in a small bounded memo keyed by the archive's identity (so a listing that paints
+    fifty rows of one cold archive streams it once), and after a read that had no
+    sidecar the window is recorded as ``preview.json`` so the NEXT process starts
+    from the cheap path. Neither can serve stale bytes: the memo key is
+    ``(dev, ino, size, mtime_ns)`` of the archive, so a re-compress, a restore or a
+    change under it is a miss rather than a lie, and ``write_listing_preview``
+    refuses to write beside a plain transcript.
     """
-    transcript = session_dir / TRANSCRIPT_NAME
+    session_dir = Path(session_dir)
+    key = _tail_memo_key(session_dir)
+    if key is not None:
+        cached = _tail_memo.get(key)
+        if cached is not None:
+            _tail_memo.move_to_end(key)
+            return cached
     try:
-        size = transcript.stat().st_size
-        with transcript.open("rb") as handle:
-            if size > PREVIEW_SCAN_BYTES:
-                handle.seek(size - PREVIEW_SCAN_BYTES)
-                window = handle.read()
-                # The seek landed at an arbitrary byte, so the first line is a
-                # fragment. Unlike the name scan there is nothing to recover
-                # from it: the newest entry is at the other end.
-                _, _, window = window.partition(b"\n")
-            else:
-                window = handle.read()
-    except OSError:
+        window, truncated = compression.read_tail_window(session_dir, PREVIEW_SCAN_BYTES)
+    except compression.ArchiveError:
+        # An undecodable archive costs the preview, never the listing row.
         return []
+    entries = _entries_from_window(window, truncated)
+    if key is not None:
+        _tail_memo[key] = entries
+        while len(_tail_memo) > _TAIL_MEMO_MAX:
+            _tail_memo.popitem(last=False)
+        # The read just proved what this archive's tail says; record it so the next
+        # process does not stream the archive again. Only when there is no sidecar
+        # already: one that exists is either current or is being read for a larger
+        # ``max_chars`` than it stores, and neither case needs this write.
+        if compression.read_listing_preview(session_dir) is None:
+            compression.write_listing_preview(session_dir, window, truncated=truncated)
+    return entries
+
+
+def _entries_from_window(window: bytes, truncated: bool) -> list[dict[str, Any]]:
+    """Parse one tail window, NEWEST FIRST.
+
+    ``truncated`` is the only thing that makes the first line a fragment: a
+    source LONGER than the window was seeked into, so the window starts at an
+    arbitrary byte. A source of exactly the window size starts on a whole row,
+    and dropping it would lose the oldest entry of the window (review n1) —
+    which matters to the compress-time sidecar, whose window is the source.
+    """
+    if truncated:
+        _, _, window = window.partition(b"\n")
     entries: list[dict[str, Any]] = []
     for line in reversed(window.decode("utf-8", "replace").splitlines()):
         line = line.strip()

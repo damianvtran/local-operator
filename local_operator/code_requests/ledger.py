@@ -114,7 +114,20 @@ MAX_SCAN_BYTES = 64 << 20
 
 #: The journal file this module scans, for one session directory.
 def transcript_path(session_dir: Path) -> Path:
-    return Path(session_dir) / TRANSCRIPT_FILENAME
+    """The journal, materialised when the session's transcript is compressed.
+
+    Same resolver rule as ``session_files.ledger.transcript_path``: a compressed
+    session's bytes come back from the bounded cache, identical to the journal
+    the archive was made from, so this scanner's offsets and signatures keep
+    working. A re-made cache copy is a new inode, which costs a rescan — the
+    safe direction. ``None`` means no journal, so the plain path is returned and
+    the caller's stat raises the ENOENT it always handled.
+    """
+    from local_operator.session import compression
+
+    return compression.transcript_for_read(Path(session_dir)) or (
+        Path(session_dir) / TRANSCRIPT_FILENAME
+    )
 
 
 def index_dir(config_dir: str | Path) -> Path:

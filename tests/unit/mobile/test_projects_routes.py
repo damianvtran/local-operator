@@ -69,7 +69,14 @@ def test_the_gate_holds_and_login_unlocks_the_surface() -> None:
     assert client.post("/login", data={"password": "pw123"}).status_code in (200, 303)
     listed = client.get("/api/projects")
     assert listed.status_code == 200
-    assert listed.json() == {"projects": []}
+    # The listing declares its page (the desktop fields, verbatim): an empty
+    # store is 0/0/not-truncated, never a missing key.
+    assert listed.json() == {
+        "projects": [],
+        "total_rows": 0,
+        "loaded_rows": 0,
+        "truncated": False,
+    }
 
 
 def test_create_read_patch_delete_round_trip() -> None:
@@ -533,3 +540,34 @@ def test_a_refusals_extra_can_never_clobber_error_or_code(
         "code": "project_done_incomplete",
         "n": 1,
     }
+
+
+def test_a_paged_listing_is_declared_and_the_detail_resolves_the_tail(monkeypatch) -> None:
+    """M1 (mobile): the phone is told the set is partial, and can still open it.
+
+    Same fields as the desktop listing, same meaning: ``truncated`` says rows are
+    beyond the page, and the detail route's by-id/by-name lookup reaches one.
+    """
+    from local_operator import projects as projects_module
+    from local_operator.projects import Project
+
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 1)
+    projects_dir = config_dir() / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    for project_id, name, stamp in (
+        ("aaa-dormant", "dormant-row", 1_700_000_000_000_000_000),
+        ("zzz-live", "live-row", 1_700_000_001_000_000_000),
+    ):
+        row = Project(id=project_id, name=name)
+        path = projects_dir / f"{project_id}.json"
+        path.write_text(json.dumps(row.model_dump(mode="json", by_alias=True)))
+        os.utime(path, ns=(stamp, stamp))
+
+    client = _client()
+    listed = client.get("/api/projects").json()
+    assert [row["id"] for row in listed["projects"]] == ["zzz-live"]
+    assert (listed["total_rows"], listed["loaded_rows"], listed["truncated"]) == (2, 1, True)
+
+    detail = client.get("/api/projects/dormant-row")
+    assert detail.status_code == 200
+    assert detail.json()["project"]["id"] == "aaa-dormant"

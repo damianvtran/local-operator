@@ -23,6 +23,7 @@ from local_operator.audiogen import rungs as audio_rungs
 from local_operator.audiogen.models import AudioAsset, AudioJobSpec
 from local_operator.audiogen.rungs import CancelHandle
 from local_operator.clients._http import APIError
+from local_operator.tts import output_format as audio_format
 
 HUB = "https://hub.example/v1"
 CDN_AUDIO = "https://cdn.example/one.mp3"
@@ -474,7 +475,7 @@ async def test_a_busy_submit_retries_with_bounded_backoff_then_succeeds(monkeypa
         )
     assert outcome.generation_id == "req-busy"
     assert attempts["submit"] == 3
-    assert sleeps == [2.0, 4.0], "bounded backoff, in the contract's steps"
+    assert sleeps == [10.0, 20.0], "the ladder's first two steps, over the 45 s hold"
 
 
 @pytest.mark.asyncio
@@ -505,10 +506,62 @@ async def test_an_exhausted_busy_submit_surfaces_as_transient_busy(monkeypatch):
     assert exc.code == "transient", "a busy process is not a balance signal"
     assert exc.status_code == 429
     assert exc.details.get("error_type") == "audio_rate_limited"
-    assert "busy right now" in str(exc)
-    assert sleeps == [2.0, 4.0, 8.0], "four attempts, three waits"
+    # The receipt names the capacity window, not just the provider's sentence:
+    # the previous incident produced "busy right now" per item and could not
+    # say how long the platform had been held.
+    assert "4 attempts over" in str(exc)
+    assert exc.details["attempts"] == 4
+    assert sleeps == [10.0, 20.0, 35.0], "four attempts, three waits"
     # No header dependence: the response carried no Retry-After at all.
     assert audio_rungs.SUBMIT_MAX_ATTEMPTS == 4
+    # 0 + 10 + 30 + 35 = the 65 s that clears the server's 45 s vendor bound.
+    assert sum(sleeps) == 65.0
+
+
+@pytest.mark.asyncio
+async def test_the_capacity_window_is_a_fraction_of_the_batch_budget(monkeypatch):
+    """A fake clock proves the 65 s ladder cannot eat the whole batch budget.
+
+    ``SOUND_BATCH_TIMEOUT_S`` is 225 s and is deliberately NOT raised: the
+    ladder is what absorbs the hold. One exhausted window must leave room for
+    at least two more, or a 3-item resume would spend its entire budget just
+    discovering that capacity is full.
+    """
+    from local_operator.tools import audio_tool
+
+    clock = {"t": 1_000.0}
+    sleeps: list[float] = []
+
+    async def advance(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["t"] += seconds
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", advance)
+    monkeypatch.setattr(audio_rungs, "_submit_clock", lambda: clock["t"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _rate_limited_response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs._submit_with_backoff(
+                client,
+                f"{HUB}/tools/audio/sound-effects",
+                body={"prompt": "click", "duration_s": 0.5},
+                credential="tok",
+            )
+
+    window = caught.value.details["capacity_window_s"]
+    assert window == 65.0
+    assert caught.value.details["attempts"] == 4
+    assert "Audio platform at capacity: 4 attempts over 65 s." in str(caught.value)
+    # The window is MEASURED from the injected clock, not copied from the
+    # constant tuple: the clock advanced by exactly the ladder's waits, which is
+    # what makes the receipt a duration. This fails if the seam regresses.
+    assert clock["t"] - 1_000.0 == pytest.approx(sum(sleeps)) == pytest.approx(window)
+    # The batch bound is deliberately unchanged; the ladder-vs-budget proof is
+    # a scheduling test at the tool seam (test_audio_tool), not this equality.
+    assert audio_tool.SOUND_BATCH_TIMEOUT_S == 225.0
 
 
 @pytest.mark.asyncio
@@ -559,9 +612,66 @@ async def test_an_admitted_job_that_hits_the_vendor_limit_is_not_retried(monkeyp
     assert sleeps == [], "the submit backoff belongs to a REFUSED submit only"
 
 
+@pytest.mark.asyncio
+async def test_a_5xx_carrying_the_rate_limited_code_is_not_retried_on_the_hub(monkeypatch):
+    """M1: the STATUS guards the ladder; a body can never widen it.
+
+    A 503 whose body repeats ``audio_rate_limited`` is a request that may have
+    been accepted. Re-POSTing it could double-bill, so only HTTP 429 is the
+    admission bound and every other status fails straight through.
+    """
+    posts: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(503, json={"code": "audio_rate_limited", "error": "upstream"})
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs._submit_with_backoff(
+                client,
+                f"{HUB}/tools/audio/sound-effects",
+                body={"prompt": "click", "duration_s": 0.5},
+                credential="tok",
+            )
+    assert len(posts) == 1, "a 5xx is the upstream's answer, never a refusal to retry"
+    assert sleeps == []
+    assert caught.value.status_code == 503
+
+
 # ---------------------------------------------------------------------------
 # BYOK — ElevenLabs
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fresh_format_memo():
+    """The 192->128 memo is process-wide by design; no test may inherit it."""
+    audio_format.reset_caps()
+    yield
+    audio_format.reset_caps()
+
+
+#: The measured shape of a plan refusal for the 192 format: the vendor names the
+#: offending query parameter in ``detail.param`` and classes it as an
+#: entitlement refusal. Prose is included because the real response has it, not
+#: because the predicate reads it when ``param`` is present.
+_ELEVENLABS_PLAN_REFUSAL = {
+    "detail": {
+        "type": "authorization_error",
+        "code": "feature_not_available",
+        "param": "output_format",
+        "message": (
+            "The 'mp3_44100_192' output format is only available on the Creator "
+            "plan and above. Please upgrade your subscription."
+        ),
+    }
+}
 
 
 @pytest.mark.asyncio
@@ -588,7 +698,7 @@ async def test_elevenlabs_voiceover_sends_the_map_resolved_body():
     request = seen[0]
     assert request.headers["xi-api-key"] == "el-key"
     assert request.url.path.startswith("/v1/text-to-speech/")
-    assert request.url.params["output_format"] == "mp3_44100_128"
+    assert request.url.params["output_format"] == "mp3_44100_192"
     body = json.loads(request.content)
     assert body["model_id"] == "eleven_multilingual_v2"
     assert body["text"] == spec.text
@@ -603,6 +713,8 @@ async def test_elevenlabs_voiceover_sends_the_map_resolved_body():
     assert outcome.cost_usd == pytest.approx(0.08 * len(spec.text) / 1000.0)
     asset = outcome.assets[0]
     assert isinstance(asset, AudioAsset)
+    # The receipt states the bitrate of the format that went on the wire.
+    assert asset.bitrate_kbps == 192
     notes = asset.voicing_notes
     assert notes is not None and "pace:clamped" in " ".join(notes["degraded"])
 
@@ -641,6 +753,7 @@ async def test_elevenlabs_sound_effect_body_carries_the_required_duration():
     request = seen[0]
     assert request.url.path == "/v1/sound-generation"
     body = json.loads(request.content)
+    assert request.url.params["output_format"] == "mp3_44100_192"
     assert body["duration_seconds"] == 3.5
     assert body["prompt_influence"] == 0.7
     assert body["loop"] is True
@@ -650,6 +763,372 @@ async def test_elevenlabs_sound_effect_body_carries_the_required_duration():
     assert outcome.cost_usd == pytest.approx(0.002 * 4)
     assert outcome.cost_source == "rate_table"
     assert outcome.billing_basis == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_admission_refusal_retries_on_the_shared_ladder(monkeypatch):
+    """BYOK gets the SAME ladder as the hub: a 429 is a refusal, not a verdict.
+
+    A BYOK 429 produces no audio and charges nothing, so retrying is safe — and
+    a resumed batch must not fail an item because a vendor (or a slot on a
+    shared key) was briefly busy. Batch submissions take the jittered arm; the
+    jitter floor is pinned to the hold, so three refusals still clear it.
+    """
+    posts: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        if len(posts) < 4:
+            return _rate_limited_response()
+        return httpx.Response(200, content=b"ID3ok", headers={"content-type": "audio/mpeg"})
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: low)
+    spec = _spec("sound_effect", duration_s=0.5, batch_submission=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        outcome = await audio_rungs.run_elevenlabs(
+            spec, api_key="k", handle=CancelHandle(), emit=None, pause=_fast_pause, client=client
+        )
+    assert len(posts) == 4, "three refusals, then the admitted submit"
+    assert sleeps == [10.0, 20.0, 35.0]
+    assert outcome.assets[0].data == b"ID3ok"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_a_400_is_the_answer_and_is_never_retried(monkeypatch):
+    """Only the admission refusal is retried: a rejected request is final.
+
+    A 400 (``audio_rejected``) means the request itself was wrong. Re-posting it
+    would burn the ladder's 65 s and then fail identically, so it must surface
+    on the first post — the counterpart to the retry test above.
+    """
+    posts: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(400, json={"code": "audio_rejected", "error": "bad duration"})
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    spec = _spec("sound_effect", duration_s=0.5)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs.run_elevenlabs(
+                spec,
+                api_key="k",
+                handle=CancelHandle(),
+                emit=None,
+                pause=_fast_pause,
+                client=client,
+            )
+    assert len(posts) == 1
+    assert sleeps == []
+    assert caught.value.code == "audio_rejected"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_5xx_carrying_the_rate_limited_code_is_never_retried(monkeypatch):
+    """The BYOK path the ladder was newly pointed at: status first, body never.
+
+    A 503 with ``code: audio_rate_limited`` is the exact request a re-POST could
+    double-bill. It must surface on the first post even though the body repeats
+    the admission code.
+    """
+    posts: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(503, json={"code": "audio_rate_limited", "error": "upstream"})
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    spec = _spec("sound_effect", duration_s=0.5)
+    key = "key"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs.run_elevenlabs(
+                spec,
+                api_key=key,
+                handle=CancelHandle(),
+                emit=None,
+                pause=_fast_pause,
+                client=client,
+            )
+    assert len(posts) == 1
+    assert sleeps == []
+    assert caught.value.status_code == 503
+
+
+async def _run_byok(spec: AudioJobSpec, *, api_key: str, handler):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return await audio_rungs.run_elevenlabs(
+            spec,
+            api_key=api_key,
+            handle=CancelHandle(),
+            emit=None,
+            pause=_fast_pause,
+            client=client,
+        )
+
+
+def _formats(seen: list[httpx.Request]) -> list[str]:
+    return [request.url.params["output_format"] for request in seen]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["voiceover", "sound_effect"])
+async def test_elevenlabs_drops_to_128_once_when_the_plan_refuses_192(direction):
+    """A lower-tier key must still get audio, on BOTH vendor endpoints."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.params["output_format"] == "mp3_44100_192":
+            return httpx.Response(403, json=_ELEVENLABS_PLAN_REFUSAL)
+        return httpx.Response(200, content=AUDIO_BYTES, headers={"content-type": "audio/mpeg"})
+
+    spec = _spec(direction, duration_s=2.0) if direction == "sound_effect" else _spec(direction)
+    outcome = await _run_byok(spec, api_key="capped-key", handler=handler)
+
+    assert _formats(seen) == ["mp3_44100_192", "mp3_44100_128"]
+    assert outcome.assets[0].data == AUDIO_BYTES
+    # M2: the fact follows the fallback rather than a constant. Only the
+    # voiceover leg states a bitrate; a sound effect legitimately reports none.
+    # ``assets`` is typed as the base MediaAsset, so narrow before reading the
+    # audio-specific fact (pyright would not see it on the base class).
+    asset = outcome.assets[0]
+    assert isinstance(asset, AudioAsset)
+    assert asset.bitrate_kbps == (128 if direction == "voiceover" else None)
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_skips_the_doomed_attempt_for_the_same_key():
+    """The measured cap is remembered, so later calls go straight to 128."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.params["output_format"] == "mp3_44100_192":
+            return httpx.Response(403, json=_ELEVENLABS_PLAN_REFUSAL)
+        return httpx.Response(200, content=AUDIO_BYTES, headers={"content-type": "audio/mpeg"})
+
+    await _run_byok(_spec("voiceover"), api_key="capped-key", handler=handler)
+    seen.clear()
+    await _run_byok(_spec("voiceover"), api_key="capped-key", handler=handler)
+
+    assert _formats(seen) == ["mp3_44100_128"]
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_retries_a_parameter_refusal_but_does_not_remember_it():
+    """A 400 naming the format is retried; it is not a statement about the tier."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.params["output_format"] == "mp3_44100_192":
+            return httpx.Response(
+                400,
+                json={
+                    "detail": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_parameter",
+                        "param": "output_format",
+                        "message": "This format is not available for this model.",
+                    }
+                },
+            )
+        return httpx.Response(200, content=AUDIO_BYTES, headers={"content-type": "audio/mpeg"})
+
+    await _run_byok(_spec("voiceover"), api_key="format-key", handler=handler)
+    seen.clear()
+    await _run_byok(_spec("voiceover"), api_key="format-key", handler=handler)
+
+    # Retried once on BOTH calls: the second call still attempts 192, because a
+    # parameter refusal must not suppress the preference for six hours.
+    assert _formats(seen) == ["mp3_44100_192", "mp3_44100_128"]
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_memo_is_scoped_to_the_endpoint_that_refused():
+    """A sound-effect refusal must not downgrade voiceover for the same key."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.params["output_format"] == "mp3_44100_192":
+            return httpx.Response(403, json=_ELEVENLABS_PLAN_REFUSAL)
+        return httpx.Response(200, content=AUDIO_BYTES, headers={"content-type": "audio/mpeg"})
+
+    await _run_byok(_spec("sound_effect", duration_s=1.0), api_key="capped-key", handler=handler)
+    seen.clear()
+    await _run_byok(_spec("voiceover"), api_key="capped-key", handler=handler)
+
+    # Voiceover is a different capability: it still asks for 192 first.
+    assert _formats(seen)[0] == "mp3_44100_192"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (
+            400,
+            {
+                "detail": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_parameter",
+                    "param": "text",
+                    "message": "text is invalid",
+                }
+            },
+        ),
+        (
+            403,
+            {
+                "detail": {
+                    "type": "authorization_error",
+                    "code": "feature_not_available",
+                    "param": "enable_logging",
+                    "message": "Zero retention mode is only available on the Enterprise plan.",
+                }
+            },
+        ),
+    ],
+)
+async def test_elevenlabs_does_not_retry_a_refusal_of_another_parameter(status, body):
+    """Only output_format is a tier gate we can answer by changing the format."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(status, json=body)
+
+    with pytest.raises(APIError) as caught:
+        await _run_byok(_spec("voiceover"), api_key="k", handler=handler)
+
+    assert _formats(seen) == ["mp3_44100_192"]
+    assert caught.value.status_code == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 500])
+async def test_elevenlabs_never_retries_an_auth_or_server_refusal(status):
+    """Even a body naming output_format must not earn a FORMAT retry here."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(status, json=_ELEVENLABS_PLAN_REFUSAL)
+
+    with pytest.raises(APIError) as caught:
+        await _run_byok(_spec("voiceover"), api_key="k", handler=handler)
+
+    assert _formats(seen) == ["mp3_44100_192"]
+    assert caught.value.status_code == status
+
+
+@pytest.mark.asyncio
+async def test_a_429_never_turns_into_a_format_downgrade(monkeypatch):
+    """A rate limit is the shared ADMISSION ladder's business, not the format's.
+
+    The BYOK transport now re-POSTs a 429 on the same ladder the hub uses (a
+    refusal that produced no audio), so more than one request is expected —
+    what must never happen is one of them asking for 128, or the format
+    helper treating a rate limit as a plan gate.
+    """
+    seen: list[httpx.Request] = []
+
+    async def pause(seconds):  # noqa: ARG001 - the ladder's seam
+        return None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(429, json=_ELEVENLABS_PLAN_REFUSAL)
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: low)
+
+    with pytest.raises(APIError) as caught:
+        await _run_byok(_spec("voiceover", batch_submission=True), api_key="k", handler=handler)
+
+    assert set(_formats(seen)) == {"mp3_44100_192"}
+    assert caught.value.status_code == 429
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("detail", "retried"),
+    [
+        (
+            # The safety arm: a plan gate with no `param`, recognised by class + prose.
+            {
+                "type": "feature_not_available",
+                "code": "feature_not_available",
+                "message": "This feature is not available on your current plan.",
+            },
+            True,
+        ),
+        (
+            # Same class, prose that names no entitlement: not a tier statement.
+            {
+                "type": "feature_not_available",
+                "code": "feature_not_available",
+                "message": "This feature is not available for this voice.",
+            },
+            False,
+        ),
+    ],
+)
+async def test_elevenlabs_unnamed_refusal_needs_entitlement_prose(detail, retried):
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.params["output_format"] == "mp3_44100_192":
+            return httpx.Response(403, json={"detail": detail})
+        return httpx.Response(200, content=AUDIO_BYTES, headers={"content-type": "audio/mpeg"})
+
+    try:
+        outcome = await _run_byok(_spec("voiceover"), api_key="k", handler=handler)
+    except APIError as exc:
+        assert not retried
+        assert exc.status_code == 403
+    else:
+        assert retried
+        assert outcome.assets[0].data == AUDIO_BYTES
+    assert len(seen) == (2 if retried else 1)
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_surfaces_the_original_refusal_when_the_fallback_fails():
+    """A 128 attempt that fails too must not replace the 192 diagnosis."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["output_format"] == "mp3_44100_192":
+            return httpx.Response(403, json=_ELEVENLABS_PLAN_REFUSAL)
+        return httpx.Response(500, json={"detail": {"status": "internal_error"}})
+
+    with pytest.raises(APIError) as caught:
+        await _run_byok(_spec("voiceover"), api_key="k", handler=handler)
+
+    assert caught.value.status_code == 403
+    assert isinstance(caught.value.__cause__, APIError)
+    assert caught.value.__cause__.status_code == 500
+    # A failed retry proves nothing about the plan: the key is not capped.
+    assert not audio_format.is_capped(
+        audio_format.cap_key("k", endpoint="voiceover", model="eleven_multilingual_v2")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -736,13 +1215,21 @@ async def test_radient_sha_is_required_well_formed_and_matching(sha):
 
 @pytest.mark.asyncio
 async def test_batch_admission_backoff_is_jittered_and_bounded(monkeypatch):
+    """Jitter may only LENGTHEN: the floor is the documented 65 s window.
+
+    The previous range (0.75-1.0) shortened the wait to as little as 49 s, which
+    is inside a 45 s hold plus the terminal write it has to clear — so a batch
+    worker could retry straight back into the window the ladder exists to
+    outlast. Pinning ``uniform`` to its LOW end proves the floor; the companion
+    test pins the high end.
+    """
     sleeps = []
 
     async def pause(seconds):
         sleeps.append(seconds)
 
     monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
-    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: 0.875)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: low)
     requests = []
 
     def handler(request):
@@ -755,12 +1242,38 @@ async def test_batch_admission_backoff_is_jittered_and_bounded(monkeypatch):
                 client,
                 f"{HUB}/tools/audio/sound-effects",
                 body={"prompt": "click", "duration_s": 0.5},
-                credential="synthetic",
+                credential="tok",
                 jitter=True,
             )
     assert caught.value.details["error_type"] == "audio_rate_limited"
     assert len(requests) == 4
-    assert sleeps == [1.75, 3.5, 7.0]
+    assert sleeps == [10.0, 20.0, 35.0], "the jittered floor is the hold, never below it"
+
+
+@pytest.mark.asyncio
+async def test_batch_jitter_can_only_move_a_wait_later(monkeypatch):
+    """The other end of the range: jitter stretches, and the receipt says so."""
+    swallows = []
+
+    async def pause(seconds):
+        swallows.append(seconds)
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: high)
+
+    def handler(request):
+        return _rate_limited_response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError):
+            await audio_rungs._submit_with_backoff(
+                client,
+                f"{HUB}/tools/audio/sound-effects",
+                body={"prompt": "click", "duration_s": 0.5},
+                credential="tok",
+                jitter=True,
+            )
+    assert swallows == pytest.approx([11.5, 23.0, 40.25])
 
 
 def _decodable_wav(seconds: float = 0.5, rate: int = 8000) -> bytes:
