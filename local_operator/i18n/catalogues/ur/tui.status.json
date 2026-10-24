@@ -1,0 +1,9 @@
+{
+  "tui.status.agents": "{count, plural, one {# ایجنٹ} other {# ایجنٹس}}",
+  "tui.status.band.starting": "شروع ہو رہا ہے…",
+  "tui.status.band.working": "کام جاری",
+  "tui.status.jobs": "{count, plural, one {# جاب} other {# جاب}}",
+  "tui.status.model.connecting": "منسلک ہو رہا ہے…",
+  "tui.status.model.setup": "ترتیب",
+  "tui.status.tunnel.parked": "ریموٹ رسائی بند"
+}

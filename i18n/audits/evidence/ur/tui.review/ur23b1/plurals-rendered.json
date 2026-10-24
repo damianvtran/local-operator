@@ -1,0 +1,740 @@
+{
+  "method": "core render_message(locale=ur) for every catalogue plural at 0,1,2,21,1.5; core plural_category checked against expected CLDR one/other boundaries",
+  "plural_key_count": 19,
+  "render_count": 95,
+  "render_error_count": 0,
+  "category_mismatch_count": 0,
+  "missing_literal_count_count": 0,
+  "category_checks": [
+    {
+      "value": 0,
+      "expected": "other",
+      "actual": "other"
+    },
+    {
+      "value": 1,
+      "expected": "one",
+      "actual": "one"
+    },
+    {
+      "value": 2,
+      "expected": "other",
+      "actual": "other"
+    },
+    {
+      "value": 21,
+      "expected": "other",
+      "actual": "other"
+    },
+    {
+      "value": 1.5,
+      "expected": "other",
+      "actual": "other"
+    }
+  ],
+  "rows": [
+    {
+      "key": "relay.ask.context.messages",
+      "en": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+      "ur": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "اس سوال کے بعد آپ کے 0 پیغامات (آخری 19:36)",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "اس سوال کے بعد آپ کا 1 پیغام (آخری 19:36)",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "اس سوال کے بعد آپ کے 2 پیغامات (آخری 19:36)",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "اس سوال کے بعد آپ کے 21 پیغامات (آخری 19:36)",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "اس سوال کے بعد آپ کے 1.5 پیغامات (آخری 19:36)",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "relay.session.tags.more",
+      "en": "{count, plural, one {# more tag} other {# more tags}}",
+      "ur": "{count, plural, one {# مزید ٹیگ} other {# مزید ٹیگز}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 مزید ٹیگز",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 مزید ٹیگ",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 مزید ٹیگز",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 مزید ٹیگز",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 مزید ٹیگز",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "en": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+      "ur": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 پیغام آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.review.age_days",
+      "en": "{amount, plural, one {updated # d ago} other {updated # d ago}}",
+      "ur": "{amount, plural, one {# d پہلے اپ ڈیٹ ہوا} other {# d پہلے اپ ڈیٹ ہوا}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 d پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 d پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 d پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 d پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 d پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.review.age_hours",
+      "en": "{amount, plural, one {updated # h ago} other {updated # h ago}}",
+      "ur": "{amount, plural, one {# h پہلے اپ ڈیٹ ہوا} other {# h پہلے اپ ڈیٹ ہوا}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 h پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 h پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 h پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 h پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 h پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.review.age_minutes",
+      "en": "{amount, plural, one {updated # min ago} other {updated # min ago}}",
+      "ur": "{amount, plural, one {# min پہلے اپ ڈیٹ ہوا} other {# min پہلے اپ ڈیٹ ہوا}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 min پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 min پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 min پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 min پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 min پہلے اپ ڈیٹ ہوا",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.review.ci_failing",
+      "en": "{count, plural, one {# failing} other {# failing}}",
+      "ur": "{count, plural, one {# ناکام} other {# ناکام}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 ناکام",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 ناکام",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 ناکام",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 ناکام",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 ناکام",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.review.comments_count",
+      "en": "{count, plural, one {# comment} other {# comments}}",
+      "ur": "{count, plural, one {# تبصرہ} other {# تبصرے}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 تبصرے",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 تبصرہ",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 تبصرے",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 تبصرے",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 تبصرے",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.schedule.ends_left",
+      "en": "{count, plural, one {# left} other {# left}}",
+      "ur": "{count, plural, one {# باقی} other {# باقی}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 باقی",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 باقی",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 باقی",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 باقی",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 باقی",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.schedule.fired",
+      "en": "{count, plural, one {# fired} other {# fired}}",
+      "ur": "{count, plural, one {# بار چلی} other {# بار چلی}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 بار چلی",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 بار چلی",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 بار چلی",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 بار چلی",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 بار چلی",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.schedule.fired_of",
+      "en": "{count, plural, one {# of {limit} fired} other {# of {limit} fired}}",
+      "ur": "{count, plural, one {# / {limit} چلی} other {# / {limit} چلی}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 / 3 چلی",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 / 3 چلی",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 / 3 چلی",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 / 3 چلی",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 / 3 چلی",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.schedule.subtitle",
+      "en": "{count, plural, one {# wake in this conversation} other {# wakes in this conversation}}",
+      "ur": "{count, plural, one {# بیداری اس گفتگو میں} other {# بیداریاں اس گفتگو میں}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 بیداریاں اس گفتگو میں",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 بیداری اس گفتگو میں",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 بیداریاں اس گفتگو میں",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 بیداریاں اس گفتگو میں",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 بیداریاں اس گفتگو میں",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.status.agents",
+      "en": "{count, plural, one {# agent} other {# agents}}",
+      "ur": "{count, plural, one {# ایجنٹ} other {# ایجنٹس}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 ایجنٹس",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 ایجنٹ",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 ایجنٹس",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 ایجنٹس",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 ایجنٹس",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.status.jobs",
+      "en": "{count, plural, one {# job} other {# jobs}}",
+      "ur": "{count, plural, one {# جاب} other {# جاب}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 جاب",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 جاب",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 جاب",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 جاب",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 جاب",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.transcript.attach.receipt",
+      "en": "↑ {count, plural, one {# image} other {# images}} attached",
+      "ur": "↑ {count, plural, one {# تصویر} other {# تصویریں}} منسلک",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "↑ 0 تصویریں منسلک",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "↑ 1 تصویر منسلک",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "↑ 2 تصویریں منسلک",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "↑ 21 تصویریں منسلک",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "↑ 1.5 تصویریں منسلک",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.transcript.catchup.missed",
+      "en": "{count, plural, one {# missed wake} other {# missed wakes}}",
+      "ur": "{count, plural, one {# چھوٹی ہوئی بیداری} other {# چھوٹی ہوئی بیداریاں}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 چھوٹی ہوئی بیداریاں",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 چھوٹی ہوئی بیداری",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 چھوٹی ہوئی بیداریاں",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 چھوٹی ہوئی بیداریاں",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 چھوٹی ہوئی بیداریاں",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.transcript.group.actions",
+      "en": "{count, plural, one {{label} action} other {{label} actions}}",
+      "ur": "{count, plural, one {{label} کارروائی} other {{label} کارروائیاں}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 کارروائیاں",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 کارروائی",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 کارروائیاں",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 کارروائیاں",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 کارروائیاں",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.transcript.group.reply_requested",
+      "en": "{count, plural, one {{label} reply requested} other {{label} reply requested}}",
+      "ur": "{count, plural, one {{label} جواب کی درخواست} other {{label} جواب کی درخواستیں}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 جواب کی درخواستیں",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 جواب کی درخواست",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 جواب کی درخواستیں",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 جواب کی درخواستیں",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 جواب کی درخواستیں",
+          "latin_count_present": true
+        }
+      ]
+    },
+    {
+      "key": "tui.transcript.group.steered",
+      "en": "{count, plural, one {{label} steered} other {{label} steered}}",
+      "ur": "{count, plural, one {{label} رخ بدلنے والا پیغام} other {{label} رخ بدلنے والے پیغامات}}",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 رخ بدلنے والے پیغامات",
+          "latin_count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 رخ بدلنے والا پیغام",
+          "latin_count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 رخ بدلنے والے پیغامات",
+          "latin_count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 رخ بدلنے والے پیغامات",
+          "latin_count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 رخ بدلنے والے پیغامات",
+          "latin_count_present": true
+        }
+      ]
+    }
+  ]
+}

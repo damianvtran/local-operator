@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Read-only scoped checks for the 19-key Urdu round-3 remediation."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import unicodedata
+from collections import Counter
+from pathlib import Path
+
+REPO = Path('/Users/damian/local-operator/.worktrees/i18n-ur-core')
+OUT = Path('/Users/damian/.local-operator/sessions/3e0f499dc2ee/scratchpad/ur-core-round3-audit')
+ROOT = REPO / 'local_operator/i18n/catalogues'
+scope = json.loads((OUT / 'scope.json').read_text())
+neighbor_keys = {r['key'] for r in scope['direct_neighbors']}
+
+
+def cells(text: str) -> int:
+    return sum(0 if unicodedata.combining(c) or unicodedata.category(c) == 'Cf' or c in '\n\r' else 2 if unicodedata.east_asian_width(c) in {'W', 'F'} else 1 for c in text)
+
+
+def icu_signature(text: str) -> list[str]:
+    result = []
+    pattern = re.compile(r'\{([A-Za-z_]\w*)\s*(?:\}|,\s*(plural|select|number|date|time)\s*([,}]))')
+    for match in pattern.finditer(text):
+        name, kind, delimiter = match.groups()
+        item = [name, kind or 'interpolation']
+        if kind in {'plural', 'select'}:
+            item.append(re.findall(r'(?:^|[}\s])(=\d+|zero|one|two|few|many|other)\s*\{', text[match.end():]))
+        elif delimiter == ',':
+            end = text.find('}', match.end())
+            item.append(text[match.end():end] if end >= 0 else 'UNCLOSED')
+        result.append(json.dumps(item, ensure_ascii=False))
+    return result
+
+
+def tokens(text: str) -> list[str]:
+    patterns = [r'`[^`]*`', r'\$\([^)]*\)', r'%[0-9.]*[a-zA-Z%]', r'\b(?:https?|ssh|file)://[^\s،؛۔]+', r'(?<![\w{])--[\w-]+(?:=[\w{}.-]+)?', r'<[A-Za-z_][\w-]*>', r'(?<![:/\w{])/(?:[\w~][\w./~:-]*)', r'(?<!\w)(?:ctrl|shift|alt)\+[a-z0-9_+-]+']
+    found = []
+    for pattern in patterns:
+        found.extend(re.findall(pattern, text, flags=re.I))
+    return [x.rstrip('.،؛۔') if not x.startswith(('`', '$(')) else x for x in found]
+
+
+rows = []
+for ns_row in scope['changed_namespaces']:
+    ns = ns_row['namespace']
+    en_path = ROOT / 'en' / f'{ns}.json'
+    ur_path = ROOT / 'ur' / f'{ns}.json'
+    context_path = ROOT / 'en' / f'{ns}.context.json'
+    en = json.loads(en_path.read_text())
+    ur = json.loads(ur_path.read_text())
+    contexts = json.loads(context_path.read_text()) if context_path.exists() else {}
+    keys = ns_row['changed_keys'] + sorted(k for k in neighbor_keys if k.startswith(ns + '.'))
+    for key in keys:
+        source, target = en[key], ur[key]
+        flags = []
+        if icu_signature(source) != icu_signature(target): flags.append('icu_mismatch')
+        if tokens(source) != tokens(target): flags.append('technical_token_mismatch')
+        if source.count('\n') != target.count('\n'): flags.append('newline_mismatch')
+        if not unicodedata.is_normalized('NFC', target): flags.append('non_nfc')
+        if set(target) & set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'): flags.append('manual_bidi')
+        if re.search(r'[\u06f0-\u06f9\u0660-\u0669]', target): flags.append('native_digit')
+        if '।' in target: flags.append('hindi_danda')
+        if '[redacted]' in target.lower(): flags.append('literal_redaction_artifact')
+        if re.search(r'(?<!\w)تم(?!\w)', target): flags.append('informal_tum')
+        context = contexts.get(key)
+        budget = context.get('maxCells') if isinstance(context, dict) else None
+        width = cells(target)
+        rows.append({'key': key, 'role': 'direct_neighbor' if key in neighbor_keys else 'changed', 'en': source, 'ur': target, 'flags': flags, 'maxCells': budget, 'actual_cells': width, 'actual_overflow': isinstance(budget, int) and width > budget, 'pseudo_30pct_cells': __import__('math').ceil(width * 1.30), 'pseudo_overflow': isinstance(budget, int) and __import__('math').ceil(width * 1.30) > budget, 'approx_help_cells': width if ns == 'wire.slash' else None, 'approx_help_overflow_risk': ns == 'wire.slash' and width > 55})
+
+# Prove the remediated credential noun is exactly the established native plural, not a new spelling.
+values = json.loads((ROOT / 'ur' / 'wire.errors.settings.json').read_text())
+plural = values['wire.errors.settings.credential_retrieve_failed'].split(' حاصل', 1)[0]
+inline = values['wire.errors.settings.inline_credentials']
+credential = {
+    'established_native_plural': plural,
+    'inline_uses_exact_native_plural': f'ان لائن {plural} یا کوئری پیرامیٹرز' in inline,
+    'inline_literal_artifact_count': inline.lower().count('[redacted]'),
+    'inline_safety_predicates_preserved': 'ان لائن' in inline and 'کوئری پیرامیٹرز نہ ہوں' in inline,
+    'all_scoped_literal_artifact_count': sum(r['ur'].lower().count('[redacted]') for r in rows),
+}
+# Fit is evaluated only for changed /help values and explicitly budgeted scoped values.
+fit = {
+    'explicit_maxCells_scoped_count': sum(isinstance(r['maxCells'], int) for r in rows),
+    'actual_overflow_count': sum(r['actual_overflow'] for r in rows),
+    'pseudo_30pct_overflow_count': sum(r['pseudo_overflow'] for r in rows),
+    'changed_approx_help_count': sum(r['role'] == 'changed' and r['approx_help_cells'] is not None for r in rows),
+    'changed_approx_help_overflow_risks': [{'key': r['key'], 'cells': r['approx_help_cells'], 'approx_guide_cells': 55} for r in rows if r['role'] == 'changed' and r['approx_help_overflow_risk']],
+}
+summary = {
+    'old_commit': scope['old_commit'], 'new_commit': scope['new_commit'],
+    'changed_key_count': scope['changed_key_count'], 'direct_neighbor_count': scope['direct_neighbor_count'], 'review_key_count': len(rows),
+    'flag_counts': dict(Counter(flag for r in rows for flag in r['flags'])),
+    'credential': credential, 'fit': fit,
+    'namespace_hashes': [{**{k: n[k] for k in ['namespace', 'en_sha256', 'ur_sha256', 'context_sha256']}, 'changed_keys_reviewed': n['changed_key_count'], 'direct_neighbors_reviewed': sum(k.startswith(n['namespace'] + '.') for k in neighbor_keys)} for n in scope['changed_namespaces']],
+}
+(OUT / 'verification.json').write_text(json.dumps({**summary, 'rows': rows}, ensure_ascii=False, indent=2) + '\n')
+(OUT / 'verification-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(summary, ensure_ascii=False, indent=2))

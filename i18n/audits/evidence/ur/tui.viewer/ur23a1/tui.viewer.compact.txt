@@ -1,0 +1,21 @@
+tui.viewer.title | file viewer | فائل ویور
+tui.viewer.description | View a local text file | مقامی ٹیکسٹ فائل دیکھیں
+tui.viewer.usage | Usage: /view <path> | استعمال: /view <path>
+tui.viewer.loading | reading… | پڑھا جا رہا ہے…
+tui.viewer.legend | ↑↓←→ · PgUp/PgDn · Home/End
+w wrap · r reload · y copy path · o open externally · esc close | ↑↓←→ · PgUp/PgDn · Home/End
+w سطریں لپیٹیں · r دوبارہ لوڈ کریں · y پاتھ کاپی کریں · o بیرونی ایپ میں کھولیں · esc بند کریں
+tui.viewer.truncated | Preview truncated — limit: 1 MiB / 20,000 lines | پیش نظارہ مختصر کر دیا گیا — حد: 1 MiB / 20,000 سطریں
+tui.viewer.unreadable | Cannot read this file — missing, unreadable, or outside permitted roots | یہ فائل پڑھی نہیں جا سکتی — موجود نہیں، ناقابلِ قرأت ہے، یا اجازت شدہ روٹ ڈائریکٹریوں سے باہر ہے
+tui.viewer.unsupported | This file type has no inline preview — open it externally | اس قسم کی فائل کے لیے یہاں کوئی پیش نظارہ دستیاب نہیں — اسے بیرونی ایپ میں کھولیں
+tui.viewer.binary | Cannot preview a binary file | بائنری فائل کا پیش نظارہ نہیں کیا جا سکتا
+tui.viewer.changed | This file changed since it was listed — list it again before opening | یہ فائل فہرست میں دکھائے جانے کے بعد بدل گئی ہے — کھولنے سے پہلے فائلوں کی فہرست دوبارہ دیکھیں
+tui.viewer.copied | Path copied | پاتھ کاپی ہو گیا
+tui.viewer.copy_failed | Clipboard unavailable — path: {path} | کلپ بورڈ دستیاب نہیں — پاتھ: {path}
+tui.viewer.open_failed | Could not open this file externally | یہ فائل بیرونی ایپ میں نہیں کھل سکی
+tui.viewer.kind_code | code | کوڈ
+tui.viewer.kind_markdown | markdown | Markdown
+tui.viewer.kind_text | text | ٹیکسٹ
+tui.viewer.header | {path} · {kind} · {size} B | {path} · {kind} · {size} B
+tui.viewer.wrap_on | Wrapping on | سطریں لپیٹنا چالو
+tui.viewer.wrap_off | Wrapping off | سطریں لپیٹنا بند

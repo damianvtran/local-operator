@@ -1,0 +1,292 @@
+tui.review.activity_close
+EN "closed"
+UR "بند کیا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "act word: closed"}
+tui.review.activity_comment
+EN "commented"
+UR "تبصرہ کیا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "act word: commented"}
+tui.review.activity_edit
+EN "edited"
+UR "ترمیم کی"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "act word: edited"}
+tui.review.activity_merge
+EN "merged"
+UR "merge کیا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "act word: merged"}
+tui.review.activity_push
+EN "pushed"
+UR "push کیا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "act word: pushed"}
+tui.review.activity_ready
+EN "marked ready"
+UR "تیار نشان زد کیا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "act word: marked ready"}
+tui.review.activity_review
+EN "reviewed"
+UR "جائزہ لیا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "act word: reviewed"}
+tui.review.activity_you
+EN "you {acts}"
+UR "آپ نے {acts}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "trailing tag for acts this session performed; {acts} is a joined list"}
+tui.review.age_days
+EN "{amount, plural, one {updated # d ago} other {updated # d ago}}"
+UR "{amount, plural, one {# d پہلے اپ ڈیٹ ہوا} other {# d پہلے اپ ڈیٹ ہوا}}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "updated tail in days; # is the count; `d` stays short"}
+tui.review.age_hours
+EN "{amount, plural, one {updated # h ago} other {updated # h ago}}"
+UR "{amount, plural, one {# h پہلے اپ ڈیٹ ہوا} other {# h پہلے اپ ڈیٹ ہوا}}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "updated tail in hours; # is the count; `h` stays short"}
+tui.review.age_just_now
+EN "updated just now"
+UR "ابھی اپ ڈیٹ ہوا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "updated tail under a minute old"}
+tui.review.age_minutes
+EN "{amount, plural, one {updated # min ago} other {updated # min ago}}"
+UR "{amount, plural, one {# min پہلے اپ ڈیٹ ہوا} other {# min پہلے اپ ڈیٹ ہوا}}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "updated tail in minutes; # is the count"}
+tui.review.checked_just_now
+EN "Checked just now"
+UR "ابھی چیک ہوا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "settled receipt after a refresh pass"}
+tui.review.ci_failing
+EN "{count, plural, one {# failing} other {# failing}}"
+UR "{count, plural, one {# ناکام} other {# ناکام}}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "CI clause when the host reported a failing count"}
+tui.review.ci_failing_status
+EN "CI failing"
+UR "CI ناکام"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "CI clause when only the status word failed"}
+tui.review.ci_no_checks
+EN "No checks yet"
+UR "ابھی کوئی چیک نہیں"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "CI clause when no checks exist yet"}
+tui.review.ci_passed_count
+EN "{passed}/{total} passed"
+UR "{passed}/{total} کامیاب"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "CI clause with the host's own counts; both numbers are host data"}
+tui.review.ci_passed_status
+EN "CI passed"
+UR "CI کامیاب"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "CI clause for a passed status with no counts"}
+tui.review.ci_pending
+EN "CI pending"
+UR "CI منتظر"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "CI clause for a pending status with no counts"}
+tui.review.ci_running
+EN "CI running"
+UR "CI جاری"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "CI clause when jobs are still running"}
+tui.review.comments_count
+EN "{count, plural, one {# comment} other {# comments}}"
+UR "{count, plural, one {# تبصرہ} other {# تبصرے}}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "comment total beside the other meta figures"}
+tui.review.empty_body
+EN "Pull requests and merge requests this conversation opens or mentions will appear here."
+UR "اس گفتگو کی کھولی یا مذکور pull درخواستیں اور merge درخواستیں یہاں آئیں گی۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "empty-state explanation of what will appear"}
+tui.review.empty_header
+EN "No code reviews yet"
+UR "ابھی کوئی کوڈ جائزہ نہیں"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "empty-state heading; a claim about an answer, not a failure"}
+tui.review.error_body
+EN "Nothing was lost — the conversation's record is unchanged."
+UR "کچھ نہیں کھویا — گفتگو کا ریکارڈ پہلے جیسا ہے۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "reassures that the conversation itself is untouched"}
+tui.review.error_detail
+EN "{error}"
+UR "{error}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "the technical failure; {error} is the exception text, never translated"}
+tui.review.error_header
+EN "Code reviews could not be read."
+UR "کوڈ جائزے پڑھے نہیں جا سکے۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "index-read failure heading"}
+tui.review.error_retry
+EN "Press r to try again."
+UR "دوبارہ کوشش کے لیے r دبائیں۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "retry hint; `r` is the key token, keep it in situ"}
+tui.review.group_mentioned
+EN "Mentioned"
+UR "مذکور"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "group header for mentioned rows"}
+tui.review.group_opened
+EN "Opened"
+UR "کھولی گئیں"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "group header for opened/unknown/inherited rows"}
+tui.review.hint_back
+EN "back"
+UR "واپس"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "footer hint label beside esc"}
+tui.review.hint_move
+EN "move"
+UR "منتقلی"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "footer hint label beside the arrow keys"}
+tui.review.hint_open
+EN "open"
+UR "کھولیں"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "footer hint label beside enter"}
+tui.review.hint_refresh
+EN "refresh"
+UR "تازہ کریں"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "footer hint label beside the r key"}
+tui.review.lane_awaiting_rereview
+EN "{state} · awaiting re-review"
+UR "{state} · دوبارہ جائزے کا منتظر"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "tail appended to remediation posted; keeps the state word"}
+tui.review.lane_code
+EN "Code"
+UR "کوڈ"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane display name for the agent lane"}
+tui.review.lane_design
+EN "Design"
+UR "ڈیزائن"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane display name for the design lane"}
+tui.review.lane_no_review
+EN "No agent review yet"
+UR "ابھی ایجنٹ کا جائزہ نہیں"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "clause for an open request with no agent review yet"}
+tui.review.lane_qa
+EN "QA"
+UR "QA"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane display name for the QA lane (an acronym in every locale)"}
+tui.review.lane_round
+EN "Round {round} · {state}"
+UR "راؤنڈ {round} · {state}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "full lane clause with its round number"}
+tui.review.lane_stale
+EN "stale"
+UR "پرانا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "freshness tail when neither SHA is known"}
+tui.review.lane_stale_head
+EN "stale — reviewed {reviewed}, head {head}"
+UR "پرانا — جائزہ {reviewed}، head {head}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "freshness tail naming both short SHAs"}
+tui.review.lane_stale_reviewed
+EN "stale — reviewed {reviewed}"
+UR "پرانا — جائزہ {reviewed}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "freshness tail with only the reviewed SHA"}
+tui.review.lane_state_clean
+EN "clean"
+UR "صاف"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane state word: clean"}
+tui.review.lane_state_findings_open
+EN "findings open"
+UR "مسائل کھلے ہیں"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane state word: findings open"}
+tui.review.lane_state_remediation_posted
+EN "remediation posted"
+UR "اصلاحی جواب آ گیا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane state word: remediation posted"}
+tui.review.lane_state_terminal
+EN "terminal"
+UR "حتمی"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane state word: terminal"}
+tui.review.lane_state_unstated
+EN "reviewed — verdict not stated"
+UR "جائزہ ہوا — فیصلہ نہیں دیا گیا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane state word when the verdict was not stated"}
+tui.review.lane_ux
+EN "UX"
+UR "UX"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "lane display name for the UX lane (an acronym in every locale)"}
+tui.review.link_only
+EN "Link only"
+UR "صرف لنک"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "caption for a row with no fetched state"}
+tui.review.loading
+EN "Loading code reviews…"
+UR "کوڈ جائزے لوڈ ہو رہے ہیں…"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "cold-read loading line; the ellipsis is part of the copy"}
+tui.review.notice_cooling
+EN "Cooling — this host is rate-limited; nothing was fetched yet."
+UR "وقفہ — میزبان پر درخواستوں کی حد ہے؛ ابھی کچھ نہیں لایا گیا۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "row notice while the host's rate-limit window is closed"}
+tui.review.notice_fetch_failed
+EN "Couldn't fetch this pass — will retry."
+UR "یہ بار ڈیٹا نہیں آ سکا — دوبارہ کوشش ہوگی۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "row notice for a failed fetch pass that will retry"}
+tui.review.notice_refresh_error
+EN "Couldn't refresh: {error}"
+UR "تازہ نہیں ہو سکا: {error}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "row notice for a failed refresh; {error} is the backend sentence"}
+tui.review.notice_stale
+EN "Stale — last known state, not current."
+UR "پرانا ڈیٹا — آخری معلوم حالت، موجودہ نہیں۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "row notice for stale data with no recorded failure"}
+tui.review.notice_stale_error
+EN "Stale — last known, not current: {error}"
+UR "پرانا ڈیٹا — آخری معلوم، موجودہ نہیں: {error}"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "row notice for stale data whose last attempt failed; {error} is the backend sentence"}
+tui.review.refreshing
+EN "Refreshing code reviews…"
+UR "کوڈ جائزے تازہ ہو رہے ہیں…"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "status while `r`'s forge pass is in flight"}
+tui.review.relation_inherited
+EN "inherited"
+UR "وراثت میں ملا"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "relation tag for a row inherited from a fork"}
+tui.review.relation_subagent
+EN "via subagent"
+UR "ذیلی ایجنٹ کے ذریعے"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "via tag with no path or name"}
+tui.review.relation_subagent_named
+EN "via subagent {name}"
+UR "ذیلی ایجنٹ {name} کے ذریعے"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "via tag falling back to the agent role or label"}
+tui.review.relation_subagent_path
+EN "via subagent {path}"
+UR "ذیلی ایجنٹ {path} کے ذریعے"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "via tag naming the delegation path; `›` is a separator"}
+tui.review.relation_unknown
+EN "unknown — possibly opened"
+UR "نامعلوم — شاید کھولی گئی"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "relation tag for a possible open the evidence did not prove"}
+tui.review.relation_unknown_title
+EN "Possibly opened by this session; the evidence did not prove it was."
+UR "شاید اس سیشن نے کھولی؛ ثبوت سے یقینی نہیں۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "the longer sentence behind the unknown relation tag"}
+tui.review.row_fetching
+EN "Fetching current state…"
+UR "موجودہ حالت لی جا رہی ہے…"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "loading line inside a row whose first read has not resolved"}
+tui.review.scan_failed
+EN "Couldn't scan this conversation; showing what was already recorded."
+UR "گفتگو اسکین نہیں ہو سکی؛ پہلا محفوظ ریکارڈ دکھایا جا رہا ہے۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "one-line page status when the transcript scan failed but recorded rows are still shown"}
+tui.review.session_unavailable
+EN "No session is open yet."
+UR "ابھی کوئی سیشن کھلا نہیں۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "refusal when /review runs before a session exists"}
+tui.review.slash_help
+EN "Review this session's pull and merge requests"
+UR "اس سیشن کی pull اور merge درخواستوں کا جائزہ لیں"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "one-line description in /help and the command picker"}
+tui.review.state_closed
+EN "Closed"
+UR "بند"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "state pill for a closed request"}
+tui.review.state_draft
+EN "Draft"
+UR "مسودہ"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "state pill; draft wins over open"}
+tui.review.state_merged
+EN "Merged"
+UR "merge شدہ"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "state pill for a merged request"}
+tui.review.state_open
+EN "Open"
+UR "کھلی"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "state pill for an open request"}
+tui.review.state_unknown
+EN "Unknown"
+UR "نامعلوم"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "state pill when the forge word is empty"}
+tui.review.subtitle
+EN "Pull requests and merge requests this conversation opens or mentions."
+UR "اس گفتگو کی کھولی یا مذکور pull درخواستیں اور merge درخواستیں۔"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "one-line promise under the title and in the pane"}
+tui.review.title
+EN "Code review"
+UR "کوڈ جائزہ"
+CX {"role": "TUI code-review ledger page", "tone": "terse, operator-facing, one fact per sentence", "note": "page title, the ledger's name"}

@@ -1,0 +1,743 @@
+{
+  "scoped_key_count": 676,
+  "changed_key_count": 657,
+  "neighbor_key_count": 19,
+  "errors": {
+    "key_parity": [],
+    "arguments": [],
+    "selectors": [],
+    "non_nfc": [],
+    "bidi_controls": [],
+    "non_latin_digits": []
+  },
+  "technical_token_candidates": [
+    {
+      "key": "wire.settings.shell_environment_inherit.help"
+    },
+    {
+      "key": "wire.settings.bash_shell.help"
+    }
+  ],
+  "plural_message_count": 8,
+  "plural_samples": [
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.context.messages",
+      "count": 0,
+      "text": "اس سوال کے بعد آپ کے 0 پیغامات (آخری 19:36)",
+      "error": null
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.context.messages",
+      "count": 1,
+      "text": "اس سوال کے بعد آپ کا 1 پیغام (آخری 19:36)",
+      "error": null
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.context.messages",
+      "count": 2,
+      "text": "اس سوال کے بعد آپ کے 2 پیغامات (آخری 19:36)",
+      "error": null
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.context.messages",
+      "count": 21,
+      "text": "اس سوال کے بعد آپ کے 21 پیغامات (آخری 19:36)",
+      "error": null
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.context.messages",
+      "count": 0,
+      "text": "0 پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+      "error": null
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.context.messages",
+      "count": 1,
+      "text": "1 پیغام آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+      "error": null
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.context.messages",
+      "count": 2,
+      "text": "2 پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+      "error": null
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.context.messages",
+      "count": 21,
+      "text": "21 پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_days",
+      "count": 0,
+      "text": "0 d پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_days",
+      "count": 1,
+      "text": "1 d پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_days",
+      "count": 2,
+      "text": "2 d پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_days",
+      "count": 21,
+      "text": "21 d پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_hours",
+      "count": 0,
+      "text": "0 h پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_hours",
+      "count": 1,
+      "text": "1 h پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_hours",
+      "count": 2,
+      "text": "2 h پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_hours",
+      "count": 21,
+      "text": "21 h پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_minutes",
+      "count": 0,
+      "text": "0 min پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_minutes",
+      "count": 1,
+      "text": "1 min پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_minutes",
+      "count": 2,
+      "text": "2 min پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.age_minutes",
+      "count": 21,
+      "text": "21 min پہلے اپ ڈیٹ ہوا",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.ci_failing",
+      "count": 0,
+      "text": "0 ناکام",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.ci_failing",
+      "count": 1,
+      "text": "1 ناکام",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.ci_failing",
+      "count": 2,
+      "text": "2 ناکام",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.ci_failing",
+      "count": 21,
+      "text": "21 ناکام",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.comments_count",
+      "count": 0,
+      "text": "0 تبصرے",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.comments_count",
+      "count": 1,
+      "text": "1 تبصرہ",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.comments_count",
+      "count": 2,
+      "text": "2 تبصرے",
+      "error": null
+    },
+    {
+      "namespace": "tui.review",
+      "key": "tui.review.comments_count",
+      "count": 21,
+      "text": "21 تبصرے",
+      "error": null
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key": "relay.session.tags.more",
+      "count": 0,
+      "text": "0 مزید ٹیگز",
+      "error": null
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key": "relay.session.tags.more",
+      "count": 1,
+      "text": "1 مزید ٹیگ",
+      "error": null
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key": "relay.session.tags.more",
+      "count": 2,
+      "text": "2 مزید ٹیگز",
+      "error": null
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key": "relay.session.tags.more",
+      "count": 21,
+      "text": "21 مزید ٹیگز",
+      "error": null
+    }
+  ],
+  "plural_render_errors": [],
+  "width": [
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.context.messages",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 60,
+      "cells": 118,
+      "fits": false,
+      "en_cells": 139,
+      "ur": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.answered_in_chat",
+      "mode": "static",
+      "maxCells": 34,
+      "cells": 21,
+      "fits": true,
+      "en_cells": 16,
+      "ur": "گفتگو میں جواب دے دیا"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.answered_in_chat_note",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 36,
+      "fits": true,
+      "en_cells": 39,
+      "ur": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.cancel",
+      "mode": "static",
+      "maxCells": 12,
+      "cells": 10,
+      "fits": true,
+      "en_cells": 6,
+      "ur": "منسوخ کریں"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.moot",
+      "mode": "static",
+      "maxCells": 34,
+      "cells": 13,
+      "fits": true,
+      "en_cells": 16,
+      "ur": "اب ضرورت نہیں"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.moot_note",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 27,
+      "fits": true,
+      "en_cells": 18,
+      "ur": "اب جواب کا انتظار نہیں ہوگا"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.open",
+      "mode": "static",
+      "maxCells": 12,
+      "cells": 10,
+      "fits": true,
+      "en_cells": 8,
+      "ur": "خارج کریں…"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.receipt",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 39,
+      "fits": true,
+      "en_cells": 25,
+      "ur": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 38,
+      "fits": true,
+      "en_cells": 28,
+      "ur": "خارج کیا گیا — گفتگو میں جواب موجود ہے"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.receipt_moot",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 28,
+      "fits": true,
+      "en_cells": 28,
+      "ur": "خارج کیا گیا — اب ضرورت نہیں"
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.title",
+      "mode": "static",
+      "maxCells": 24,
+      "cells": 17,
+      "fits": true,
+      "en_cells": 16,
+      "ur": "یہ سوال خارج کریں"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.context.messages",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 78,
+      "cells": 134,
+      "fits": false,
+      "en_cells": 139,
+      "ur": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "mode": "static",
+      "maxCells": 34,
+      "cells": 21,
+      "fits": true,
+      "en_cells": 16,
+      "ur": "گفتگو میں جواب دے دیا"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.answered_in_chat_note",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 36,
+      "fits": true,
+      "en_cells": 39,
+      "ur": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.fleet_gone",
+      "mode": "static",
+      "maxCells": 60,
+      "cells": 46,
+      "fits": true,
+      "en_cells": 48,
+      "ur": "یہ سوال متعلقہ گفتگو کے لاگ میں اب موجود نہیں۔"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.hint",
+      "mode": "static",
+      "maxCells": 40,
+      "cells": 32,
+      "fits": true,
+      "en_cells": 26,
+      "ur": "enter خارج کریں · esc منسوخ کریں"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.moot",
+      "mode": "static",
+      "maxCells": 34,
+      "cells": 13,
+      "fits": true,
+      "en_cells": 16,
+      "ur": "اب ضروری نہیں"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.moot_note",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 27,
+      "fits": true,
+      "en_cells": 18,
+      "ur": "اب جواب کا انتظار نہیں ہوگا"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.notice_answered_in_chat",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 38,
+      "fits": true,
+      "en_cells": 28,
+      "ur": "خارج کیا گیا — گفتگو میں جواب موجود ہے"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.notice_moot",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 28,
+      "fits": true,
+      "en_cells": 28,
+      "ur": "خارج کیا گیا — اب ضرورت نہیں"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.notice_no_reply",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 39,
+      "fits": true,
+      "en_cells": 25,
+      "ur": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.title",
+      "mode": "static",
+      "maxCells": 60,
+      "cells": 17,
+      "fits": true,
+      "en_cells": 16,
+      "ur": "یہ سوال خارج کریں"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.approvals",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 42,
+      "fits": true,
+      "en_cells": 50,
+      "ur": "ٹولز کا پہلے پوچھنا: /approvals <ask|auto>"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.classification_login",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 52,
+      "fits": true,
+      "en_cells": 53,
+      "ur": "اشارے چالو — lop login <radient|typesafe|openrouter>"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.classification_off",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 53,
+      "fits": true,
+      "en_cells": 57,
+      "ur": "اشارے بند — lop config edit classification.auto false"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.cmux",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 55,
+      "fits": true,
+      "en_cells": 52,
+      "ur": "cmux میں “کہاں کھلے” سے ورک اسپیس یا سرفیس مقرر ہوتا ہے"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.esc",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 37,
+      "fits": true,
+      "en_cells": 46,
+      "ur": "esc ایجنٹ روکتا ہے، سیشن ختم کیے بغیر"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.fork",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 56,
+      "fits": true,
+      "en_cells": 53,
+      "ur": "/fork شاخ بناتا ہے؛ /fork <message> الگ کام شروع کرتا ہے"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.fork_placement",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 54,
+      "fits": true,
+      "en_cells": 52,
+      "ur": "/settings → فورک → “فورک کہاں کھلے” سے مقام طے ہوتا ہے"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.hotkeys",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 38,
+      "fits": true,
+      "en_cells": 37,
+      "ur": "/settings → ہاٹ کیز سے یہ کلیدیں بدلیں"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.key_new_session",
+      "mode": "reserved_placeholder",
+      "maxCells": 32,
+      "cells": 28,
+      "fits": true,
+      "en_cells": 33,
+      "ur": "'{key}' سے نئی گفتگو شروع ہوتی ہے"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.key_resume",
+      "mode": "reserved_placeholder",
+      "maxCells": 32,
+      "cells": 24,
+      "fits": true,
+      "en_cells": 37,
+      "ur": "'{key}' سے حالیہ گفتگو کھولیں"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.mesh",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 50,
+      "fits": true,
+      "en_cells": 55,
+      "ur": "/network new <name> سے دوسرے ڈیوائسز کا میش بنائیں"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.model",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 51,
+      "fits": true,
+      "en_cells": 49,
+      "ur": "/model <provider>/<id> صرف اسی سیشن پر لاگو ہوتا ہے"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.paste",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 43,
+      "fits": true,
+      "en_cells": 50,
+      "ur": "ctrl+v سسٹم کلپ بورڈ سے تصویر منسلک کرتا ہے"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.resume",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 40,
+      "fits": true,
+      "en_cells": 52,
+      "ur": "/resume سے حالیہ سیشن وہیں سے جاری رکھیں"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.setup",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 55,
+      "fits": true,
+      "en_cells": 57,
+      "ur": "نئے ہیں؟ {login} براؤزر سائن ان ہے؛ کلید پیسٹ نہیں کرنی"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.shell",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 36,
+      "fits": true,
+      "en_cells": 43,
+      "ur": "خالی کمپوزر میں ! شیل کمانڈ چلاتا ہے"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.subagents",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 55,
+      "fits": true,
+      "en_cells": 54,
+      "ur": "متوازی کام کہیں؛ ایجنٹ کام ذیلی ایجنٹس میں بانٹ دیتا ہے"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.team",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 46,
+      "fits": true,
+      "en_cells": 48,
+      "ur": "/team <name> <message> مینیجر کو کام بھیجتا ہے"
+    },
+    {
+      "namespace": "wire.settings",
+      "key": "wire.settings.asks_lapsed_visible_for.help",
+      "mode": "static",
+      "maxCells": 58,
+      "cells": 48,
+      "fits": true,
+      "en_cells": 57,
+      "ur": "بلا جواب سوال آخری مہلت کے بعد کتنی دیر نظر آئے۔"
+    },
+    {
+      "namespace": "wire.settings",
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "mode": "static",
+      "maxCells": 29,
+      "cells": 22,
+      "fits": true,
+      "en_cells": 23,
+      "ur": "وقت ختم سوالات دکھائیں"
+    },
+    {
+      "namespace": "wire.settings",
+      "key": "wire.settings.session_compression.title",
+      "mode": "static",
+      "maxCells": 34,
+      "cells": 17,
+      "fits": true,
+      "en_cells": 22,
+      "ur": "ٹرانسکرپٹ کمپریشن"
+    },
+    {
+      "namespace": "wire.settings",
+      "key": "wire.settings.session_compression_after_days.label",
+      "mode": "static",
+      "maxCells": 29,
+      "cells": 25,
+      "fits": true,
+      "en_cells": 23,
+      "ur": "↳ اتنے دن بعد کمپریس کریں"
+    },
+    {
+      "namespace": "wire.settings",
+      "key": "wire.settings.session_compression_enabled.label",
+      "mode": "static",
+      "maxCells": 29,
+      "cells": 28,
+      "fits": true,
+      "en_cells": 24,
+      "ur": "پرانے ٹرانسکرپٹس کمپریس کریں"
+    },
+    {
+      "namespace": "wire.settings",
+      "key": "wire.settings.session_scratchpad.title",
+      "mode": "static",
+      "maxCells": 12,
+      "cells": 10,
+      "fits": true,
+      "en_cells": 10,
+      "ur": "Scratchpad"
+    },
+    {
+      "namespace": "wire.settings",
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "mode": "static",
+      "maxCells": 29,
+      "cells": 21,
+      "fits": true,
+      "en_cells": 27,
+      "ur": "Scratchpad حد (bytes)"
+    }
+  ],
+  "width_failures": [
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.context.messages",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 60,
+      "cells": 118,
+      "fits": false,
+      "en_cells": 139,
+      "ur": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}"
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.context.messages",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 78,
+      "cells": 134,
+      "fits": false,
+      "en_cells": 139,
+      "ur": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}"
+    }
+  ]
+}

@@ -1,0 +1,379 @@
+{
+  "schema": 1,
+  "record_kind": "auditor_receipt",
+  "locale": "ur",
+  "round": 2,
+  "date": "2026-10-24",
+  "status": "failed",
+  "verdict": "changes_requested",
+  "previous_revision": "2189b61739e08b5f219d317ead68b4a5f4cf709f",
+  "revision": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+  "delta": "2189b61739e08b5f219d317ead68b4a5f4cf709f..d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+  "scope": {
+    "changed_catalogues": 11,
+    "changed_keys_read": 657,
+    "direct_neighbor_catalogues": 1,
+    "direct_neighbor_keys_read": 19,
+    "total_scoped_keys_read": 676,
+    "unrelated_unchanged_namespaces_reaudited": false
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "5ebbaba9537e",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "served_model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "fallback": "none",
+    "date": "2026-10-24",
+    "result": "failed",
+    "findings": 2
+  },
+  "independence": {
+    "translator_sessions": [
+      "52136848d1fc",
+      "7a648afb0f8d",
+      "7c4a4229b011",
+      "ffc94c8cb17d"
+    ],
+    "integrator_session": "3f68f20b2cad",
+    "independent_from_all_translator_and_integrator_sessions": true,
+    "auditor_contributed_translation_or_remediation": false,
+    "auditor_edited_source_catalogues_ledger_or_eligibility": false
+  },
+  "hash_algorithm": "SHA-256 over exact UTF-8 file bytes; context_sha256 is null when English has no sidecar",
+  "all_current_scoped_en_ur_context_hashes_match_provenance": true,
+  "round_1_dispositions": {
+    "total": 10,
+    "resolved": 10,
+    "unresolved": 0,
+    "note": "UR-R1-008 resolved by masculine ٹیگ standardization in tui.tags; unchanged relay.session.tags is now consistent. Alternate semantically equivalent wording accepted for UR-R1-003, UR-R1-005 and UR-R1-010.",
+    "evidence": "round1-disposition-summary.json"
+  },
+  "ledger_contract": {
+    "source": "docs/design/i18n.md §6",
+    "auditor.findings": "unresolved BLOCKER/MAJOR only",
+    "blocker_count": 0,
+    "major_count": 2,
+    "minor_count": 5,
+    "nit_count": 0
+  },
+  "mechanical": {
+    "catalogue_check": {
+      "command": "/Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+      "exit_code": 0,
+      "actual_output": "check.py: catalogue checks: 0 problem(s)"
+    },
+    "scoped_keys_checked": 676,
+    "key_parity_problems": 0,
+    "icu_argument_parity_problems": 0,
+    "plural_selector_parity_problems": 0,
+    "non_nfc_values": 0,
+    "forbidden_bidi_control_values": 0,
+    "non_latin_digit_values": 0,
+    "plural_message_count": 8,
+    "plural_render_samples": 32,
+    "plural_render_errors": 0,
+    "cldr_samples": {
+      "0": "other",
+      "1": "one",
+      "2": "other",
+      "3": "other",
+      "21": "other"
+    },
+    "cldr_source": "Node Intl.PluralRules(\"ur\")",
+    "technical_token_raw_candidates": 2,
+    "technical_token_missing_after_review": 0,
+    "technical_review": "TOP is prose in ON TOP; /bin/sh. only absorbed sentence punctuation. Literal choice values provider/client/session are allowed identifiers, not leakage.",
+    "maxCells": {
+      "total": 47,
+      "static_passed": 43,
+      "static_failed": 0,
+      "reserved_placeholder_passed": 2,
+      "dynamic_wrap_or_clip": 2,
+      "dynamic_raw_over_cap": 2,
+      "unresolved_static_overflow": 0
+    },
+    "pseudo": {
+      "keys_checked": 676,
+      "argument_parity_errors": 0,
+      "plural_render_samples": 4,
+      "plural_render_errors": 0,
+      "static_width_cases": 8,
+      "static_over_budget_after_40_percent_stretch": 4,
+      "interpretation": "Synthetic parser/fit evidence only, not native/rendered RTL evidence."
+    },
+    "approximate_help_overflow": {
+      "risk_count": 4,
+      "keys": [
+        "wire.slash.agent",
+        "wire.slash.credential",
+        "wire.slash.fork",
+        "wire.slash.highlights"
+      ],
+      "measurements": [
+        {
+          "key": "wire.slash.agent",
+          "ur_cells": 72,
+          "en_cells": 69,
+          "delta": 3,
+          "ur": "ایجنٹس دیکھیں، کسی ایجنٹ کی قسم بدلیں، یا اس سیشن سے بطور ایجنٹ بات کریں"
+        },
+        {
+          "key": "wire.slash.credential",
+          "ur_cells": 55,
+          "en_cells": 44,
+          "delta": 11,
+          "ur": "اسپیس کے بعد خفیہ متن لکھیں/چسپاں کریں؛ متن چھپا رہے گا"
+        },
+        {
+          "key": "wire.slash.fork",
+          "ur_cells": 84,
+          "en_cells": 74,
+          "delta": 10,
+          "ur": "اس گفتگو کی شاخ بنائیں؛ --switch یہیں، --window کہیں اور؛ <message> سے کام شروع کریں"
+        },
+        {
+          "key": "wire.slash.highlights",
+          "ur_cells": 59,
+          "en_cells": 53,
+          "delta": 6,
+          "ur": "جواب کے نمایاں حصے منسوخ کریں، دوبارہ کوشش کریں یا رخ بدلیں"
+        }
+      ],
+      "disposition": "Reserved for rendered review; not a silent pass and not a hard maxCells failure."
+    }
+  },
+  "semantic": {
+    "accuracy_idiom_register_glossary_reviewed_for_every_scoped_value": true,
+    "hindi_danda_or_informal_tum_values": 0,
+    "exclamatory_register_violations": 0,
+    "findings_file": "ur-core.round2.findings.json",
+    "human_report": "ur-core.round2.findings.md"
+  },
+  "namespaces": [
+    {
+      "namespace": "cli.exec_remote_help",
+      "namespace_key_count": 11,
+      "scoped_keys_read": 3,
+      "changed_keys": 3,
+      "direct_neighbor": false,
+      "en_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "ur_sha256": "e12f432f8cf3015f6e852af79ca4688e8e8087727997a3f885eb2dd458b95296",
+      "context_sha256": "fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "relay.ask",
+      "namespace_key_count": 11,
+      "scoped_keys_read": 5,
+      "changed_keys": 5,
+      "direct_neighbor": false,
+      "en_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "ur_sha256": "534aa6d0f7a34c153a088695fa052cc2342fe716de96a0fb0bfc9e5dffba863c",
+      "context_sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.asks",
+      "namespace_key_count": 11,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "direct_neighbor": false,
+      "en_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "ur_sha256": "dfa37a3f780b3bc257942a06d7d24a2b40e2c9f75d2641064abd0e84fd201b4d",
+      "context_sha256": "e09cd8e796359ab8c4d8de2fd5a59bb990c76f8488c28846cfb1623610507362",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.review",
+      "namespace_key_count": 73,
+      "scoped_keys_read": 2,
+      "changed_keys": 2,
+      "direct_neighbor": false,
+      "en_sha256": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+      "ur_sha256": "175caf5610f2837c37e49fed9406339e93a3e1965820b664b03b5ed41658a996",
+      "context_sha256": "b879498a3ba2debfac6ec65a640a75b8d53e71073a1d32676dc41f7325dbc202",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.tags",
+      "namespace_key_count": 27,
+      "scoped_keys_read": 6,
+      "changed_keys": 6,
+      "direct_neighbor": false,
+      "en_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "ur_sha256": "850ae391162ea317f72352f1788e44822d6ed7005f284d193cdde29510eb6f64",
+      "context_sha256": null,
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.viewer",
+      "namespace_key_count": 19,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "direct_neighbor": false,
+      "en_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "ur_sha256": "9334ed44af55fe3d00940ae5914d937d270055f1def9b5796d0df13ca4374a1b",
+      "context_sha256": "ed4535ceb6e3119c8a3b35f0aa0570ed0398d61c212a43f35bc6d2aa9ac389ae",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.welcome",
+      "namespace_key_count": 30,
+      "scoped_keys_read": 2,
+      "changed_keys": 2,
+      "direct_neighbor": false,
+      "en_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "ur_sha256": "db161318b2cf14288b928fc9aa9eaa9d597ea482e7a45dd88e7b989f8504718d",
+      "context_sha256": "bfd46d9dbcc5c4dfbee6a3fd93e47264f17f123e01ddf84a7aae99869c41debd",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.errors.settings",
+      "namespace_key_count": 12,
+      "scoped_keys_read": 4,
+      "changed_keys": 4,
+      "direct_neighbor": false,
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "b15d7f47abe473cfd019e1599e0d84569b9ceeec9159f1f78dc7391fefb1eda2",
+      "context_sha256": null,
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "namespace_key_count": 43,
+      "scoped_keys_read": 21,
+      "changed_keys": 21,
+      "direct_neighbor": false,
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "155435eb060235e868761a235e22d55423a502daab51c61b62eb4d5f135245dc",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean_with_followups",
+      "finding_ids": [
+        "UR-R2-006"
+      ],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 1,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.settings",
+      "namespace_key_count": 818,
+      "scoped_keys_read": 589,
+      "changed_keys": 589,
+      "direct_neighbor": false,
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "24be0297765a8cf23a7c0cfb25f2cb8a0cb9d4e841259986cc87cc7a6df2d1f7",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "hashes_rederived_and_matched": true,
+      "verdict": "failed",
+      "finding_ids": [
+        "UR-R2-001",
+        "UR-R2-002",
+        "UR-R2-003",
+        "UR-R2-005",
+        "UR-R2-007"
+      ],
+      "unresolved_blocker_major": 2,
+      "unresolved_minor": 3,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.slash",
+      "namespace_key_count": 52,
+      "scoped_keys_read": 23,
+      "changed_keys": 23,
+      "direct_neighbor": false,
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "1ce934002aa7bd474a64df26817ab7ebc8ac542d25e01ac908f54042ebb4838e",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean_with_followups",
+      "finding_ids": [
+        "UR-R2-004"
+      ],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 1,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "relay.session.tags",
+      "namespace_key_count": 19,
+      "scoped_keys_read": 19,
+      "changed_keys": 0,
+      "direct_neighbor": true,
+      "en_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "ur_sha256": "4f0fab7f40bacc152b1cabba0244372b8d8dec40213c778ef8c417ac6be242aa",
+      "context_sha256": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    }
+  ],
+  "companions": [
+    "current-hashes.json",
+    "runtime-mechanical.json",
+    "pseudo-evidence.json",
+    "help-overflow-risks.json",
+    "typography.json",
+    "round1-disposition-summary.json",
+    "ur-core.round2.findings.json",
+    "ur-core.round2.findings.md",
+    "ur-core.round2.semantic.json"
+  ],
+  "pending_gates": [
+    "Remediate UR-R2-001 and UR-R2-002 and obtain a fresh scoped independent audit before any passed ledger row.",
+    "Second independent high-visibility/safety audit remains separate and unclaimed.",
+    "Native rendered RTL/bidi/shaping and long-text/fallback evidence remains separate and unclaimed.",
+    "Rendered /help review for wire.slash.agent, credential, fork and highlights."
+  ],
+  "source_state": {
+    "git_status_porcelain": "",
+    "ledger_sha256": "bfc623b0b698e2f6e6dfc0446a0697ce34b26dec2c6f56d922da34ae5be4aef4",
+    "shipped_sha256": "8c37aff60b6cb448a2c1f638b525d24c98b7bb1870fd44d0cbbe2ca12a476d8c",
+    "modified_by_auditor": false
+  }
+}
