@@ -190,8 +190,9 @@ def urdu_app_corpus(tmp_path, monkeypatch):
             "tui.welcome.status.update": "ورژن {version} پر اپ ڈیٹ کریں — /update",
             # Real `feat/i18n-ur-core@1c6c7d0d` bytes for the command-bearing
             # surfaces (QA Q-6); the fixture exists because this branch has no
-            # ur package, and these two strings are copied verbatim.
+            # ur package, and every string added below is copied verbatim.
             "tui.welcome.status.login_required": "آپ لاگ ان نہیں ہیں — /login {provider}",
+            "tui.welcome.status.login_required.short": "آپ لاگ ان نہیں ہیں",
             "tui.welcome.tip.mesh": "/network new <name> سے دوسرے ڈیوائسز کا میش بنائیں",
             "tui.welcome.tip.model": "/model <provider>/<id> صرف اسی سیشن پر لاگو ہوتا ہے",
             "tui.welcome.tip.team": "/team <name> <message> مینیجر کو کام بھیجتا ہے",
@@ -733,8 +734,10 @@ def test_real_welcome_tip_and_login_commands_are_ltr_islands(urdu_app_corpus) ->
         assert "<network new <name/" not in tip, tip
 
     login = welcome._t(tui_welcome.status_login_required(provider="radient"))
-    assert LRI + "/login" + PDI in login, login
-    assert LRI + "radient" + PDI in login, login
+    # The command is ONE island: `/login` and its provider cannot be two.
+    assert LRI + "/login radient" + PDI in login, login
+    assert LRI + "/login" + PDI not in login, login
+    assert login.count(LRI) == 1, login
     _assert_balanced(login)
     rows = [
         line.plain
@@ -742,8 +745,16 @@ def test_real_welcome_tip_and_login_commands_are_ltr_islands(urdu_app_corpus) ->
     ]
     login_rows = [line for line in rows if "/login" in line]
     assert login_rows, rows
-    assert LRI + "/login" + PDI in login_rows[0], login_rows[0]
-    assert LRI + "radient" + PDI in login_rows[0], login_rows[0]
+    assert LRI + "/login radient" + PDI in login_rows[0], login_rows[0]
+    assert login_rows[0].count(LRI) == 1, login_rows[0]
+    # Narrow width keeps the fact and drops the command WHOLE (unchanged).
+    narrow = [
+        line.plain
+        for _, line in welcome._status_rows(welcome.WelcomeInfo(missing_credential="radient"), 36)
+    ]
+    narrow_login = [line for line in narrow if "لاگ ان" in line]
+    assert narrow_login, narrow
+    assert "/login" not in narrow_login[0], narrow_login[0]
 
     # Nested declarations (`/fork` inside `/fork <message>`) stay ONE island.
     fork = welcome._t(tui_welcome.tip_fork())

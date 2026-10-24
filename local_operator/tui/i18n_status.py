@@ -140,19 +140,46 @@ def technical_parameter_spans(
     return tuple(sorted(spans, key=lambda span: span.start))
 
 
+def extract_command_spans(
+    text: str, commands: Sequence[str], params: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Format declared command templates, keeping multi-word commands WHOLE.
+
+    ``/login {provider}`` is ONE instruction. Declaring ``/login`` and
+    ``provider`` separately produces neighbouring LTR islands, which UAX#9
+    orders right-to-left against each other and renders ``radient /login``
+    (design D1, review R3-1). A template is only materialised when every field
+    it needs is a parameter of the message; a missing value yields nothing
+    rather than a half command.
+    """
+    rendered: list[str] = []
+    for template in commands:
+        try:
+            command = template.format(**params)
+        except (KeyError, IndexError, ValueError):
+            continue
+        if command and command in text:
+            rendered.append(command)
+    return tuple(rendered)
+
+
 def _record_display(
     record: RenderedMessage,
     message: Msg,
     technical: Sequence[TechnicalSpan],
     technical_params: Sequence[str],
     technical_literals: Sequence[str],
+    technical_commands: Sequence[str] = (),
 ) -> Text:
     if record.source_locale != "ur":
         return Text(record.text)
+    literals = tuple(technical_literals) + extract_command_spans(
+        record.text, technical_commands, message.params
+    )
     spans = (
         tuple(technical)
         + technical_parameter_spans(record, message.params, technical_params)
-        + technical_literal_spans(record, technical_literals)
+        + technical_literal_spans(record, literals)
     )
     return Text(isolated_status_text(record, spans))
 
@@ -162,14 +189,21 @@ def display_tr(
     *,
     technical_params: Sequence[str] = (),
     technical_literals: Sequence[str] = (),
+    technical_commands: Sequence[str] = (),
 ) -> Callable[[Msg], str]:
-    """Build the conventional per-namespace resolver for terminal paint."""
+    """Build the conventional per-namespace resolver for terminal paint.
+
+    ``technical_commands`` are format templates over the message's params and
+    become ONE island each (`"/login {provider}"`), for commands whose words
+    must not be laid out as separate LTR runs.
+    """
     resolve = tr_record(namespace)
     classified = tuple(technical_params)
     literals = tuple(technical_literals)
+    commands = tuple(technical_commands)
 
     def display(message: Msg) -> str:
-        return _record_display(resolve(message), message, (), classified, literals).plain
+        return _record_display(resolve(message), message, (), classified, literals, commands).plain
 
     return display
 
@@ -181,10 +215,13 @@ def message_display(
     technical: Sequence[TechnicalSpan] = (),
     technical_params: Sequence[str] = (),
     technical_literals: Sequence[str] = (),
+    technical_commands: Sequence[str] = (),
 ) -> Text:
     """Paint one catalogued message with source-aware Urdu and LTR islands."""
     record = render_record(message.code, message.params, locale=locale or active_locale())
-    return _record_display(record, message, technical, technical_params, technical_literals)
+    return _record_display(
+        record, message, technical, technical_params, technical_literals, technical_commands
+    )
 
 
 def technical_display(text: str, *, locale: str | None = None) -> Text:
