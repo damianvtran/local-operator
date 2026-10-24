@@ -28,6 +28,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Pin ``local_operator.mcp.manager`` at collection time. The manager binds
+# ``load_all_mcp_configs`` with a module-level import, so whichever import of
+# ``manager`` happens FIRST fixes that binding for the rest of the process. The
+# MCP login/logout tests below monkeypatch
+# ``local_operator.mcp.config.load_all_mcp_configs``; if one of them is what
+# first imports ``manager``, the manager keeps that test's lambda permanently.
+# That leak surfaced in CI shard 4: after this file ran,
+# ``test_session_factory.py::test_dispose_abandons_a_classification_call_still_in_flight``
+# triggered MCP discovery and logged ``TypeError: ...lambda() got an unexpected
+# keyword argument 'boundary'``, which that test asserts is absent (it fails on
+# any warning). Importing here, before any patch is applied, pins the real
+# function.
+import local_operator.mcp.manager  # noqa: F401  (import-order pin; see above)
 from local_operator import cli
 from local_operator.cli import (
     agents_create_command,
