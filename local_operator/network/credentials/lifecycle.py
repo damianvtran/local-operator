@@ -1033,7 +1033,7 @@ def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, A
     """
     from local_operator.network.credentials import sync as sync_mod
     from local_operator.network.credentials.placement import PlacementDocument
-    from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
+    from local_operator.network.credentials.types import is_device_bound_provider
 
     root = getattr(server, "root", None)
     self_device = str(getattr(getattr(server, "identity", None), "device_id", "") or "")
@@ -1087,8 +1087,8 @@ def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, A
         entry = document.entry(key)
         if (
             entry is None
-            or key in DEVICE_BOUND_PROVIDERS
-            or entry.provider in DEVICE_BOUND_PROVIDERS
+            or is_device_bound_provider(key)
+            or is_device_bound_provider(entry.provider)
         ):
             continue
         native = _native_contexts(root, str(entry.provider or key))

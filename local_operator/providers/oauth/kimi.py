@@ -10,6 +10,11 @@ Traps preserved:
   (mode 0600) so the account stays bound to one "device".
 - ``slow_down`` both adds 5 s AND honours a larger returned ``interval``.
 - Refresh reuses the old refresh token when the response omits a new one.
+- A grant refreshes against the host that ISSUED it (``auth_host`` in the
+  payload), never against whatever the login default happens to be today. Rows
+  written before the host split carry no host: their explicit env override is
+  retained, otherwise the historical .com default applies. Exactly one refresh
+  request is made; a sibling host is never guessed from a failed response.
 """
 
 from __future__ import annotations
@@ -40,7 +45,24 @@ from local_operator.providers.oauth.device_code import (
 )
 
 CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
-DEFAULT_AUTH_HOST = "https://auth.kimi.com"
+#: The LOGIN default: kimi.ai is the international surface. auth.kimi.com is
+#: the mainland host and its browser flow routes Western accounts into a WeChat
+#: QR they cannot complete, which is why it is no longer what an unqualified
+#: `lop login kimi` reaches. Both hosts speak the same device-grant protocol
+#: with the same client id; only the host (and the user-facing verification
+#: site behind it) differs.
+DEFAULT_AUTH_HOST = "https://auth.kimi.ai"
+WECHAT_AUTH_HOST = "https://auth.kimi.com"
+#: Compatibility default, not an assertion about issuance: hostless rows from
+#: before the split normally used .com, but an explicit env override could have
+#: selected .ai or a custom host. Preserve such an override; otherwise use .com.
+LEGACY_AUTH_HOST = WECHAT_AUTH_HOST
+#: The only hosts a STORED payload may name. See :func:`_normalise_known_host`
+#: for why the set is closed rather than a URL-syntax check.
+KNOWN_AUTH_HOSTS = frozenset({DEFAULT_AUTH_HOST, WECHAT_AUTH_HOST})
+#: Payload key recording the issuing host. Refreshes read it so one account is
+#: not re-pointed at an IdP that never minted its grant.
+AUTH_HOST_KEY = "auth_host"
 DEVICE_AUTHORIZATION_PATH = "/api/oauth/device_authorization"
 TOKEN_PATH = "/api/oauth/token"
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
@@ -55,12 +77,55 @@ DEVICE_ID_FILENAME = "kimi-device-id"
 
 
 def auth_host() -> str:
-    """OAuth host with env overrides."""
+    """The LOGIN default host, with the operator's env overrides.
+
+    This is deliberately not what a refresh reads first: a refresh resolves the
+    host recorded on the credential so an already-issued grant keeps working
+    when the default moves. Env overrides stay the escape hatch for rows that
+    predate host recording.
+    """
     return (
         os.environ.get("KIMI_CODE_OAUTH_HOST")
         or os.environ.get("KIMI_OAUTH_HOST")
         or DEFAULT_AUTH_HOST
     )
+
+
+def _normalise_known_host(value: Any) -> str | None:
+    """The known host a stored payload names, else ``None``.
+
+    An ALLOWLIST, never a URL-syntax check. ``auth_host`` travels in the same
+    payload as the refresh token, which is a bearer secret; accepting whatever
+    URL a (hand-edited) payload carried would turn a local file edit into token
+    exfiltration. Only the two hosts this module ships can be addressed by a
+    stored value. The env override is read separately because it is the
+    operator's explicit instruction rather than data from a credential.
+    """
+    # Accept legacy runtime mappings that predate the typed credential model;
+    # absent/malformed values still resolve through env/legacy, never as hosts.
+    if not isinstance(value, str):
+        return None
+    host = value.strip().rstrip("/")
+    return host if host in KNOWN_AUTH_HOSTS else None
+
+
+def _refresh_host(creds: dict[str, Any]) -> str:
+    """The ONE host whose token endpoint may receive this refresh grant.
+
+    A valid recorded host wins over env. A hostless row retains an explicit
+    override, because old overrides could legitimately select .ai or a custom
+    host; absent one, .com is the historical default rather than a claim about
+    where every old grant was issued. A rejected response never triggers a
+    second-host guess: operators who deliberately used a non-default host must
+    keep that override until a new login records its issuer.
+    """
+    recorded = _normalise_known_host(creds.get(AUTH_HOST_KEY))
+    if recorded is not None:
+        return recorded
+    override = os.environ.get("KIMI_CODE_OAUTH_HOST") or os.environ.get("KIMI_OAUTH_HOST")
+    if override:
+        return override.rstrip("/")
+    return LEGACY_AUTH_HOST
 
 
 def _config_dir() -> Path:
@@ -133,9 +198,23 @@ async def login_kimi(
     signal: AbortSignal | None = None,
     http_client: httpx.AsyncClient | None = None,
     config_dir: Path | None = None,
+    host: str | None = None,
 ) -> dict[str, Any]:
-    """Run the RFC 8628 device flow against ``auth.kimi.com``."""
-    host = auth_host().rstrip("/")
+    """Run the RFC 8628 device flow against ``host`` (default :func:`auth_host`).
+
+    ``host`` is an explicit, keyword-only argument rather than another env
+    variable: the registry ships two login ENTRIES that differ only in which
+    IdP they address ("kimi" and "kimi-wechat"), and an entry must not mutate
+    process env to choose its host.
+
+    Both entries are alternative sign-ins for ONE stored Kimi credential: the
+    registry stores the row under ``kimi`` (``store_credentials_as``) and
+    ``auth_store._identity_key_for`` dedupes OAuth payloads to ``oauth:kimi``,
+    exactly as ``openai-device``/``openai`` share one slot. Signing in with the
+    other flavour therefore replaces this row rather than adding a second one.
+    """
+    host = (host or auth_host()).rstrip("/")
+
     headers = kimi_common_headers(get_or_create_device_id(config_dir))
     owns_client = http_client is None
     http = http_client or httpx.AsyncClient(timeout=30.0, headers=headers)
@@ -218,20 +297,56 @@ async def login_kimi(
             on_progress=callbacks.on_progress,
             interval_holder=poll_interval_holder,
         )
-        return _credentials_from_token(token, old_refresh=None)
+        creds = _credentials_from_token(token, old_refresh=None)
+        # Record the issuing host so refresh keeps talking to it even after the
+        # login default moves again (the same durability question as below).
+        creds[AUTH_HOST_KEY] = host
+        return creds
     finally:
         if owns_client:
             await http.aclose()
 
 
+async def login_kimi_wechat(
+    callbacks: LoginCallbacks,
+    *,
+    signal: AbortSignal | None = None,
+    http_client: httpx.AsyncClient | None = None,
+    config_dir: Path | None = None,
+) -> dict[str, Any]:
+    """The mainland/WeChat login entry: :func:`login_kimi` pinned to kimi.com.
+
+    A thin wrapper rather than a second device-flow implementation: the two
+    hosts speak the same protocol, and duplicating the polling/error mapping is
+    how the ``slow_down`` and terminal-error traps drift apart. Named here so
+    the registry can import the callable by name like every other login.
+    """
+    return await login_kimi(
+        callbacks,
+        signal=signal,
+        http_client=http_client,
+        config_dir=config_dir,
+        host=WECHAT_AUTH_HOST,
+    )
+
+
 async def refresh_kimi_token(
     creds: dict[str, Any], *, http_client: httpx.AsyncClient | None = None
 ) -> dict[str, Any]:
-    """Form-encoded refresh; reuses the old refresh token when none returns."""
-    host = auth_host().rstrip("/")
+    """Refresh against the host that ISSUED the grant, not today's login default.
+
+    The host is recorded on the credential at login/refresh and resolved by
+    :func:`_refresh_host`. Exactly ONE token POST is made: a failed response
+    must not send the grant to a guessed second IdP or let that sibling's
+    transient failure reclassify the original terminal/transient verdict.
+
+    Form-encoded refresh; reuses the old refresh token when none returns.
+    """
+    host = _refresh_host(creds)
     headers = kimi_common_headers()
     owns_client = http_client is None
     http = http_client or httpx.AsyncClient(timeout=30.0)
+
     try:
         response = await http.post(
             f"{host}{TOKEN_PATH}",
@@ -246,9 +361,13 @@ async def refresh_kimi_token(
         if owns_client:
             await http.aclose()
     if response.status_code != 200:
+        # Preserve the selected host's own terminal/transient classification.
         raise_for_refresh_failure("Kimi", response.status_code, response.text)
     merged = dict(creds)
     merged.update(_credentials_from_token(response.json(), old_refresh=creds.get("refresh")))
     # Preserve the original authorization timestamp across refreshes.
     merged["authorized_at"] = creds.get("authorized_at", merged["authorized_at"])
+    # Record the host that answered so later refreshes do not depend on env or
+    # the legacy default. A recorded host is echoed back unchanged.
+    merged[AUTH_HOST_KEY] = host
     return merged

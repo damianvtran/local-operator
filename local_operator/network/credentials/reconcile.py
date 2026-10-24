@@ -184,13 +184,13 @@ def provider_ok(provider: str) -> bool:
     that can never be projected is a permission that never delivers anything.
     """
     from local_operator.network.credentials.github import GITHUB_KEY
-    from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
+    from local_operator.network.credentials.types import is_device_bound_provider
 
     return (
         consent.PROVIDER.fullmatch(provider) is not None
         and provider != GITHUB_KEY
         and provider != "mcp-oauth"
-        and provider not in DEVICE_BOUND_PROVIDERS
+        and not is_device_bound_provider(provider)
     )
 
 
