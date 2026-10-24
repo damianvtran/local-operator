@@ -89,6 +89,7 @@ from local_operator.harness.types import (
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
+from .types import _CONVERSATION_MESSAGE_ID as _CANONICAL_MESSAGE_ID
 from .types import (
     CONVERSATION_ID_PATTERN,
     InvalidSendRecipient,
@@ -250,9 +251,13 @@ def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
 #: pattern lives in ``team_bridge.types`` so the two entry points cannot drift.
 _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: A conversation MESSAGE id is interpolated into the replies path the same
-#: way, so it is held to the minted grammar (the desktop route's
-#: ``_MESSAGE_ID``) before any client call.
-_CONVERSATION_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
+#: way, so it is held to the minted grammar before any client call. THE
+#: package's object, not a copy: this module used to compile its own literal
+#: requiring eight characters while ``types`` allows one, so the desktop route
+#: and this tool disagreed about which roots exist. Aliasing a compiled pattern
+#: is safe — ``re.Pattern`` is immutable and nothing here reassigns or
+#: identity-compares it.
+_CONVERSATION_MESSAGE_ID = _CANONICAL_MESSAGE_ID
 
 
 def _full_body_text(result: Any) -> str | None:
@@ -595,7 +600,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         channel_id = params.channel_id.strip()
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
             return _error("react needs a conversation id (bcv_…)")
-        if re.fullmatch(r"bcmsg_[0-9a-z]{8,64}", params.message_id) is None:
+        if _CONVERSATION_MESSAGE_ID.fullmatch(params.message_id) is None:
             return _error("react needs a conversation message id (bcmsg_…)")
         emoji = unicodedata.normalize("NFC", params.emoji)
         if not emoji or len(emoji.encode("utf-8")) > 128:
