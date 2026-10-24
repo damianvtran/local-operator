@@ -5,6 +5,10 @@ The UI lane's HTTP surfaces over :mod:`local_operator.team_bridge`:
 - ``GET  /v1/desktop/team-bridge/status``    — the eligibility/state read.
 - ``GET  /v1/desktop/team-bridge/settings``  — endpoint, consent record, policies.
 - ``PUT  /v1/desktop/team-bridge/settings``  — state changes (the consented write).
+  ``state="disabled"`` is the one-click **Turn off** of the default-on notice: after
+  the hub accepts it the runtime also persists the sticky local opt-out (see below).
+- ``POST /v1/desktop/team-bridge/onboarding/dismiss`` — mark the one-time
+  "Team Bridge is on for you" notice dismissed on this machine (never returns).
 - ``GET  /v1/desktop/team-bridge/directory`` — the organization's member rows,
   the frozen ``{members:[{account_id,display_label,role,bridge_enabled,
   bridge_state}]}`` shape, for the surface that chooses who an agent may reach.
@@ -23,6 +27,26 @@ server dark (``BRIDGE_ENABLED`` off, RFC §5.5) the upstream answers 503
 ``messaging_unavailable``; the STATUS route renders that as a state
 (``unavailable`` with the refusal), which is the fail-closed behaviour the
 contract asks for, and the other routes carry the §6.5 code through.
+
+DEFAULT-ON CONTRACT (``bridge_consent_v2``, the UI banner "Team Bridge is on for you").
+The enrolment itself is NOT a route: the runtime's status discipline performs it
+(``POST /v1/messaging/enrollment`` upstream) when the hub serves and accepts v2,
+the member is eligible with no endpoint and has not opted out here. These routes
+only expose what the banner needs, all ADDITIVE:
+
+* status ``default_on`` — ``{in_force, notice_pending}``: ``in_force`` the hub
+  serves+accepts v2 for this caller (the opt-out default applies);
+  ``notice_pending`` the one-time notice was not dismissed
+  (``team_bridge.onboarding != "seen"``). The banner shows when the surface is
+  state C, settings ``default_on`` is true and ``notice_pending`` is true.
+* status ``local.enabled`` — the COMPOSED switch: an explicit value wins; an
+  absent key reads ON only while ``in_force`` (``enabled_given``).
+* settings GET ``default_on`` — the endpoint's consent was recorded as
+  ``consented_via == "default_on"`` (the hub's own provenance, passed through
+  untouched in ``endpoint.consent`` as well).
+* the PUT's ``consented_via`` stays ``dialog | settings``: ``default_on`` is
+  server-asserted and a client surface can never claim it (a body carrying it is
+  a 422).
 
 NONE of the routes gate on local ``team_bridge.enabled``: the composed surface
 gate is capability × eligible × enabled and it is the RENDERER's (RFC §5.4), so a
@@ -484,6 +508,7 @@ async def status(
 
     from local_operator.team_bridge.client import (
         consent_for_display,
+        default_on_in_force,
         get_status_discipline,
         selected_tenant_id,
         surface_projection,
@@ -515,6 +540,7 @@ async def status(
     watcher.poll_now()
     local = TeamBridgeSettings.from_values(watcher.values)
     consent = consent_for_display(check)
+    in_force = default_on_in_force(check)
     # §5.6's A–G reading, computed ONCE (the same function the availability
     # record uses), so a renderer binds to the backend's policy instead of
     # re-deriving it. The onboarding row also needs the LOCAL dismissal flag:
@@ -552,9 +578,19 @@ async def status(
         "can_receive": projection["can_receive"],
         "can_decide": projection["can_decide"],
         "local": {
-            "enabled": local.enabled,
+            # The COMPOSED switch (see the module docstring): explicit wins, an
+            # absent key follows the served consent. v1-only hubs read exactly
+            # ``local.enabled`` as before.
+            "enabled": local.enabled_given(in_force),
             "onboarding": local.onboarding,
             "session": local.session,
+        },
+        # The default-on banner's inputs (module docstring). Flags only: the
+        # copy belongs to the renderer, and the full v2 text is already in
+        # ``consent.text`` for "Read what this means".
+        "default_on": {
+            "in_force": in_force,
+            "notice_pending": local.onboarding != "seen",
         },
         # The admission-gate receipt (§8, §13.9): screening is an INVARIANT of
         # this client, not a setting — no registered key can turn it off (a
@@ -638,6 +674,17 @@ async def get_settings(
         _raise_sign_in(exc)
     except BridgeRefusal as exc:
         _raise_bridge(exc)
+    # ADDITIVE: the hub's provenance verdict as a flag, so the banner does not
+    # re-derive it. ``endpoint.consent`` itself passes through untouched.
+    endpoint = payload.get("endpoint") if isinstance(payload, dict) else None
+    consent = endpoint.get("consent") if isinstance(endpoint, dict) else None
+    if isinstance(payload, dict):
+        payload = {
+            **payload,
+            "default_on": (
+                isinstance(consent, dict) and consent.get("consented_via") == "default_on"
+            ),
+        }
     return reply(payload)
 
 
@@ -696,6 +743,31 @@ async def put_settings(
         # the desktop plane's validation register.
         raise HTTPException(422, {"code": "invalid_request", "message": str(exc)}) from None
     return reply(payload)
+
+
+@router.post("/v1/desktop/team-bridge/onboarding/dismiss", response_model=CRUDResponse[Any])
+async def dismiss_onboarding(
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Mark the one-time notice seen on this machine; it never returns.
+
+    The smallest addition that lets the default-on banner be dismissed:
+    ``team_bridge.onboarding`` is internal state with no registry row (so
+    ``settings.edit`` cannot write it) and is client-local by design (RFC
+    §5.3) — no upstream call, no consent change, idempotent. Dismissing the
+    notice does not turn Team Bridge off or on.
+    """
+
+    from local_operator.team_bridge.settings import record_onboarding_seen
+
+    try:
+        record_onboarding_seen(config_manager.config_dir)
+    except Exception:  # noqa: BLE001 - surfaced as a coded 500, never a stack
+        raise HTTPException(
+            500,
+            {"code": "onboarding_not_saved", "message": "could not save the dismissal"},
+        ) from None
+    return reply({"onboarding": "seen"})
 
 
 @router.get("/v1/desktop/team-bridge/directory", response_model=CRUDResponse[Any])
