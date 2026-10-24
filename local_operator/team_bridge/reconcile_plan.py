@@ -46,6 +46,7 @@ class Reason(StrEnum):
     BINDING_IDENTITY_MISMATCH = "binding_identity_mismatch"
     ENDPOINT_MISMATCH = "endpoint_mismatch"
     GENERATION_MISMATCH = "generation_mismatch"
+    GENERATION_NOT_CAPTURED = "generation_not_captured"
     MEMBERSHIP_NOT_CURRENT = "membership_not_current"
     INELIGIBLE = "ineligible"
     SERVER_DISABLED = "server_disabled"
@@ -166,6 +167,15 @@ class Intent:
     offer_version: str | None = None
     offer_text_ref: str | None = None
 
+    def __post_init__(self) -> None:
+        # Membership revision is required for every decision about a tenant the
+        # snapshot still contains. Only the removed-tenant hold can lack one,
+        # because no fresh revision exists for an org the account left. Making
+        # this a construction invariant keeps a future caller from expressing
+        # "unknown membership" on an intent that might otherwise attach.
+        if self.membership_revision is None and self.reason is not Reason.TENANT_REMOVED:
+            raise ValueError("membership revision missing for a non-removal intent")
+
 
 def _validate_binding(b: Binding) -> None:
     """Captured bindings are facts; a malformed one fails the whole plan.
@@ -241,7 +251,13 @@ def _reason(s: AccountSnapshot, t: TenantSnapshot) -> Reason:
         # expects; ``None`` is "not captured" and the adapter must compare it
         # against the store's active generation before acting. A supplied value
         # is authoritative here, so stale generations cannot attach.
-        if s.generation is not None and b.generation != s.generation:
+        # "Not captured" is a boundary the pure function enforces: a caller that
+        # did not supply the expected generation cannot attach. Leaving that to
+        # the adapter's comparison would make the boundary advisory, and this
+        # contract does not delegate boundaries. Capture it to attach.
+        if s.generation is None:
+            return Reason.GENERATION_NOT_CAPTURED
+        if b.generation != s.generation:
             return Reason.GENERATION_MISMATCH
         if not b.active or not b.current:
             return Reason.BINDING_NOT_CURRENT
@@ -338,6 +354,7 @@ def plan_reconciliation(snapshot: AccountSnapshot) -> tuple[Intent, ...]:
             Reason.BINDING_IDENTITY_MISMATCH,
             Reason.ENDPOINT_MISMATCH,
             Reason.GENERATION_MISMATCH,
+            Reason.GENERATION_NOT_CAPTURED,
         }:
             b = None
         kind = {
