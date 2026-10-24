@@ -416,6 +416,36 @@ def test_a_thread_root_never_rides_with_a_migration_alias() -> None:
     assert parse_conversation_ref_value(base + "/thread_root=bcmsg_root0001") is not None
 
 
+def test_a_thread_root_requires_the_sender_kind_slot() -> None:
+    """4-form + ``/thread_root=`` is refused: "only on the 5-form" enforced.
+
+    ``validated()`` checks the root's shape but not the presence of the kind
+    (kind is optional on every other ref), so the grammar states it here. A ref
+    that says "reply from nobody" is a writer bug, not a shape to honour.
+    """
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    four = "bcv_abcdefgh/bcmsg_abcdef01/1/1"
+    assert parse_conversation_ref_value(four + "/thread_root=bcmsg_root0001") is None
+    assert parse_conversation_ref_value(four + "/human/thread_root=bcmsg_root0001") is not None
+
+
+def test_an_empty_known_tag_is_a_refusal_not_an_absence() -> None:
+    """``thread_root=`` with no value must not read as "no thread root".
+
+    The same rule already applied to ``legacy_alias=``; an empty known tag is a
+    malformed writer, and silently treating it as absent would let a broken
+    ref pass as a valid one.
+    """
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    base = "bcv_abcdefgh/bcmsg_abcdef01/1/1/human"
+    assert parse_conversation_ref_value(base + "/thread_root=") is None
+    assert parse_conversation_ref_value(base + "/legacy_alias=") is None
+
+
 def test_a_positional_after_a_tag_is_still_malformed() -> None:
     """The one shape tags must not open up: order-dependent meaning."""
 

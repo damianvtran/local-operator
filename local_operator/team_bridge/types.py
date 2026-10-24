@@ -471,6 +471,19 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     elif len(positional) > 1:
         return None
 
+    if "thread_root" in tags:
+        # A KNOWN tag with an EMPTY value is a refusal, like an empty
+        # ``legacy_alias=``: "present but blank" is a malformed writer, not a
+        # ref that happens to have no thread root.
+        if not tags["thread_root"]:
+            return None
+        # And a thread root only exists on a ref that states its sender kind.
+        # ``validated()`` cannot express this — kind is optional on every other
+        # shape — so the grammar states it here: 4-form + ``/thread_root=``
+        # would otherwise parse and round-trip while meaning "reply from
+        # nobody", which no writer produces.
+        if len(positional) != 1:
+            return None
     if "thread_root" in tags and "legacy_alias" in tags:
         # REFUSED ON PURPOSE. A reply is written by the threads path, which
         # never mints migration aliases; a ref carrying both is a combination
