@@ -118,6 +118,14 @@ def test_a_cold_dismiss_accepts_an_open_ask_and_records_the_reason(tmp_path: Pat
     """D6 (design §15): a session with no runtime is "no agent work running", so an
     OPEN ask is dismissible there. The event carries who and why."""
     directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    # The entry a RUNNING session had written at enqueue: the cold door rewrites
+    # the row it finds, and seeds nothing of its own (best-effort, the log heals).
+    store.write_entry(
+        tmp_path,
+        SESSION,
+        cwd="/tmp/colddismiss",
+        asks=[store.pending_row(store.fold(store.read_events(directory), NOW)[0])],
+    )
     outcome = _run(
         dismiss_cold(
             tmp_path, SESSION, ASK_ID, by="phone", reason="answered_in_chat", now_ms=NOW + 1_000
@@ -128,6 +136,16 @@ def test_a_cold_dismiss_accepts_an_open_ask_and_records_the_reason(tmp_path: Pat
     event = store.read_events(directory)[-1]
     assert event["by"] == {"surface": "phone"}
     assert event["reason"] == "answered_in_chat"
+    # SA-D8: a dismissal BEFORE the deadline is a settled receipt, and the index
+    # this door writes carries both facts the readers need to say so.
+    entry = store.read_entry(tmp_path, SESSION)
+    assert entry is not None
+    (row,) = entry["asks"]
+    assert row["dismissed_at"] == NOW + 1_000
+    assert row["dismissed_reason"] == "answered_in_chat"
+    (shown,) = store.session_asks(tmp_path, SESSION, now=NOW + 2_000)
+    assert shown["status"] == store.STATUS_DISMISSED
+    assert shown["dismissed_reason"] == "answered_in_chat"
 
 
 def test_a_cold_dismiss_without_a_reason_records_moot(tmp_path: Path):
@@ -264,6 +282,18 @@ def test_a_cold_dismiss_records_the_event_and_the_index_and_starts_nothing(tmp_p
     (row,) = entry["asks"]
     assert row["ask_id"] == ASK_ID
     assert row["status"] == store.STATUS_DISMISSED
+    # SA-D8: the cold door has no runtime to reconcile the entry from the log, so
+    # this write is the row's only chance to state WHEN and WHY. Both ride the
+    # index because the shared visibility rule reads ``dismissed_at`` (a receipt
+    # before the deadline, none after it) and a surface names the reason under
+    # the chip.
+    assert row["dismissed_at"] == NOW
+    assert row["dismissed_reason"] == store.DISMISS_REASON_DEFAULT
+    # Case 2 of §17, and the regression this PR must not break: an ask dismissed
+    # AT/AFTER its deadline still leaves every list. This fixture's ask lapsed an
+    # hour before the dismissal, so the reader shows nothing — "put it away"
+    # keeps its original effect.
+    assert store.session_asks(tmp_path, SESSION, now=NOW + 1) == []
 
     # The fold's own half of the contract: dismissed, and the notice is still owed
     # to the model (the queue's reconcile is what delivers it).

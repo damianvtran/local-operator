@@ -241,6 +241,57 @@ def _running_status(job_status: Any, job_id: str, timeout: float = 20.0) -> dict
     return state
 
 
+def _resume_preflight_environment(run, root):
+    """The CLI regression carries no ambient credential or peer/session identity."""
+    path = run.env.get("PATH", os.defpath)
+    run.env.clear()
+    run.env.update(
+        {
+            "PATH": path,
+            "HOME": str(root.parent),
+            "LOCAL_OPERATOR_CONFIG_DIR": str(root),
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+            "TERM": "xterm-256color",
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            **NO_NOTIFY_ENV,
+        }
+    )
+
+
+def test_exec_resume_preflight_uses_saved_keyless_route(exec_server):
+    """A real CLI must reach the loopback model, not require the global Radient key."""
+    from tests.unit.session.test_model_selection import _journal, _selection_row
+
+    run, requests, root = exec_server
+    _resume_preflight_environment(run, root)
+    sid = "abc123def456"
+    _journal(root / "sessions" / sid, [_selection_row("openai-compatible/exec-fixture")])
+    ConfigManager(root).update_config({"hosting": "radient", "model_name": "global-model"})
+    result = run("exec", "RESUME_PREFLIGHT_SENTINEL", "--resume", sid, "--json", stdin="")
+    assert result.returncode == 0, result.stderr
+    assert requests, "the actual loopback wire must observe the resumed turn"
+    assert any(row.get("model") == "exec-fixture" for row in requests)
+    assert "Fixture completed" in result.stdout
+    assert "RADIENT_API_KEY is required" not in result.stderr
+    assert ConfigManager(root).get_config_value("hosting") == "radient"
+
+
+@pytest.mark.parametrize("saved", [None, "unknown-vendor/not-a-model"])
+def test_exec_resume_without_usable_selection_keeps_key_preflight_fail_closed(exec_server, saved):
+    from tests.unit.session.test_model_selection import _journal, _selection_row
+
+    run, requests, root = exec_server
+    _resume_preflight_environment(run, root)
+    sid = "abc123def456"
+    _journal(root / "sessions" / sid, [] if saved is None else [_selection_row(saved)])
+    ConfigManager(root).update_config({"hosting": "radient", "model_name": "global-model"})
+    result = run("exec", "Must not reach a model", "--resume", sid, "--json", stdin="")
+    assert result.returncode == 1
+    assert "RADIENT_API_KEY is required" in result.stderr
+    assert requests == []
+
+
 def test_exec_team_count_loop_and_resume(exec_server):
     run, requests, root = exec_server
     result = run(

@@ -49,8 +49,11 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # `wire.remote_compute`) -- TWENTY-NINE. The pin stays cardinal so an
     # unrelated held namespace cannot slip in. The session-transcript-
     # compression slice's independently audited 8-key `wire.settings` delta
-    # (0 blocker, 0 major; comments carried) makes it THIRTY.
-    assert len(hindi) == 30
+    # (0 blocker, 0 major; comments carried) makes it THIRTY. The R5 stale-ask
+    # wave's two independently audited namespaces (`tui.asks`, `relay.ask`)
+    # make it THIRTY-TWO, and the P5 command-palette slice's independently
+    # audited 7-key `tui.palette` row makes it THIRTY-THREE.
+    assert len(hindi) == 33
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

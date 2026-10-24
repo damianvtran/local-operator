@@ -272,7 +272,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``confirm_replace`` (the second is the overwrite AND the user's answer, so
     # its wording is the safety-critical part). Trimmed once already; the same
     # printed table measured it.
-    "agent": 1119,
+    # RE-MEASURED (LOH-9 S5): 1119 -> 1365. The delta is the completed guidance:
+    # a ``promote`` row in the authored ops table and the promote step in the
+    # notes, the corrected refusal remedy (the TUI form and the create/install
+    # retry, with update/reset/sync naming no retry), the collision clause and
+    # the host-dependent default. The same printed table measured it; the
+    # 8 KiB soft cap still holds.
+    "agent": 1365,
     "ask": 1079,
     "ask_withdraw": 452,
     "bash": 295,
@@ -295,7 +301,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # 376 -> 240 chars, both model docstrings to one line each). 729 is the
     # structural floor for a capability the model must be able to call. The
     # paired start-context raise is stated in scripts/bench_context_budget.py.
-    "bridge": 729,
+    # 729 -> 747 (PR #2828): the closed recipient schema now exposes its allowed
+    # endpoint/account properties in the opt-in reference. Canonical CI renderer
+    # run39986222406/job120529704999 measured this; the other 47 entries match.
+    # Neither the document soft cap nor the start-context budget changes.
+    "bridge": 747,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -467,7 +477,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``if_version`` contract. The tool is DEFERRED, so this doc is what the
     # first ``tool://`` read or call teaches; its schema adds nothing to the
     # start context (``scripts/bench_context_budget.py`` unchanged).
-    "artifact_data": 818,
+    "artifact_data": 836,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than
@@ -484,7 +494,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S4): 1030 -> 1109, the same promotion delta; the team
     # doc also states that a replace may cover a member, which the agent twin
     # does not need.
-    "team": 1109,
+    # RE-MEASURED (LOH-9 S5): 1109 -> 1400 — the promote row, the promote and
+    # member-copy step, the corrected refusal copy and the collision clause;
+    # the same printed table.
+    "team": 1400,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -518,7 +531,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: the canonical arm; `task` stays 764.
 #: RE-MEASURED (LOH-9 S4): agent 1085 -> 1148; ``task`` is unmoved because the
 #: promotion fields are on ``agent``/``team``, not on the launch tool.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1148, "task": 764}
+#: RE-MEASURED (LOH-9 S5): agent 1148 -> 1394, the same +246 the canonical arm
+#: takes because both arms render the completed notes; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1394, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -924,6 +939,21 @@ def test_cut_wire_prose_moved_into_the_tool_doc(
             f"{name}: phrase still on the always-loaded wire — the move saved "
             f"nothing, so either cut it or drop it from MOVED_WIRE_DETAIL: {phrase!r}"
         )
+
+
+@pytest.mark.parametrize("name", ["agent", "team"])
+def test_the_promote_op_and_step_are_reachable_in_the_rendered_doc(
+    default_surface: list[AgentTool], name: str
+) -> None:
+    """The ledger pins SIZE, not content: a same-length edit could drop the row.
+
+    The design's guidance-reachability metric is an assertion, not eyeballing, so
+    both halves the model reads are pinned by phrase: the authored Ops-table row
+    and the narrative PROMOTE step.
+    """
+    doc = render_tool_doc(next(tool for tool in default_surface if tool.name == name))
+    assert "\n- promote: " in doc, f"tool://{name} lost its promote row"
+    assert "\n- PROMOTE: " in doc, f"tool://{name} lost the promote step in its notes"
 
 
 def test_authored_notes_and_renderers_name_real_tools(

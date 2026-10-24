@@ -935,7 +935,7 @@ class SettingsView(Vertical):
         Binding("escape", "leave", "Back", show=False),
     ]
 
-    def __init__(self, manager: Any) -> None:
+    def __init__(self, manager: Any, *, section: str | None = None) -> None:
         super().__init__(classes="settings-view")
         #: The ConfigManager every read and write goes through. Held rather
         #: than re-derived per row: a fresh manager per read would re-parse
@@ -950,6 +950,11 @@ class SettingsView(Vertical):
         #: (review round 1, B1). Do not add a write path that bypasses
         #: ``settings_io``.
         self._manager = manager
+        #: The ``settings_io.SECTIONS`` name the palette asked the page to open
+        #: on, applied in ``on_mount`` once the rows exist. Consumed once: a
+        #: later repaint (a write, a resize) must not drag the cursor back to a
+        #: section the user has since left.
+        self._initial_section = section
         #: ``(policy, would-remove count)`` for the cleanup master row's detail
         #: clause; see ``_cleanup_preview_count``.
         self._cleanup_preview_cache: tuple[Any, int] | None = None
@@ -1167,6 +1172,26 @@ class SettingsView(Vertical):
             self.focus()
         except Exception:
             pass
+        if self._initial_section is not None:
+            # LAST, so the landing is what the first painted frame shows: a jump
+            # before the repaint would be undone by the repaint's own scroll.
+            self.focus_section(self._initial_section)
+            self._initial_section = None
+
+    def focus_section(self, name: str) -> bool:
+        """Put the cursor on the first row of the section called ``name``.
+
+        The palette's landing seam, and the same landing ``pagedown`` uses: the
+        section's HEADER index, then the first selectable row at or after it.
+        Returning ``False`` for an unknown (or currently hidden) section lets
+        the caller open the page at its own position instead of pretending the
+        jump happened.
+        """
+        for index, row in enumerate(self._rows):
+            if row.kind == "header" and row.section is not None and row.section.name == name:
+                self._select_after_index(index)
+                return True
+        return False
 
     def on_resize(self) -> None:
         # Drop every elision key BEFORE the repaint. `update_if_changed` and

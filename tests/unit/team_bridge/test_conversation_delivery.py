@@ -47,6 +47,8 @@ EXPECTED_CARD_A = f"""Channel message · #qa-coordination · from Ada (human, sa
 {BRIDGE_UNTRUSTED_CLAUSE}
 
 mention: yes
+tenant_id: tnt_1
+conversation_id: bcv_abcdefgh
 message_id: bcmsg_abcdef01
 conversation_seq: 1
 guidance: bridge-guidance-v2"""
@@ -210,6 +212,9 @@ class FakeServer:
             "message_id": MESSAGE_ID,
             "body": self.body_override if self.body_override is not None else self.body,
             "body_hash": hashlib.sha256(self.body.encode("utf-8")).hexdigest(),
+            "conversation_name": self.conversation_name,
+            "sender_label": self.sender["display_label"],
+            "sender_kind": self.sender["kind"],
         }
 
 
@@ -232,6 +237,8 @@ class FakeWire:
 
     async def conversation_body(self, conversation_id: str, message_id: str, **kwargs: Any):
         assert (conversation_id, message_id) == (CONVERSATION_ID, MESSAGE_ID)
+        assert kwargs["tenant_id"] == "tnt_1"
+        assert kwargs["endpoint_id"] == self.endpoint
         if not self.server.body_route_available:
             raise conversation_mod.BridgeRefusal(
                 "not_found", "classification route unavailable", http_status=404
@@ -241,6 +248,9 @@ class FakeWire:
     async def conversation_admit(
         self, conversation_id: str, message_id: str, *, verdict: str, body_hash: str, **kwargs: Any
     ) -> dict[str, Any]:
+        assert (conversation_id, message_id) == (CONVERSATION_ID, MESSAGE_ID)
+        assert kwargs["endpoint_id"] == self.endpoint
+        assert kwargs["tenant_id"] == "tnt_1"
         self.server.admits.append(
             {"endpoint": self.endpoint, "message_id": message_id, "verdict": verdict}
         )
@@ -284,6 +294,10 @@ def _wire_rig(
         return FakeWire(server, owner.endpoint_id)
 
     async def fake_screen(owner: Any, item: Any, *, config_dir: Path, **kwargs: Any):
+        # Queue aliases never become screen, body, or message authority.
+        assert item["message"]["id"] == MESSAGE_ID
+        assert item["message"]["thread_id"] == CONVERSATION_ID
+        assert "legacy_alias" not in json.dumps(item)
         screen_calls.append(owner.endpoint_id)
         if disposition == "hold":
             return ScreenResult(disposition="hold", hold_code="screening_hold")
@@ -354,6 +368,8 @@ def test_card_renders_the_shipped_untrusted_clause_verbatim() -> None:
 
     card = build_conversation_card(
         ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="tnt_1",
             conversation_label="#qa-coordination",
             sender_label="Ada",
             sender_kind="human",
@@ -374,6 +390,8 @@ def test_card_sender_kind_is_dynamic() -> None:
 
     card = build_conversation_card(
         ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="tnt_1",
             conversation_label="#qa-coordination",
             sender_label="Robo",
             sender_kind="agent",
@@ -398,6 +416,8 @@ def test_card_header_collapses_crlf_in_labels() -> None:
 
     card = build_conversation_card(
         ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="tnt_1",
             conversation_label="#qa\ncoordination\r",
             sender_label="Ada\r\nEve",
             sender_kind="human",
@@ -576,8 +596,8 @@ def test_body_route_does_not_depend_on_a_newest_window(tmp_path, monkeypatch) ->
     assert transcripts["sess_a"][0]["payload"] == EXPECTED_CARD_A
 
 
-def test_body_route_unavailable_falls_back_to_the_target_window(tmp_path, monkeypatch) -> None:
-    """A legacy server without the body route still gets the target, not a 404."""
+def test_body_route_unavailable_holds_without_history_fallback(tmp_path, monkeypatch) -> None:
+    """A missing classification route never authorizes a weaker history fetch."""
 
     a = _owner("a", 1)
     config_dir = tmp_path / "a"
@@ -595,10 +615,10 @@ def test_body_route_unavailable_falls_back_to_the_target_window(tmp_path, monkey
     transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
     out = _run(a, config_dir)
 
-    assert out["handled"][0]["action"] == "delivered"
-    assert server.history_calls == [{"before_seq": 2, "after_seq": None, "limit": 1}]
-    assert [row["verdict"] for row in server.admits] == ["allow"]
-    assert transcripts["sess_a"][0]["payload"] == EXPECTED_CARD_A
+    assert out["handled"][0]["action"] == "hold"
+    assert out["handled"][0]["code"] == "body_unavailable"
+    assert server.view_calls == server.history_calls == server.admits == []
+    assert transcripts["sess_a"] == []
 
 
 def test_absent_target_keeps_the_hold(tmp_path, monkeypatch) -> None:
@@ -625,8 +645,9 @@ def test_absent_target_keeps_the_hold(tmp_path, monkeypatch) -> None:
     assert store.screening_hold(a, _ref(server).encode()) is not None
 
 
-def test_hold_retry_survives_restart(tmp_path, monkeypatch) -> None:
-    """A persisted conversation hold is re-driven by its encoded ref."""
+@pytest.mark.parametrize("legacy", [False, True], ids=["contentless", "legacy-names"])
+def test_hold_retry_survives_restart(tmp_path, monkeypatch, legacy) -> None:
+    """Old hold identity survives restart without copying its cached labels."""
 
     a = _owner("a", 1)
     config_dir = tmp_path / "a"
@@ -636,7 +657,29 @@ def test_hold_retry_survives_restart(tmp_path, monkeypatch) -> None:
     server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
     transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
     ref = _ref(server)
+    raw = (
+        (
+            f"message_available:conversation_id={CONVERSATION_ID}/{MESSAGE_ID}/1/1/"
+            "STALE-CHANNEL/STALE-SENDER/human"
+        )
+        if legacy
+        else ref.encode()
+    )
     store.persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
+    before = store.sync_state(a)
+    if legacy:
+        import sqlite3
+
+        from local_operator.team_bridge.store import state_db_path
+
+        # Fixture-only v6 image. Restart migrates the key, not the owner,
+        # cursor, reason, or deadline; no operator database is touched.
+        with sqlite3.connect(state_db_path(config_dir)) as conn:
+            conn.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+            conn.execute("UPDATE screening_holds SET message_id=?", (raw,))
+    store = Store(config_dir)
+    pending = store.screening_hold(a, raw)
+    assert pending is not None and pending["retry_at"] == 0
     loop_mod._RETRY_ATTEMPTS.clear()  # a fresh process has no in-memory counter
 
     out = asyncio.run(
@@ -650,7 +693,11 @@ def test_hold_retry_survives_restart(tmp_path, monkeypatch) -> None:
 
     assert out["outcomes"][0]["action"] == "delivered"
     assert transcripts["sess_a"][0]["payload"] == EXPECTED_CARD_A
+    assert store.screening_hold(a, raw) is None
     assert store.screening_hold(a, ref.encode()) is None
+    assert store.sync_state(a) == before
+    assert store.active_owner() == a
+    assert "STALE-" not in transcripts["sess_a"][0]["payload"]
     assert [row["verdict"] for row in server.admits] == ["allow"]
 
 
@@ -670,7 +717,10 @@ def test_denied_body_stays_metadata_only(tmp_path, monkeypatch) -> None:
     assert out["handled"][0]["code"] == "screening_bounce"
     card = transcripts["sess_a"][0]["payload"]
     assert "hello from the channel" not in card
-    assert card == EXPECTED_CARD_A
+    assert "Ada" not in card and "#qa-coordination" not in card
+    assert "from unknown (unknown, same tenant)" in card
+    assert f"conversation_id: {CONVERSATION_ID}" in card
+    assert BRIDGE_UNTRUSTED_CLAUSE in card
     assert [row["verdict"] for row in server.admits] == ["reject"]
 
 
@@ -697,7 +747,10 @@ def test_mutated_body_is_not_screened_admitted_or_rendered(tmp_path, monkeypatch
     assert screen_calls == [] and server.admits == []
     card = transcripts["sess_a"][0]["payload"]
     assert "tampered bytes" not in card
-    assert card == EXPECTED_CARD_A
+    assert "Ada" not in card and "#qa-coordination" not in card
+    assert "from unknown (unknown, same tenant)" in card
+    assert f"conversation_id: {CONVERSATION_ID}" in card
+    assert BRIDGE_UNTRUSTED_CLAUSE in card
 
 
 def test_conversation_event_is_never_routed_as_a_pair_delivery() -> None:
@@ -733,3 +786,247 @@ def test_conversation_event_is_never_routed_as_a_pair_delivery() -> None:
     )
     # Round-trip: the durable ref spelling parses back to the same record.
     assert plan_feed_refs([ref.encode()]).conversation_deliveries == (ref,)
+
+
+def test_one_send_four_recipient_states_keeps_both_synthetic_transcripts(tmp_path, monkeypatch):
+    """#157's recipient matrix in ONE send, not four unrelated happy paths.
+
+    This is a synthetic contract fixture, not a real server fan-out proof and
+    not evidence about Ben's account. Keeping both positive transcripts makes
+    it impossible to prove only the mentioned arm while quietly losing the
+    unmentioned notify=all recipient. The served guidance still owns reply vs
+    no_reply; this test must not fake an agent response or a user turn.
+    """
+
+    states = {
+        "mentioned": ("mute", True, True),
+        "all": ("all", True, False),
+        "muted": ("mute", True, False),
+        "disabled": ("all", False, True),
+    }
+    runtimes = {}
+    for credential, name in enumerate(states, start=1):
+        owner = _owner(name, credential)
+        root = tmp_path / name
+        root.mkdir()
+        _enroll(root, owner, f"sess_{name}")
+        runtimes[name] = (owner, root)
+    server = FakeServer(
+        notify={f"bep_{name}": notify for name, (notify, _, _) in states.items()},
+        active={f"bep_{name}": active for name, (_, active, _) in states.items()},
+        mentioned={f"bep_{name}" for name, (_, _, mention) in states.items() if mention},
+    )
+    notifications, pair_calls = [], []
+    transcripts, modes = _wire_rig(
+        monkeypatch, server, runtimes, notifications=notifications, pair_calls=pair_calls
+    )
+    # Server-selected rows, projected into the existing conversation spine.
+    # The nonrecipients have no row: do not fabricate a runtime decision to
+    # override server membership, mention, or endpoint authority.
+    for name in ("mentioned", "all"):
+        owner, root = runtimes[name]
+        assert _run(owner, root)["handled"][0]["action"] == "delivered"
+    for name in ("muted", "disabled"):
+        assert server.event_for(f"bep_{name}") is None
+        assert not transcripts.get(f"sess_{name}")
+    for name, mention in (("mentioned", "yes"), ("all", "no")):
+        rows = transcripts[f"sess_{name}"]
+        assert len(rows) == 1
+        assert f"mention: {mention}" in rows[0]["payload"]
+        # channel_history takes a canonical channel_id, not a display name.
+        # The same metadata-only card must locate BOTH recipients' message
+        # without asking the model to guess among equally named channels.
+        assert f"conversation_id: {CONVERSATION_ID}" in rows[0]["payload"]
+        assert BRIDGE_UNTRUSTED_CLAUSE in rows[0]["payload"]
+        assert BODY not in rows[0]["payload"]
+        assert modes[f"sess_{name}"] == ["mailbox"]
+    assert [row["endpoint"] for row in server.admits] == ["bep_mentioned", "bep_all"]
+    assert notifications == pair_calls == []
+
+
+def test_projected_feed_and_hold_storage_exclude_display_names_across_restart(tmp_path):
+    """Wire labels may exist, but never become a second local name/body cache."""
+    import sqlite3
+
+    owner = _owner("a", 1)
+    store = _enroll(tmp_path, owner, "sess_a")
+    server = FakeServer(
+        active={"bep_a": True},
+        notify={"bep_a": "all"},
+        conversation_name="PRIVATE-CHANNEL-7731",
+        sender={**SENDER, "display_label": "PRIVATE-NAME-7731"},
+    )
+    cursor, refs, _ = project_events_batch(server.events_answer("bep_a"))
+    store.record_feed_batch(owner, cursor, refs, resync_required=False)
+    store.persist_hold(owner, refs[0], "provider_error", retry_at=100)
+    with sqlite3.connect(tmp_path / "team_bridge" / "state.sqlite3") as conn:
+        raw_rows = conn.execute("SELECT ref FROM feed_refs").fetchall()
+        raw_rows += conn.execute("SELECT message_id FROM screening_holds").fetchall()
+        # Inspect serialized storage, not a public reader that could redact it.
+        dump = "\n".join(conn.iterdump())
+    assert "PRIVATE-" not in dump and BODY not in dump
+    for (raw,) in raw_rows:
+        assert "PRIVATE-" not in raw
+        assert BODY not in raw
+        assert "Ada" not in raw
+    restarted = Store(tmp_path)
+    assert restarted.sync_state(owner)["feed_seq"] == int(cursor)
+    assert restarted.active_owner() == owner
+    ref = plan_feed_refs(restarted.drain_feed_refs(owner, int(cursor))).conversation_deliveries[0]
+    assert ref.conversation_id == CONVERSATION_ID
+    assert ref.sender_kind == "human"
+    assert "PRIVATE-" not in ref.encode()
+
+
+def test_legacy_ref_parser_discards_names_without_losing_delivery_identity():
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    legacy = f"{CONVERSATION_ID}/{MESSAGE_ID}/1/1/PRIVATE-CHANNEL/PRIVATE-NAME/human"
+    ref = parse_conversation_ref_value(legacy)
+    assert ref is not None
+    assert (ref.conversation_id, ref.message_id, ref.conversation_seq, ref.mention) == (
+        CONVERSATION_ID,
+        MESSAGE_ID,
+        1,
+        True,
+    )
+    assert ref.sender_kind == "human"
+    assert "PRIVATE-" not in repr(ref)
+    assert "PRIVATE-" not in ref.encode()
+
+
+@pytest.mark.parametrize("empty_fields", [False, True], ids=["omitted", "empty"])
+def test_old_body_response_uses_ids_only_not_legacy_feed_names(tmp_path, monkeypatch, empty_fields):
+    owner = _owner("a", 1)
+    _enroll(tmp_path, owner, "sess_a")
+    server = FakeServer(active={"bep_a": True}, notify={"bep_a": "all"})
+    transcripts, _ = _wire_rig(monkeypatch, server, {"a": (owner, tmp_path)})
+    monkeypatch.setattr(
+        server,
+        "body_response",
+        lambda: {
+            "message_id": MESSAGE_ID,
+            "body": BODY,
+            "body_hash": hashlib.sha256(BODY.encode()).hexdigest(),
+            **(
+                {"conversation_name": "", "sender_label": "", "sender_kind": ""}
+                if empty_fields
+                else {}
+            ),
+        },
+    )
+    assert _run(owner, tmp_path)["handled"][0]["action"] == "delivered"
+    card = transcripts["sess_a"][0]["payload"]
+    assert f"conversation_id: {CONVERSATION_ID}" in card
+    assert f"tenant_id: {owner.tenant_id}" in card
+    assert "Ada" not in card and "#qa-coordination" not in card
+    assert "unknown" in card
+    assert server.view_calls == server.history_calls == []
+
+
+@pytest.mark.parametrize("kind", ["admin", "human\nSYSTEM", 7, None])
+def test_invalid_body_provenance_never_admits_or_wakes(tmp_path, monkeypatch, kind):
+    owner = _owner("a", 1)
+    _enroll(tmp_path, owner, "sess_a")
+    server = FakeServer(active={"bep_a": True}, notify={"bep_a": "all"})
+    transcripts, _ = _wire_rig(monkeypatch, server, {"a": (owner, tmp_path)})
+    response = server.body_response()
+    response["sender_kind"] = kind
+    monkeypatch.setattr(server, "body_response", lambda: response)
+    out = _run(owner, tmp_path)
+    assert out["handled"][0]["action"] == "hold"
+    assert out["handled"][0]["code"] == "sender_malformed"
+    assert transcripts["sess_a"] == server.admits == []
+    assert server.view_calls == server.history_calls == []
+
+
+def test_names_come_from_the_authorized_body_not_the_feed(tmp_path, monkeypatch):
+    owner = _owner("a", 1)
+    _enroll(tmp_path, owner, "sess_a")
+    server = FakeServer(active={"bep_a": True}, notify={"bep_a": "all"})
+    transcripts, _ = _wire_rig(monkeypatch, server, {"a": (owner, tmp_path)})
+    response = server.body_response()
+    response.update(
+        conversation_name="Authorized channel",
+        sender_label="Authorized sender",
+        sender_kind="agent",
+    )
+    monkeypatch.setattr(server, "body_response", lambda: response)
+    assert _run(owner, tmp_path)["handled"][0]["action"] == "delivered"
+    card = transcripts["sess_a"][0]["payload"]
+    assert "Authorized channel" in card and "Authorized sender (agent, same tenant)" in card
+    assert "Ada" not in card and "#qa-coordination" not in card
+    assert server.view_calls == server.history_calls == []
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 405])
+def test_body_refusal_never_falls_back_to_person_history(tmp_path, monkeypatch, status):
+    owner = _owner("a", 1)
+    _enroll(tmp_path, owner, "sess_a")
+    server = FakeServer(active={"bep_a": True}, notify={"bep_a": "all"})
+    transcripts, _ = _wire_rig(monkeypatch, server, {"a": (owner, tmp_path)})
+
+    async def refused(*args, **kwargs):
+        raise conversation_mod.BridgeRefusal("message_not_found", "refused", http_status=status)
+
+    monkeypatch.setattr(FakeWire, "conversation_body", refused)
+    assert _run(owner, tmp_path)["handled"][0]["action"] == "hold"
+    assert transcripts["sess_a"] == server.admits == []
+    assert server.view_calls == server.history_calls == []
+
+
+def test_alias_retry_consumes_only_that_hold_not_canonical_or_sibling(tmp_path, monkeypatch):
+    import sqlite3
+    import time
+
+    from local_operator.team_bridge.store import state_db_path
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    owner = _owner("a", 1)
+    store = _enroll(tmp_path, owner, "sess_a")
+    server = FakeServer(active={"bep_a": True}, notify={"bep_a": "mute"}, mentioned={"bep_a"})
+    transcripts, _ = _wire_rig(monkeypatch, server, {"a": (owner, tmp_path)})
+    canonical = _ref(server).encode()
+    first = (
+        f"message_available:conversation_id={CONVERSATION_ID}/{MESSAGE_ID}/1/1/"
+        "OLD-FIRST/SENDER/human"
+    )
+    sibling = first.replace("OLD-FIRST", "OLD-SIBLING")
+    sibling_ref = parse_conversation_ref_value(sibling.split("=", 1)[1])
+    assert sibling_ref is not None
+    before = store.sync_state(owner)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        key = conn.execute("SELECT owner_key FROM enrollments").fetchone()[0]
+        conn.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+        for raw, deadline in (
+            (first, 0),
+            (canonical, time.time() + 3600),
+            (sibling, time.time() + 3600),
+        ):
+            conn.execute(
+                "INSERT INTO screening_holds VALUES (?,?,?,?,?)",
+                (key, raw, "screening_hold", deadline, 12),
+            )
+    loop_mod._RETRY_ATTEMPTS.clear()
+    result = asyncio.run(
+        loop_mod.retry_due_holds(
+            owner,
+            config_dir=tmp_path,
+            access=SimpleNamespace(credential_id=owner.credential_id),
+            auth_store=None,
+            limit=1,
+        )
+    )
+    assert result["due"] == 1 and result["outcomes"][0]["action"] == "delivered"
+    assert len(transcripts["sess_a"]) == 1
+    assert transcripts["sess_a"][0]["payload"] == EXPECTED_CARD_A
+    assert "legacy_alias" not in transcripts["sess_a"][0]["payload"]
+    assert [row["message_id"] for row in server.admits] == [MESSAGE_ID]
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        holds = conn.execute("SELECT message_id FROM screening_holds").fetchall()
+        claims = conn.execute("SELECT message_id FROM claims").fetchall()
+    assert {row[0] for row in holds} == {canonical, sibling_ref.encode()}
+    assert all(row[0] == MESSAGE_ID for row in claims)
+    assert store.sync_state(owner) == before
+    assert store.active_owner() == owner
+    loop_mod._RETRY_ATTEMPTS.clear()

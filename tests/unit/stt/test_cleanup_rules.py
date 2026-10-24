@@ -35,9 +35,6 @@ def test_french_filler_is_removed() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        # `um` is a real Portuguese numeral/article; it is deliberately absent
-        # from the English set even when the take is labelled English.
-        "Um, the album is in the sum.",
         "The album is in the sum. Hum a tune.",
         # Hyphenated compounds: `-` is a word-continuation character.
         "uh-huh, that works",
@@ -92,6 +89,88 @@ def test_unknown_language_removes_cues_but_not_tokens() -> None:
 
     assert result.text == "Uh, so I think."
     assert [span.kind for span in result.removed] == ["cue"]
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "expected"),
+    [
+        ("Um, the album is in the sum.", "en", "The album is in the sum."),
+        ("Er, I think we should, um, review it.", "en", "I think we should review it."),
+        ("Ähm, das prüfen wir.", "de", "Das prüfen wir."),
+        ("Ehm, non lo so.", "it", "Non lo so."),
+        ("えーと、なんだったかな。", "ja", "なんだったかな。"),
+        ("ええと、なんだったかな。", "ja", "なんだったかな。"),
+        ("אממ, אני לא בטוח שזו התשובה הנכונה.", "he", "אני לא בטוח שזו התשובה הנכונה."),
+        ("呃……我不知道。", "zh", "我不知道。"),
+        ("उम्म, मुझे नहीं पता।", "hi", "मुझे नहीं पता।"),
+        ("Э … Даже не знаю, что сказать", "ru", "Даже не знаю, что сказать"),
+    ],
+)
+def test_sourced_pause_fillers_are_removed(text: str, language: str, expected: str) -> None:
+    once = _clean(text, language)
+
+    assert once.text == expected
+    assert _clean(once.text, language).text == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "expected"),
+    [
+        ("Ah … I am not sure.", "en", "I am not sure."),
+        ("Hmm … I am not sure.", "en", "I am not sure."),
+        ("Mm … I am not sure.", "en", "I am not sure."),
+        ("Äh … das weiß ich nicht.", "de", "Das weiß ich nicht."),
+        ("Ben … je ne sais pas.", "fr", "Je ne sais pas."),
+        ("Eh … no sé.", "es", "No sé."),
+        ("Este … no sé.", "es", "No sé."),
+        ("Hã … não entendi.", "pt", "Não entendi."),
+        ("あの……なんだったかな。", "ja", "なんだったかな。"),
+        ("嗯……我不知道。", "zh", "我不知道。"),
+        ("Ну … даже не знаю.", "ru", "Даже не знаю."),
+    ],
+)
+def test_ambiguous_fillers_require_ellipsis_pause_context(
+    text: str, language: str, expected: str
+) -> None:
+    once = _clean(text, language)
+
+    assert once.text == expected
+    twice = _clean(once.text, language)
+    assert twice.text == expected
+    assert twice.removed == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [
+        ("Um livro.", "pt"),
+        ("6 mm is the measurement.", "en"),
+        ("ER and ERM are abbreviations.", "en"),
+        ("Mm, I know what you mean", "en"),
+        ("Ah, I know what you mean", "en"),
+        ("Hmm, I know what you mean", "en"),
+        ("Ah! That hurts.", "en"),
+        ("Äh! Das ist eklig.", "de"),
+        ("Äh, das ist eklig.", "de"),
+        ("Ben oui, bien sûr.", "fr"),
+        ("Ben, oui.", "fr"),
+        ("Eh, no sé.", "es"),
+        ("Este, no sé.", "es"),
+        ("Toma este libro.", "es"),
+        ("hã?", "pt"),
+        ("Hã, não entendi.", "pt"),
+        ("あの国の人", "ja"),
+        ("あの、なんだったかな。", "ja"),
+        ("嗯，就这么做吧！", "zh"),
+        ("呃逆", "zh"),
+        ("उम्म एक संज्ञा है।", "hi"),
+        ("Ну, рассказывай!", "ru"),
+        ("Ну, рассказывай.", "ru"),
+        ("Э, нет, не так", "ru"),
+    ],
+)
+def test_ambiguous_or_lexical_forms_survive(text: str, language: str) -> None:
+    assert _clean(text, language).text == text
 
 
 def test_clean_is_idempotent() -> None:

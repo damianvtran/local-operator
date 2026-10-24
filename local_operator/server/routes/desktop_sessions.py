@@ -3330,18 +3330,46 @@ async def draft_mint(body: DraftMint, request: Request):
     is one per new-chat pane that ever received a keystroke, the same order of
     cost as the ``create:`` row each chat already writes.
 
+    THE REPLAY IS CONDITIONAL ON THE ID STILL OPENING (operator-reported
+    regression, 2026-10-23). The id a receipt records is not durable: the draft
+    registry entry expires after ``DRAFT_TTL_S``, and a draft that materialised
+    can have its conversation deleted. Replaying either handed the client an id
+    every door answers "Unknown session" for — its ``/events`` streams 404 and
+    the pane painted the terminal missing state over a brand-new chat. So the
+    journal's ``replay_guard`` asks the pool whether the recorded id is still
+    servable (``session_id_servable``); when it is not, the mint RUNS AGAIN and
+    supersedes the row, so this retry and every later one answer the fresh id.
+    A still-registered or still-materialised id replays unchanged.
+
     The SAME admissions ``create`` applies, in the same order (cwd, model,
     target) and BEFORE the receipt is claimed — for the two reasons
     ``create``'s own docstring states: a refusal must leave the store exactly as
-    it found it, and the pool re-runs every admission as its own contract.
+    it found it, and the pool re-runs every admission as its own contract. A
+    STALE replay is the one path where they run after a row already exists (it
+    is superseded, not claimed): ``mint_draft`` re-runs the cwd and target
+    checks and ``mint`` resolves the model spec, so the fresh draft is admitted
+    exactly as the first one was.
 
     A LATCHED daemon mints nothing: the refusal is ``assert_admitting``'s, asked
     first, exactly as on ``create``.
     """
 
     async def mint():
+        # ``spec`` is assigned below, in the admission block; the declaration is
+        # needed because a STALE replay (see ``replay_guard``) re-runs this
+        # operation after that block was skipped for the recorded key.
+        nonlocal spec
         pool = host(request)
         target = body.target.model_dump() if body.target else None
+        if spec is None and body.model is not None:
+            # RESOLVED HERE TOO, not only in the admission block: that block is
+            # skipped for a recorded key, and a stale record still mints. Same
+            # resolver and same refusals as the first mint, so the fresh draft is
+            # born on the model the body named rather than the configured default.
+            # ``mint_draft`` re-runs the pool's own admissions (cwd, target) for
+            # every mint, which is what makes the stale path's re-admission
+            # complete without this route asking twice on the first path.
+            spec = await asyncio.to_thread(_draft_model_spec, body.model)
         draft_id = await pool.mint_draft(
             body.cwd,
             target=target,
@@ -3376,7 +3404,20 @@ async def draft_mint(body: DraftMint, request: Request):
                     target_row["kind"],
                     target_row["name"],
                 )
-        return reply(await receipts(request).run(key, body.model_dump(), mint))
+        return reply(
+            await receipts(request).run(
+                key,
+                body.model_dump(),
+                mint,
+                # THE RECORDED ID IS ONLY AN ANSWER WHILE THE POOL CAN STILL
+                # SERVE IT. Asked under the receipt's per-key lock, so the
+                # judgement and the write that may follow cannot race another
+                # same-id request; ``False`` re-mints and supersedes the row.
+                replay_guard=lambda cached: pool.session_id_servable(
+                    str(cached.get("draft_id") or "")
+                ),
+            )
+        )
 
 
 @router.get("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[SessionSnapshot])
