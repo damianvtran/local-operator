@@ -19,6 +19,13 @@ E2E_STOP_PATH = Path(__file__).resolve().parents[3] / "tests/e2e/test_fork_cold_
 E2E_STOP_SOURCE = E2E_STOP_PATH.read_text(encoding="utf-8")
 
 
+def _enter(directory: Path) -> inbox.InboxReadBatch:
+    """Seat a batch in a fixture where the read seat is known to be free."""
+    batch = inbox.try_enter_read_batch(directory)
+    assert batch is not None, "the read seat must be free in this fixture"
+    return batch
+
+
 class JournalTests(unittest.TestCase):
     def test_short_append_and_failed_rollback_never_ack_poisoned_next_row(self):
         with TemporaryDirectory() as raw:
@@ -136,11 +143,13 @@ class OwnedWriteTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(entered.wait(), 2)
                     snapshot = spooled.read_spooled_turn(root, directory.name)
                     self.assertIsNotNone(snapshot)
+                    assert snapshot is not None
                     self.assertIsNone(snapshot["generation"])
                     self.assertFalse(task.done())
                     release.set()
                     self.assertTrue(await task)
                     snapshot = spooled.read_spooled_turn(root, directory.name)
+                    assert snapshot is not None
                     self.assertIsNotNone(snapshot["generation"])
                     self.assertFalse(
                         spooled.clear_if_no_owed_turn(
@@ -164,7 +173,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
                 text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER
             )
             self.assertTrue(inbox.append_inbox(directory, row))
-            batch = inbox.try_enter_read_batch(directory)
+            batch = _enter(directory)
             self.assertIsNotNone(batch)
             ready = asyncio.Event()
             release = threading.Event()
@@ -196,7 +205,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
                     await task
                 self.assertTrue(spooled.spool_owes_turn(directory))
                 self.assertFalse(batch.acquired)
-                next_batch = inbox.try_enter_read_batch(directory)
+                next_batch = _enter(directory)
                 self.assertIsNotNone(next_batch)
                 inbox.leave_read_batch(next_batch)
             finally:
@@ -212,7 +221,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
 
             for text in ("same", "same", "later"):
                 self.assertTrue(inbox.append_inbox(directory, line(text)))
-            batch = inbox.try_enter_read_batch(directory)
+            batch = _enter(directory)
             try:
                 await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
                 self.assertTrue(
@@ -236,7 +245,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
             inbox.append_inbox(
                 directory, inbox.InboxLine(text="one", sender={}, mode="mailbox", written_at=1)
             )
-            batch = inbox.try_enter_read_batch(directory)
+            batch = _enter(directory)
             await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
             entered = asyncio.Event()
             release = asyncio.Event()
@@ -274,7 +283,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
             inbox.append_inbox(
                 directory, inbox.InboxLine(text="one", sender={}, mode="mailbox", written_at=1)
             )
-            batch = inbox.try_enter_read_batch(directory)
+            batch = _enter(directory)
             await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
             batch.handled.add(0)
             path = inbox.inbox_path(directory)
@@ -299,7 +308,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
                     text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER
                 ),
             )
-            batch = inbox.try_enter_read_batch(directory)
+            batch = _enter(directory)
 
             class Busy:
                 released = False
@@ -310,7 +319,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
                 def release(self):
                     self.released = True
 
-            batch.reader = Busy()
+            setattr(batch, "reader", Busy())
             self.assertFalse(await inbox.claim_read_batch_or_defer(batch))
             await inbox.settle_read_batch(batch)  # must not raise, must not settle
             self.assertFalse(Busy.released, "release without acquisition")
@@ -332,7 +341,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
             target.write_bytes(path.read_bytes())
             path.unlink()
             path.symlink_to(target)
-            batch = inbox.try_enter_read_batch(directory)
+            batch = _enter(directory)
             try:
                 self.assertFalse(await inbox.claim_read_batch_or_defer(batch))
             finally:
@@ -348,7 +357,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
         """An empty inbox must not re-acquire/settle on every pipeline pass."""
         with TemporaryDirectory() as raw:
             directory = Path(raw)
-            batch = inbox.try_enter_read_batch(directory)
+            batch = _enter(directory)
             try:
                 await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
                 self.assertIs(batch.pending_after_commit, False)
@@ -359,7 +368,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
             inbox.append_inbox(
                 directory, inbox.InboxLine(text="owed", sender={}, mode="mailbox", written_at=1)
             )
-            batch = inbox.try_enter_read_batch(directory)
+            batch = _enter(directory)
             try:
                 await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
                 self.assertIs(batch.pending_after_commit, True)

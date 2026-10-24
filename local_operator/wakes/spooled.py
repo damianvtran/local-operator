@@ -47,7 +47,6 @@ its docstring forbids.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -55,11 +54,27 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Mapping, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Mapping, ParamSpec, TypeVar
 
-from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
+if TYPE_CHECKING:  # the lock is imported on use: see `_lock_errors`
+    from local_operator.wakes.lock import WakeWriteLock
 
 logger = logging.getLogger(__name__)
+
+
+def _lock_errors() -> tuple[type[BaseException], ...]:
+    """The lock refusals, imported WHEN A WRITE HAPPENS rather than at import.
+
+    This store is imported by the wake supervisor at startup, and
+    ``test_import_graph`` pins that resident set to the store family alone; a
+    module-scope lock import would drag ``wakes.lock`` and ``procstate`` in.
+    The lock is still the one real dependency of a spool write — deferring it
+    costs one import on the first write, never on the supervisor's start.
+    """
+    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
+
+    return WakeLockBusy, WakeLockUnavailable
+
 
 #: Subdirectory of the wakes dir holding one ``<session_id>.json`` per session
 #: that owes a turn. A SUBdirectory for the reason ``deliveries`` gives: an index
@@ -151,6 +166,8 @@ class SpoolWriteError(OSError):
 
 
 def _session_lock(config_dir: Path, session_id: str, *, read: bool = False) -> WakeWriteLock:
+    from local_operator.wakes.lock import WakeWriteLock
+
     # Persistent session-specific inodes survive record deletion/recreation (ABA).
     # Mixed older, unlocked writers are outside this cooperative protocol.
     _validate_session_id(session_id)
@@ -189,7 +206,7 @@ def read_spooled_turn(config_dir: Path, session_id: str) -> dict[str, Any] | Non
                 if not _write(config_dir, session_id, record):
                     record["generation"] = None
             return record
-    except (WakeLockBusy, WakeLockUnavailable, OSError):
+    except (*_lock_errors(), OSError):
         record = _raw_read(config_dir, session_id)
         if record is not None:
             record["generation"] = None
@@ -226,6 +243,11 @@ async def await_spool_write(function: Callable[P, T], *args: P.args, **kwargs: P
     Shield alone is insufficient: a cancelled await does not stop its OS thread.
     Repeated cancellation is remembered, never allowed to orphan a submitted write.
     """
+    # Imported HERE rather than at module scope: this store is on the
+    # supervisor's startup path and `test_import_graph` pins its import closure
+    # asyncio-free. The helper is only called from an already-running loop.
+    import asyncio
+
     task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     cancellation: asyncio.CancelledError | None = None
     failure: BaseException | None = None
@@ -336,7 +358,7 @@ def note_spooled_turn(
     try:
         with _session_lock(config_dir, session_id):
             noted = _note_locked(config_dir, session_id, cwd=cwd, rows=rows, now_ms=now_ms)
-    except (WakeLockBusy, WakeLockUnavailable) as exc:
+    except _lock_errors() as exc:
         raise SpoolWriteError("spool obligation lock unavailable") from exc
     if noted:
         _raise_reader(config_dir, session_id)
@@ -388,7 +410,7 @@ def _clear_guarded(
                     return False
             spooled_path(config_dir, session_id).unlink()
             return True
-    except (WakeLockBusy, WakeLockUnavailable, OSError):
+    except (*_lock_errors(), OSError):
         return False
 
 
@@ -432,7 +454,7 @@ def note_attempt(config_dir: Path, session_id: str, *, error: str = "") -> None:
                 record["last_error"] = str(error)[:400]
             if not _write(config_dir, session_id, record):
                 raise SpoolWriteError("could not persist spool backoff")
-    except (WakeLockBusy, WakeLockUnavailable) as exc:
+    except _lock_errors() as exc:
         raise SpoolWriteError("spool attempt lock unavailable") from exc
 
 

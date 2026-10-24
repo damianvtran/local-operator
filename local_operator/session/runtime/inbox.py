@@ -419,7 +419,7 @@ class InboxReadBatch:
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
         self.key = str(self.directory.resolve())
-        self.reader = WakeWriteLock(self.directory, name=".inbox-reader.lock")
+        self.reader = WakeWriteLock(self.directory, name=".inbox-reader.lock", reentrant=True)
         self.acquired = False
         self.raw: bytes | None = None
         self.chunks: list[bytes] = []
@@ -677,7 +677,7 @@ def _journal_lock(session_dir: Path) -> WakeWriteLock:
     # EVERY cooperating append/recall/drain/purge, including rollback on Windows.
     # Updated writers must activate together; older unlocked binaries are outside
     # this contract. No inode replacement or unknown-file repair is attempted.
-    return WakeWriteLock(session_dir, name=".inbox-write.lock")
+    return WakeWriteLock(session_dir, name=".inbox-write.lock", reentrant=True)
 
 
 def _append_payload(fd: int, payload: bytes) -> None:
@@ -996,7 +996,7 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
     if not session_dir.is_dir():
         return False
     try:
-        with WakeWriteLock(session_dir, name=".inbox-reader.lock"):
+        with WakeWriteLock(session_dir, name=".inbox-reader.lock", reentrant=True):
             with _journal_lock(session_dir):
                 return _withdraw_inbox_locked(session_dir, command_id)
     except (WakeLockBusy, WakeLockUnavailable, OSError):
@@ -1104,7 +1104,7 @@ def remove_wake_rows(session_dir: Path, wake_id: str) -> int:
     if not session_dir.is_dir():
         return 0
     try:
-        with WakeWriteLock(session_dir, name=".inbox-reader.lock"):
+        with WakeWriteLock(session_dir, name=".inbox-reader.lock", reentrant=True):
             with _journal_lock(session_dir):
                 return _remove_wake_rows_locked(session_dir, wake_id)
     except (WakeLockBusy, WakeLockUnavailable, OSError):
@@ -1260,7 +1260,7 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
     if not session_dir.is_dir():
         return []
     try:
-        with WakeWriteLock(session_dir, name=".inbox-reader.lock"):
+        with WakeWriteLock(session_dir, name=".inbox-reader.lock", reentrant=True):
             with _journal_lock(session_dir):
                 return _drain_inbox_locked(session_dir)
     except (WakeLockBusy, WakeLockUnavailable, OSError):

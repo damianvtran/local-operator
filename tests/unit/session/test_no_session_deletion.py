@@ -2373,10 +2373,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "temp FILE -> wakes/spooled/<id>.json",
     ),
+    # The generation-guarded clear's one unlink: the SAME `<id>.json` FILE the
+    # row above writes, removed only after the caller's generation and authority
+    # predicates pass under the same mutex. The path is built from the store
+    # directory plus the validated id, so it cannot name a directory.
     (
-        "local_operator/wakes/spooled.py::clear_spooled_turn",
+        "local_operator/wakes/spooled.py::_clear_guarded",
         "<path>.unlink",
         "wakes/spooled/<id>.json FILE",
+    ),
+    # The inbox batch commit stages its rewrite as a temp FILE in the session
+    # directory it was handed, then renames it over `inbox.jsonl`; the unlink
+    # below removes that temp only on the failure path. Neither can reach a
+    # session DIRECTORY: both paths are `session_dir / <fixed name>` where the
+    # session dir identity was checked when the batch was claimed.
+    (
+        "local_operator/session/runtime/inbox.py::commit_inbox_batch",
+        "os.replace",
+        "temp FILE -> sessions/<id>/inbox.jsonl",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::commit_inbox_batch",
+        "os.unlink",
+        "temp FILE -> sessions/<id>/.inbox-commit-<n>.tmp",
     ),
     # The wake-trigger layer is the supervisor's FOURTH state family
     # (`local_operator/wakes/triggers/`), beside the index, the ledger and the
@@ -3790,6 +3809,9 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # allow-list rows above for the full argument).
         "local_operator/session/compression.py::_publish",
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp FILE -> sessions/<id>/inbox.jsonl inside the session it was handed;
+        # the commit swaps one spool file, never a directory.
+        "local_operator/session/runtime/inbox.py::commit_inbox_batch",
         # tmp -> .session-holds.json (the holds map, beside the log)
         "local_operator/session/cleanup.py::_write_holds",
         # THE ONE PATH DISPLACER THAT MAY NAME A SESSION DIRECTORY, and it is this
