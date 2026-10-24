@@ -189,7 +189,15 @@ preview time, so narrow the filter or chunk the cleanup. `lop memory consolidate
 that carry real text, or at least 70% title+body token overlap, grouped transitively
 with the similarity measure, the shared tokens and what differs shown (or the
 identical text for an exact pair). It never deletes or merges; review with `show`, merge with `edit`, retire with
-`forget`. No embedding, model call or new dependency is involved.
+`forget`. No embedding, model call or new dependency is involved. `lop memory
+compact` is the journal pass, a preview too unless confirmed with `--yes --expect
+FINGERPRINT`: it keeps one operation per fact (every head of a concurrent edit),
+every tombstone and the operations a cross-fact link pins, then prunes inert links,
+rewrites the portable session exports and rebuilds the file. Facts, quota and sync
+state are unchanged; superseded revisions become unreadable (`show --version` reports
+"Revision unavailable"), and a peer that is behind still catches up because the
+retained operation IS the state. Run it explicitly when the store nears its byte cap;
+it is not on a timer.
 
 Design inspiration: [Hindsight](https://github.com/vectorize-io/hindsight)'s
 structured retain/recall lifecycle, source/time filtering and bounded retrieval.
