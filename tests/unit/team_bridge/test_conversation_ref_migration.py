@@ -413,7 +413,7 @@ def test_a_thread_root_never_rides_with_a_migration_alias() -> None:
         parse_conversation_ref_value(base + f"/legacy_alias={alias}/thread_root=bcmsg_root0001")
         is None
     )
-    assert parse_conversation_ref_value(base + f"/thread_root=bcmsg_root0001") is not None
+    assert parse_conversation_ref_value(base + "/thread_root=bcmsg_root0001") is not None
 
 
 def test_a_positional_after_a_tag_is_still_malformed() -> None:
