@@ -1749,8 +1749,8 @@ class MemoryStore:
             "fingerprint": MemoryStore._journal_fingerprint([]),
         }
 
+    @staticmethod
     def _journal_estimate(
-        self,
         db: sqlite3.Connection,
         keep: set[str],
         sizes: dict[str, int],
