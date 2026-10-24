@@ -2446,6 +2446,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Stage one image for a later send: ``{attachment: {id, mime, ...}}``.
 
@@ -2473,6 +2474,7 @@ class TeamBridgeClient:
             params=params,
             content=bytes(data),
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def delete_attachment(
@@ -2482,6 +2484,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Discard one STAGED upload (idempotent on the hub; bound ones stay)."""
 
@@ -2492,6 +2495,7 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/attachments/{attachment_id}",
             params=params,
             access=access,
+            expected_account_id=expected_account_id,
         )
         if response.status_code >= 400:
             raise _refusal(response)
@@ -2508,6 +2512,7 @@ class TeamBridgeClient:
         endpoint_id: str | None = None,
         purpose: Literal["screen", "context"] | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> tuple[bytes, str]:
         """One bound attachment's bytes and served type: ``(data, mime)``.
 
@@ -2541,6 +2546,7 @@ class TeamBridgeClient:
             params=params or None,
             access=access,
             max_response_bytes=ATTACHMENT_MAX_BYTES,
+            expected_account_id=expected_account_id,
         )
         if response.status_code >= 400:
             raise _refusal(response)

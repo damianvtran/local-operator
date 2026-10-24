@@ -184,6 +184,46 @@ def test_upload_refusals_happen_before_any_hub_call(proxy):
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("POST", f"{BASE}/attachments", PNG),
+        ("DELETE", f"{BASE}/attachments/{AID}", None),
+        ("GET", f"{BASE}/messages/{MID}/attachments/{AID}", None),
+    ],
+    ids=["upload", "delete", "fetch"],
+)
+def test_a_captured_owner_guard_refuses_before_any_bytes_move(proxy, method, path, body):
+    """#2772 B1: the guard must reach ALL THREE verbs, before any dispatch.
+
+    Captured under ``acc_1`` (the store's account), arriving while the receipt
+    names ``acc_other``: the client's guard refuses with the mismatch code and
+    the hub sees ZERO requests — no fetch, no upload, no delete. Asserted on the
+    transport spy, not on the returned value, because a 409 alone would also be
+    produced by a guard that ran AFTER the bytes moved.
+    """
+
+    client, calls, _ = proxy
+    response = client.request(method, f"{path}?expected_account_id=acc_other", content=body)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == bridge.ACCOUNT_MISMATCH_CODE
+    assert calls == [], f"{method} reached the hub before the guard"
+
+
+def test_the_matching_captured_owner_still_serves_all_three_verbs(proxy):
+    """The positive control: a matching receipt must not break the routes."""
+
+    client, calls, _ = proxy
+    query = "expected_account_id=acc_1"
+    uploaded = client.post(f"{BASE}/attachments?{query}", content=PNG)
+    assert uploaded.status_code == 201, uploaded.text
+    fetched = client.get(f"{BASE}/messages/{MID}/attachments/{AID}?{query}")
+    assert fetched.status_code == 200 and fetched.content == PNG
+    removed = client.delete(f"{BASE}/attachments/{AID}?{query}")
+    assert removed.status_code == 204, removed.text
+    assert [call[0] for call in calls] == ["POST", "GET", "DELETE"]
+
+
 def test_hub_refusals_pass_through_with_their_status(proxy):
     client, _calls, state = proxy
     state["error"] = (415, "attachment_type_unsupported")
