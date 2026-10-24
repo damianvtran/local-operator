@@ -107,7 +107,7 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
         # as the browse — the accepted command shape.
         assert any(
             text.startswith("language: en (English)")
-            and "<auto|en|fr|es|ru|vi|hi>" in text
+            and "/language <value>; space browses" in text
             and "; space" in text
             for text in texts
         ), texts
@@ -122,7 +122,7 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
             await pilot.pause()
             assert any(
                 text.startswith(f"language: {'en' if value == 'auto' else value} (")
-                and "<auto|en|fr|es|ru|vi|hi>; space" in text
+                and "/language <value>; space browses" in text
                 for text in _notices(app)
             ), (value, _notices(app))
         for text in _language_notices(app):
@@ -193,7 +193,7 @@ async def test_the_space_opens_the_choices_on_the_current_value(config_dir: Path
         picker = editor.picker
         assert picker.is_open(), "the space must open the choices list"
         rows = _choice_map(picker)
-        assert list(rows) == ["auto", "en", "fr", "es", "ru", "vi", "hi"], list(rows)
+        assert list(rows) == ["auto", "en", "fr", "es", "ru", "vi", "ur", "hi"], list(rows)
         assert picker.highlighted_name() == "auto", "the browse starts where the user is"
         assert rows["auto"].detail == "← current"
         # After a committed switch the marker moves with the value.
@@ -215,13 +215,12 @@ async def test_unknown_and_unshipped_values_are_refused_with_the_option_list(
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(110, 34)) as pilot:
         await _boot(pilot, app)
-        # Hindi ships in this wave; Chinese stays held after the incomplete
-        # slash audit, and Urdu awaits translation. Neither supported-but-
-        # unshipped locale may write config or appear in the available list.
-        for value in ("klingon", "zh-CN", "ur"):
+        # Hindi and Urdu now ship; Chinese stays held after the incomplete
+        # slash audit. A supported-but-unshipped locale may not write config.
+        for value in ("klingon", "zh-CN"):
             app._run_slash_command(f"/language {value}")
             await pilot.pause()
-            receipt = f"unknown language '{value}' — available: auto, en, fr, es, ru, vi, hi"
+            receipt = f"unknown language '{value}' — /language lists the values"
             assert receipt in _notices(app), _notices(app)
             assert _stored(config_dir) is None
         for text in _language_notices(app):
