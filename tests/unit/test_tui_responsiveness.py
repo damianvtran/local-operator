@@ -543,9 +543,7 @@ class StallRecorder:
         )
         delta_cpu = turn.cpu_ms - control.cpu_ms
         worst_wall = max(self.wall_stalls, default=0.0)
-        floor_text = (
-            f"{noise_floor_ms:.0f} ms" if noise_floor_ms is not None else "unmeasured"
-        )
+        floor_text = f"{noise_floor_ms:.0f} ms" if noise_floor_ms is not None else "unmeasured"
         suffix = (
             f" [CPU bound {bound_cpu:.0f} ms fixed (layout cancels in the delta, "
             f"so the run's wake floor and descheduling ratio are not applied), "
@@ -556,9 +554,7 @@ class StallRecorder:
             f"\ncontrol: {control.cpu_ms:.1f} ms CPU / {control.wall_ms:.1f} ms wall; "
             f"turn: {turn.cpu_ms:.1f} ms CPU / {turn.wall_ms:.1f} ms wall"
         )
-        if self._callbacks is not None and (
-            delta_cpu >= bound_cpu or worst_wall >= bound_wall
-        ):
+        if self._callbacks is not None and (delta_cpu >= bound_cpu or worst_wall >= bound_wall):
             suffix += "\ncallback attribution: " + json.dumps(self._callbacks.summary())
         assert delta_cpu < bound_cpu, (
             f"the agent-turn path added {delta_cpu:.1f} ms of loop-thread CPU over "
@@ -1720,9 +1716,7 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
                         noise_floor_ms=recorder.noise_floor_ms
                     )
                     control_low = (
-                        min(control_peaks, key=lambda peak: peak.cpu_ms)
-                        if control_peaks
-                        else None
+                        min(control_peaks, key=lambda peak: peak.cpu_ms) if control_peaks else None
                     )
                     record_property(
                         "s2_loop_liveness",
@@ -1735,9 +1729,7 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
                                     "turn": turn_peak is not None,
                                 },
                                 "composition_worst_cpu_ms": _peak_ms(composition_peak),
-                                "composition_worst_wall_ms": _peak_ms(
-                                    composition_peak, wall=True
-                                ),
+                                "composition_worst_wall_ms": _peak_ms(composition_peak, wall=True),
                                 "control_samples_worst_cpu_ms": [
                                     round(peak.cpu_ms, 1) for peak in control_peaks
                                 ],
