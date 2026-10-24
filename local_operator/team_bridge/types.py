@@ -18,14 +18,23 @@ that produce them. Two hard rules, both from the frozen contract (§13.9's
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, NewType
-from urllib.parse import quote, unquote
+
+# WHY the two imports differ from the branch's original pair: ``quote`` /
+# ``unquote`` left with #2856 (durable refs no longer carry display labels, so
+# nothing here percent-encodes them); ``UUID`` arrived with #2828's canonical
+# account shape and is still required by ``is_account_id``.
+from uuid import UUID
 
 __all__ = [
     "ATTACHMENT_ID_PATTERN",
     "CONVERSATION_ID_PATTERN",
+    "InvalidSendRecipient",
+    "is_account_id",
+    "validate_send_recipient",
     "SCREENING_CATEGORIES",
     "ACK_TARGETS",
     "AckTarget",
@@ -67,11 +76,6 @@ ATTACHMENT_ID_PATTERN = r"^batt_[0-9A-Za-z-]{8,64}$"
 _CONVERSATION_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{1,64}$")
 CONVERSATION_FEED_KIND = "conversation_id"
 CONVERSATION_FEED_TYPE = "message_available"
-#: Bound on the card labels the feed may carry (the same 200 the server uses
-#: for a display label). Kept here because the ref is persisted, not just
-#: rendered.
-_CONVERSATION_CARD_LABEL_MAX = 200
-
 
 #: §6.2's closed ack states for ONE recipient advancing their own delivery:
 #: unread→read (with an allow verdict) or unread/held→blocked (with a reject
@@ -119,6 +123,53 @@ SCREENING_CATEGORIES = (
 
 class TeamBridgeTypeError(ValueError):
     """A record violated its contract shape. Fail closed: callers refuse."""
+
+
+class InvalidSendRecipient(TeamBridgeTypeError):
+    """A caller supplied an unsupported destination; never persist or send it."""
+
+    code = "invalid_request"
+
+
+def validate_send_recipient(value: Any) -> dict[str, str]:
+    """Return the closed pair-inbox destination without coercion or field loss.
+
+    A nested ``to.kind`` once survived tool validation but disappeared when the
+    client rebuilt the HTTP body. That made an unsupported delivery request look
+    successful. Both the tool (BEFORE its durable outbox) and the wire client
+    use this check, so neither can silently reinterpret a destination. This is
+    the existing pair-inbox contract, not conversation routing or a human fallback.
+    Refusals deliberately do not quote caller-controlled keys or values.
+    """
+    if not isinstance(value, Mapping) or len(value) != 1:
+        raise InvalidSendRecipient("send/reply require exactly one endpoint_id or account_id")
+    key = next(iter(value))
+    if key not in ("endpoint_id", "account_id"):
+        raise InvalidSendRecipient("send/reply recipient contains an unsupported field")
+    identifier = value[key]
+    if not isinstance(identifier, str) or not identifier or identifier != identifier.strip():
+        raise InvalidSendRecipient("send/reply recipient must be a non-empty unpadded string")
+    return {key: identifier}
+
+
+def is_account_id(value: Any) -> bool:
+    """Accept legacy account IDs and the account service's canonical UUID shape.
+
+    Keep this identity guard in the dependency-light types module: desktop read
+    queries and conversation path guards must agree without importing an HTTP
+    client at server boot. UUID parsing plus canonical-form comparison follows
+    the Radient client's identifier guard; no braced, compact, URN, whitespace,
+    or path/query spellings are admitted. Case is accepted, not normalized:
+    authorization still compares the caller's actual identity, unchanged.
+    """
+    if not isinstance(value, str):
+        return False
+    if re.fullmatch(r"acc_[A-Za-z0-9_-]{1,64}", value) is not None:
+        return True
+    try:
+        return value.lower() == str(UUID(value))
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -284,39 +335,32 @@ def _optional_id(value: Any) -> str | None:
 
 @dataclass(frozen=True)
 class ConversationFeedRef:
-    """One conversation-delivery signal from the feed — refs, mention and card labels.
+    """Contentless durable locator, never a cache of display names.
 
-    The conversation lane does not share the pair lane's ``message_id``-only
-    ref: a card needs the conversation it belongs to, the message's position in
-    that conversation, whether this endpoint was mentioned, and — for an
-    agent-only membership that cannot read the person-gated conversation view —
-    the server-resolved display labels. ``conversation_name``/``sender_label``/
-    ``sender_kind`` are optional so pair-shaped legacy rows still parse; when
-    absent the handler falls back to the person-gated view.
-
-    The encoded form is what :class:`~...store.Store` persists in
-    ``feed_refs`` — one opaque string, exactly like the existing pair refs, so
-    the once-only durable consumption path needs no schema change. Labels are
-    percent-encoded so a name containing ``/`` (or anything else) cannot split
-    the ref.
+    New refs contain IDs, sequence, mention and the closed sender-kind enum.
+    Migration-only aliases distinguish old queue rows, never authority. Old
+    four/seven-part refs remain readable, but legacy labels are discarded
+    on read. Names are fetched ephemerally through the endpoint-authorized body
+    route and only rendered after screening/hash/admission. The store's v7
+    migration removes old name-bearing queue keys transactionally; this parser
+    also accepts older in-flight refs. Transcripts are never rewritten.
     """
 
     conversation_id: str
     message_id: str
     conversation_seq: int
     mention: bool
-    conversation_name: str | None = None
-    sender_label: str | None = None
     sender_kind: str | None = None
+    # Migration-only row identity. Never copied from wire ids or used for
+    # message/body/admit/claim authority; preserves old pending aliases exactly.
+    legacy_alias: str | None = None
     #: Set only when the message is a thread REPLY (agent-server threads): the
-    #: root it answers, so the card can tell the agent to answer in-thread.
-    #: Optional and additive — a ref persisted before threads still parses.
+    #: root it answers. Persisted as a TAGGED slot (``/thread_root=<bcmsg_…>``)
+    #: rather than a positional part, because a positional part would collide
+    #: with the old seven-part name/label/kind layout. Optional and additive:
+    #: a ref written before threads parses exactly as it did, and a reader that
+    #: does not know the tag ignores it.
     thread_root_id: str | None = None
-
-    def has_card_metadata(self) -> bool:
-        """Whether the feed supplied enough provenance to render without a human read."""
-
-        return bool(self.sender_label and self.sender_kind)
 
     def validated(self) -> "ConversationFeedRef":
         """Refuse a ref the parser could not read back (never guess)."""
@@ -333,20 +377,15 @@ class ConversationFeedRef:
             raise TeamBridgeTypeError("conversation_seq must be a positive integer")
         if not isinstance(self.mention, bool):
             raise TeamBridgeTypeError("mention must be a boolean")
-        card_fields = (self.conversation_name, self.sender_label, self.sender_kind)
-        if any(value is not None for value in card_fields):
-            # All-or-nothing for the SENDER half: a label without a kind (or
-            # vice versa) cannot render a dynamic header, so it is malformed
-            # rather than a reason to trust the person-gated view.
-            if not isinstance(self.sender_label, str) or not self.sender_label.strip():
-                raise TeamBridgeTypeError("sender_label is required with card metadata")
-            if self.sender_kind not in ("human", "agent"):
-                raise TeamBridgeTypeError("sender_kind must be human or agent")
-            if self.conversation_name is not None and not isinstance(self.conversation_name, str):
-                raise TeamBridgeTypeError("conversation_name must be a string")
-            for value in card_fields:
-                if value is not None and len(value) > _CONVERSATION_CARD_LABEL_MAX:
-                    raise TeamBridgeTypeError("card label exceeds its bound")
+        if self.sender_kind is not None and self.sender_kind not in ("human", "agent"):
+            raise TeamBridgeTypeError("sender_kind must be human or agent")
+        if self.legacy_alias is not None:
+            if (
+                self.sender_kind is None
+                or not isinstance(self.legacy_alias, str)
+                or re.fullmatch(r"[0-9a-f]{64}", self.legacy_alias) is None
+            ):
+                raise TeamBridgeTypeError("invalid legacy conversation alias")
         if self.thread_root_id is not None and (
             _CONVERSATION_MESSAGE_ID.fullmatch(self.thread_root_id) is None
         ):
@@ -361,62 +400,114 @@ class ConversationFeedRef:
             f"{self.conversation_id}/{self.message_id}/{self.conversation_seq}/"
             f"{1 if self.mention else 0}"
         )
-        if self.thread_root_id is None and not any(
-            value is not None
-            for value in (self.conversation_name, self.sender_label, self.sender_kind)
-        ):
-            return base
-        name = quote(self.conversation_name or "", safe="")
-        label = quote(self.sender_label or "", safe="")
-        meta = f"{base}/{name}/{label}/{self.sender_kind or ''}"
-        # The thread root is an 8th segment, appended so the 4- and 7-part refs
-        # already persisted in ``feed_refs`` keep their exact spelling. A
-        # ``bcmsg_`` id has no ``/``, so it needs no quoting.
-        return f"{meta}/{self.thread_root_id}" if self.thread_root_id else meta
+        encoded = base if self.sender_kind is None else f"{base}/{self.sender_kind}"
+        if self.legacy_alias is not None:
+            self.validated()
+            encoded += f"/legacy_alias={self.legacy_alias}"
+        if self.thread_root_id is not None:
+            self.validated()
+            encoded += f"/thread_root={self.thread_root_id}"
+        return encoded
 
 
 def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     """Decode a conversation feed ref value; ``None`` means malformed (skip, never guess).
 
-    Four parts is the original ref (no card metadata); seven is the additive
-    form carrying the server-resolved name/label/kind; eight adds a thread
-    reply's root id. Anything else is malformed, including a partial metadata
-    tuple.
+    Four parts is the original locator; five adds the closed sender kind.
+    Six adds a migration-only legacy_alias=<sha256> slot. Seven is the old
+    name/label/kind layout: discard both name slots and derive a stable alias
+    from the EXACT full old key's UTF-8 bytes. This preserves distinct pending
+    states even when names were the only difference. It is a name-derived
+    operational digest, NOT anonymization, authority or forensic erasure.
     """
 
     if not isinstance(value, str):
         return None
     parts = value.split("/")
-    if len(parts) not in (4, 7, 8):
+    if len(parts) not in (4, 5, 6, 7):
         return None
     conversation_id, message_id, seq_text, mention_text = parts[:4]
     if _CANONICAL_DECIMAL.fullmatch(seq_text) is None:
         return None
     if mention_text not in ("0", "1"):
         return None
-    name = label = kind = None
-    thread_root_id = parts[7] if len(parts) == 8 else None
-    if len(parts) >= 7:
-        encoded_name, encoded_label, kind = parts[4:7]
-        if (
-            len(encoded_name) > _CONVERSATION_CARD_LABEL_MAX * 12
-            or len(encoded_label) > _CONVERSATION_CARD_LABEL_MAX * 12
-        ):
+    # Tagged vs positional: a segment carrying ``=`` is a NAME=value tag and is
+    # never read as a positional slot. That is what makes the shape extensible —
+    # ``thread_root=`` (and anything a later release adds) rides beside the
+    # existing parts instead of changing what a 6- or 7-part ref means. An
+    # unknown tag is IGNORED, never rejected: a reader that predates a tag must
+    # still decode the ref rather than dropping a durable queue row.
+    positional: list[str] = []
+    tags: dict[str, str] = {}
+    seen_tag = False
+    for segment in parts[4:]:
+        if "=" in segment:
+            name, _, tagged = segment.partition("=")
+            tags[name] = tagged
+            seen_tag = True
+            continue
+        if seen_tag:
+            # A POSITIONAL after a tag is the ambiguity the old parser refused
+            # (``legacy_alias=<hash>/human``): the tag would have to mean two
+            # different things depending on order. Tags may follow positionals,
+            # never precede one.
             return None
-        name = unquote(encoded_name)
-        label = unquote(encoded_label)
-        if thread_root_id is not None and not (encoded_name or encoded_label or kind):
-            # A reply ref without card metadata pads the three slots empty.
-            name = label = kind = None
+        positional.append(segment)
+
+    kind: str | None = None
+    if "legacy_alias" in tags:
+        # A KNOWN tag with an invalid value is malformed, not "no alias": the
+        # empty/mis-sized alias exists precisely to keep two rows distinct.
+        if re.fullmatch(r"[0-9a-f]{64}", tags["legacy_alias"]) is None:
+            return None
+    legacy_alias = tags.get("legacy_alias") or None
+    if len(positional) == 3:
+        # The OLD seven-part layout: name, label, kind. The names are discarded
+        # (they are a name cache and a privacy regression) and the alias is
+        # derived from the EXACT full old key's bytes, so two pending rows that
+        # differed only by display name stay distinct.
+        if tags:
+            return None
+        kind = positional[2] or None
+        original = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}={value}"
+        try:
+            legacy_alias = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        except UnicodeEncodeError:
+            return None
+    elif len(positional) == 1:
+        kind = positional[0] or None
+    elif len(positional) > 1:
+        return None
+
+    if "thread_root" in tags:
+        # A KNOWN tag with an EMPTY value is a refusal, like an empty
+        # ``legacy_alias=``: "present but blank" is a malformed writer, not a
+        # ref that happens to have no thread root.
+        if not tags["thread_root"]:
+            return None
+        # And a thread root only exists on a ref that states its sender kind.
+        # ``validated()`` cannot express this — kind is optional on every other
+        # shape — so the grammar states it here: 4-form + ``/thread_root=``
+        # would otherwise parse and round-trip while meaning "reply from
+        # nobody", which no writer produces.
+        if len(positional) != 1:
+            return None
+    if "thread_root" in tags and "legacy_alias" in tags:
+        # REFUSED ON PURPOSE. A reply is written by the threads path, which
+        # never mints migration aliases; a ref carrying both is a combination
+        # no released writer can produce. Accepting it would quietly widen the
+        # grammar to every tag combination, and a widened grammar is how a
+        # reader starts honouring shapes nobody ever meant to persist.
+        return None
+    thread_root_id = tags.get("thread_root") or None
     try:
         return ConversationFeedRef(
             conversation_id=conversation_id,
             message_id=message_id,
             conversation_seq=int(seq_text),
             mention=mention_text == "1",
-            conversation_name=name,
-            sender_label=label,
             sender_kind=kind,
+            legacy_alias=legacy_alias,
             thread_root_id=thread_root_id,
         ).validated()
     except TeamBridgeTypeError:
@@ -668,22 +759,12 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
             # The server omits ``mention`` when false (Go's ``omitempty`` on a
             # bool), so an absent bit is a NON-mention delivery, not a
             # malformed one.
-            card_meta = {}
-            for field_name in ("conversation_name", "sender_label", "sender_kind"):
-                if field_name in ids:
-                    value = ids.get(field_name)
-                    if not isinstance(value, str):
-                        raise TeamBridgeTypeError(
-                            f"events[{index}].ids.{field_name} must be a string"
-                        )
-                    card_meta[field_name] = value
-            thread_root = ids.get("thread_root_id")
-            if thread_root not in (None, ""):
-                if not isinstance(thread_root, str):
-                    raise TeamBridgeTypeError(
-                        f"events[{index}].ids.thread_root_id must be a string"
-                    )
-                card_meta["thread_root_id"] = thread_root
+            # Wire labels are deliberately not read: feed/hold refs survive
+            # restart and must not become a persistent name cache. Only the
+            # closed provenance enum may accompany the locator.
+            kind = ids.get("sender_kind")
+            if kind is not None and kind not in ("human", "agent"):
+                raise TeamBridgeTypeError(f"events[{index}].ids.sender_kind is invalid")
             at = raw.get("at")
             if not isinstance(at, str) or not at:
                 raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")
@@ -693,7 +774,7 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
                     message_id=message_id,
                     conversation_seq=int(seq_text),
                     mention=mention,
-                    **card_meta,
+                    sender_kind=kind,
                 )
                 .validated()
                 .encode()

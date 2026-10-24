@@ -102,7 +102,8 @@ async def test_committed_gate_drains_before_viewer_disposal(
                         handle._approval_gate("write", "Save one record")
                     )
                     await _pump(pilot, lambda: app._approval is not None)
-                    app._answer_live_approval_as_allowed()
+                    if app._approval is not None:
+                        app._approval.resolve(True, answer="y")
                 else:
                     questions = [
                         AskQuestion(

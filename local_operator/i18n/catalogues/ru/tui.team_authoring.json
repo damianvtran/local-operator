@@ -33,5 +33,6 @@
   "tui.team_authoring.new_hint": "Создать команду",
   "tui.team_authoring.edit_hint": "Изменить установленную команду",
   "tui.team_authoring.subcommand": "подкоманда",
-  "tui.team_authoring.talk_hint": "общаться с командой · {detail}"
+  "tui.team_authoring.talk_hint": "общаться с командой · {detail}",
+  "tui.team_authoring.promote_hint": "Скопировать команду этой беседы в ваш аккаунт"
 }

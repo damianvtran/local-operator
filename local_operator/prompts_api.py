@@ -924,6 +924,7 @@ def build_system_blocks(
     host_has_browser: bool | None = None,
     host_has_console: bool | None = None,
     deferred_tools: Collection[str] = (),
+    open_asks: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -1009,6 +1010,24 @@ def build_system_blocks(
     is built, passes the live answer instead: ``tools`` there is the
     construction-time list and would have said "no ask hook" to every TUI and
     desktop session.
+
+    ``open_asks`` is the ALREADY-RENDERED open-asks reminder (design §16/SA-D3),
+    or ``""`` when nothing is open. It is passed as text rather than as the queue
+    whose rows it describes because this builder must stay free of the ask
+    store — the session renders the section from its own live queue, and a
+    print-only builder (a benchmark, a prompt copy) never has one. ``""`` renders
+    NO section at all, which is not a style choice: a section that appeared and
+    vanished would move the tail's bytes on every settle, and a start context
+    with no open ask has to stay byte-identical to the tree before this existed.
+    Empty-string-equals-absent is the same rule the goal, team and credentials
+    sections follow above.
+
+    ``""`` from a host that cannot answer (no ask queue) is NOT the same fact as
+    ``""`` from a host whose queue is empty, and this builder does not decide
+    which it was: both render nothing, and ``Session._system_state_delta`` is
+    what refuses to turn the first into a removal the model would read as "your
+    asks are gone" (QA round 1, Q2). Callers with a queue pass its render;
+    callers without one pass nothing.
     """
     # THREE states, not two, and conflating the last two ships a false claim.
     # Membership, not visibility: a hidden tool is still callable, and telling
@@ -1202,6 +1221,19 @@ def build_system_blocks(
             interactive, _interactivity_channel(tools, channel), queued_ask=_ask_queue_queued()
         )
         tail = f"{tail}\n\n{body}"
+    if open_asks.strip():
+        # AFTER `<interactivity>`, because that section states HOW a question can
+        # reach a person and this one names what is already waiting — the channel
+        # before the queue. A host can render this without it (a resumed
+        # headless run has a queue and no attachment probe), so the order is a
+        # reading order, not a claim that both always appear; what is load-bearing
+        # is that it matches `_TAIL_SECTION_MARKERS`, because the splitter walks
+        # that table in composition order.
+        # MODEL-FACING English by design (the model reads it, not a person).
+        tail = (
+            # i18n: ignore model-facing open-asks reminder (not shown to the user)
+            f"{tail}\n\n<open-asks>\n{open_asks.strip()}\n</open-asks>"
+        )
     names = [name for name in (credentials or ()) if name]
     if names:
         # Names only. The values live in process memory and are injected into
@@ -1281,6 +1313,11 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     ("agent", "<agent>"),
     ("run", "<configuration-run>"),
     ("interactivity", "<interactivity>"),
+    # The open-asks reminder (design §16/SA-D3). Its own section because it is
+    # the one tail piece that can move on EVERY user message while asks are open:
+    # fused with any neighbour, each re-anchor would re-ship that neighbour too,
+    # for a change that has nothing to do with it.
+    ("open_asks", "<open-asks>"),
     ("credentials", "<session-credentials>"),
     ("memory_suggestions", "<memory_suggestions>"),
     ("memory_hint", "<memory_hint"),
@@ -1344,6 +1381,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
     "agent": "Agent",
     "run": "Configuration run",
     "interactivity": "Interactivity",
+    "open_asks": "Open asks",
     "credentials": "Session credentials",
     "memory_suggestions": "Memory suggestions (untrusted)",
     "memory_hint": "Compaction memory",

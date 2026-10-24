@@ -2576,6 +2576,30 @@ def _is_a_name_in_the_store_grammar(token: str) -> bool:
     return "_" in token and _ENV_NAME_SHAPED.fullmatch(token) is not None
 
 
+def _is_reference_name(value: str) -> bool:
+    """Whether a flag/assignment argument is a NAME-shaped reference.
+
+    The release for ``--secret`` must not become a release for every lowercase
+    word: a single lowercase argument is indistinguishable from a password typed
+    into the wrong flag. A reference has NAME STRUCTURE — the
+    store's caps/underscore grammar, or a dotted/hyphenated DNS-1123 identifier
+    (``wire.slash.credential``, ``mda-internal-contribution-delivery``). A bare
+    lowercase word is left to the mask; that is the same residual
+    :func:`_is_a_name_in_the_store_grammar` already states for one-word entries.
+    """
+    if _is_a_name_in_the_store_grammar(value):
+        return True
+    # A digit in a hyphenated/dotted name is the cheapest evidence of an opaque
+    # token (``my-api-key-123``, ``hunter2-prod-eu``), so it keeps the mask. The
+    # dotted catalogue keys this release exists for (``wire.slash.credential``)
+    # and the camel-free project slugs carry no digits.
+    return (
+        _is_dns_name(value)
+        and ("." in value or "-" in value)
+        and not any(char.isdigit() for char in value)
+    )
+
+
 def _value_is_a_reference_to_a_credential(value: str) -> bool:
     """Whether a flag's argument is the NAME of a stored credential, not one.
 
@@ -2735,6 +2759,15 @@ def _flag_value_guard(match: Match[str]) -> bool:
     if any(char in value for char in _EXPRESSION_CHARS):
         return False
     if _value_is_a_reference_to_a_credential(value):
+        return False
+    # ``--secret`` is the ONE flag whose argument is a store ENTRY NAME rather
+    # than a credential value (``secrets/cli.py``'s ``NAME[=VAR]`` metavar). Its
+    # argument may therefore be any DNS-1123 name — including a dotted catalogue
+    # key such as ``wire.slash.credential`` — and masking it makes the documented
+    # lookup impossible. ``--password``/``--token``/``--api-key`` keep masking
+    # their argument: those flags bind a VALUE, and a name-shaped value there is
+    # a passphrase typed into the command.
+    if _is_store_entry_flag(match.group(_FLAG_GROUP)) and _is_reference_name(value):
         return False
     return True
 
@@ -2940,10 +2973,15 @@ def _assignment_value_guard(match: Match[str]) -> bool:
     # VALUE-shaped argument on this rule's own path, which is why a token after
     # ``--token=`` still masks and still carries the flag rule's label. See
     # :func:`_value_is_a_reference_to_a_credential` for the failure that motivated it.
-    if _CLI_CREDENTIAL_FLAG_NAME.match(name) and _value_is_a_reference_to_a_credential(
-        match.group(4)
-    ):
-        return False
+    if _CLI_CREDENTIAL_FLAG_NAME.match(name):
+        # The ``=`` spelling of ``--secret`` binds a store ENTRY NAME, so the
+        # same DNS-1123 release the space spelling gets in
+        # :func:`_flag_value_guard` applies here. Kept on the store-entry flag
+        # only: ``--token=`` still binds a value and still masks.
+        if _is_store_entry_flag(name) and _is_reference_name(match.group(4)):
+            return False
+        if _value_is_a_reference_to_a_credential(match.group(4)):
+            return False
     # The VALUE is read the way the NAME is: the rendering's line breaks are line
     # breaks for the judgement too, so what is judged is the run before the first
     # of them while the mask covers the whole run (see

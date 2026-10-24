@@ -2778,8 +2778,16 @@ CHOSEN_MODEL = {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning
 CONFIGURED = {"hosting": "anthropic", "model_name": "claude-sonnet-5"}
 
 
-def draft_model(provider: str = "deepseek", model_id: str = "deepseek-flash", effort=None):
-    return {"provider": provider, "model_id": model_id, "reasoning_effort": effort}
+def draft_model(
+    provider: str = "deepseek", model_id: str = "deepseek-flash", effort=None, fast=None
+):
+    body = {"provider": provider, "model_id": model_id, "reasoning_effort": effort}
+    # Omitted unless a test names it, so every pre-existing call builds the exact
+    # body it built before this field existed (``None`` and absence are distinct
+    # on this wire: absence is what an older client sends).
+    if fast is not None:
+        body["fast_mode"] = fast
+    return body
 
 
 @pytest.mark.asyncio
@@ -2865,6 +2873,10 @@ REFUSED_DRAFT_MODELS = [
     (draft_model("anthropic", "claude-opus-9"), "model_unknown"),
     (draft_model("deepseek", "deepseek-flash", "turbo"), "effort_unsupported"),
     (draft_model("anthropic", "claude-opus-5", "xhighz"), "effort_unsupported"),
+    # The speed dial is the OTHER per-request capability a pick can name, and a
+    # model that does not sell the tier must be refused rather than silently
+    # answered at standard speed: the pane drew a toggle the user turned on.
+    (draft_model("deepseek", "deepseek-flash", fast=True), "fast_mode_unsupported"),
 ]
 
 
@@ -2954,6 +2966,75 @@ async def test_an_effort_on_a_model_with_no_ladder_is_refused(draft_api) -> None
     assert result.json()["detail"]["code"] == "effort_unsupported"
 
 
+@pytest.mark.asyncio
+async def test_a_draft_preview_publishes_the_fast_dial_it_will_run_on(draft_api) -> None:
+    """The draft chip reads the dial off the SAME spec the first turn gets.
+
+    ``selected_model`` is a ``ModelSpec`` on the wire, so both halves of the
+    question — whether this route sells the tier at all, and whether the user
+    asked for it — ride the frame the pane already renders. A preview that
+    dropped them would leave the chip unable to say "available" before the
+    first message, which is the reported blocker (ui#1265).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    result = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "model": draft_model("anthropic", "claude-opus-5", fast=True),
+        },
+    )
+    assert result.status_code == 200, result.text
+    model = result.json()["result"]["frontend"]["snapshot"]["selected_model"]
+    assert model["fast_mode"] is True, "the pane must show the dial it was asked for"
+    assert model["supports_fast_mode"] is True, "and that this route sells it"
+    assert not (root / "sessions").exists(), "a preview still costs nothing durable"
+
+
+@pytest.mark.asyncio
+async def test_the_preview_says_a_model_with_no_tier_cannot_go_fast(draft_api) -> None:
+    """The other half of the chip: the pair, refused, with nothing durable left.
+
+    ``deepseek-flash`` is a shipped row with no fast tier, so this is the shape
+    a released client's picker meets when it offers the toggle anyway.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    result = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "model": draft_model("deepseek", "deepseek-flash", fast=True),
+        },
+    )
+    assert result.status_code == 422, result.text
+    assert result.json()["detail"]["code"] == "fast_mode_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_the_backend_advertises_that_a_draft_can_pick_fast(draft_api) -> None:
+    """A client must be able to ASK before it sends the dial.
+
+    ``DraftModel`` inherits ``extra="forbid"``, so an older backend refuses the
+    whole create body over one unknown field — not just the dial. That is the
+    rule ``draft_selection`` sits beside ``draft_preview`` to state, one field
+    down: a renderer that does not see ``draft_fast`` keeps its speed toggle
+    inert rather than letting it dispatch into a 422, while the model and effort
+    chips it already had keep working.
+    """
+    client, _root = draft_api
+
+    capabilities = (await client.get("/v1/capabilities")).json()["result"]["features"]
+
+    assert capabilities["draft_fast"] == 1
+    assert capabilities["draft_selection"] == 1, "the picker the dial rides on must stay advertised"
+
+
 def _marker(root: Path, session_id: str) -> dict[str, Any]:
     return json.loads((root / "sessions" / session_id / "desktop.json").read_text())
 
@@ -3014,6 +3095,36 @@ async def test_a_created_drafts_choice_is_what_a_snapshot_reports(draft_api) -> 
     # The spec a cold frame carries comes from the same synth the preview used,
     # so the draft chip and the first real frame cannot disagree.
     assert tuple(model["reasoning_efforts"]) == ("none", "low", "high", "max")
+
+
+@pytest.mark.asyncio
+async def test_a_created_drafts_fast_dial_is_the_one_its_first_turn_runs_on(draft_api) -> None:
+    """The dial travels marker → birth selection → first cold frame.
+
+    Additive like the pair and the level beside it: a body that names no dial
+    writes the marker it always wrote (the equality case above pins that).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    picked = draft_model("anthropic", "claude-opus-5", fast=True)
+
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": picked},
+    )
+    assert created.status_code == 200, created.text
+    session_id = created.json()["result"]["session_id"]
+    assert _marker(root, session_id)["model"]["fast_mode"] is True
+
+    from local_operator.server.utils.desktop_sessions import draft_birth_selection
+
+    seeded = draft_birth_selection(root, session_id)
+    assert seeded is not None and seeded.fast_mode is True
+
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert model["fast_mode"] is True, "the first cold frame must agree with the chip"
 
 
 @pytest.mark.asyncio
@@ -9268,15 +9379,19 @@ async def test_the_stored_pages_through_id_cut_is_exercised_directly(tmp_path) -
 # ---------------------------------------------------------------------------
 
 
-def _install_ask_remote(app: FastAPI, remote: Any) -> None:
+def _install_ask_remote(app: FastAPI, remote: Any, *, remote_row: Any = None) -> None:
     """Point the answers route at a stub bridge carrying ``remote``.
 
     The pool is the only thing stubbed: the route, its body model, the refusal
     ladder and the response envelope are the real ones. ``SimpleNamespace`` is
     what the route reads (``bridge.remote``), which is the same shape
     ``test_viewer_protocol`` pins for the real bridge.
+
+    ``remote_row`` marks the session as a PEER'S conversation, which is the one
+    case the dismissal route skips the local cold door for (this device holds no
+    ask log for it).
     """
-    bridge = SimpleNamespace(remote=remote)
+    bridge = SimpleNamespace(remote=remote, remote_row=remote_row)
 
     class _Pool:
         @contextlib.asynccontextmanager
@@ -9304,6 +9419,10 @@ async def answers_api(tmp_path: Path, monkeypatch):
     app = FastAPI()
     app.state.config_manager = ConfigManager(tmp_path)
     app.include_router(desktop_sessions.router)
+    # The capability map is served by its own router, and the dismissal gate reads
+    # the key it publishes (`features.ask_dismiss`) — the same route the renderer
+    # negotiates against, so the cell exercises the real advertisement.
+    app.include_router(capabilities.router)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
@@ -9322,12 +9441,23 @@ class _AskRemote:
     revision caught only ``ValueError`` and let the shared ladder answer 503.
     """
 
-    def __init__(self, *, refuse_with: str = "", detail: str = "answered") -> None:
+    def __init__(
+        self,
+        *,
+        refuse_with: str = "",
+        detail: str = "answered",
+        silent_refusal: bool = False,
+    ) -> None:
         self.refuse_with = refuse_with
+        #: A refusal with NO sentence — the contract break R1-5's guard covers.
+        self.silent_refusal = silent_refusal
         self.detail = detail
         #: ``(ask_id, answers, decline, revise)`` — the third and fourth are the
         #: two intent flags, positional because each cell asserts the whole tuple.
         self.calls: list[tuple[str, Any, bool, bool]] = []
+        #: ``(ask_id, by, reason)`` — the LIVE dismissal op, kept apart from
+        #: ``calls`` so a cell can prove which door answered.
+        self.dismissals: list[tuple[str, str, str | None]] = []
         # The route reads ``remote.frontend_state.epoch`` on the GATE arm (the
         # queued-ask arm skips the epoch check by design), so the double has to
         # carry the attribute the real ``AttachedSession`` carries. Declared as
@@ -9347,6 +9477,24 @@ class _AskRemote:
         if self.refuse_with:
             raise RuntimeError(self.refuse_with)
         return self.detail
+
+    async def dismiss_ask(
+        self, ask_id: str, *, by: str = "", reason: str | None = None
+    ) -> dict[str, Any]:
+        """The LIVE dismissal op (SA-D5), in the REAL facade's verdict shape.
+
+        ``AttachedSession.dismiss_ask`` answers ``{"ok": …}`` and reports a
+        refusal in that dict rather than raising, so a double that returned a
+        detail string would let the route read the wrong contract and pass. The
+        call is appended separately from ``calls`` so a cell can tell "took the
+        cold door" from "dialled the owner" by which list is non-empty.
+        """
+        self.dismissals.append((ask_id, by, reason))
+        if self.silent_refusal:
+            return {"ok": False}
+        if self.refuse_with:
+            return {"ok": False, "error": self.refuse_with}
+        return {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -9415,6 +9563,198 @@ async def test_a_queued_ask_body_without_answers_or_decline_is_a_422(answers_api
         result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
         assert result.status_code == 422, (body, result.text)
     assert remote.calls == [], "a malformed body must not reach the runtime"
+
+
+# ---------------------------------------------------------------------------
+# The DESKTOP DISMISSAL (SA-D5, design §15)
+# ---------------------------------------------------------------------------
+
+
+def _cold_open_ask(root: Path, *, session: str = "0123456789ab", ask_id: str = "a-1") -> Path:
+    """A session directory holding ONE OPEN ask, with no runtime anywhere."""
+    from local_operator.asks import store
+
+    directory = store.session_dir(root, session)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    # NOW, not a fixed instant: the cold door folds at the wall clock, so a
+    # constant would seed a deadline that lapsed seven days ago.
+    now = store.now_ms()
+    store.append_event(
+        directory,
+        {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_QUEUED,
+            "ask_id": ask_id,
+            "at": now,
+            "created_at": now,
+            "expires_at": now + 3_600_000,
+            "timeout_s": 3600,
+            "urgent": False,
+            "tool_call_id": "",
+            "questions": [
+                {
+                    "id": "q0",
+                    "question": "ship it?",
+                    "options": [{"label": "yes", "description": ""}],
+                    "multi": False,
+                    "secret": False,
+                    "persist": False,
+                }
+            ],
+        },
+    )
+    return directory
+
+
+@pytest.mark.asyncio
+async def test_a_cold_open_ask_is_dismissed_without_dialling_anything(answers_api) -> None:
+    """SA-D5 + §14: no live owner means the NO-BOOT door — the route writes the
+    dismissal and never touches the facade, which is what could start a runtime."""
+    from local_operator.asks import store
+
+    client, app = answers_api
+    root = app.state.config_manager.config_dir
+    directory = _cold_open_ask(root)
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "dismiss": True, "reason": "answered_in_chat"},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "dismissed"}
+    assert remote.dismissals == [], "a cold dismissal must not dial (a bind BOOTS)"
+    assert remote.calls == []
+    events = store.read_events(directory)
+    assert events[-1]["kind"] == store.EVENT_DISMISSED
+    assert events[-1]["by"] == {"surface": "desktop"}
+    assert events[-1]["reason"] == "answered_in_chat"
+
+
+@pytest.mark.asyncio
+async def test_a_live_owner_gets_the_live_dismiss_op(answers_api, monkeypatch) -> None:
+    """``ask_owner_present`` from the cold door is the ONE refusal that dials: the
+    owner settles its own ask, and the frame takes the operator's reason."""
+    client, app = answers_api
+    monkeypatch.setattr("local_operator.resume.live_runtime_pid", lambda root, session_id: 4242)
+    remote = _AskRemote(detail="dismissed")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "dismiss": True, "reason": "moot"},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "dismissed"}
+    assert remote.dismissals == [("a-1", "desktop", "moot")]
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_conversation_skips_the_local_cold_door(answers_api) -> None:
+    """A PEER's ask has no local log to fold, so the local door could only answer
+    "not in this session's queue". The session's owner is the one to ask."""
+    client, app = answers_api
+    remote = _AskRemote(detail="dismissed")
+    _install_ask_remote(app, remote, remote_row=SimpleNamespace(owner_device="peer-1"))
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "dismiss": True},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.dismissals == [("a-1", "desktop", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_door_that_refuses_without_a_sentence_still_answers_409(
+    answers_api, monkeypatch
+) -> None:
+    """R1-5, the second half: the fallback is a CONTRACT-BREAK guard, not copy.
+
+    A real door always supplies a sentence (``tests/unit/asks/test_dismiss.py``
+    pins that), so this one feeds a facade that breaks the contract on purpose:
+    the refusal must still be a well-formed 409 rather than a blank detail.
+    """
+    client, app = answers_api
+    monkeypatch.setattr("local_operator.resume.live_runtime_pid", lambda root, session_id: 4242)
+    remote = _AskRemote(silent_refusal=True)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "dismiss": True}
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "the dismissal was refused"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_dismissal_answers_409_with_the_asks_own_sentence(answers_api) -> None:
+    """No owner and no such ask: the queue's sentence, as a 409 — never the 503
+    ladder's reconnect remedy, which cannot work for a settled or unknown ask."""
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-nope", "dismiss": True}
+    )
+    assert result.status_code == 409, result.text
+    assert "not in this session's queue" in result.json()["detail"]
+    assert remote.dismissals == []
+
+
+@pytest.mark.asyncio
+async def test_a_live_refusal_on_the_dismissal_is_a_409_not_a_503(answers_api, monkeypatch) -> None:
+    """The wire raises ``RuntimeError`` for a refusal with no known code, and the
+    shared ladder would map that to 503 — the answer path's own lesson (QA Q1)."""
+    client, app = answers_api
+    monkeypatch.setattr("local_operator.resume.live_runtime_pid", lambda root, session_id: 4242)
+    remote = _AskRemote(refuse_with="you already dismissed this.")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "dismiss": True}
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "you already dismissed this."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"dismiss": True},
+        {"ask_id": "a-1", "dismiss": True, "answers": {"q0": ["yes"]}},
+        {"ask_id": "a-1", "dismiss": True, "decline": True},
+        {"ask_id": "a-1", "dismiss": True, "revise": True},
+        {
+            # A real payload, because an EMPTY image list is the existing wire's
+            # way to say "no images" on every other shape too — the refusal is
+            # for a dismissal that actually carries one.
+            "ask_id": "a-1",
+            "dismiss": True,
+            "images": [{"question_id": "q0", "data_b64": "aGk=", "mime_type": "image/png"}],
+        },
+        {"ask_id": "a-1", "reason": "moot"},
+        {"ask_id": "a-1", "dismiss": True, "reason": "because"},
+    ],
+)
+async def test_a_malformed_dismissal_body_is_a_422(answers_api, body: dict[str, Any]) -> None:
+    """Every shape a dismissal cannot honour is refused at the boundary: a no-op
+    field is a 422 here rather than a silently dropped intent (§10)."""
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
+    assert result.status_code == 422, (body, result.text)
+    assert remote.dismissals == []
+
+
+@pytest.mark.asyncio
+async def test_the_capabilities_map_advertises_ask_dismiss(answers_api) -> None:
+    """``Answer`` is ``extra=\"forbid\"``, so the renderer MUST gate on the key —
+    without it an older backend 422s the user's own tap."""
+    client, _ = answers_api
+    result = await client.get("/v1/capabilities")
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["features"]["ask_dismiss"] == 1
 
 
 @pytest.mark.asyncio
@@ -10091,3 +10431,205 @@ async def test_a_local_row_answers_its_binding_once(draft_api) -> None:
     (row,) = answer.json()["result"]["sessions"]
     assert row["binding"] == {"agent": None, "team": "lopdev"}
     assert "team" not in row and "agent" not in row, sorted(row)
+
+
+# -- the hub check a session start asks for ------------------------------------------------
+
+
+class _StubHubRunner:
+    """The bit of ``app.state.hub_sync`` a create touches: the start trigger.
+
+    A real ``HubSyncRunner`` would need credentials, a store and a network; what
+    this file is about is the ROUTE's contract with it -- one call per created
+    conversation, none for a refusal or a replay, and no dependence on whether
+    the call worked. ``raises`` models the worst case: a trigger that blows up.
+    """
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.calls = 0
+        self.raises = raises
+
+    def note_session_start(self) -> None:
+        self.calls += 1
+        if self.raises:
+            raise RuntimeError("hub unreachable")
+
+
+@pytest_asyncio.fixture
+async def hub_trigger_api(tmp_path: Path, monkeypatch):
+    """``draft_api``'s minimal app, plus a stub hub runner on ``app.state``."""
+
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    app.state.hub_sync = _StubHubRunner()
+    app.include_router(desktop_sessions.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        yield client, tmp_path, app
+    if hasattr(app.state, "desktop_sessions"):
+        await app.state.desktop_sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_a_created_session_asks_the_hub_runner_for_one_check(hub_trigger_api) -> None:
+    """One create is one session start -- and a REPLAY of it is not a second one.
+
+    The replay half is the at-most-once contract leaking into the trigger: the
+    retried request did not open a conversation, it re-answered one that was
+    already open, so asking the hub again would misdescribe what happened (and
+    the runner's own throttle would be the only thing stopping it).
+    """
+
+    client, root, app = hub_trigger_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    body = {"request_id": str(uuid.uuid4()), "cwd": str(root)}
+
+    created = await client.post("/v1/desktop/sessions", json=body)
+    assert created.status_code == 200, created.text
+    assert created.json()["result"]["replayed"] is False
+    assert app.state.hub_sync.calls == 1
+
+    replay = await client.post("/v1/desktop/sessions", json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["result"]["replayed"] is True
+    assert app.state.hub_sync.calls == 1, "a replay did not start a conversation"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_create_never_asks_the_hub_runner(hub_trigger_api) -> None:
+    """A refusal is not a session start: no conversation exists to have opened."""
+
+    client, root, app = hub_trigger_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    refused = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root / "does-not-exist")},
+    )
+    assert refused.status_code == 409, refused.text
+    assert app.state.hub_sync.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_hub_trigger_that_raises_never_fails_the_create(hub_trigger_api) -> None:
+    """The hub is optional; the conversation is not.
+
+    A runner whose trigger raises must cost nothing but the check: the create
+    still answers 200 and the session directory is on disk, so a hub problem can
+    never turn into "your new conversation failed".
+    """
+
+    client, root, app = hub_trigger_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    app.state.hub_sync.raises = True
+
+    created = await client.post(
+        "/v1/desktop/sessions", json={"request_id": str(uuid.uuid4()), "cwd": str(root)}
+    )
+    assert created.status_code == 200, created.text
+    session_id = created.json()["result"]["session_id"]
+    assert (root / "sessions" / session_id).is_dir()
+
+
+@pytest_asyncio.fixture
+async def hub_runner_api(tmp_path: Path, monkeypatch):
+    """The REAL ``HubSyncRunner`` on the app, over the fake hub the runner suite uses.
+
+    The stub above proves the route's side of the contract; this proves the
+    composition -- route, one runner, its throttle, its check and the store --
+    with nothing faked but the hub's HTTP client and the network itself.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.runner import HubSyncRunner
+    from tests.unit.hub_sync.test_service import Hub, _pull_agent
+
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    hub = Hub()
+    monkeypatch.setattr(
+        "local_operator.agents._fetch_hub_profile", lambda _c, h, **_k: hub.agents[h]
+    )
+    agents = AgentRegistry(tmp_path)
+    row = _pull_agent(agents, hub, tmp_path)
+    cm = ConfigManager(tmp_path)
+
+    def build() -> svc.HubSyncContext:
+        return svc.HubSyncContext(
+            config_dir=tmp_path,
+            config_manager=cm,
+            client_for_tenant=lambda _t: hub.client(),
+            credential="ok",
+            agent_registry=agents,
+            resolver=None,
+        )
+
+    runner = HubSyncRunner(config_manager=cm, build_ctx=build, startup_delay=0)
+    app = FastAPI()
+    app.state.config_manager = cm
+    app.state.hub_sync = runner
+    app.include_router(desktop_sessions.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        yield client, tmp_path, runner, row
+    if hasattr(app.state, "desktop_sessions"):
+        await app.state.desktop_sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_two_creates_back_to_back_are_one_real_hub_check(hub_runner_api, monkeypatch) -> None:
+    """The acceptance rule, end to end: a burst of creates costs ONE check.
+
+    Two sessions created in the same tick of the client's loop are one moment.
+    The second create must neither wait for the first check nor start a second
+    one -- and the first check must really have run, which is why this asserts
+    the store row the check writes rather than only counting calls.
+    """
+
+    client, root, runner, row = hub_runner_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync import store as st
+
+    calls: list[str] = []
+    real = svc.check_items
+
+    def counting(ctx: Any, **kw: Any) -> Any:
+        calls.append("check")
+        return real(ctx, **kw)
+
+    monkeypatch.setattr(svc, "check_items", counting)
+
+    first = await client.post(
+        "/v1/desktop/sessions", json={"request_id": str(uuid.uuid4()), "cwd": str(root)}
+    )
+    second = await client.post(
+        "/v1/desktop/sessions", json={"request_id": str(uuid.uuid4()), "cwd": str(root)}
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["result"]["session_id"] != second.json()["result"]["session_id"]
+
+    # The trigger is fire-and-forget, so wait for the ONE check it scheduled.
+    await _until(lambda: bool(calls), why="the session-start check never ran")
+    assert runner._session_check_task is not None
+    await asyncio.wait_for(runner._session_check_task, timeout=30.0)
+
+    assert len(calls) == 1
+    assert st.StatusStore(root).load()["items"][f"agent:{row.id}"]["last_checked_at"]

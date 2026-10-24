@@ -282,12 +282,13 @@ def project_subcommand_rows() -> tuple[tuple[str, str], ...]:
     return tuple((word, PROJECT_SUBCOMMAND_HELP[word]) for word in PROJECT_SUBCOMMANDS)
 
 
-AGENT_SUBCOMMANDS: tuple[str, ...] = ("class", "new", "edit")
+AGENT_SUBCOMMANDS: tuple[str, ...] = ("class", "new", "edit", "promote")
 
 AGENT_SUBCOMMAND_HELP: dict[str, str] = {
     "class": "Show or switch an agent's class (proactive|reactive)",
     "new": "Create an agent role or specialist",
     "edit": "Edit an installed agent profile",
+    "promote": "Copy this conversation's role into your account",
 }
 
 
@@ -440,6 +441,35 @@ def project_show_refusal_text(name: str) -> str:
     return f"no project named {name!r} — /project list shows every tracked project."
 
 
+def project_page_truncation_text(registry: Any) -> str:
+    """The partial-listing notice, or ``""`` when the store fits one page.
+
+    The store's snapshot is a recency PAGE over the rows (``projects._MAX_ROWS``),
+    not a visibility boundary, so a SET-returning surface must state what it left
+    out — otherwise "not listed" reads as "does not exist" for a project the
+    addressing verbs still resolve (the ordinal-502 incident). ONE copy for both
+    ``/project`` listing renderers (the `list` branch and the nameless `show`
+    overview), so the two receipts cannot disagree; the TUI page states the same
+    fact through its own renderer's existing overflow row. The count is the PAGE
+    CUT (``PageCounts.beyond_page``), never ``on_disk - loaded``: an unreadable
+    row is not hidden-by-page (QA Q1) — while a torn FILE hiding in the unparsed
+    tail is counted as not listed, so the sentence promises only what the store
+    can read.
+    """
+    counts = getattr(registry, "page_counts", None)
+    if counts is None:
+        return ""
+    hidden = counts.beyond_page
+    if hidden <= 0:
+        return ""
+    noun = "row is" if hidden == 1 else "rows are"
+    return (
+        f"showing the {counts.loaded} most recently active of {counts.total_rows} stored "
+        f"projects — {hidden} {noun} not listed; /project show <name> resolves "
+        "any project the store can read."
+    )
+
+
 def project_listing_hint_text() -> str:
     """The listing's FOOTER: the two page entries, named (S3b).
 
@@ -541,7 +571,9 @@ def project_overview_receipt(
         return (project_empty_text(), "info")
     states = scan_runtime_states(config_dir)
     rows = project_listing_rows(projects, states=states, now=now, window=stale_after_s(config_dir))
-    return ("\n".join([*rows, project_listing_hint_text()]), "info")
+    note = project_page_truncation_text(registry)
+    footer = [*([note] if note else []), project_listing_hint_text()]
+    return ("\n".join([*rows, *footer]), "info")
 
 
 def project_delete_rehearsal_text(name: str) -> str:
@@ -782,9 +814,12 @@ def run_project_slash_op(
         rows = project_listing_rows(
             projects, states=states, now=now, window=stale_after_s(config_dir)
         )
-        # The listing's footer (S3b): the two page entries, named. A FOOTER —
-        # after every row, absent on an empty store.
-        return ("\n".join([*rows, project_listing_hint_text()]), "info")
+        # The listing's footer (S3b): the two page entries, named — and, when
+        # the store outgrew the page, what the page left out. A FOOTER — after
+        # every row, absent on an empty store.
+        note = project_page_truncation_text(registry)
+        footer = [*([note] if note else []), project_listing_hint_text()]
+        return ("\n".join([*rows, *footer]), "info")
 
     if word in PROJECT_PAGE_VERBS:
         name = rest.strip()
@@ -2191,6 +2226,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
             "status",
             "inspect",
             "consolidate",
+            "compact",
         ),
     ),
     SlashCommand(

@@ -89,7 +89,7 @@ from local_operator.harness.types import (
     StaleAside,
 )
 from local_operator.session import subagent_ledger as ledger
-from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
+from local_operator.session.transcript import TranscriptEntry
 
 if TYPE_CHECKING:
     from local_operator.session.session import Session
@@ -1318,7 +1318,12 @@ class SubagentComms:
         cached = self._transcript_probes.get(session_dir)
         if cached is not None and now - cached[1] < TRANSCRIPT_PROBE_TTL_S:
             return cached[0]
-        present = (session_dir / TRANSCRIPT_FILENAME).exists()
+        from local_operator.session import compression
+
+        # Both forms. This probe decides whether the viewer treats the child as
+        # having durable history at all; a compressed transcript answering
+        # "absent" hid the trajectory and showed the missing-history notice.
+        present = compression.has_transcript(session_dir)
         self._transcript_probes[session_dir] = (present, now)
         return present
 
@@ -2415,8 +2420,9 @@ class SubagentComms:
                 0,
                 error=detail,
             )
-        transcript_file = record.session_dir / TRANSCRIPT_FILENAME
-        if not transcript_file.exists():
+        from local_operator.session import compression
+
+        if not compression.has_transcript(record.session_dir):
             return PeekWindow(
                 job_id,
                 record.label,
@@ -3185,7 +3191,9 @@ class SubagentComms:
                 f"{record.label} is already resumed as job {live.job_id}; two agents sharing "
                 "one transcript would overwrite each other's history"
             )
-        if not (record.session_dir / TRANSCRIPT_FILENAME).exists():
+        from local_operator.session import compression
+
+        if not compression.has_transcript(record.session_dir):
             return None, f"transcript for {record.label} is gone from disk; launch a new one"
         # Relaunch under the child's REAL parent when that parent is live, so
         # the continuation lands in the ledger that owns it and its replies

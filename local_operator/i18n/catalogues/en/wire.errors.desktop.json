@@ -31,6 +31,7 @@
   "wire.errors.desktop.desktop_refusal": "{error}",
   "wire.errors.desktop.effort_levels_missing": "{model} has no reasoning-effort levels",
   "wire.errors.desktop.effort_not_in_levels": "{model} accepts {levels} — not ''{effort}''",
+  "wire.errors.desktop.fast_mode_unsupported": "{model} has no fast mode",
   "wire.errors.desktop.feed_subscriber_limit": "Too many desktop feed subscribers",
   "wire.errors.desktop.feed_subscription_unknown": "Unknown desktop feed subscription",
   "wire.errors.desktop.force_requires_confirm_replace": "--force replaces your copy; use replace with confirm_replace",

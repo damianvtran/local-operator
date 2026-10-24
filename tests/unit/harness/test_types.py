@@ -433,6 +433,15 @@ def test_message_user_keeps_text_that_is_present() -> None:
     assert Message.user(" ").content == [TextContent(text=" ")]
 
 
+def test_message_user_drops_whitespace_text_beside_an_attachment() -> None:
+    """Beside media, whitespace is a composer artefact, not an utterance: it
+    would persist as a blank block every wire then has to drop. On its own it
+    is kept (above) — it is the whole of what the user sent."""
+    image = ImageContent(data="aGk=", mime_type="image/png")
+    assert Message.user("  \n", images=[image]).content == [image]
+    assert Message.user(" hi ", images=[image]).content == [TextContent(text=" hi "), image]
+
+
 def test_a_spec_does_not_take_audio_unless_it_is_stated() -> None:
     """The wrong-True asymmetry (see the field's comment): silence reads False.
 

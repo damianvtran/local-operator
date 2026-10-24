@@ -1877,7 +1877,11 @@ class AttachedSession:
         state = await self._synthesise_cold_state(cwd)
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
-        if (config_dir / "sessions" / session_id / "transcript.jsonl").exists():
+        # ``has_transcript``: a compressed session has a history to paint, and
+        # the plain name would open it as an empty conversation.
+        from local_operator.session import compression as _compression
+
+        if _compression.has_transcript(config_dir / "sessions" / session_id):
             # ``want_checkpoint`` extracts the durable status row during the
             # SAME threaded parse the history comes from, so the restore below
             # costs no second read of a file that is 103 MB at the top end.
@@ -3269,6 +3273,7 @@ class AttachedSession:
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | None = None,
+        files: list[dict[str, Any]] | None = None,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
@@ -3286,11 +3291,38 @@ class AttachedSession:
         nobody reads) — and it is the one attachment the inbox spool cannot
         carry (see ``ServingSessionHandle.steer``'s update-window arm), so it
         travels the ordinary frame or not at all.
+
+        ``files`` are ``Prompt.files``' references. A send that names them on a
+        conversation whose OWNER IS A PEER is refused HERE, before a frame is
+        dialled: the bytes are in THIS device's store while the owner reads
+        its own, so forwarding the digest would promise a file the far side
+        cannot resolve (contract amendment 2). Images keep their peer staging
+        (``prepare_peer_images``); documents travel the local owner's frame
+        and nothing else in v1.
         """
+        if files and self.runtime_locality == "another-machine":
+            # The owner is a PEER: its attachment store is a different one, so a
+            # digest resolved from THIS device's upload names bytes the far
+            # side does not hold. v1 refuses rather than send a doomed
+            # reference (contract amendment 2); images keep their peer staging
+            # (``prepare_peer_images``) because their bytes ride the frame.
+            from local_operator.session.errors import RemoteDocumentUnsupported
+
+            raise RemoteDocumentUnsupported()
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
+        if files and not getattr(client, "_document_attachments_supported", False):
+            # An owner from before the carriage would DROP the key (its
+            # dispatch only passes literal parameters), so this side refuses
+            # the send instead. The capability string is the owner's own
+            # statement that it resolves the references (contract
+            # amendment 1); the dispatch's parameter probe is the second,
+            # owner-side guard.
+            from local_operator.session.errors import DocumentCarriageUnsupported
+
+            raise DocumentCarriageUnsupported()
         fields: dict[str, Any] = {"text": text, "images": images, "command_id": command_id}
         if input_mode is not None:
             fields["input_mode"] = input_mode
@@ -3298,6 +3330,14 @@ class AttachedSession:
             fields["input_path"] = input_path
         if audio:
             fields["audio"] = audio
+        if files:
+            # Omitted when absent, exactly like ``audio``: a sender that always
+            # passes its list must leave a legacy frame byte-identical, and an
+            # owner from before the carriage must never see a key it does not
+            # read. An owner that cannot carry them REFUSES the frame
+            # (``DocumentCarriageUnsupported`` in the dispatch's parameter
+            # probe) rather than forwarding the text without its files.
+            fields["files"] = files
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
     async def bind_runtime(self) -> None:
@@ -6924,17 +6964,27 @@ class AttachedSession:
             and not self._model_selection_override
             and (
                 self._birth_model is None
-                # Compared as the TRIPLE: the level is part of the sample. A
-                # successor seeded from a pair-only record is constructed with no
-                # ``LOP_MOBILE_CHILD_EFFORT`` and silently drops to its own
-                # resolved level (review round 1, R2) — so a level-only change on
-                # an attached owner refreshes the sample too.
+                # Compared as the QUADRUPLE: the level and the speed dial are
+                # both part of the sample. A successor seeded from a pair-only
+                # record is constructed with no ``LOP_MOBILE_CHILD_EFFORT`` and
+                # silently drops to its own resolved level (review round 1, R2),
+                # and one seeded from a sample that predates the dial is born at
+                # standard speed -- so a level-only OR a fast-only change on an
+                # attached owner refreshes the sample too. The dial's half is
+                # ui#1266 arriving through owner replacement: the retirable owner
+                # reports the tier, and its successor has to open on it.
                 or (
                     self._birth_model.provider,
                     self._birth_model.model_id,
                     self._birth_model.reasoning_effort,
+                    bool(self._birth_model.fast_mode),
                 )
-                != (selected.provider, selected.model_id, selected.reasoning_effort)
+                != (
+                    selected.provider,
+                    selected.model_id,
+                    selected.reasoning_effort,
+                    bool(selected.fast_mode),
+                )
             )
             and get_provider_definition(selected.provider) is not None
         ):
@@ -6945,6 +6995,10 @@ class AttachedSession:
                 provider=selected.provider,
                 model_id=selected.model_id,
                 reasoning_effort=selected.reasoning_effort,
+                # Clamped on the route's own answer, as every other reader of the
+                # dial is: a sample that claims a tier this model does not sell
+                # is one no spawn may be born on.
+                fast_mode=bool(selected.fast_mode and selected.supports_fast_mode),
             )
         if changed_fields is None or "jobs" in changed_fields:
             self.jobs.replace(state.jobs)
@@ -10697,6 +10751,11 @@ def _pending_request(state: Any) -> PendingRequest | None:
         # gate state (which has neither key) safe.
         recommended=(raw if isinstance(raw := getattr(state, "recommended", None), int) else None),
         persist=bool(getattr(state, "persist", False)),
+        # Additive policy keys, defaulted so an older owner's gate state (which
+        # has neither) rebuilds as "not stated" rather than failing the card.
+        approval_mode=str(getattr(state, "approval_mode", "") or ""),
+        approval_provenance=str(getattr(state, "approval_provenance", "") or ""),
+        approval_global_mode=str(getattr(state, "approval_global_mode", "") or ""),
     )
 
 

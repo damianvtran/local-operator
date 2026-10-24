@@ -412,7 +412,8 @@ async def test_picker_first_slot_offers_teams_first_then_chart_subcommand() -> N
     assert rows[0][0] != "chart", f"a team must lead, not the subcommand: {rows}"
     # The `chart` subcommand row is still offered — discoverable, ranked by query.
     assert ("chart", "subcommand") in rows
-    assert rows[-3:] == [(verb, "subcommand") for verb in ("chart", "new", "edit")]
+    # Four reserved verbs since LOH-9 S4 added `promote`; they stay LAST.
+    assert rows[-4:] == [(verb, "subcommand") for verb in ("chart", "new", "edit", "promote")]
     # U3: a team literally named `chart` still appears, completing to the `=chart`
     # ESCAPE (not the bare name, which would route to the subcommand); its detail
     # names the talk path, so the collision is resolvable from the picker.

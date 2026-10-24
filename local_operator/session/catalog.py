@@ -1633,11 +1633,17 @@ def _row_stat_key(session_dir: Path) -> tuple[float, int] | None:
     been appended to — which is exactly the condition under which its name and
     fork mark cannot have changed. Size is carried alongside mtime because a
     coarse filesystem timestamp can hide an append inside the same second.
+
+    THE PHYSICAL SOURCE, not the plain name: for a compressed session the file
+    on disk is the archive (whose mtime is stamped from the journal's, so the
+    key still moves exactly when the journal did). Statting ``transcript.jsonl``
+    here returned ``None`` for every compressed row, which silently defeated the
+    poll's memo for the whole compressed part of the store.
     """
-    from local_operator.session.retention import TRANSCRIPT_FILENAME
+    from local_operator.session import compression
 
     try:
-        stat = (session_dir / TRANSCRIPT_FILENAME).stat()
+        stat = compression.transcript_source(session_dir)[0].stat()
     except OSError:
         return None
     return (stat.st_mtime, stat.st_size)
@@ -1806,12 +1812,10 @@ def _ranked_candidates(
         _scanned_entries,
         _store_error_detail,
     )
+    from local_operator.session import compression
     from local_operator.session.attention import AttentionStore, conversation_identity
     from local_operator.session.errors import SessionStoreUnavailable
-    from local_operator.session.retention import (
-        DESKTOP_MARKER_NAME,
-        TRANSCRIPT_FILENAME,
-    )
+    from local_operator.session.retention import DESKTOP_MARKER_NAME
 
     # The scan's second return value is every directory it established is not
     # the user's own session. Taken here rather than recomputed because it is
@@ -1858,8 +1862,13 @@ def _ranked_candidates(
             wanted = {session_id for session_id in wanted if session_id not in archived_hidden}
         stamped: list[tuple[float, str]] = []
         for session_id in wanted:
-            transcript = directory / "sessions" / session_id / TRANSCRIPT_FILENAME
+            # The physical source, for the same reason ``_row_stat_key`` uses
+            # it: a compressed subagent run has no plain journal, and a
+            # plain-name stat skipped it out of the layer entirely.
             try:
+                transcript, _codec = compression.transcript_source(
+                    directory / "sessions" / session_id
+                )
                 stamped.append((transcript.stat().st_mtime, session_id))
             except OSError:
                 # No readable transcript: nothing to hydrate a row from, and
@@ -1997,7 +2006,11 @@ def _ranked_candidates(
                     # A marker is a draft fallback, never a competing source of
                     # historical title/mtime for a transcript that fell beyond a
                     # previous page bound.
-                    if os.path.exists(os.path.join(entry.path, TRANSCRIPT_FILENAME)):
+                    # Both forms: a compressed session has a transcript, it is
+                    # just not at the plain name, and treating it as absent here
+                    # let the desktop marker's draft fallback claim a real
+                    # conversation's row.
+                    if compression.has_transcript(Path(entry.path)):
                         continue
                 except OSError:
                     # Includes the common case: no ``desktop.json`` here, which

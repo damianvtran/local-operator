@@ -13,6 +13,7 @@ import base64
 import hashlib
 import io
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -548,6 +549,48 @@ def _receipt(verdict: str, body: str) -> ScreeningReceipt:
     ).validated()
 
 
+def _persist_receipt(config_dir: Path, receipt: ScreeningReceipt, message_id: str) -> None:
+    """Model what the REAL screener writes before it answers ``deliver``.
+
+    ``screen_item`` is replaced wholesale in this rig, so nothing calls
+    ``Store.finish_screening`` (screening.py) — and main's producer correctly
+    refuses ``receipt_unavailable`` when the trusted receipt is missing. A
+    missing receipt is an anomaly, not something to bypass, so the fake writes
+    the same row the real pipeline would (the recipe
+    ``test_conversation_delivery`` uses for the same reason).
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import state_db_path
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        row = conn.execute("SELECT owner_key, enrollment_generation FROM enrollments").fetchone()
+        assert row is not None
+        owner_key, generation = row
+        conn.execute(
+            "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, "
+            "body_sha256, template_sha256, prompt_version, model, verdict, categories, "
+            "envelope_digest, admission_revision, policy_epoch, creator_generation, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                owner_key,
+                message_id,
+                receipt.body_sha256,
+                receipt.template_sha256,
+                receipt.prompt_version,
+                receipt.model,
+                receipt.verdict,
+                json.dumps(sorted(receipt.categories)),
+                "e" * 64,
+                "rev-1",
+                1,
+                generation,
+                time.time(),
+            ),
+        )
+
+
 def _connector_rig(monkeypatch, tmp_path, hub: Hub, *, verdict: str, vision: bool = True):
     from tests.unit.team_bridge.test_conversation_delivery import _enroll
     from tests.unit.team_bridge.test_conversation_delivery import _owner as conv_owner
@@ -561,10 +604,14 @@ def _connector_rig(monkeypatch, tmp_path, hub: Hub, *, verdict: str, vision: boo
         screened.append(item)
         carrier = item.get("attachments")
         if verdict == "bounce":
-            return ScreenResult("bounce", receipt=_receipt("reject", hub.body))
+            bounce_receipt = _receipt("reject", hub.body)
+            _persist_receipt(tmp_path, bounce_receipt, MID)
+            return ScreenResult("bounce", receipt=bounce_receipt)
+        allow_receipt = _receipt("allow", hub.body)
+        _persist_receipt(tmp_path, allow_receipt, MID)
         return ScreenResult(
             "deliver",
-            receipt=_receipt("allow", hub.body),
+            receipt=allow_receipt,
             attachments_hash=carrier.attachments_hash if carrier is not None else None,
         )
 
@@ -580,9 +627,11 @@ def _connector_rig(monkeypatch, tmp_path, hub: Hub, *, verdict: str, vision: boo
     # session under consent v1 holds ``open_chief_of_staff`` before any byte
     # fetch). That gate is tested on its own in test_connector.py.
     monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
-    ref = ConversationFeedRef(
-        CID, MID, 1, True, conversation_name="#qa", sender_label="Ada", sender_kind="human"
-    )
+    # The ref is a CONTENTLESS locator since #2856: labels never live in it.
+    # They arrive on the transient classification response instead, so the rig
+    # serves them there (``_hub_payload``) and the card builder reads them from
+    # that mapping exactly as production does.
+    ref = ConversationFeedRef(CID, MID, 1, True, sender_kind="human")
     return owner, ref, screened, cards
 
 
@@ -921,9 +970,11 @@ async def test_screened_template_is_reported_beside_the_policy_receipt(
     owner, ref, _s, _c = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
 
     async def v3_screen(owner: Any, item: Any, **kwargs: Any) -> Any:
+        v3_receipt = _receipt("allow", hub.body)
+        _persist_receipt(tmp_path, v3_receipt, MID)
         return ScreenResult(
             "deliver",
-            receipt=_receipt("allow", hub.body),
+            receipt=v3_receipt,
             attachments_hash=item["attachments"].attachments_hash,
             rendered_version=SCREENING_VERSION_V3,
             rendered_template_sha256=SCREENING_TEMPLATE_V3_SHA256,
@@ -1006,6 +1057,8 @@ def test_card_for_a_thread_reply_points_at_channel_thread() -> None:
 
     card = build_conversation_card(
         ConversationCardMetadata(
+            conversation_id=CID,
+            tenant_id="tnt_1",
             conversation_label="#qa",
             sender_label="Ada",
             sender_kind="human",

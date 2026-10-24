@@ -76,6 +76,40 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
     # that mkstemp file. Neither operation accepts a session directory/name.
+    # -- the promotion index: a DEVICE-level store at the config root ---------
+    # ``_atomic_write`` publishes the rotated index by renaming a sibling mkstemp
+    # REGULAR FILE over ``<config>/role-provenance.jsonl``; the file name is a
+    # module constant (PROVENANCE_FILENAME) built on the config ROOT, never on a
+    # session id or a path under ``sessions/``. The unlink clears that same
+    # mkstemp sibling when the write fails, so neither call can name a session
+    # directory or a transcript.
+    (
+        "local_operator/role_provenance.py::_atomic_write",
+        "os.replace",
+        "Rotates the device-level index at the config root; both paths are sibling regular files.",
+    ),
+    (
+        "local_operator/role_provenance.py::_atomic_write",
+        "<path>.unlink",
+        "Clears the failed sibling mkstemp regular file; never a session path.",
+    ),
+    # -- startup key inventory: a config-root sidecar ------------------------
+    # ``_write_key_inventory`` publishes ``<config>/.config-keys.json`` (the
+    # per-launch record of setting paths the shrink report compares against) by
+    # renaming a sibling mkstemp REGULAR FILE over it, and clears that same temp
+    # file when the write fails. Every path is a module constant on the CONFIG
+    # ROOT: no session id and no caller input can reach it, and the file records
+    # setting names, never conversation content.
+    (
+        "local_operator/config_migrations.py::_write_key_inventory",
+        "os.replace",
+        "Atomic swap of a sibling mkstemp FILE onto <config>/.config-keys.json; never a directory",
+    ),
+    (
+        "local_operator/config_migrations.py::_write_key_inventory",
+        "os.unlink",
+        "Removes only the failed write's own mkstemp temp FILE beside the inventory sidecar",
+    ),
     (
         "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
         "os.replace",
@@ -85,6 +119,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
         "os.unlink",
         "Only the failed sibling mkstemp regular file; never a session or transcript.",
+    ),
+    # The conversation's approvals.json sidecar. `replace` swaps a sibling
+    # mkstemp TEMP FILE onto that file, and `unlink` removes only that temp file
+    # after a failed write. The session directory is the CONTAINER (the target
+    # is <session_dir>/approvals.json), so neither call can rename or remove a
+    # directory, and no path here is ever a session directory itself.
+    (
+        "local_operator/session/approval_policy.py::write_override",
+        "os.replace",
+        "Atomic swap of a sibling mkstemp temp FILE onto <session>/approvals.json; "
+        "never a directory",
+    ),
+    (
+        "local_operator/session/approval_policy.py::write_override",
+        "os.unlink",
+        "Removes only the failed write's own mkstemp temp FILE beside approvals.json; "
+        "never a directory",
     ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
@@ -948,6 +999,45 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<store>/<session>/scratchpad/, store marker, config dir), the removal "
         "shape is an lstat-confirmed non-directory, and the caller only plans "
         "files whose shape+size+age passed",
+    ),
+    # -- transcript compression ----------------------------------------------
+    # The compression pass RENAMES nothing and REMOVES nothing but the two files
+    # it owns, and both call sites are one function each so the argument can be
+    # read off the line rather than reconstructed:
+    #
+    # * `_publish(tmp, destination)` is the ONLY os.replace in the module. Its
+    #   destination is always a regular file the module names itself: the
+    #   session's own `transcript.jsonl.<suffix>` archive, a cache
+    #   `.meta.json`, or `sessions/last-compression.json`. A session DIRECTORY is
+    #   never a destination and is never renamed; `os.replace` onto a directory
+    #   would fail anyway, which is the belt on the argument.
+    # * `_unlink_file(path)` is the ONLY os.unlink. It lstat()s first and refuses
+    #   anything that is not a regular file (so a directory cannot be passed in
+    #   by a future bug), and it has exactly four callers, all in this module:
+    #   the just-written `.tmp`, the original transcript AFTER the verified
+    #   archive is published and re-stat confirms it did not change, the archive
+    #   itself when that re-stat fails (rollback), and an archive after a
+    #   verified restore. A session directory is never unlinked anywhere.
+    (
+        "local_operator/session/compression.py::_publish",
+        "os.replace",
+        "os.replace(tmp FILE, destination FILE): transcript archive, cache meta or "
+        "sessions/last-compression.json; a session directory is never a destination.",
+    ),
+    (
+        "local_operator/session/tail_anchor.py::drop_anchor",
+        "<path>.unlink",
+        "Removes only <session>/tail-anchor.v1.json — the sidecar this module owns, "
+        "named by its own ANCHOR_FILENAME constant. A stale anchor can never validate "
+        "once the journal is stored compressed, so leaving it would make the prewarm "
+        "selector call the journal warm forever. Never a session directory.",
+    ),
+    (
+        "local_operator/session/compression.py::_unlink_file",
+        "os.unlink",
+        "Single os.unlink, lstat-guarded to regular files only: the pass's own .tmp, "
+        "the original transcript only after a verified archive exists, that archive on "
+        "rollback, and an archive after a verified restore. Never a session directory.",
     ),
     (
         "local_operator/session/cleanup.py::_write_record",
@@ -2283,10 +2373,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "temp FILE -> wakes/spooled/<id>.json",
     ),
+    # The generation-guarded clear's one unlink: the SAME `<id>.json` FILE the
+    # row above writes, removed only after the caller's generation and authority
+    # predicates pass under the same mutex. The path is built from the store
+    # directory plus the validated id, so it cannot name a directory.
     (
-        "local_operator/wakes/spooled.py::clear_spooled_turn",
+        "local_operator/wakes/spooled.py::_clear_guarded",
         "<path>.unlink",
         "wakes/spooled/<id>.json FILE",
+    ),
+    # The inbox batch commit stages its rewrite as a temp FILE in the session
+    # directory it was handed, then renames it over `inbox.jsonl`; the unlink
+    # below removes that temp only on the failure path. Neither can reach a
+    # session DIRECTORY: both paths are `session_dir / <fixed name>` where the
+    # session dir identity was checked when the batch was claimed.
+    (
+        "local_operator/session/runtime/inbox.py::commit_inbox_batch",
+        "os.replace",
+        "temp FILE -> sessions/<id>/inbox.jsonl",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::commit_inbox_batch",
+        "os.unlink",
+        "temp FILE -> sessions/<id>/.inbox-commit-<n>.tmp",
     ),
     # The wake-trigger layer is the supervisor's FOURTH state family
     # (`local_operator/wakes/triggers/`), beside the index, the ledger and the
@@ -2939,9 +3048,44 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "tmp FILE -> <config>/cache/library/index.json FILE; cache-derived, never sessions/",
     ),
     (
-        "local_operator/library/service.py::thumbnail",
+        "local_operator/library/indexer.py::LibraryIndexer._drop_legacy_index",
+        "<path>.unlink",
+        "removes <config>/cache/library/index.json and its .lock: the superseded "
+        "derived catalog, never a session directory",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore.ensure_thumbnail",
         "os.replace",
-        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/; never sessions/",
+        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/thumbs; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._swap_in_database",
+        "os.replace",
+        "a fresh copy of <config>/library/library.sqlite3 replaces the unreadable "
+        "database in the same directory; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._swap_in_database",
+        "<path>.unlink",
+        "removes the old file's stale -wal/-shm siblings BEFORE the replace "
+        "(after it they would attach to the new file); never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._clean_stale_rebuilds",
+        "<path>.unlink",
+        "removes another process's crashed database-rebuild temp file beside "
+        "<config>/library/library.sqlite3; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore._rebuild_database",
+        "<path>.unlink",
+        "removes the rebuild temp file before writing it and again on failure; " "never sessions/",
+        2,
+    ),
+    (
+        "local_operator/library/service.py::waveform",
+        "os.replace",
+        "tmp FILE -> a peaks cache FILE under <config>/cache/library/peaks/; never sessions/",
     ),
     # The Library VIEW's flagged calls are heap/Textual operations, not
     # filesystem ones: the viewport cursor is an in-memory integer, the
@@ -3212,6 +3356,67 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes validated skill-unpull markers under <config_dir>/hub/unpull/ (six branches)",
         6,
+    ),
+    # -- the bundle carrier: <config_dir>/hub/downloads/<hex> and skills/.stage-* --
+    # Every path the carrier removes or renames is built from the config dir plus
+    # an OPAQUE operation id (``secrets.token_hex``/the storage's validated
+    # operation id) or from ``validate_name``'d alias. The download root is
+    # ``<config>/hub/downloads/`` (0700, sibling of sessions/); staging is
+    # ``<config>/skills/.stage-<op>/`` inside the managed root, and aliases can
+    # never collide with the dot-prefixed stage. No call accepts a session id, a
+    # caller-named directory or any path under sessions/.
+    (
+        "local_operator/hub_sync/service.py::_download_bundle_archive",
+        "shutil.rmtree",
+        "Removes ONLY this operation's <config_dir>/hub/downloads/<token_hex> on the refusal paths",
+        2,
+    ),
+    (
+        "local_operator/hub_sync/service.py::_discard_bundle_download",
+        "shutil.rmtree",
+        "Removes the resolved <config_dir>/hub/downloads/<op> parent of its own archive file",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_materialize_published_skill",
+        "shutil.rmtree",
+        "Removes this publish's own <config_dir>/hub/downloads/<token_hex> archive directory",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle.py::extract_archive",
+        "shutil.rmtree",
+        "Removes ONLY the caller's staging dir under <config_dir>/skills/.stage-<op> on failure",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle_storage.py::ManagedBundleStorage._stage",
+        "shutil.rmtree",
+        "Removes ONLY its own just-made .stage-<op> under <config_dir>/skills/",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle_storage.py::" "ManagedBundleStorage._cleanup_stages",
+        "shutil.rmtree",
+        "Removes this alias's own abandoned .stage-* siblings under <config_dir>/skills/",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle_storage.py::"
+        "ManagedBundleStorage._discard_settled_stage",
+        "shutil.rmtree",
+        "Removes the settled transaction's own .stage-<op> under <config_dir>/skills/",
+    ),
+    (
+        "local_operator/hub_sync/skill_bundle_storage.py::ManagedBundleStorage.apply",
+        "os.replace",
+        "Staged->destination swap and the concurrent-edit restore under <config_dir>/skills/",
+        2,
+    ),
+    (
+        ("local_operator/hub_sync/skill_bundle_storage.py::" "ManagedBundleStorage._recover_one"),
+        "os.replace",
+        "Crash-gap restore of this operation's own staged/backup tree under <config_dir>/skills/",
+    ),
+    (
+        ("local_operator/hub_sync/skill_bundle_storage.py::" "ManagedBundleStorage._recover_one"),
+        "shutil.rmtree",
+        "Removes ONLY the crashed transaction's own .stage-<op> under <config_dir>/skills/",
     ),
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_unpull_locked",
@@ -3599,7 +3804,14 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_origin_scan_sentinel",  # tmp -> origin-scan.json
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
+        # tmp -> the session's own transcript archive / a cache meta FILE /
+        # sessions/last-compression.json; never a session directory (see the
+        # allow-list rows above for the full argument).
+        "local_operator/session/compression.py::_publish",
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp FILE -> sessions/<id>/inbox.jsonl inside the session it was handed;
+        # the commit swaps one spool file, never a directory.
+        "local_operator/session/runtime/inbox.py::commit_inbox_batch",
         # tmp -> .session-holds.json (the holds map, beside the log)
         "local_operator/session/cleanup.py::_write_holds",
         # THE ONE PATH DISPLACER THAT MAY NAME A SESSION DIRECTORY, and it is this
@@ -3676,6 +3888,9 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # (``<config>/network/pending-move.json``). Its receiver is that file, and
         # the move's own reader turns a missing one into "no handoff in flight".
         "local_operator/session/placement.py::_write_journal",  # tmp -> journal FILE
+        # tmp -> approvals.json, a FILE inside the conversation's own directory
+        # (the atomic-write shape every other sidecar writer here uses).
+        "local_operator/session/approval_policy.py::write_override",
     }
 )
 

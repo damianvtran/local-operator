@@ -1003,34 +1003,239 @@ async def test_a_stopped_session_takes_an_open_ask_dismissal_without_a_turn(
 
 
 @pytest.mark.asyncio
-async def test_a_running_session_refuses_an_open_ask_dismissal_and_writes_nothing(
+async def test_an_idle_session_takes_an_open_ask_dismissal_without_a_turn(
     headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """SA-D4: an IDLE live runtime (up, no stop) settles the dismissal durably and
+    buys NO turn — the operator tidying a card must not be charged a provider call.
+
+    The row is still owed to the model: the next real turn carries it out of the
+    live context it was parked in.
+    """
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
     stream = ScriptedStream(
         [
             tool_call_turn(
                 text="asking",
                 tool_name="ask",
-                tool_call_id="ask-r",
+                tool_call_id="ask-i",
                 arguments=_ask_args("which db?", timeout=1800),
             ),
             text_turn("working"),
+            text_turn("carrying on"),
         ]
     )
-    session = _session(headless_tui_env, "dismiss-running", stream)
+    directory = headless_tui_env / "sessions" / "dismiss-idle"
+    session = _session(headless_tui_env, "dismiss-idle", stream)
     session.set_ask_handler(_never_answers)
     try:
-        with bounded(BOUND_S, "an open ask dismissal on a running session"):
+        with bounded(BOUND_S, "an open ask dismissed on an idle session"):
             await session.prompt("go")
-            (ask_id,) = _ask_ids(session.transcript.directory)
-            events_before = store.read_events(session.transcript.directory)
+            (ask_id,) = _ask_ids(directory)
+            requests_before = len(stream.requests)
+            # IDLE, and that is not the stopped state: the D2 residue rule does not
+            # apply, so the no-turn arm under test is SA-D4's own.
+            assert session.ask_agent_running() is True
+
             outcome = session.dismiss_ask(ask_id, by="remote", reason="moot")
-            assert outcome["ok"] is False
-            assert "reply in chat" in outcome["error"]
-            assert store.read_events(session.transcript.directory) == events_before
-            assert not session.transcript.has_entry(store.response_row_id(ask_id))
-            assert session.ask_queue().find(ask_id)["status"] == store.STATUS_OPEN
+            assert outcome == {"ok": True}, outcome
+            await _wait_for_delivery(
+                session,
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the dismissal's response row",
+            )
+            # The HOLD's own half: the append that made it durable is also what
+            # flipped ``delivered``, so a resume can find it (design §2.3).
+            assert session.ask_queue().find(ask_id)["delivered"] is True
+            await asyncio.sleep(0.3)
+            assert len(stream.requests) == requests_before, "an idle dismissal bought a turn"
+
+            # The next real turn sees it.
+            await session.prompt("continue")
+            assert any(
+                "no longer needed" in (message.text or "")
+                for request in stream.requests[requests_before:]
+                for message in request.messages
+            ), "the next turn did not carry the dismissal row"
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_parked_past_the_last_boundary_is_held_without_a_turn(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: the OTHER way a parked dismissal could reach a paid turn.
+
+    ``deliver_ask_messages`` parks a mid-turn row for "the next boundary". A turn
+    that is already PAST its last boundary never reaches one, so the only reader
+    left is ``_flush_parked_deliveries`` at turn end — and before this cell's fix
+    that flush handed the row to ``_prompt_messages``, buying a provider call to
+    say "noted".
+
+    The park happens for real, inside the turn's tail (``_persist_new_messages``,
+    the thread hop the flush's own docstring names) rather than by forcing
+    ``_is_streaming`` by hand, and the turn then ENDS NORMALLY — no abort, so the
+    stopped-work residue rule cannot be what holds it.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-tail",
+                arguments=_ask_args("which db?", timeout=1800),
+            ),
+            text_turn("working"),
+            text_turn("carrying on"),
+        ]
+    )
+    directory = headless_tui_env / "sessions" / "dismiss-tail"
+    session = _session(headless_tui_env, "dismiss-tail", stream)
+    session.set_ask_handler(_never_answers)
+    # THE TAIL, not a tool boundary: `_persist_new_messages` also runs at the
+    # compaction gate, which a boundary drain follows — a park there rides that
+    # boundary and never reaches the flush (measured: the row was drained at
+    # `harness/loop.py`'s `_collect_inflight_injections`).
+    # `_mark_code_requests_dirty` runs only from a turn's tail (and from
+    # wake/monitor deliveries, which this cell never makes).
+    original_tail = session._mark_code_requests_dirty
+    parked = False
+
+    async def park_then_tail() -> None:
+        nonlocal parked
+        if not parked:
+            parked = True
+            (ask_id,) = _ask_ids(directory)
+            # Past the last boundary: the row can only be parked here, and this
+            # assertion is what makes the cell about the FLUSH rather than about
+            # a delivery that would have parked anyway a moment later.
+            assert session.dismiss_ask(ask_id, by="remote", reason="moot") == {"ok": True}
+            await session.reconcile_asks()
+            assert session.queued_steering(), "the dismissal did not park on the queue"
+        await original_tail()
+
+    session._mark_code_requests_dirty = park_then_tail  # type: ignore[method-assign]
+    try:
+        with bounded(BOUND_S, "a dismissal parked past the last boundary"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(directory)
+            requests_before = len(stream.requests)
+            # The turn-end flush held it: durable, delivered, and NO provider call
+            # (with the old arm this count grew by one before the assert below).
+            await _wait_for_delivery(
+                session,
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the flush-held dismissal row",
+            )
+            assert session.ask_queue().find(ask_id)["delivered"] is True
+            await asyncio.sleep(0.3)
+            assert (
+                len(stream.requests) == requests_before
+            ), "the turn-end flush bought a turn for a dismissal"
+            # Not lost: the next real turn carries it.
+            await session.prompt("continue")
+            assert any(
+                "no longer needed" in (message.text or "")
+                for request in stream.requests[requests_before:]
+                for message in request.messages
+            ), "the next turn did not carry the flush-held dismissal row"
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_a_running_session_takes_an_open_ask_dismissal_in_the_same_turn(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SA-D4 (replacing §15's D6 refusal): a mid-turn dismissal is ACCEPTED, and
+    its receipt reaches the model at the running turn's NEXT BOUNDARY — the same
+    turn, not a later one.
+
+    The model is parked inside a tool call while the operator dismisses, which is
+    the only shape that can tell the two deliveries apart: if the row arrived in a
+    turn of its own, the request that follows the release could not carry it, and
+    the cell would see no receipt in this conversation's remaining requests.
+    """
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def execute(  # type: ignore[no-untyped-def]
+        tool_call_id, args, signal, on_update, context
+    ):
+        entered.set()
+        await gate.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="blocker",
+            content=[TextContent(text="blocked, then released")],
+        )
+
+    blocker = AgentTool(
+        name="blocker",
+        description="Hold the turn open until the test releases it.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        interruptible=True,
+        execute=execute,
+    )
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-m",
+                arguments=_ask_args("which db?", timeout=1800),
+            ),
+            tool_call_turn(
+                text="working", tool_name="blocker", tool_call_id="block-1", arguments={}
+            ),
+            text_turn("carrying on"),
+            text_turn("spare"),
+        ]
+    )
+    directory = headless_tui_env / "sessions" / "dismiss-running"
+    session = build_session(directory, stream, tools=[blocker], cwd=headless_tui_env)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "an open ask dismissed mid-turn"):
+            turn = asyncio.ensure_future(session.prompt("go"))
+            await asyncio.wait_for(entered.wait(), timeout=30)
+            (ask_id,) = _ask_ids(directory)
+            requests_before = len(stream.requests)
+            outcome = session.dismiss_ask(ask_id, by="remote", reason="moot")
+            assert outcome == {"ok": True}, outcome
+            # The row is queued for the RUNNING turn; the drain is what writes it.
+            await _wait_for_delivery(
+                session,
+                lambda: bool(session.queued_steering()),
+                what="the dismissal row on the steering queue",
+            )
+            gate.set()
+            await asyncio.wait_for(turn, timeout=60)
+
+            assert session.transcript.has_entry(store.response_row_id(ask_id))
+            # ``delivered`` flips at that append, not at the hold: the row's
+            # durability IS the delivery marker (design §2.3).
+            assert session.ask_queue().find(ask_id)["delivered"] is True
+            assert "no longer needed" in _dismiss_row_text(session, ask_id)
+            events = store.read_events(directory)
+            assert events[-1]["kind"] == store.EVENT_DISMISSED
+            assert events[-1]["reason"] == "moot"
+            assert session.ask_queue().find(ask_id)["status"] == store.STATUS_DISMISSED
+            # THE SAME TURN: a request after the dismissal carries the receipt.
+            later = "\n".join(
+                message.text or ""
+                for request in stream.requests[requests_before:]
+                for message in request.messages
+            )
+            assert "no longer needed" in later, (
+                "the mid-turn dismissal did not reach the running turn's next request: "
+                f"{later!r}"
+            )
     finally:
         await dispose_quietly(session)
 

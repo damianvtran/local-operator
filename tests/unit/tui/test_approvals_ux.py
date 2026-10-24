@@ -243,7 +243,13 @@ async def test_the_default_form_writes_the_config_and_names_the_file(config_dir:
         assert app._approvals_default_auto is True
         receipt = _notices(app)[-1]
         assert "config.yml" in receipt and "tool_approval_mode auto" in receipt
-        assert "every new one" in receipt
+        # The claim that used to stand here — "(this session and every new one)"
+        # — was false in the attached topology and silent about the one case
+        # the command now handles: this conversation's own record is cleared, so
+        # it inherits the default, while another conversation's recorded choice
+        # is untouched. The receipt states exactly those three facts.
+        assert "this conversation follows it" in receipt
+        assert "other conversations with their own choice keep it" in receipt
 
 
 @pytest.mark.asyncio
@@ -1149,3 +1155,101 @@ async def test_a_remote_gate_card_names_the_device_and_a_local_one_does_not() ->
         assert not any("runs on" in row for row in rows), rows
         await pilot.press("n")
         assert await asyncio.wait_for(task, 2) is False
+
+
+@pytest.mark.asyncio
+async def test_auto_leaves_a_parked_prompt_unanswered_and_notes_it(
+    config_dir: Path,
+) -> None:
+    """A MODE CHANGE IS NOT AN ANSWER (2026-10-23).
+
+    `/approvals auto` used to answer the visible prompt as allowed, through the
+    widget so the transcript kept a receipt. The receipt was honest about what
+    the code did and dishonest about what the user did: they asked to stop being
+    asked, on a frame where "answer this request" was still the only decision
+    the card was for. The card now stays parked, states in its own reserved slot
+    that the mode was saved, and the NEXT gate is the one that skips.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)("bash", "run: one"))
+        await _wait_prompt(pilot, app)
+        card = app.query(ApprovalPrompt).first()
+
+        # The card holds focus, so Enter there would ANSWER the selected row.
+        # A user reaches the composer the same way: focus it first. (The
+        # routing that lets answer letters work from the composer is covered
+        # elsewhere; this test is about the command's effect on the card.)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        await _submit(pilot, app, "/approvals auto")
+        await pilot.pause()
+
+        assert not pending.done(), "the command answered a request nobody answered"
+        assert not card.answered
+        assert "Auto saved for this session, with this conversation" in "\n".join(
+            card.render_lines_for_test()
+        )
+        assert app._explicit_approvals_mode == "auto"
+
+        # The parked request still takes its own answer…
+        await pilot.press("n")
+        assert await asyncio.wait_for(pending, 2) is False
+        # …and the NEXT gate is auto, so it raises no card at all.
+        second = asyncio.ensure_future(_gate(session)("bash", "run: two"))
+        assert await asyncio.wait_for(second, 2) is True
+        await _settle(pilot)
+        assert not app.query(ApprovalPrompt)
+
+
+@pytest.mark.asyncio
+async def test_the_session_choice_survives_readoption_from_the_sidecar(
+    config_dir: Path,
+) -> None:
+    """The choice is remembered WITH the conversation, not in this process.
+
+    Simulated re-adoption clears the in-memory bit and reloads from the session
+    directory: a resume builds a fresh app, so a choice that lived only in
+    `_explicit_approvals_mode` was the "resumed into the machine default"
+    defect the sidecar exists to remove.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/approvals auto")
+        assert app._explicit_approvals_mode == "auto"
+
+        # Exactly what a new process starts with: no memory, gate on the file.
+        app._explicit_approvals_mode = None
+        app._set_approve_all(False)
+        # A fresh process: the source has no in-memory mode yet, so the FIRST
+        # adoption is where the sidecar must win.
+        app._adopt_approval_override(session, first_adoption=True)
+
+        assert app._explicit_approvals_mode == "auto"
+        assert app._approve_all is True
+
+
+@pytest.mark.asyncio
+async def test_default_ask_clears_this_conversations_record(config_dir: Path) -> None:
+    """`default` is the one form that follows the FILE it names.
+
+    A stale record would make the receipt's "this conversation follows it" false
+    — the exact two-truths split the new precedence creates if clearing is
+    forgotten.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/approvals auto")
+        assert app._explicit_approvals_mode == "auto"
+
+        await _submit(pilot, app, "/approvals default ask")
+        assert app._explicit_approvals_mode is None
+        assert app._approve_all is False
+        assert app._approvals_default_auto is False
+        assert "this conversation follows it" in _notices(app)[-1]
