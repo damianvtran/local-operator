@@ -31,7 +31,7 @@
   "relay.shell.usage.fraction": "{value, number, percent} استعمال",
   "relay.shell.usage.reset": "بحالی: {value, date, medium}، {value, time, short}",
   "relay.shell.usage.command": "پرووائیڈر کا کیش شدہ استعمال دکھائیں",
-  "relay.shell.usage.as_of": "{value, date, medium}، {value, time, short} تک۔",
+  "relay.shell.usage.as_of": "{value, date, medium}، {value, time, short} کے مطابق۔",
   "relay.shell.usage.stale": "یہ معلومات پرانی ہو سکتی ہیں۔",
   "relay.shell.usage.row": "{label} · {window}: {value}",
   "relay.shell.usage.row_family": "{label} ({family}) · {window}: {value}",
