@@ -747,7 +747,7 @@ def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
 
     parser = argparse.ArgumentParser()
     network_cli.add_parser(parser.add_subparsers(dest="subcommand"))
-    received = parser.parse_args(join_argv[join_argv.index("network"):])
+    received = parser.parse_args(join_argv[join_argv.index("network") :])
     assert received.name == approved_name
     assert received.automated is True
 
