@@ -65,6 +65,21 @@ def _open(store: Store) -> None:
         store._init(conn)
 
 
+def _row(store: Store) -> dict[str, Any]:
+    """The stored row, NARROWED by an assertion rather than a cast.
+
+    ``body_reservation`` returns ``dict | None`` because the read is total; a
+    test that has just reserved and claimed knows the row exists, and stating
+    that as an assertion keeps pyright honest without a ``cast`` or an ignore
+    (this is the exact shape CI's type-check caught while a local run over
+    ``store.py`` alone could not).
+    """
+
+    row = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    assert row is not None
+    return row
+
+
 def _reserve(store: Store, *, now: float | None = None, seq: int = 3) -> bool:
     return store.record_body_reservation(
         _owner(),
@@ -226,7 +241,7 @@ def test_release_refuses_a_reason_outside_the_closed_vocabulary(tmp_path) -> Non
             now=now + 1,
         )
     assert refused.value.code == "invalid_body_reason"
-    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    row = _row(store)
     assert row["state"] == "claimed" and row["last_error"] is None
 
 
@@ -306,7 +321,7 @@ def test_completion_clears_the_claim_capability(tmp_path) -> None:
         entry_id="entry-1",
         now=now + 1,
     )
-    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    row = _row(store)
     assert row["state"] == "completed"
     assert row["claim_token"] is None and row["turn_token"] is None
     assert row["claim_expires_at"] is None
@@ -422,7 +437,7 @@ def test_consent_withdrawn_is_a_valid_release_reason(tmp_path) -> None:
         reason="consent_withdrawn",
         now=now + 1,
     )
-    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    row = _row(store)
     assert row["state"] == "pending"
     assert row["last_error"] == "consent_withdrawn"
 
@@ -452,7 +467,7 @@ def test_two_consumers_cannot_both_claim(tmp_path) -> None:
     )
 
     assert (first, second) == (True, False)
-    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    row = _row(store)
     assert row["state"] == "claimed" and row["claim_token"] == "tok-a"
 
 
@@ -481,7 +496,7 @@ def test_an_expired_claim_is_reclaimed_by_the_next_claimant(tmp_path) -> None:
     )
 
     assert reclaimed is True
-    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    row = _row(store)
     assert row["claim_token"] == "tok-b"
     assert row["attempts"] == 2
 
@@ -518,7 +533,7 @@ def test_a_claim_loser_cannot_complete(tmp_path) -> None:
     )
 
     assert (won, lost) == (True, False)
-    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    row = _row(store)
     assert row["state"] == "completed" and row["completed_entry_id"] == "entry-1"
 
 
@@ -582,7 +597,7 @@ def test_release_returns_the_row_to_pending_with_its_reason(tmp_path) -> None:
     )
 
     assert released is True
-    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    row = _row(store)
     assert row["state"] == "pending"
     assert row["last_error"] == "body_not_fitted"
     assert row["claim_token"] is None
@@ -608,7 +623,7 @@ def test_retire_requires_a_known_terminal_code(tmp_path) -> None:
         terminal_code=BODY_TERMINAL_CODES[0],
         now=time.time(),
     )
-    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    row = _row(store)
     assert row["state"] == "retired" and row["terminal_code"] == BODY_TERMINAL_CODES[0]
 
 
