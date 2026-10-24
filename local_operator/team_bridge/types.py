@@ -30,6 +30,7 @@ from typing import Any, Literal, Mapping, NewType
 from uuid import UUID
 
 __all__ = [
+    "ATTACHMENT_ID_PATTERN",
     "CONVERSATION_ID_PATTERN",
     "InvalidSendRecipient",
     "is_account_id",
@@ -60,6 +61,13 @@ __all__ = [
 #: second copy is a drift risk, not a style choice. Kept here (not in the
 #: route module) because this module has no httpx/server imports.
 CONVERSATION_ID_PATTERN = r"^bcv_[0-9a-z]{8,64}$"
+
+#: The hub-minted image attachment id (``batt_`` + a UUID). Shared by the
+#: client, the desktop routes and the agent tool for the same reason as the
+#: conversation pattern: each interpolates the id into an upstream path, and
+#: the grammar's job is to prove it cannot reshape that path (no ``/``, ``.``,
+#: ``%`` or ``?``), not to re-implement the hub's mint.
+ATTACHMENT_ID_PATTERN = r"^batt_[0-9A-Za-z-]{8,64}$"
 
 #: The conversation-message id family (``bcmsg_`` + lowercase base36), and the
 #: kind token the feed ref uses to carry a conversation delivery. Both are
