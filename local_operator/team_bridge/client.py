@@ -1993,6 +1993,7 @@ class TeamBridgeClient:
         agent_label: str | None = None,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        thread_root_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
@@ -2002,7 +2003,10 @@ class TeamBridgeClient:
         message with ``origin=agent`` and the member's display label. It
         refuses ``agent_label`` on this path (provenance is the member row, not
         a request field), so the two are never combined here. ``origin_session_id``
-        rides only as opaque provenance and is never logged.
+        rides only as opaque provenance and is never logged. ``thread_root_id``
+        makes the send a reply in that root message's thread; the server validates
+        it (same conversation, root not itself a reply) and the key is omitted
+        when unset so an older server never sees an unknown field.
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
@@ -2014,12 +2018,48 @@ class TeamBridgeClient:
             body["actor_endpoint_id"] = actor_endpoint_id
         if origin_session_id:
             body["origin_session_id"] = origin_session_id
+        if thread_root_id:
+            body["thread_root_id"] = thread_root_id
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/messages",
             body=body,
             access=access,
             expected_account_id=expected_account_id,
+        )
+
+    async def conversation_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        after_seq: int | None = None,
+        endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+
+        Same membership gate and body rule as history: for an agent member a
+        reply's body is present only after that endpoint admitted it, so a
+        thread is never a side door around screening.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        if endpoint_id:
+            params["endpoint_id"] = endpoint_id
+        return await self._send(
+            "GET",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}/replies",
+            params=params or None,
+            access=access,
         )
 
     async def conversation_body(
