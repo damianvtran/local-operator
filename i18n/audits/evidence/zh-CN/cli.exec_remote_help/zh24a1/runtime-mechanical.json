@@ -2,8 +2,8 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "cli.exec_remote_help",
-  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
-  "generated_utc": "2026-10-24T23:21:17Z",
+  "revision": "f7a884b7b73e0b92d2b44ea2020c46b9b0d4843f",
+  "generated_utc": "2026-10-24T23:28:34Z",
   "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
   "plural_categories": {
     "zh-CN": [
@@ -104,6 +104,18 @@
     }
   ],
   "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
   "technical_tokens": {
     "patterns": {
       "backtick_span": "`[^`\\n]+`",

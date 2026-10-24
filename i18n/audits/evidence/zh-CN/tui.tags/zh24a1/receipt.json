@@ -6,13 +6,13 @@
   "record": "i18n/audits/evidence/zh-CN/tui.tags/zh24a1/record.json",
   "provenance": "Bundle receipt for independent audit zh24a1 written 2026-10-24 by translation-auditor (lopdev team), session 0c7aebe462e8, served model deepseek/deepseek-flash; this manifest is not another audit.",
   "hashes": {
-    "audit.log": "d4f93b7d0614943d2663168caa4e9b1df3117a21bc781550b1e4ae0a41825ff7",
-    "audit.py.txt": "5282b48a93e70222416f7c5fc6a11e7fd22b11e4d0321b8c14614f897a3d34cd",
-    "mechanical-raw.json": "a3badd646006047923ba159e241fe262e62fb038e8751931b1f20ebf1b041458",
-    "pseudo-evidence.json": "ee91fd326f592ce925e270040e8eb7f7d07f745c8a7a5511a7d887a694b44c1a",
-    "record.json": "b64fae4f7d54a25dd81071eda1b544b8392aea6388f6cd9d4880e08e33b3fe90",
+    "audit.log": "6a5d60d955301ff8dceccc1af9c9e22d72400201112d4a757033eccc87e498af",
+    "audit.py.txt": "afb9612c98953ebad359a24b10d7a8cdd93ccea95add1ee6c5d2cd3e2c1e3e43",
+    "mechanical-raw.json": "cd0a3a8d8c03560df3800c2108c74e9bb6fb274d871bc9e4bc2074ed95ca464d",
+    "pseudo-evidence.json": "d3403b3b35ee0999a00b54af224c721fe69b41d6184da0aed9ca45e080fccfb9",
+    "record.json": "e0019a9b69b367fa50d0b8f6de97f5afc874f5e28a501b9b249cabf43d2365d4",
     "report.md": "77cdf770e41f9380afc60e1f854c0f1a3e84dde08b1d6bffe35e74e1d07278c3",
-    "runtime-mechanical.json": "18637b3788cedf0bf0d74deab1a43aaa8d78161ea985bbaeb202adce8c4fda18",
+    "runtime-mechanical.json": "0ea1fc345dcf303cb1c0a14d97080f0e943c946736c9955d1faf9b1e27f8e70a",
     "tui.tags.compact.txt": "9600d34f276bb9f057232e5bd7ba80bc38325edb7d17fd87827b95940ef4b2c7",
     "tui.tags.pairs.txt": "21d96c418fec77883db810c0febe055483cad4822d2cf252b27350ef3360d720"
   }
