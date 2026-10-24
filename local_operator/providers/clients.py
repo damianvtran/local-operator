@@ -5507,7 +5507,10 @@ def client_for_spec(
     ``openai_api`` both are per-provider settings resolved by the caller
     (``SessionStreamFn._client_for``) so this function stays settings-free.
     """
-    from local_operator.providers.registry import get_provider_definition
+    from local_operator.providers.registry import (
+        credential_provider_id,
+        get_provider_definition,
+    )
 
     definition = get_provider_definition(spec.provider)
     if definition is None:
@@ -5558,10 +5561,12 @@ def client_for_spec(
     extra_headers = None
     if spec.provider == "openrouter":
         extra_headers = openrouter_attribution_headers()
-    elif spec.provider == "kimi":
+    elif credential_provider_id(spec.provider) == "kimi":
         # The OAuth grant is minted against a device fingerprint; every
         # inference call must present the same X-Msh-* headers or the provider
         # can reject the session as an unknown device (kimi.py invariant).
+        # Resolve the storage id so a manual kimi-wechat/k3 spec keeps the same
+        # binding without rewriting the provider or model the caller selected.
         from local_operator.providers.oauth.kimi import kimi_common_headers
 
         extra_headers = kimi_common_headers()
