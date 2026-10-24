@@ -669,9 +669,10 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
             "task",
             "wait",
             "jobs",
-            # Appended LAST by design (§E): a roster entry the classification
-            # block may advertise once this session's inventory holds the tool.
+            # Capability entries follow the session-management tools by design (§E):
+            # the classification block may advertise them once the inventory holds them.
             "code_requests",
+            "secret",
         ]
         cached = session_factory._classification_roster(hooks)
         assert [row.name for row in cached if row.kind == "tool"] == [
@@ -682,6 +683,7 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
             "wait",
             "jobs",
             "code_requests",
+            "secret",
         ]
         # A later inventory write rebuilds both the roster and its cache: the
         # cache key carries the tool term, so the change is visible on the
