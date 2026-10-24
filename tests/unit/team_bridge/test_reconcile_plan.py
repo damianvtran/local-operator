@@ -48,6 +48,7 @@ def _snapshot(**changes) -> AccountSnapshot:
             hub=HUB,
             account_id="acc_a",
             device_id="dev_1",
+            endpoint_id="ep_1",
             snapshot_id="snapshot-10",
             preference=Preference.UNSET,
             tenants=(_tenant(),),
@@ -191,6 +192,68 @@ def test_binding_device_mismatch_is_a_hold() -> None:
     assert intent.reason is Reason.BINDING_IDENTITY_MISMATCH
 
 
+def test_an_endpoint_only_difference_is_a_hold_not_an_attachment() -> None:
+    """The owner namespace is JSON(hub, account, tenant, endpoint).
+
+    A binding captured for another endpoint of the SAME tenant and account is a
+    different owner; attaching it as current would hand one endpoint's
+    membership to another. The snapshot differs only in endpoint_id here, so
+    this is the negative the exact-namespace claim needs.
+    """
+    (intent,) = plan_reconciliation(
+        _snapshot(endpoint_id="ep_other", tenants=(_tenant(binding=_binding()),))
+    )
+    assert intent.kind is IntentKind.HOLD
+    assert intent.reason is Reason.ENDPOINT_MISMATCH
+    assert intent.owner is None and intent.generation is None
+
+
+def test_generation_mismatch_is_a_hold_and_absent_generation_is_capture_only() -> None:
+    """Generation is compared when captured, carried when not.
+
+    ``None`` is the documented "not captured" boundary: the adapter must
+    compare the carried generation against the store's active one before
+    acting. A supplied expected generation is authoritative here.
+    """
+    captured = _tenant(binding=_binding())
+    (stale,) = plan_reconciliation(_snapshot(generation=2, tenants=(captured,)))
+    assert stale.kind is IntentKind.HOLD
+    assert stale.reason is Reason.GENERATION_MISMATCH
+    assert stale.owner is None and stale.generation is None
+
+    (exact,) = plan_reconciliation(_snapshot(generation=3, tenants=(captured,)))
+    assert exact.kind is IntentKind.ATTACH_CURRENT
+    assert exact.generation == 3
+
+    # Not captured -> carried through, not silently blessed as equal.
+    (carried,) = plan_reconciliation(_snapshot(tenants=(captured,)))
+    assert carried.kind is IntentKind.ATTACH_CURRENT
+    assert carried.generation == 3
+
+
+def test_a_locally_bound_tenant_removed_from_the_org_is_a_visible_hold() -> None:
+    """Removed-from-org is HOLD, never no-intent.
+
+    A local binding whose tenant is absent from the fresh authoritative snapshot
+    is an account removed from that org. Silently omitting it looks identical to
+    "nothing to do" while the user still has a binding; attaching is impossible
+    because no fresh membership revision exists. A non-authoritative snapshot
+    cannot prove absence, so it emits no removal hold.
+    """
+    removed = _binding("tnt_removed")
+    result = plan_reconciliation(_snapshot(local_bindings=(removed,)))
+    assert [i.tenant_id for i in result] == ["tnt_1", "tnt_removed"]
+    held = result[1]
+    assert held.kind is IntentKind.HOLD and held.reason is Reason.TENANT_REMOVED
+    assert held.membership_revision is None
+    assert held.owner == removed.owner and held.generation == 3
+    assert held.pre_enable_head == 42 and held.receipt_version == V1
+
+    uncertain = plan_reconciliation(_snapshot(authoritative=False, local_bindings=(removed,)))
+    assert [i.tenant_id for i in uncertain] == ["tnt_1"]
+    assert uncertain[0].reason is Reason.SNAPSHOT_NOT_AUTHORITATIVE
+
+
 @pytest.mark.parametrize(
     "tenants",
     [
@@ -313,6 +376,13 @@ def test_late_attach_cannot_invent_initial_fence_or_authorize_backlog() -> None:
     "changes",
     [
         {"authoritative": "false"},
+        {"endpoint_id": ""},
+        {"generation": 0},
+        {"local_bindings": (_binding("tnt_1"),)},
+        {"local_bindings": (_binding("tnt_9", device_id="dev_2"),)},
+        {
+            "local_bindings": (_binding("tnt_9"), _binding("tnt_9")),
+        },
         {"tenants": (_tenant(membership_current="false"),)},
         {"offer": replace(Offer(V2, "sha256:offer", True, True), policy_accepted="false")},
     ],

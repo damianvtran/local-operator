@@ -44,6 +44,8 @@ class Reason(StrEnum):
     RECEIVER_IDENTITY_MISMATCH = "receiver_identity_mismatch"
     TENANT_IDENTITY_MISMATCH = "tenant_identity_mismatch"
     BINDING_IDENTITY_MISMATCH = "binding_identity_mismatch"
+    ENDPOINT_MISMATCH = "endpoint_mismatch"
+    GENERATION_MISMATCH = "generation_mismatch"
     MEMBERSHIP_NOT_CURRENT = "membership_not_current"
     INELIGIBLE = "ineligible"
     SERVER_DISABLED = "server_disabled"
@@ -54,6 +56,7 @@ class Reason(StrEnum):
     REPLAY_FENCE_MISSING = "replay_fence_missing"
     BOOKKEEPING_WITHOUT_BINDING = "bookkeeping_without_binding"
     OFFER_NOT_AUTOMATIC = "offer_not_automatic"
+    TENANT_REMOVED = "tenant_removed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,11 +120,26 @@ class AccountSnapshot:
     hub: str
     account_id: str
     device_id: str
+    #: The owner namespace's ENDPOINT half. Exact attachment requires this to
+    #: match the captured binding's ``owner.endpoint_id``; a snapshot that
+    #: differs only here is a different local owner, not the same row.
+    endpoint_id: str
     snapshot_id: str
     preference: Preference
     tenants: tuple[TenantSnapshot, ...]
     offer: Offer | None
     accepted_receipt_versions: tuple[str, ...]
+    #: The generation the caller expects for this owner namespace, when it has
+    #: one. ``None`` means "not captured": the planner carries the binding's
+    #: generation through but cannot judge it, and the adapter must compare it
+    #: against the store's active generation before acting. A provided value is
+    #: compared here, so a stale generation can never attach as current.
+    generation: int | None = None
+    #: Bindings the local store holds for this account/device whose tenant is
+    #: NOT in ``tenants`` — an org the account has been removed from. They are
+    #: planned as visible holds, never silently dropped; the adapter must supply
+    #: every local binding or an omission is indistinguishable from absence.
+    local_bindings: tuple[Binding, ...] = ()
     receiver: ReceiverBinding | None = None
     authoritative: bool = True
     active_owner_ambiguous: bool = False
@@ -137,7 +155,9 @@ class Intent:
     device_id: str
     snapshot_id: str
     tenant_id: str
-    membership_revision: str
+    #: ``None`` only for a tenant removed from the org, where no fresh membership
+    #: revision exists; every tenant present in the snapshot carries one.
+    membership_revision: str | None
     receiver: ReceiverBinding | None
     owner: OwnerKey | None
     generation: int | None
@@ -145,6 +165,34 @@ class Intent:
     receipt_version: str | None
     offer_version: str | None = None
     offer_text_ref: str | None = None
+
+
+def _validate_binding(b: Binding) -> None:
+    """Captured bindings are facts; a malformed one fails the whole plan.
+
+    Shared by tenant rows and local (removed-tenant) captures so both entry
+    points cannot drift into accepting different shapes of the same record.
+    """
+    if not isinstance(b, Binding):
+        raise ValueError("typed binding required")
+    if any(type(flag) is not bool for flag in (b.active, b.current, b.receipt_validated)):
+        raise ValueError("validated boolean facts required, not truthy raw values")
+    identifiers = (
+        b.owner.hub,
+        b.owner.account_id,
+        b.owner.tenant_id,
+        b.owner.endpoint_id,
+        b.device_id,
+        b.receipt_version,
+    )
+    if any(not isinstance(v, str) or not v.strip() for v in identifiers):
+        raise ValueError("empty or invalid captured identity")
+    if type(b.generation) is not int or b.generation < 1:
+        raise ValueError("invalid namespace generation")
+    if b.pre_enable_head is not None and (
+        type(b.pre_enable_head) is not int or b.pre_enable_head < 0
+    ):
+        raise ValueError("invalid initial replay fence")
 
 
 def _reason(s: AccountSnapshot, t: TenantSnapshot) -> Reason:
@@ -183,6 +231,18 @@ def _reason(s: AccountSnapshot, t: TenantSnapshot) -> Reason:
             s.device_id,
         ):
             return Reason.BINDING_IDENTITY_MISMATCH
+        # The namespace is JSON(hub, account, tenant, ENDPOINT): a row captured
+        # for another endpoint of the same tenant is a different owner, and
+        # attaching it would hand one endpoint's membership to another. Exact
+        # means all four fields, so this is compared, never assumed.
+        if b.owner.endpoint_id != s.endpoint_id:
+            return Reason.ENDPOINT_MISMATCH
+        # Generation is compared only when the caller captured the one it
+        # expects; ``None`` is "not captured" and the adapter must compare it
+        # against the store's active generation before acting. A supplied value
+        # is authoritative here, so stale generations cannot attach.
+        if s.generation is not None and b.generation != s.generation:
+            return Reason.GENERATION_MISMATCH
         if not b.active or not b.current:
             return Reason.BINDING_NOT_CURRENT
         if not b.receipt_validated or b.receipt_version not in s.accepted_receipt_versions:
@@ -220,7 +280,18 @@ def plan_reconciliation(snapshot: AccountSnapshot) -> tuple[Intent, ...]:
         raise ValueError("typed preference and immutable tenant snapshot required")
     if not isinstance(s.accepted_receipt_versions, tuple):
         raise ValueError("immutable accepted receipt policy required")
-    identifiers = [s.hub, s.account_id, s.device_id, s.snapshot_id, *s.accepted_receipt_versions]
+    if s.generation is not None and (type(s.generation) is not int or s.generation < 1):
+        raise ValueError("invalid expected generation")
+    if not isinstance(s.local_bindings, tuple):
+        raise ValueError("immutable local binding capture required")
+    identifiers = [
+        s.hub,
+        s.account_id,
+        s.device_id,
+        s.endpoint_id,
+        s.snapshot_id,
+        *s.accepted_receipt_versions,
+    ]
     flags = [s.authoritative, s.active_owner_ambiguous, s.legacy_account_done]
     if s.offer is not None:
         if not isinstance(s.offer.version, str) or not isinstance(s.offer.text_ref, str):
@@ -236,24 +307,22 @@ def plan_reconciliation(snapshot: AccountSnapshot) -> tuple[Intent, ...]:
         if not isinstance(t.server_state, ServerState):
             raise ValueError("unknown server state")
         if t.binding is not None:
-            b = t.binding
-            flags.extend((b.active, b.current, b.receipt_validated))
-            identifiers.extend(
-                (
-                    b.owner.hub,
-                    b.owner.account_id,
-                    b.owner.tenant_id,
-                    b.owner.endpoint_id,
-                    b.device_id,
-                    b.receipt_version,
-                )
-            )
-            if type(b.generation) is not int or b.generation < 1:
-                raise ValueError("invalid namespace generation")
-            if b.pre_enable_head is not None and (
-                type(b.pre_enable_head) is not int or b.pre_enable_head < 0
-            ):
-                raise ValueError("invalid initial replay fence")
+            _validate_binding(t.binding)
+    present = {t.tenant_id for t in s.tenants}
+    for b in s.local_bindings:
+        _validate_binding(b)
+        if (b.owner.hub, b.owner.account_id, b.device_id) != (
+            s.hub,
+            s.account_id,
+            s.device_id,
+        ):
+            raise ValueError("local binding belongs to another hub/account/device")
+        if b.owner.tenant_id in present:
+            # A tenant row carries its own binding; a second capture for the
+            # same tenant is a malformed snapshot, not two facts to reconcile.
+            raise ValueError("local binding duplicates a present tenant")
+    if len({b.owner.namespace for b in s.local_bindings}) != len(s.local_bindings):
+        raise ValueError("duplicate local binding")
     if any(type(flag) is not bool for flag in flags):
         raise ValueError("validated boolean facts required, not truthy raw values")
     if any(not isinstance(v, str) or not v.strip() for v in identifiers):
@@ -264,7 +333,12 @@ def plan_reconciliation(snapshot: AccountSnapshot) -> tuple[Intent, ...]:
     for t in sorted(s.tenants, key=lambda row: row.tenant_id):
         reason, b = _reason(s, t), t.binding
         # A foreign owner is diagnostic only, never a consumable attachment key.
-        if reason in {Reason.TENANT_IDENTITY_MISMATCH, Reason.BINDING_IDENTITY_MISMATCH}:
+        if reason in {
+            Reason.TENANT_IDENTITY_MISMATCH,
+            Reason.BINDING_IDENTITY_MISMATCH,
+            Reason.ENDPOINT_MISMATCH,
+            Reason.GENERATION_MISMATCH,
+        }:
             b = None
         kind = {
             Reason.NEW_ENROLLMENT: IntentKind.CREATE,
@@ -290,6 +364,32 @@ def plan_reconciliation(snapshot: AccountSnapshot) -> tuple[Intent, ...]:
                 offer_text_ref=offer.text_ref if offer else None,
             )
         )
+    # An org the account has been removed from still has a local owner row. It
+    # is a HOLD with the captured owner/generation carried for the adapter to
+    # preserve: silence would look identical to "nothing to do" while a user
+    # still has a binding, and no fresh membership revision exists to attach
+    # with. Removal is inferred ONLY from an authoritative snapshot — a
+    # non-authoritative capture cannot prove absence, and its present tenants
+    # already carry the account-wide hold.
+    if s.authoritative:
+        for b in sorted(s.local_bindings, key=lambda row: row.owner.tenant_id):
+            result.append(
+                Intent(
+                    kind=IntentKind.HOLD,
+                    reason=Reason.TENANT_REMOVED,
+                    hub=s.hub,
+                    account_id=s.account_id,
+                    device_id=s.device_id,
+                    snapshot_id=s.snapshot_id,
+                    tenant_id=b.owner.tenant_id,
+                    membership_revision=None,
+                    receiver=s.receiver,
+                    owner=b.owner,
+                    generation=b.generation,
+                    pre_enable_head=b.pre_enable_head,
+                    receipt_version=b.receipt_version,
+                )
+            )
     return tuple(result)
 
 
