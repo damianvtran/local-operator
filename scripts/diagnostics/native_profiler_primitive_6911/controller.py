@@ -26,6 +26,14 @@ def phase_pass(row,phase,labels):
     if row['phase']!=phase or row['mode']!='INTEGER_NS' or row['status']!='PASS' or row['first_guard'] is not None:raise ValueError('phase outcome STOP')
     if len({r['code_id'] for r in row['rows']})!=len(row['rows']) or len({(e['parent'],e['child']) for e in row['own_edges']})!=len(row['own_edges']):raise ValueError('duplicate source ID STOP')
     if row['entries']!=row['unknown_entries']+len(row['rows']) or row['edges']<row['unknown_edges']+len(row['own_edges']):raise ValueError('quality cardinality STOP')
+    # The shared schema intentionally retains signed/nullable failure evidence.
+    # A successful graph must independently reject contradictions in EVERY
+    # published own row/edge, not trust global counters or only the chosen root.
+    for item in (*row['rows'],*row['own_edges']):
+        for key in ('callcount','reccallcount'):
+            if type(item[key]) is not int or item[key]<0:raise ValueError('full count quality STOP')
+        for key in ('inlinetime','totaltime'):
+            if type(item[key]) not in (int,float) or not math.isfinite(item[key]) or item[key]<0:raise ValueError('full time quality STOP')
     reference=row['reference']
     if type(reference) is not dict or reference.get('ready') is not True or reference.get('trailing') is not True:raise ValueError('readiness STOP')
     if phase in ('DIRECT','NESTED'):
