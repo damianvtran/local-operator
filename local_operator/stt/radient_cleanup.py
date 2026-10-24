@@ -110,14 +110,23 @@ def radient_cleanup_options(
     mode: str,
     prompt: str | None,
     language: str | None,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     """Map the shared cleanup vocabulary to optional Radient multipart fields."""
     resolved = resolve_cleanup(mode)
     remove: bool | None = None
     include_events: bool | None = None
-    if resolved in ("auto", "provider"):
+    # Native cleanup is ElevenLabs-only. An explicitly different provider must
+    # not receive controls the relay correctly rejects; an omitted provider
+    # keeps the default-Radient native path and its ElevenLabs fix unchanged.
+    explicit_non_elevenlabs = (
+        isinstance(provider, str)
+        and bool(provider.strip())
+        and provider.strip().lower() != "elevenlabs"
+    )
+    if not explicit_non_elevenlabs and resolved in ("auto", "provider"):
         remove, include_events = True, False
-    elif resolved == "client":
+    elif not explicit_non_elevenlabs and resolved == "client":
         remove, include_events = False, False
     return {
         "remove_disfluencies": remove,

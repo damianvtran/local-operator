@@ -141,7 +141,7 @@ async def create_transcription_endpoint(
             provider=provider,
             session_id=str(session_id or "") or None,
             client_request_id=request_id,
-            **radient_cleanup_options(mode, prompt, language),
+            **radient_cleanup_options(mode, prompt, language, provider=provider),
         )
 
         # The legacy route shares the cascade's pure rules, so two live

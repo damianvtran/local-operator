@@ -957,6 +957,34 @@ async def test_create_transcription_auto_cleans_radient_text(test_app_client, te
 
 
 @pytest.mark.asyncio
+async def test_create_transcription_explicit_openai_preserves_compatibility(
+    test_app_client, temp_audio_file
+):
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "[redacted]"
+    mock_radient_client.create_transcription.return_value = RadientTranscriptionResponseData(
+        text="Um, review the album.", provider="openai", status="completed"
+    )
+    app.dependency_overrides[get_radient_client] = lambda: mock_radient_client
+    try:
+        with open(temp_audio_file, "rb") as f:
+            response = await test_app_client.post(
+                "/v1/transcriptions",
+                files={"file": (SAMPLE_FILE_NAME, f, "audio/mpeg")},
+                data={"provider": "openai", "cleanup": "auto", "language": "en"},
+            )
+    finally:
+        del app.dependency_overrides[get_radient_client]
+
+    assert response.status_code == 200, response.text
+    kwargs = mock_radient_client.create_transcription.call_args[1]
+    assert kwargs["remove_disfluencies"] is None
+    assert kwargs["include_audio_events"] is None
+    assert "omit filler" in kwargs["prompt"].lower()
+    assert response.json()["result"]["text"] == "Review the album."
+
+
+@pytest.mark.asyncio
 async def test_create_transcription_off_is_verbatim(test_app_client, temp_audio_file):
     mock_radient_client = MagicMock()
     mock_radient_client.api_key = "[redacted]"
