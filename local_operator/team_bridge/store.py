@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -1094,6 +1095,28 @@ _BODY_RESERVATION_COLUMNS = frozenset(
 #: silently consumes an admitted message.
 BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
 
+#: Closed reason vocabulary for ``last_error`` on a reservation. The column is
+#: written from a caller argument, so an OPEN string is how third-party text
+#: could reach a durable row that is supposed to be contentless (B2). A reason
+#: outside this set is refused, never truncated.
+BODY_HOLD_REASONS = (
+    "body_not_fitted",
+    "admission_drift",
+    "consent_unverified",
+    "claim_lost",
+    "never_appended",
+    "binding_drift",
+    "screening_unverified",
+)
+
+#: The shapes the contentless columns must satisfy. These are the package's own
+#: grammars, not a second spelling: ``conversation_id``/``message_id`` come from
+#: ``types``, and a digest here is lowercase hex only.
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_SESSION_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_CONSENT_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+
+
 #: Terminal codes (design S-9). Kept distinct so a capacity stop is never
 #: confused with "nobody ran", and neither can be read as delivered.
 BODY_TERMINAL_CODES = (
@@ -1185,7 +1208,11 @@ class Store:
         try:
             # Serialise the rekey and stamp. Existing legacy upgrades may
             # already hold the write transaction; never commit it underneath
-            # them. A failure must roll back both queues and the version.
+            # them. HONEST LIMIT: `_ensure_body_reservations` runs
+            # ``executescript``, which COMMITS the open transaction before its
+            # own DDL, so a later stamp failure does not roll the table back.
+            # What is guaranteed: a failed stamp leaves v7, and the next open
+            # revalidates the already-created table and completes the stamp.
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
             version = conn.execute(
@@ -1268,13 +1295,22 @@ class Store:
         is read or written here.
         """
 
-        conn.executescript(_BODY_RESERVATIONS_SCHEMA)
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
-        if not _BODY_RESERVATION_COLUMNS <= columns:
-            raise StoreRefused(
-                "schema_damaged",
-                f"body_reservations lacks {sorted(_BODY_RESERVATION_COLUMNS - columns)}",
-            )
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if existing:
+            # A carrying table is VALIDATED BEFORE any DDL: the index statement
+            # inside the script names `state`, so running it first raised a raw
+            # sqlite3.OperationalError from a partial table instead of a typed
+            # refusal (M1). A partial table is damage, never an upgrade.
+            if not _BODY_RESERVATION_COLUMNS <= existing:
+                raise StoreRefused(
+                    "schema_damaged",
+                    f"body_reservations lacks " f"{sorted(_BODY_RESERVATION_COLUMNS - existing)}",
+                )
+            return
+        try:
+            conn.executescript(_BODY_RESERVATIONS_SCHEMA)
+        except sqlite3.Error as error:
+            raise StoreRefused("state_unreadable", "body reservation DDL failed") from error
 
     def _init_layout(self, conn: sqlite3.Connection) -> None:
         """Validate BEFORE any DDL; refuse damage instead of repairing it.
@@ -1475,6 +1511,13 @@ class Store:
                     "schema_damaged",
                     f"screened_request_deliveries lacks {missing}",
                 )
+            if version == str(_LAYOUT_VERSION):
+                # A v6 store predates the reservation table by construction.
+                # VERIFY the v6 floor and return: `_init` performs the name
+                # rekey, then ensures the table and stamps v8 in one place.
+                # Requiring v8 structure here made a genuine v6 store refuse as
+                # "damaged" before it could ever be migrated (B1).
+                return
             if version == "7":
                 # V7 is fully verified above; the ONLY remaining step is
                 # the additive reservation table (IF NOT EXISTS, so a
@@ -1939,6 +1982,20 @@ class Store:
     def _reservation(row: Any) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
 
+    @staticmethod
+    def _reservation_field(field: str, value: Any, pattern: Any) -> str:
+        """Refuse rather than coerce an id or digest that is not in shape.
+
+        WHY: this table is claimed to be contentless. The DDL guarantees no
+        body column exists; this guard is the other half — a free-form string
+        in an identity column can still carry arbitrary text, so every
+        caller-supplied value is matched against a closed grammar first.
+        """
+
+        if not isinstance(value, str) or pattern.fullmatch(value) is None:
+            raise StoreRefused("invalid_body_reservation", field)
+        return value
+
     def record_body_reservation(
         self,
         owner: OwnerSnapshot,
@@ -1960,6 +2017,25 @@ class Store:
         retry path may emit the same reservation again after a crash; a second
         insert must be a no-op rather than a duplicate promise.
         """
+
+        from local_operator.team_bridge.types import (
+            CONVERSATION_ID_PATTERN,
+            is_conversation_message_id,
+        )
+
+        if re.fullmatch(CONVERSATION_ID_PATTERN, conversation_id) is None:
+            raise StoreRefused("invalid_body_reservation", "conversation_id")
+        if not is_conversation_message_id(message_id):
+            raise StoreRefused("invalid_body_reservation", "message_id")
+        self._reservation_field("body_sha256", body_sha256, _HEX64)
+        self._reservation_field("screening_fingerprint", screening_fingerprint, _HEX64)
+        self._reservation_field("designated_session", designated_session, _SESSION_TOKEN)
+        if consent_version is not None:
+            self._reservation_field("consent_version", consent_version, _CONSENT_TOKEN)
+        if not isinstance(conversation_seq, int) or isinstance(conversation_seq, bool):
+            raise StoreRefused("invalid_body_reservation", "conversation_seq")
+        if conversation_seq < 1:
+            raise StoreRefused("invalid_body_reservation", "conversation_seq")
 
         with self._connect() as conn:
             self._init(conn)
@@ -2111,13 +2187,19 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            if reason not in BODY_HOLD_REASONS:
+                # Refuse, never truncate: a truncated free-form reason is still
+                # third-party text in a durable row (B2).
+                # The value itself is NOT echoed: it is caller text, and this path exists
+                # precisely because caller text must not travel.
+                raise StoreRefused("invalid_body_reason", "reason")
             cursor = conn.execute(
                 "UPDATE body_reservations SET state = 'pending', claim_token = NULL, "
                 "turn_token = NULL, claim_expires_at = NULL, last_error = ?, "
                 "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
                 "AND message_id = ? AND state = 'claimed' AND claim_token = ?",
                 (
-                    reason[:64],
+                    reason,
                     float(now),
                     _owner_key(owner),
                     conversation_id,
