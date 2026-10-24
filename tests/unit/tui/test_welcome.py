@@ -331,7 +331,14 @@ def test_update_row_is_absent_when_none() -> None:
     assert "/update" not in rows
 
 
-def test_update_row_copy_and_narrow_drop() -> None:
+def test_update_row_copy_and_narrow_wrap() -> None:
+    """Narrow terminals WRAP the instruction rather than dropping it (D2).
+
+    The old rule printed the short sentence and no command below the full
+    sentence's width. That made the same width behave differently per locale —
+    Urdu's full sentence is longer, so it lost ``/update`` while English kept
+    it. Wrapping keeps every row whole (no ``/upd…``) and the command present.
+    """
     info = WelcomeInfo(
         version="0.27.0",
         model_label="test/model",
@@ -340,10 +347,15 @@ def test_update_row_copy_and_narrow_drop() -> None:
     )
     wide = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
     assert "! latest is v0.28.0 — /update" in wide
-    narrow = plain(build_welcome_lines(info, 22, ROOMY_H))
+    narrow_lines = build_welcome_lines(info, 22, ROOMY_H)
+    narrow = plain(narrow_lines)
     assert "latest is v0.28.0" in narrow
-    assert "/update" not in narrow
-    assert "/upd" not in narrow
+    assert "/update" in narrow
+    update_rows = [line.plain for line in narrow_lines if "/update" in getattr(line, "plain", "")]
+    assert update_rows, "the wrapped update row disappeared"
+    for line in update_rows:
+        assert "…" not in line, line
+        assert cell_len(line) <= 22, line
 
 
 def test_update_sheds_before_harness_notice_and_login() -> None:

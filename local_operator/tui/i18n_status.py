@@ -34,18 +34,32 @@ def _occurrence_spans(text: str, value: str) -> list[TechnicalSpan]:
     return spans
 
 
+#: Characters that may sit against a technical token without being part of it.
+#: A literal inside a longer word (``/update`` in ``/update-all``) is prose, not
+#: that token, and isolating it would split a word the prose owns (n-1).
+_TOKEN_PREFIX = frozenset(" \t\n\"'`([{<")
+_TOKEN_SUFFIX = frozenset(" \t\n\"')]}>.,;:!?۔؟،")
+
+
+def _at_token_boundary(text: str, span: TechnicalSpan) -> bool:
+    before = text[span.start - 1] if span.start else " "
+    after = text[span.end] if span.end < len(text) else " "
+    return before in _TOKEN_PREFIX and after in _TOKEN_SUFFIX
+
+
 def technical_literal_spans(
     record: RenderedMessage, literals: Sequence[str]
 ) -> tuple[TechnicalSpan, ...]:
     """Locate owner-declared technical tokens authored inside catalogue prose."""
     if any(not literal for literal in literals):
         raise ValueError("technical display literals must be non-empty")
-    return tuple(
-        sorted(
-            (span for literal in literals for span in _occurrence_spans(record.text, literal)),
-            key=lambda span: span.start,
-        )
-    )
+    spans: list[TechnicalSpan] = []
+    for literal in literals:
+        for occurrence in _occurrence_spans(record.text, literal):
+            widened = _with_single_letter_prefix(record.text, occurrence)
+            if _at_token_boundary(record.text, widened):
+                spans.append(widened)
+    return tuple(sorted(spans, key=lambda span: span.start))
 
 
 def balance_display_line(line: Text) -> None:
@@ -65,6 +79,31 @@ def balance_display_line(line: Text) -> None:
         raise ValueError("display line has an unmatched closing isolate")
     if depth:
         line.append(_PDI * depth)
+
+
+def _with_single_letter_prefix(text: str, span: TechnicalSpan) -> TechnicalSpan:
+    """Include one ASCII letter glued to a NUMERIC parameter (``v9.9.9``).
+
+    A locale writes ``v{version}`` with no space, so the value starts glued to a
+    letter. ``isolated_status_text`` requires an island to begin at a word
+    boundary, and widening the whole word would drag prose into a technical run.
+    Exactly one letter is admitted, and only before a value that begins with a
+    digit; a longer run is left to the validator to refuse rather than guessed.
+    """
+    start = span.start
+    if not span.expected[:1].isdigit() or start == 0:
+        return span
+    precedent = text[start - 1]
+    if not (precedent.isascii() and precedent.isalpha()):
+        return span
+    if start >= 2:
+        before = text[start - 2]
+        if before.isascii() and (before.isalnum() or before == "_"):
+            return span
+        if ord(before) > 0x7F:
+            # A Latin letter glued to a non-ASCII word is not a version marker.
+            return span
+    return TechnicalSpan(start - 1, span.end, text[start - 1 : span.end])
 
 
 def technical_parameter_spans(
@@ -87,7 +126,7 @@ def technical_parameter_spans(
             raise ValueError(f"technical display parameter {name!r} must be a non-empty string")
         occurrences = _occurrence_spans(record.text, value)
         found = bool(occurrences)
-        spans.extend(occurrences)
+        spans.extend(_with_single_letter_prefix(record.text, span) for span in occurrences)
         if not found:
             raise ValueError(f"technical display parameter {name!r} is absent from rendered copy")
     return tuple(sorted(spans, key=lambda span: span.start))

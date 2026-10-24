@@ -18,6 +18,7 @@ from local_operator.tui.i18n_status import (
     localized_display,
     message_display,
     technical_display,
+    technical_literal_spans,
 )
 
 RLI, LRI, PDI = "\u2067", "\u2066", "\u2069"
@@ -214,6 +215,47 @@ def urdu_app_corpus(tmp_path, monkeypatch):
     text._sources.cache_clear()
 
 
+@pytest.fixture()
+def native_urdu_update(tmp_path, monkeypatch):
+    """The QA-reported native spelling: ``v{version}`` glued with no space."""
+    real = catalogues.catalogue_root()
+    root = tmp_path / "native-catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "ur").mkdir()
+    (root / "en" / "tui.welcome.json").write_text(
+        json.dumps(
+            {
+                "tui.welcome.status.update": "Latest is v{version} — /update",
+                "tui.welcome.status.update.short": "Latest is v{version}",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "ur" / "tui.welcome.json").write_text(
+        json.dumps(
+            {
+                "tui.welcome.status.update": "تازہ ترین v{version} ہے — /update۔",
+                "tui.welcome.status.update.short": "تازہ ترین v{version} ہے۔",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+    monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "ur"))
+    messages._namespace_for.cache_clear()
+    text._sources.cache_clear()
+    set_active_locale("ur")
+    yield root
+    patched = catalogues._CATALOGUES
+    catalogues._CATALOGUES = real
+    try:
+        set_active_locale("en")
+    finally:
+        catalogues._CATALOGUES = patched
+    messages._namespace_for.cache_clear()
+    text._sources.cache_clear()
+
+
 def _assert_balanced(value: str) -> None:
     for line in value.split("\n"):
         depth = 0
@@ -277,6 +319,15 @@ async def test_real_wakeblock_copy_excludes_projection_controls(urdu_app_corpus)
         assert copied is not None
         assert copied[0]
         assert not any(control in copied[0] for control in (RLI, LRI, PDI))
+        # The CONTENT, not just the absence of controls: the copied text is the
+        # raw catalogue sentence (with the folded wake ids), byte for byte.
+        from local_operator.tui.widgets.transcript import _raw_t
+        from local_operator.i18n.keys import tui_transcript
+
+        label = _raw_t(tui_transcript.catchup_missed(count=2))
+        expected = _raw_t(tui_transcript.catchup_headline(label=label)) + " (w1, w2)"
+        assert expected in copied[0], copied[0]
+        assert "اپ ڈیٹ" in copied[0]
 
 
 @pytest.mark.asyncio
@@ -408,12 +459,321 @@ def test_external_tool_and_live_wake_summaries_pass_through_unprojected(urdu_cor
         assert not any(control in painted for control in (RLI, LRI, PDI)), painted
 
 
-def test_urdu_language_choice_documents_degraded_terminal(monkeypatch):
+def test_welcome_update_keeps_the_literal_in_both_locales(urdu_app_corpus):
+    """D2: equal width, equal treatment — wrap instead of dropping `/update`."""
+    from local_operator.tui.widgets import welcome
+
+    info = welcome.WelcomeInfo(
+        version="0.27.0",
+        model_label="test/model",
+        cwd="/tmp",
+        update_available="0.28.0",
+    )
+    rows: dict[str, list[str]] = {}
+    for locale in ("en", "ur"):
+        set_active_locale(locale)
+        rows[locale] = [
+            line.plain
+            for priority, line in welcome._status_rows(info, 32)
+            if priority == welcome._PRIORITY_UPDATE
+        ]
+
+    for locale, lines in rows.items():
+        joined = "".join(lines)
+        assert "/update" in joined, (locale, lines)
+        assert joined.count("/update") == 1, (locale, lines)
+        # The `!` marker is structural: it stays at the LEFT edge, outside the
+        # RTL run (M-2's rule applied to the status glyph).
+        assert lines[0].startswith("! "), (locale, lines[0])
+        assert not lines[0].startswith(RLI), (locale, lines[0])
+        for line in lines:
+            _assert_balanced(line)
+            assert "…" not in line, (locale, line)
+    assert len(rows["en"]) == 1, rows["en"]
+    assert len(rows["ur"]) > 1, "Urdu must wrap rather than fall to the short form"
+
+
+def test_native_urdu_version_prefix_is_one_island(native_urdu_update):
+    """Q-3: ``v{version}`` must isolate ``v9.9.9``, not raise or split the v."""
+    from local_operator.i18n.keys import tui_welcome
+    from local_operator.tui import i18n_status
+    from local_operator.tui.widgets import welcome
+
+    set_active_locale("ur")
+    full = welcome._t(tui_welcome.status_update(version="9.9.9"))
+    assert LRI + "v9.9.9" + PDI in full
+    assert LRI + "/update" + PDI + "۔" in full
+    assert "/update۔" not in full.replace(LRI + "/update" + PDI, "X")
+    _assert_balanced(full)
+    short = welcome._t(tui_welcome.status_update_short(version="9.9.9"))
+    assert LRI + "v9.9.9" + PDI in short
+    _assert_balanced(short)
+
+    record = messages.render_record(
+        tui_welcome.status_update(version="9.9.9").code, {"version": "9.9.9"}, locale="ur"
+    )
+    spans = i18n_status.technical_parameter_spans(record, {"version": "9.9.9"}, ("version",))
+    start = record.text.index("v9.9.9")
+    assert [(span.start, span.end, span.expected) for span in spans] == [
+        (start, start + 6, "v9.9.9")
+    ]
+    literal_spans = i18n_status.technical_literal_spans(record, ("9.9.9",))
+    assert [(span.start, span.end, span.expected) for span in literal_spans] == [
+        (start, start + 6, "v9.9.9")
+    ]
+
+    # The real Welcome row path, at the size QA reported, must not raise.
+    info = welcome.WelcomeInfo(
+        version="0.27.0", model_label="test/model", cwd="/tmp", update_available="9.9.9"
+    )
+    rows = [line.plain for _, line in welcome._status_rows(info, 34)]
+    update_lines = [line for line in rows if "9.9.9" in line]
+    assert update_lines
+    assert any(LRI + "v9.9.9" + PDI in line for line in update_lines)
+    for line in update_lines:
+        _assert_balanced(line)
+
+    # English stays byte-identical.
+    set_active_locale("en")
+    assert welcome._t(tui_welcome.status_update(version="9.9.9")) == "Latest is v9.9.9 — /update"
+    assert welcome._t(tui_welcome.status_update_short(version="9.9.9")) == "Latest is v9.9.9"
+
+
+@pytest.mark.asyncio
+async def test_declared_and_undeclared_bools_read_the_same_in_urdu(
+    urdu_app_corpus, tmp_path: Path, monkeypatch
+) -> None:
+    """Q-4: a declared BOOL must not fall back to English on/off."""
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets import settings_view as settings_mod
+    from local_operator.tui.widgets.settings_view import SettingsView
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    config_dir = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _boot_app(pilot, app)
+        app._run_slash_command("/language ur")
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+
+        labels: dict[str, list[str]] = {}
+        for key in ("retry.enabled", "memory.enabled"):
+            if key == "memory.enabled":
+                await pilot.press("escape")
+                await pilot.pause()
+            _select_setting(view, key)
+            await pilot.press("enter")
+            await pilot.pause()
+            labels[key] = [
+                row.choice.label for row in view._rows if row.kind == "choice" and row.choice
+            ]
+        assert labels["retry.enabled"] == labels["memory.enabled"]
+        assert labels["memory.enabled"] == [choice.label for choice in settings_mod._BOOL_CHOICES]
+        assert set(labels["retry.enabled"]) == {"فعال", "غیرفعال"}
+        painted = view.render_lines_for_test()
+        assert any("فعال" in line for line in painted), painted
+        choice_lines = [
+            view._row_text(row, index, 120).plain
+            for index, row in enumerate(view._rows)
+            if row.kind == "choice"
+        ]
+        assert any("فعال" in line for line in choice_lines), choice_lines
+        assert not any("on" in line or "off" in line for line in choice_lines), choice_lines
+
+
+def test_peer_pid_row_stays_balanced_at_narrow_widths(urdu_app_corpus) -> None:
+    """M-1: fit RAW, project after — a narrowed pid row keeps every isolate paired."""
+    from local_operator.tui.widgets.transcript import PeerMessageBlock
+
+    # A translated sender copy is what projects; the fixture's ur catalogue is
+    # small, so add this key the way a real wave would carry it.
+    root = catalogues._CATALOGUES
+    overlay = json.loads((root / "ur" / "tui.transcript.json").read_text(encoding="utf-8"))
+    overlay["tui.transcript.sender.pid"] = "pid {pid}"
+    (root / "ur" / "tui.transcript.json").write_text(json.dumps(overlay), encoding="utf-8")
+    messages._namespace_for.cache_clear()
+    set_active_locale("ur")
+
+    for width in (20, 36):
+        block = PeerMessageBlock("hello there", {"pid": 4321})
+        row = block._build_row(width)
+        _assert_balanced(row.plain)
+        # The coarse RLI wraps the whole identity whenever its provenance is a
+        # translated locale; the LRI island appears only while the value itself
+        # survives the fit (at 20 cells it is cut, which is the point).
+        assert RLI in row.plain and PDI in row.plain, row.plain
+        if width >= 36:
+            assert LRI + "4321" + PDI in row.plain, row.plain
+
+
+def test_quiet_group_row_stays_balanced_at_narrow_widths(urdu_app_corpus) -> None:
+    """M-1 for the folded bar: the group sentence is fitted raw then projected."""
+    from local_operator.tui.widgets import transcript as transcript_mod
+
+    root = catalogues._CATALOGUES
+    overlay = json.loads((root / "ur" / "tui.transcript.json").read_text(encoding="utf-8"))
+    overlay["tui.transcript.group.messages"] = "پیغامات · {count}"
+    (root / "ur" / "tui.transcript.json").write_text(json.dumps(overlay), encoding="utf-8")
+    messages._namespace_for.cache_clear()
+    transcript_mod._reload_copy()
+    set_active_locale("ur")
+
+    from local_operator.tui.quiet_groups import QuietGroup
+
+    group = QuietGroup(
+        key="qg:test",
+        family="peer",
+        count=3,
+        first_ts=None,
+        last_ts=None,
+        senders=(),
+        actions=0,
+        failed=0,
+        open=False,
+        row_ids=("a", "b", "c"),
+    )
+    bar = transcript_mod.QuietGroupBlock(group)
+    for width in (20, 36):
+        row = bar._build_row(width)
+        _assert_balanced(row.plain)
+
+
+@pytest.mark.asyncio
+async def test_english_queued_fallback_stays_byte_identical_under_urdu(
+    native_urdu_update,
+) -> None:
+    """M-2: no ur transcript catalogue → raw English, dot still at the LEFT edge."""
+    from local_operator.tui.widgets import transcript as transcript_mod
+
+    transcript_mod._reload_copy()
+    assert transcript_mod._QUEUED_SOURCE == "en"
+    painted = localized_display(
+        transcript_mod.QUEUED_ROW_TEXT,
+        source_locale=transcript_mod._QUEUED_SOURCE,
+    ).plain
+    assert painted == transcript_mod.QUEUED_ROW_TEXT
+    assert not any(control in painted for control in (RLI, LRI, PDI))
+    assert painted[0] != "·" or painted.startswith("·")
+
+
+def test_palette_settings_are_never_rtl_wrapped() -> None:
+    """M-2: a registry setting name is English source, not Urdu prose."""
+    from local_operator.tui import command_palette as palette
+
+    entry = palette.PaletteEntry(
+        label="Terminal title", kind=palette.KIND_SETTING, description="window title"
+    )
+    painted = palette._label_display(entry).plain
+    assert painted == "Terminal title"
+    assert not any(control in painted for control in (RLI, LRI, PDI))
+
+
+@pytest.mark.asyncio
+async def test_urdu_disclosure_wraps_whole_and_uses_a_passing_ink(
+    urdu_app_corpus, tmp_path: Path, monkeypatch
+) -> None:
+    """D1: the Urdu caveat is never ellipsised and clears AA in both themes."""
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.settings_view import SettingsView
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    config_dir = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(36, 36)) as pilot:
+        await _boot_app(pilot, app)
+        app._run_slash_command("/language ur")
+        await pilot.pause()
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        _select_setting(view, "language")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        sentinel = "Terminal: best effort; requires bidi and Arabic shaping."
+        notes = [index for index, row in enumerate(view._rows) if row.kind == "note"]
+        assert len(notes) > 1, "the 36-column disclosure must wrap, not truncate"
+        assert " ".join(view._rows[index].text for index in notes) == sentinel
+        assert not any(view._rows[index].selectable for index in notes)
+
+        width = view._list_width()
+        painted = view.render_lines_for_test()
+        assert all(cell_len(line) <= width for line in painted), [
+            line for line in painted if cell_len(line) > width
+        ]
+        for index in notes:
+            caveat_line = view._row_text(view._rows[index], index, width).plain
+            assert "…" not in caveat_line, caveat_line
+            assert caveat_line.strip() == view._rows[index].text
+
+        # The ink is the passing token, measured — not a remembered claim.
+        from local_operator.tui import theme as theme_mod
+
+        from rich.color import Color
+
+        row_text = view._row_text(view._rows[notes[0]], notes[0], width)
+        muted = Color.parse(theme_mod.semantic_color("muted"))
+        inks = [
+            getattr(getattr(span.style, "color", None), "triplet", None) for span in row_text.spans
+        ]
+        assert muted.triplet in inks, row_text.spans
+
+        body = view._body
+        assert not body.show_horizontal_scrollbar
+        assert body.virtual_size.width <= body.size.width
+
+
+def _contrast(a: str, b: str) -> float:
+    def channel(value: int) -> float:
+        scaled = value / 255
+        return scaled / 12.92 if scaled <= 0.04045 else ((scaled + 0.055) / 1.055) ** 2.4
+
+    def luminance(hex_colour: str) -> float:
+        digits = hex_colour.lstrip("#")
+        red, green, blue = (int(digits[index : index + 2], 16) for index in (0, 2, 4))
+        return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+    lighter, darker = sorted((luminance(a), luminance(b)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def test_the_disclosure_ink_clears_aa_on_both_theme_grounds() -> None:
+    """Pin the measured pair: `faint` failed (1.97/2.08), `muted` passes."""
+    from local_operator.tui import theme as theme_mod
+
+    grounds = {"dark": "bg", "light": "paper"}
+    for theme_name, ground_key in grounds.items():
+        tokens = theme_mod.BRAND_TOKENS[theme_name]
+        assert _contrast(tokens["muted"], tokens[ground_key]) >= 4.5, theme_name
+        assert _contrast(tokens["faint"], tokens[ground_key]) < 4.5, theme_name
+
+
+def test_urdu_language_choice_renders_the_degraded_note(monkeypatch):
+    """The caveat is asserted as ROWS, not as source substrings (m-2)."""
     from local_operator import settings_io
+    from local_operator.tui.widgets import settings_view as settings_mod
 
     monkeypatch.setattr(resolve, "language_options", lambda: (("ur", "ur"),))
     choice = settings_io._language_choices()[0]
     assert choice.value == "ur"
-    assert "best effort" in choice.description
-    assert "bidi" in choice.description
-    assert "shaping" in choice.description
+    rows = settings_mod._note_rows(choice.description, 30)
+    assert " ".join(row.text for row in rows) == choice.description
+    assert len(rows) > 1, "the caveat must wrap, not ellipsise"
+    assert all(row.kind == "note" and not row.selectable for row in rows)
+    assert all(
+        "best effort" in row.text or "bidi" in row.text or "shaping" in row.text for row in rows
+    )
+
+
+def test_literal_inside_a_longer_word_is_not_an_island():
+    """n-1: `/update` in `/update-all` is prose, not the command token."""
+    record = messages.RenderedMessage("/update-all then /update", "ur")
+    spans = technical_literal_spans(record, ("/update",))
+    assert [(span.start, span.expected) for span in spans] == [
+        (record.text.rindex("/update"), "/update")
+    ]

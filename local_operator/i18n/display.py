@@ -117,7 +117,10 @@ def isolated_status_text(record: RenderedMessage, technical: Sequence[TechnicalS
         if span.start and not text[span.start - 1].isspace():
             raise ValueError("technical status span must include its whole prefix")
         suffix = span.end
-        while suffix < len(text) and text[suffix] in ".,;:!?":
+        # Urdu/Arabic sentence punctuation belongs to the PROSE that follows
+        # the token, exactly as ASCII . , ; : ! ? does. Without these the
+        # native `… /update۔` copy failed the whole-suffix rule (B-1).
+        while suffix < len(text) and text[suffix] in ".,;:!?۔؟،":
             suffix += 1
         if suffix < len(text) and not text[suffix].isspace():
             raise ValueError("technical status span must include its whole suffix")
