@@ -79,15 +79,24 @@ def _enroll(config_dir: Path, owner: OwnerSnapshot, session: str) -> Store:
     return store
 
 
-def _receipt(verdict: str) -> Any:
+def _receipt(verdict: str, body: str | None = None) -> Any:
+    """A receipt over the body the fake server actually served.
+
+    ``body`` defaults to the module-level BODY so the older tests keep their
+    exact fixture, while a test that serves different bytes (a canary excerpt)
+    gets a receipt that matches them — otherwise the pipeline would refuse on
+    ``body_hash_mismatch`` before the reservation is ever reached.
+    """
+
     from local_operator.team_bridge.types import ScreeningReceipt
 
+    served = BODY if body is None else body
     return ScreeningReceipt(
         verdict=verdict,
         model="qa-default",
         prompt_version="bridge-screen-v1",
         template_sha256="ab" * 32,
-        body_sha256=hashlib.sha256(BODY.encode("utf-8")).hexdigest(),
+        body_sha256=hashlib.sha256(served.encode("utf-8")).hexdigest(),
         categories=(),
     ).validated()
 
@@ -343,8 +352,8 @@ def _wire_rig(
         if disposition == "hold":
             return ScreenResult(disposition="hold", hold_code="screening_hold")
         if disposition == "bounce":
-            return ScreenResult(disposition="bounce", receipt=_receipt("reject"))
-        receipt = _receipt("allow")
+            return ScreenResult(disposition="bounce", receipt=_receipt("reject", server.body))
+        receipt = _receipt("allow", server.body)
         _persist_fake_receipt(config_dir, receipt, message_id=MESSAGE_ID)
         return ScreenResult(disposition="deliver", receipt=receipt)
 
@@ -422,7 +431,16 @@ def test_admission_records_exactly_one_contentless_reservation(tmp_path, monkeyp
     config_dir.mkdir()
     _enroll(config_dir, a, "sess_a")
 
-    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    # A distinctive body excerpt and a subject-shaped label, so a short
+    # alphanumeric chunk that the store's grammars would ACCEPT is also caught
+    # if it ever reached a column (M2: the plain BODY is too generic).
+    server = FakeServer(
+        notify={"bep_a": "mute"},
+        active={"bep_a": True},
+        mentioned={"bep_a"},
+        body=f"{BODY} MARTENEXCERPT7731",
+        conversation_name="#qa-SUBJECTCANARY9917",
+    )
     transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
     out = _run(a, config_dir)
 
@@ -436,6 +454,8 @@ def test_admission_records_exactly_one_contentless_reservation(tmp_path, monkeyp
     for column, value in row.items():
         text = "" if value is None else str(value)
         assert BODY not in text, f"body text leaked into {column}"
+        assert "MARTENEXCERPT7731" not in text, f"body excerpt leaked into {column}"
+        assert "SUBJECTCANARY9917" not in text, f"subject leaked into {column}"
         assert "qa-coordination" not in text, f"label leaked into {column}"
         assert "Ada" not in text, f"label leaked into {column}"
 
@@ -495,6 +515,73 @@ def test_a_refused_reservation_holds_without_a_card(tmp_path, monkeypatch) -> No
 
     assert out["handled"][0]["action"] == "hold"
     assert out["handled"][0]["code"] == "reservation_refused"
+    assert transcripts["sess_a"] == []
+    assert _reservation_rows(config_dir) == []
+
+
+def test_two_owners_with_identical_receipts_get_different_fingerprints() -> None:
+    """B1: the owner namespace is IN the pre-image hydration recomputes.
+
+    Without it, two accounts whose receipts happen to agree would share a
+    digest, and one owner's reservation would refuse its own admission check
+    after the card was already posted.
+    """
+
+    receipt_row = {
+        "body_sha256": "aa" * 32,
+        "template_sha256": "bb" * 32,
+        "model": "some-model",
+        "admission_revision": "rev-1",
+        "envelope_digest": "cc" * 32,
+    }
+    a = _owner("a", 1)
+    b = _owner("b", 2)
+
+    assert conversation_mod._screening_fingerprint(a, receipt_row) != (
+        conversation_mod._screening_fingerprint(b, receipt_row)
+    )
+
+
+def test_a_replayed_admit_does_not_post_a_second_card(tmp_path, monkeypatch) -> None:
+    """M1: the HANDLER dedupes on the reservation, not on a store-level check.
+
+    The earlier version proved only "one row"; a replay still posted a second
+    card, which is the wake the agent would answer twice.
+    """
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+
+    first = _run(a, config_dir)
+    second = _run(a, config_dir)
+
+    assert first["handled"][0]["action"] == "delivered"
+    assert second["handled"][0]["action"] == "duplicate"
+    assert len(transcripts["sess_a"]) == 1, "a replay must not wake the session twice"
+    assert len(_reservation_rows(config_dir)) == 1
+
+
+def test_a_missing_receipt_holds_without_a_card_or_a_row(tmp_path, monkeypatch) -> None:
+    """M3: ``receipt_unavailable`` is exercised, not merely defined."""
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+
+    monkeypatch.setattr(Store, "receipt_for_message", lambda *_a, **_k: None)
+    out = _run(a, config_dir)
+
+    assert out["handled"][0]["action"] == "hold"
+    assert out["handled"][0]["code"] == "receipt_unavailable"
     assert transcripts["sess_a"] == []
     assert _reservation_rows(config_dir) == []
 
