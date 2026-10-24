@@ -11,7 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "./api";
 import { SupplementBlock } from "./components/supplement-block";
 import { Transcript } from "./components/transcript";
-import type { SupplementBeat, SupplementComponent, SupplementFile } from "./lib/supplement";
+import type {
+	SupplementBeat,
+	SupplementComponent,
+	SupplementFile,
+	SupplementSound,
+} from "./lib/supplement";
 import type { TranscriptEntry } from "./types";
 
 const api = vi.hoisted(() => ({
@@ -127,6 +132,7 @@ function beat(over: Partial<SupplementBeat> = {}): SupplementBeat {
 		filesMore: 0,
 		more: [],
 		components: [],
+		sounds: [],
 		error: "",
 		cause: "",
 		dismissed: false,
@@ -440,5 +446,109 @@ describe("the transcript seat", () => {
 			/>,
 		);
 		expect(container.querySelector("[data-supplement-block]")).toBeNull();
+	});
+});
+
+/*
+ * SOUNDS ON THE BEAT (sound parity, lane C).
+ *
+ * The core lane removed the producer's three-sound cap (PR #2807); the phone
+ * never parsed `sounds[]` at all, so a fourteen-item batch and a silent turn
+ * looked identical. These tests pin the rendering half of the fix: every sound
+ * mounts its own player, a sound-only beat still mounts a block, and nothing
+ * about audio hides behind a disclosure. The flat-scrubber case is here too,
+ * because "no waveform" is a rendered state, not an absence.
+ */
+function sound(index: number): SupplementSound {
+	return {
+		attachment: index.toString(16).padStart(32, "0"),
+		mime: "audio/mpeg",
+		title: `clip ${index + 1}`,
+		durationS: 1.5,
+	};
+}
+
+/** The waveform route's two answers: peaks, or the honest 404. */
+function stubWaveformFetch(peaks: number[] | null): void {
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async () => ({
+			ok: peaks !== null,
+			status: peaks === null ? 404 : 200,
+			json: async () =>
+				peaks === null ? { error: "no waveform" } : { version: 1, bars: peaks.length, peaks },
+		})),
+	);
+}
+
+describe("supplement sounds", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("renders all fourteen sounds and no disclosure gate", () => {
+		stubWaveformFetch(null);
+		const sounds = Array.from({ length: 14 }, (_, index) => sound(index));
+		const { container } = render(
+			<SupplementBlock beat={beat({ sounds })} sessionId="s1" jobLive={true} />,
+		);
+
+		expect(container.querySelectorAll("[data-supplement-sound]")).toHaveLength(14);
+		expect(
+			container.querySelector("[data-supplement-sounds]")?.getAttribute("data-supplement-sounds"),
+		).toBe("14");
+		/* The rule the operator stated: collapse may hide tool lines, never an
+		   artifact. Neither disclosure exists for a sounds-only beat. */
+		expect(container.querySelector("[data-supplement-more]")).toBeNull();
+		expect(container.querySelector("[data-supplement-show-all]")).toBeNull();
+		expect(screen.queryByText(/more/)).toBeNull();
+		expect(screen.getAllByRole("slider")).toHaveLength(14);
+	});
+
+	it("mounts a block for a SOUND-ONLY beat (the desktop's sound-only rule)", () => {
+		stubWaveformFetch(null);
+		const { container } = render(
+			<SupplementBlock beat={beat({ sounds: [sound(0)] })} sessionId="s1" jobLive={true} />,
+		);
+		expect(
+			container.querySelector("[data-supplement-block]")?.getAttribute("data-supplement-block"),
+		).toBe("block");
+		expect(container.querySelectorAll("[data-supplement-sound]")).toHaveLength(1);
+		/* One sound takes the whole column: a lone narrow player beside
+		   whitespace reads as a broken grid. */
+		expect(container.querySelector("[data-supplement-sounds]")?.className).toContain(
+			"grid-cols-1",
+		);
+	});
+
+	it("renders nothing for zero sounds (an older runtime's absent list)", () => {
+		stubWaveformFetch(null);
+		const { container } = render(
+			<SupplementBlock beat={beat({ sounds: [] })} sessionId="s1" jobLive={true} />,
+		);
+		expect(container.querySelector("[data-supplement-sounds]")).toBeNull();
+		/* A done row with nothing at all still renders nothing — the sound
+		   clause must not turn "silent" into an empty block. */
+		expect(container.querySelector("[data-supplement-block]")).toBeNull();
+	});
+
+	it("draws the flat scrubber when the peaks route answers 404", async () => {
+		stubWaveformFetch(null);
+		const { container } = render(
+			<SupplementBlock beat={beat({ sounds: [sound(0)] })} sessionId="s1" jobLive={true} />,
+		);
+		await waitFor(() => {
+			expect(container.querySelector('[data-sound-player][data-waveform="flat"]')).toBeTruthy();
+		});
+	});
+
+	it("draws stored peaks when the sidecar answers", async () => {
+		stubWaveformFetch(new Array(240).fill(0.4));
+		const { container } = render(
+			<SupplementBlock beat={beat({ sounds: [sound(0)] })} sessionId="s1" jobLive={true} />,
+		);
+		await waitFor(() => {
+			expect(container.querySelector('[data-sound-player][data-waveform="peaks"]')).toBeTruthy();
+		});
 	});
 });

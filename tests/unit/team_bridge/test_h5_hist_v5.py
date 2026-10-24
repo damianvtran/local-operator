@@ -376,7 +376,7 @@ def test_pinned_historical_v5_migrates_to_6_preserving_every_row(tmp_path: Path)
     before = _snapshot(path)
     store = Store(tmp_path)
     assert store.active_owner() is not None  # the migration ran on first touch
-    assert _version(path) == str(SCHEMA_VERSION) == "6"
+    assert _version(path) == str(SCHEMA_VERSION)
     assert _snapshot(path) == before  # byte-for-byte on every compared table
     assert _table_exists(path, "screened_request_deliveries")
     conn = sqlite3.connect(path)
@@ -414,7 +414,7 @@ def test_mid_ddl_failure_rolls_back_and_preserves_the_v5_file(
     monkeypatch.setattr(store_mod, "_ensure_producer_table", original)
     reopened = Store(tmp_path)
     assert reopened.active_owner() is not None
-    assert _version(path) == "6"
+    assert _version(path) == str(SCHEMA_VERSION)
     assert _snapshot(path) == before
 
 

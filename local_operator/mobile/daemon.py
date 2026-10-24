@@ -43,13 +43,14 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Protocol
 
 if TYPE_CHECKING:
     from starlette.requests import Request
 
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.mobile.push_worker import PushWorker
+    from local_operator.providers.auth_store import StoredCredential
 
 from local_operator.harness.approval import (
     frame_authority,
@@ -1725,7 +1726,15 @@ def _slash_receipt(outcome: Any, command: str) -> tuple[str, str, bool]:
         if isinstance(data, dict) and str(data.get("type") or "") in _SLASH_SUCCESS_TYPES
         else "neutral"
     )
-    refused = outcome.get("kind") == "error" or outcome.get("style") == "warning"
+    # ``data.ok`` is the runtime's structured verdict and OUTRANKS the tint: a
+    # successful loosening is deliberately painted `warning` (loosening is the
+    # loud direction), so the old rule turned every success into a refusal on
+    # the phone and kept the composer's draft (agent review round 1, B1). The
+    # tint rule remains only for an older runtime that sends no verdict.
+    if isinstance(data, dict) and "ok" in data:
+        refused = not bool(data.get("ok"))
+    else:
+        refused = outcome.get("kind") == "error" or outcome.get("style") == "warning"
     if len(text) > _SLASH_RECEIPT_CHARS:
         text = text[: _SLASH_RECEIPT_CHARS - 1].rstrip() + "\u2026"
     return text, tone, refused
@@ -1768,7 +1777,11 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
     directory = config_dir() / "sessions" / session_id
-    if not (directory / "transcript.jsonl").is_file() or not is_user_session(directory):
+    from local_operator.session import compression
+
+    # Both forms: judging only the plain name hid every compressed session from
+    # the phone's session list, because its journal is an archive on disk.
+    if not compression.has_transcript(directory) or not is_user_session(directory):
         return None
     return directory
 
@@ -1843,6 +1856,7 @@ def _durable_projection(
         _compact_multiline,
     )
     from local_operator.resume import stored_session_title
+    from local_operator.session import compression
     from local_operator.session.attention import AttentionStore
     from local_operator.tools.builtin import todo_snapshot
 
@@ -1851,6 +1865,19 @@ def _durable_projection(
         return None
     try:
         state = _durable_fold_cache().load(directory)
+    except compression.ArchiveError as exc:
+        # KEPT BEST EFFORT, BUT NO LONGER SILENT (review round 3, m-3). A transcript
+        # this build cannot decode answers no projection — the daemon must not take a
+        # 500 for one damaged archive — and the WARNING names the session and the
+        # archive+codec the typed error carries, so the blank frame has a trace. The
+        # history route reports the same condition to the surface as ``unavailable``;
+        # see ``_history_page``.
+        logger.warning(
+            "mobile: no projection for %s, its transcript could not be decoded: %s",
+            session_id,
+            exc,
+        )
+        return None
     except FileNotFoundError:
         return None
     except Exception as exc:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
@@ -2468,12 +2495,15 @@ def _pin_opening_user_message(projection: SessionProjection, record: SessionReco
         return
     try:
         from local_operator.paths import config_dir
+        from local_operator.session import compression
 
-        path = config_dir() / "sessions" / record.session_id / "transcript.jsonl"
-        if not path.exists():
+        path = compression.transcript_for_read(config_dir() / "sessions" / record.session_id)
+        if path is None:
             return
         # Read only the head: the opening user turn is within the first few
         # entries, and a 10 MB transcript should not be replayed per repaint.
+        # ``transcript_for_read`` is what makes this work for a compressed
+        # session too — the materialised copy is byte-identical to the journal.
         import json as _json
 
         with path.open() as fh:
@@ -2815,11 +2845,51 @@ def _journal_page(
     return rows if rows is not None else ([], False)
 
 
+class _UnavailablePage(list[Any]):
+    """An EMPTY history page that remembers WHY it is empty (review round 3, m-3).
+
+    The handler is best effort by contract — a phone that raises is worse than one
+    that says "unavailable" — but a compressed transcript this build cannot decode
+    used to arrive as a plain ``[]``, and an empty page reads as the TOP of the
+    conversation: the reader believes it has seen the whole thing. This type is still
+    a list (so every existing caller's ``if not entries`` keeps working) that carries
+    the typed reason the route puts on the wire as ``unavailable``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self.unavailable = reason
+
+
+def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
+    """The wire body for one history page, with the honest emptiness beside it.
+
+    ``unavailable`` is ADDITIVE and present only when the page is empty for a
+    REASON: an app build that ignores the key renders the old empty state, and one
+    that reads it can say "history unavailable" instead of "that was the top".
+    """
+    body: dict[str, Any] = {
+        "entries": [_transcript_entry_json(row) for row in page],
+        "has_more": has_more,
+    }
+    reason = getattr(page, "unavailable", "")
+    if reason:
+        body["unavailable"] = reason
+    return body
+
+
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
     """Return the page of folded entries immediately OLDER than ``before``
     (chronological within the page) plus whether more history exists beyond it.
+
+    THE EMPTINESS IS SPELLED WHEN IT IS A FAILURE (review round 3, m-3). A page
+    that could not be read is an :class:`_UnavailablePage` — empty, like an honest
+    end of history, but carrying the typed :class:`compression.ArchiveError`
+    message, which the route serves as ``unavailable``. The error is caught HERE,
+    before the blanket handler, and logged at WARNING with its own sentence (which
+    names the archive and codec) rather than as an unexplained fold failure.
 
     Reads through the daemon's incremental fold cache (:mod:`.durable`), so a
     page costs one fold per session per daemon lifetime plus the appended
@@ -2864,10 +2934,20 @@ def _history_page(
             if session_id not in ("", ".", "..") and Path(session_id).name == session_id
             else None
         )
-    if directory is None or not (directory / "transcript.jsonl").is_file():
+    from local_operator.session import compression
+
+    if directory is None or not compression.has_transcript(directory):
         return [], False
     try:
         state = _durable_fold_cache().load(directory)
+    except compression.ArchiveError as exc:
+        # NOT AN EMPTY CONVERSATION: the transcript exists, it just could not be
+        # decoded by this build (a truncated archive, or one written by a runtime
+        # with a codec this one does not have).
+        logger.warning(
+            "mobile: history for %s is unavailable rather than empty: %s", session_id, exc
+        )
+        return _UnavailablePage(str(exc)), False
     except FileNotFoundError:
         return [], False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
@@ -2920,10 +3000,16 @@ def _attachment_bytes(
     from local_operator.session.transcript import Transcript
 
     directory = config_dir() / "sessions" / record.session_id
-    if not (directory / "transcript.jsonl").exists():
+    from local_operator.session import compression
+
+    if not compression.has_transcript(directory):
         return None
     try:
-        transcript = Transcript(directory)
+        # READ-ONLY: this fetch folds history and serves one row. A writer
+        # Transcript would restore the archive into a plain file for good, so
+        # viewing one image on the phone would re-inflate the whole transcript
+        # on the serving device (review m2).
+        transcript = Transcript(directory, read_only=True)
         history = transcript.build_llm_history()
     except Exception:  # noqa: BLE001 — an odd transcript serves no image, not a 500
         logger.exception("image fetch: history fold failed for %s", record.session_id)
@@ -6138,9 +6224,7 @@ def build_app(daemon: MobileDaemon):
         page, has_more = await asyncio.to_thread(
             _history_page, child_session_id, before, limit, durable_only=False
         )
-        return JSONResponse(
-            {"entries": [_transcript_entry_json(entry) for entry in page], "has_more": has_more}
-        )
+        return JSONResponse(_history_response(page, has_more))
 
     async def api_session_history(request: Request) -> Response:
         """Older transcript entries for lazy loading.
@@ -6172,12 +6256,7 @@ def build_app(daemon: MobileDaemon):
         page, has_more = await asyncio.to_thread(
             _history_page, session_id, before, limit, durable_only=entry is None
         )
-        return JSONResponse(
-            {
-                "entries": [_transcript_entry_json(e) for e in page],
-                "has_more": has_more,
-            }
-        )
+        return JSONResponse(_history_response(page, has_more))
 
     async def api_session_checkpoints(request: Request) -> Response:
         """The checkpoint manifest for one conversation: the rail's ticks.
@@ -6221,6 +6300,49 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         return JSONResponse(await manifest_payload(config_dir(), session_id))
+
+    def _ranged_media_response(
+        request: Request, data: bytes, media_type: str, headers: dict[str, str]
+    ) -> Response:
+        """One media body, honouring a single byte Range.
+
+        THE ONE RANGE SPELLING for every sound/attachment byte route. Phone Safari
+        will not play audio or video that arrives as a full-body 200, and a media
+        element asking for a byte window is its normal case. A range set the
+        server does not honour (malformed, multi, inverted) is IGNORED into a
+        full 200 — the spec's remedy — while a start at or past EOF is a genuine
+        416 so the client learns its request was refused.
+        """
+        window = _range_window(request.headers.get("range", ""), len(data))
+        if isinstance(window, str):
+            # "unsatisfiable": the spec's own answer for a range set nothing
+            # can satisfy (a start at or past EOF).
+            return Response(
+                content=b"",
+                status_code=416,
+                headers={
+                    "Content-Range": f"bytes */{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **headers,
+                },
+            )
+        if window is not None:
+            first, last = window
+            return Response(
+                content=data[first : last + 1],
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Content-Range": f"bytes {first}-{last}/{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **headers,
+                },
+            )
+        return Response(
+            content=data,
+            media_type=media_type,
+            headers={"Accept-Ranges": "bytes", **headers},
+        )
 
     async def api_session_image(request: Request) -> Response:
         """One image attachment's bytes, fetched lazily by the transcript.
@@ -6300,37 +6422,145 @@ def build_app(daemon: MobileDaemon):
         if found is None:
             return JSONResponse({"error": "no such attachment"}, status_code=404)
         data, mime_type = found
-        cache = {"Cache-Control": "public, max-age=31536000, immutable"}
-        window = _range_window(request.headers.get("range", ""), len(data))
-        if isinstance(window, str):
-            # "unsatisfiable": the spec's own answer for a range set nothing
-            # can satisfy (a start at or past EOF).
-            return Response(
-                content=b"",
-                status_code=416,
-                headers={
-                    "Content-Range": f"bytes */{len(data)}",
-                    "Accept-Ranges": "bytes",
-                    **cache,
-                },
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        return _ranged_media_response(request, data, mime_type, headers)
+
+    async def api_session_sound(request: Request) -> Response:
+        """One supplement sound's audio bytes, keyed by its attachment digest.
+
+        WHY A DIGEST-KEYED ROUTE AND NOT ANOTHER ``kind``. ``api_session_attachment``
+        indexes MESSAGE blocks by ``(entry, kind, i)``; a sound generated for a turn
+        is a supplement artifact carried on the beat's own ``sounds[]`` as
+        ``{attachment, mime, title, duration_s}``. It has no message block to index,
+        so the digest IS its whole address — the same shape the component document
+        route uses, and the shape the desktop plane's sound family uses.
+
+        AUTHORISATION IS THREE FACTS, the document route's own shape (memo §2.7):
+        the cookie (``gate``), the session existing on disk as a LOCAL USER
+        conversation (``_durable_user_session_dir`` — a live generation and an ended
+        conversation both qualify, because a played-back answer must still play), and
+        the digest being REFERENCED by the ``sounds[]`` of a ``supplement_v1`` row in
+        that session's journal (``_journal_references_sound``). The third is what
+        makes a digest alone insufficient: a component digest is also an
+        ``attachment`` on a supplement row, and it must not reach the audio family.
+        Deliberately NOT ``_entry_for_session``: that serves only live generations,
+        which would mute every historical turn's sounds.
+
+        ONLY AUDIO IS SERVED (round-1 review B1). The store is shared with
+        agent-authored ``text/html`` component blobs, and this route's origin is the
+        relay's own — returning one as ``text/html`` would run script with the auth
+        cookie. So a non-``audio/*`` sidecar is the same honest 404 as a missing
+        sound; the type is never sniffed, rewritten or guessed around. Every answer
+        also carries ``nosniff`` and ``same-origin`` (the library route's policy).
+
+        RANGE + CACHE mirror the attachment route: phone Safari will not play a
+        sound that arrives as a full-body 200, and the bytes are content-addressed so
+        the year-long ``immutable`` cache is safe (the digest changes when the audio
+        does). ``Content-Type`` is the sidecar's own ``mime_type``; ``audio/mpeg``
+        stands in only when the sidecar states none (``get_bytes``'s
+        ``application/octet-stream`` sentinel), never as a guess over a stated type.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return _sound_response(denied)
+        session_id = str(request.path_params["session_id"])
+        digest = request.query_params.get("digest", "")
+        from local_operator.supplements.contract import is_digest
+
+        if not is_digest(digest):
+            return _sound_response(JSONResponse({"error": "bad digest"}, status_code=400))
+
+        def load() -> tuple[bytes, str] | None:
+            from local_operator.session import compression
+            from local_operator.session.attachments import AttachmentStore
+
+            directory = _durable_user_session_dir(session_id)
+            if directory is None:
+                return None
+            try:
+                referenced = _journal_references_sound(compression.iter_lines(directory), digest)
+            except (OSError, compression.ArchiveError):
+                return None
+            if not referenced:
+                return None
+            return AttachmentStore().get_bytes(digest)
+
+        found = await asyncio.to_thread(load)
+        if found is None:
+            return _sound_response(JSONResponse({"error": "no such sound"}, status_code=404))
+        data, mime_type = found
+        if mime_type == "application/octet-stream":
+            mime_type = "audio/mpeg"
+        if not mime_type.startswith("audio/"):
+            # NEVER a page: a component's text/html blob must not become
+            # executable content at this origin, whatever row references it.
+            return _sound_response(JSONResponse({"error": "no such sound"}, status_code=404))
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        return _sound_response(_ranged_media_response(request, data, mime_type, headers))
+
+    async def api_session_waveform(request: Request) -> Response:
+        """One supplement sound's waveform sidecar, keyed by the same digest.
+
+        The reply is the stored ``<digest>.peaks.json`` payload
+        (``{version, bars, peaks}``), read through the core reader the desktop
+        library route also uses (``audiogen.recovery.waveform_payload``) so there is
+        ONE sidecar decoder and its bounded legacy repair is not re-implemented
+        here. ``no-store``: peaks are cheap to re-ask and a surface that renders a
+        waveform must never draw yesterday's bars for a re-generated digest.
+
+        The same three facts authorise it as the byte route: the cookie, a durable
+        local user conversation, and a ``sounds[]`` entry in one of its
+        ``supplement_v1`` rows naming this digest. Waveform data is not secret, but
+        the peaks of another conversation's sound are not this session's to serve,
+        and one authorisation rule for the whole family is easier to keep true than
+        two.
+
+        A missing sidecar is a 404, NEVER a fabricated flat line: the phone draws
+        its honest flat scrubber from the absence itself, and a zero envelope the
+        audio does not have would be a lie about the sound.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return _sound_response(denied)
+        session_id = str(request.path_params["session_id"])
+        digest = request.query_params.get("digest", "")
+        from local_operator.supplements.contract import is_digest
+
+        if not is_digest(digest):
+            return _sound_response(
+                JSONResponse(
+                    {"error": "bad digest"},
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
             )
-        if window is not None:
-            first, last = window
-            return Response(
-                content=data[first : last + 1],
-                status_code=206,
-                media_type=mime_type,
-                headers={
-                    "Content-Range": f"bytes {first}-{last}/{len(data)}",
-                    "Accept-Ranges": "bytes",
-                    **cache,
-                },
+
+        def load() -> dict[str, Any] | None:
+            from local_operator.audiogen.recovery import waveform_payload
+            from local_operator.session import compression
+            from local_operator.session.attachments import AttachmentStore
+
+            directory = _durable_user_session_dir(session_id)
+            if directory is None:
+                return None
+            try:
+                referenced = _journal_references_sound(compression.iter_lines(directory), digest)
+            except (OSError, compression.ArchiveError):
+                return None
+            if not referenced:
+                return None
+            return waveform_payload(AttachmentStore(), digest)
+
+        payload = await asyncio.to_thread(load)
+        if payload is None:
+            return _sound_response(
+                JSONResponse(
+                    {"error": "no waveform"},
+                    status_code=404,
+                    headers={"Cache-Control": "no-store"},
+                )
             )
-        return Response(
-            content=data,
-            media_type=mime_type,
-            headers={"Accept-Ranges": "bytes", **cache},
-        )
+        return _sound_response(JSONResponse(payload, headers={"Cache-Control": "no-store"}))
 
     # -- the supplement read family (memo §2.7; RFC D5) ----------------------------------
     #
@@ -6381,6 +6611,69 @@ def build_app(daemon: MobileDaemon):
                 continue
             if any(match == needle for match in _ATTACHMENT_REF.findall(line)):
                 return True
+        return False
+
+    def _sound_response(response: Response) -> Response:
+        """Stamp the sound family's policy on EVERY answer, refusals included.
+
+        ``nosniff`` and ``same-origin`` are not only success-path facts: an error
+        body must not become a sniffing surface either, and a policy attached only
+        to the 200 is silently absent exactly where a caller is probing. One
+        spelling, the supplement family's own ``_supplement_response`` pattern
+        (qa round 1, Q1).
+        """
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        return response
+
+    def _journal_references_sound(lines: Iterable[str], digest: str) -> bool:
+        """Whether a ``supplement_v1`` row's ``sounds[]`` names ``digest``.
+
+        THE SOUND ROUTES' THIRD AUTHORISATION FACT, and deliberately a PRECISE
+        reader rather than ``_journal_references_digest`` above: that helper
+        matches any ``attachment`` reference on a supplement row, which includes
+        the COMPONENT document digests. Serving an audio route off a component
+        digest would let the bytes family be reached through a reference that
+        never meant it — the round-1 review's own distinction (B1's sibling).
+
+        Lines, not bytes: after #2798 a settled transcript may be archived, so
+        every caller passes ``session.compression.iter_lines(directory)``. A
+        plain ``transcript.jsonl`` probe would read a compressed session as
+        "no reference" and 404 its own sounds — the guard
+        ``test_no_plain_name_probe_outside_the_resolver`` exists for exactly
+        this.
+
+        Read per row, with the same cheap pre-filter (the marker and the digest
+        must both appear on the line before a parse is worth doing). A beat that
+        has not yet been journaled references nothing yet; the live projection
+        only paints a settled beat, whose row the job writes at settle.
+        """
+        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+        marker = SUPPLEMENT_CUSTOM_TYPE
+        for line in lines:
+            if marker not in line or digest not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            row_payload = row.get("payload")
+            if not isinstance(row_payload, dict):
+                continue
+            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                continue
+            details = row_payload.get("details")
+            if not isinstance(details, dict):
+                continue
+            sounds = details.get("sounds")
+            if not isinstance(sounds, list):
+                continue
+            for sound in sounds:
+                if isinstance(sound, dict) and sound.get("attachment") == digest:
+                    return True
         return False
 
     async def api_session_supplement_document(request: Request) -> Response:
@@ -6436,9 +6729,25 @@ def build_app(daemon: MobileDaemon):
             directory = _durable_user_session_dir(session_id)
             if directory is None:
                 return None
+            # Imported BEFORE the try it is caught in: the except clause names
+            # ``compression.ArchiveError``, so an import failure inside the block
+            # would make the handler itself raise ``NameError`` (pyright's
+            # ``reportPossiblyUnboundVariable`` caught exactly that).
+            from local_operator.session import compression
+
             try:
-                payload = (directory / "transcript.jsonl").read_bytes()
-            except OSError:
+                # Stream through the codec and keep only the rows that can be
+                # the reference being authorised: a whole-file ``read_bytes`` is
+                # both unbounded and wrong for an archive (compressed bytes are
+                # not JSONL).
+                from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+                payload = b"\n".join(
+                    line.encode("utf-8", "replace")
+                    for line in compression.iter_lines(directory)
+                    if SUPPLEMENT_CUSTOM_TYPE in line
+                )
+            except (OSError, compression.ArchiveError):
                 return None
             if not _journal_references_digest(payload, digest):
                 return None
@@ -8321,6 +8630,27 @@ def build_app(daemon: MobileDaemon):
             headers["Cache-Control"] = "private, max-age=300"
         return headers
 
+    async def api_library_waveform(request: Request) -> Response:
+        """One audio asset's waveform payload, through the library service.
+
+        A PROXY, not a decoder: ``library.service.waveform`` owns the two sources
+        of truth (a digest-backed asset's sidecar, a path-backed asset's one
+        bounded decode cached under ``cache/library/peaks``) and its refusals are
+        the ordinary 404s ``_library_call`` already maps. ``no-store`` for the same
+        reason the session route is: a re-indexed asset may change its peaks, and
+        a player must not draw an envelope the audio no longer has.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        response = await _library_call(
+            "waveform_payload", config_dir(), str(request.path_params["asset_id"])
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     async def api_library_bytes(request: Request) -> Response:
         """One asset's bytes. Addressed by id, Range-capable, never a path."""
         denied = gate(request)
@@ -8454,6 +8784,12 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
+        # The supplement sound family (sound parity, lane C): digest-addressed audio
+        # bytes with Range support, and the peaks sidecar beside them. Both are
+        # keyed by the beat's own ``sounds[].attachment`` rather than a message
+        # block index, because a turn's generated sound has no message block.
+        Route("/api/sessions/{session_id:str}/sound", api_session_sound),
+        Route("/api/sessions/{session_id:str}/waveform", api_session_waveform),
         Route(
             "/api/sessions/{session_id:str}/supplements/{digest:str}/document",
             api_session_supplement_document,
@@ -8534,6 +8870,7 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/library/assets/{asset_id:str}/content", api_library_bytes),
         Route("/api/library/assets/{asset_id:str}/thumbnail", api_library_thumb),
+        Route("/api/library/assets/{asset_id:str}/waveform", api_library_waveform),
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),
@@ -9017,6 +9354,14 @@ class _UnreadableAuthStore:
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> Any:
         raise self._unavailable("upsert_credential")
+
+    def complete_radient_login(self, result: dict[str, object]) -> "StoredCredential":
+        # Unreadable storage cannot admit a login, even with a valid receipt.
+        raise self._unavailable("complete_radient_login")
+
+    def retained_radient_login_ids(self) -> tuple[int, ...]:
+        # Empty would falsely claim readable history with no retained records.
+        raise self._unavailable("retained_radient_login_ids")
 
     def delete_credentials_for_provider(self, provider: str, disabled_cause: str = "") -> int:
         raise self._unavailable("delete_credentials_for_provider")

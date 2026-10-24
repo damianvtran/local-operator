@@ -266,6 +266,12 @@ class ControllerAuthStore(Protocol):
         self, provider: str, credential: dict[str, Any]
     ) -> "StoredCredential": ...  # pragma: no cover
 
+    def complete_radient_login(
+        self, result: dict[str, Any]
+    ) -> "StoredCredential": ...  # pragma: no cover
+
+    def retained_radient_login_ids(self) -> tuple[int, ...]: ...  # pragma: no cover
+
     def delete_credentials_for_provider(
         self, provider: str, disabled_cause: str = ...
     ) -> int: ...  # pragma: no cover
@@ -1317,7 +1323,19 @@ class ProviderController:
             return f"Login for '{storage}' produced no key; nothing stored."
 
         result.setdefault("authorized_at", int(time.time() * 1000))
-        self.auth_store.upsert_credential(storage, result)
+        completed_radient = None
+        if storage == "radient":
+            # The flow has awaited /me verification; the cancellation guard
+            # above and the receipt's own final recheck both precede writes.
+            completed_radient = self.auth_store.complete_radient_login(result)
+        else:
+            self.auth_store.upsert_credential(storage, result)
+        if completed_radient is not None and completed_radient.disabled_cause is not None:
+            from local_operator.providers.oauth.radient import RadientLoginDisabled
+
+            # A closed typed outcome lets desktop distinguish preserved local
+            # disablement without forwarding arbitrary provider exception text.
+            raise RadientLoginDisabled()
         # The new credential may list DIFFERENT models than the one it replaced
         # -- a different account, a different plan, or a catalogue listed
         # anonymously before there was a credential at all. No TTL can observe
@@ -1346,6 +1364,12 @@ class ProviderController:
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
+        if storage == "radient":
+            from local_operator.providers.auth_cli import format_retained_radient_logins
+
+            retained = format_retained_radient_logins(self.auth_store.retained_radient_login_ids())
+            if retained:
+                msg += "\n" + "\n".join(retained)
         if result.get("grant_note"):
             msg += f" Note: {result['grant_note']}"
         return msg

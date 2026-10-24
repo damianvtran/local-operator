@@ -11,6 +11,13 @@ The arms therefore take ``client_for_tenant(tenant_id)`` and pick per item, and
 the tenant a row was pulled from comes from its baseline record — never from the
 remote. A 404 is "unavailable / hub-item-missing" and is NEVER read as "the hub
 removed it, delete locally": removal and lost membership are indistinguishable.
+
+THE SKILL READ IS CONDITIONAL (client half of agent-server #175). The skill arm
+sends the revision the link already holds as ``If-None-Match``, so an unchanged
+row answers ``304`` and transfers headers instead of the whole manifest. A
+``304`` means exactly what "remote equals baseline" means everywhere below --
+unchanged, no body, no merge, no revision advance -- and is NEVER a failed
+check. See :func:`check_hub_skills`.
 """
 
 from __future__ import annotations
@@ -81,6 +88,10 @@ class ItemCheck:
     local: Mapping[str, Any] | None = None
     remote: Mapping[str, Any] | None = None
     base: Mapping[str, Any] | None = None
+    #: The publisher a bundle row NAMED (``published_by``), when it named one.
+    #: Carried so an apply can compare it with the link's persisted pin without a
+    #: second fetch; ``None`` when the row named none.
+    publisher: Mapping[str, Any] | None = None
     #: The record's explicit content state. ``absent`` means this link has no
     #: managed copy (subscribe-without-pull, or an unpulled copy): the check has
     #: no local side, and the runner/apply must never treat a merge as possible.
@@ -591,6 +602,7 @@ def check_hub_skills(
     it always had.
     """
 
+    from local_operator.clients.radient import NotModified
     from local_operator.hub_sync.adapters import SkillAdapter
     from local_operator.hub_sync.skill_storage import ManagedSkillStorage
 
@@ -608,11 +620,22 @@ def check_hub_skills(
             continue
         tenant = record.tenant_id
         absent = record.content_state == "absent"
+        # FORM: a bundle link's baseline stores the archive manifest, and its
+        # local reading is the managed directory's tree hash. The adapter already
+        # dispatches on exactly this key, so the check reuses it instead of
+        # re-reading a bundle as a text document (which would refuse every file
+        # byte) -- design §8.2's fingerprints ARE those values.
+        is_bundle = "bundle" in (record.fields or {})
         local: Mapping[str, Any] | None = None
         local_fp: str | None = None
+        snapshot: Any = None
         if not absent:
             try:
-                snapshot = storage.snapshot(record.local_id)
+                if is_bundle:
+                    local = dict(adapter.snapshot(config_dir, record.local_id).fields)
+                    local_fp = prov.fingerprint_snapshot("skill", local)
+                else:
+                    snapshot = storage.snapshot(record.local_id)
             except Exception as error:  # noqa: BLE001
                 # A crashed unpull is settled from its own durable evidence. When
                 # that settles the record to absent this is a normal absent check;
@@ -646,8 +669,9 @@ def check_hub_skills(
                 record = settled
                 absent = True
             else:
-                local = adapter.canonical_fields(snapshot.document.to_json())
-                local_fp = prov.fingerprint_snapshot("skill", local)
+                if not is_bundle and snapshot is not None:
+                    local = adapter.canonical_fields(snapshot.document.to_json())
+                    local_fp = prov.fingerprint_snapshot("skill", local)
         client = client_for_tenant(tenant)
         if client is None:
             checks.append(
@@ -668,8 +692,33 @@ def check_hub_skills(
             )
             continue
         fetcher = fetch or _fetch_skill
+        conditional_match = False
+        matched_revision: str | None = None
+        # CONDITIONAL READ (client half of agent-server #175): revalidate against
+        # the revision this link already holds -- the same baseline
+        # ``remote_revision`` the push CAS sends as ``If-Match`` -- so an unchanged
+        # row costs headers instead of the whole manifest (~55 KiB each across the
+        # catalogue, hourly, per client). ``None`` (a first pull, or a legacy
+        # baseline that recorded no revision) sends NO header: there is nothing to
+        # revalidate against, and an unconditional 200 is the only honest read.
         try:
-            document = fetcher(client, record.hub_id, timeout=REQUEST_TIMEOUT_S)
+            document = fetcher(
+                client,
+                record.hub_id,
+                timeout=REQUEST_TIMEOUT_S,
+                if_none_match=record.remote_revision,
+            )
+        except NotModified as not_modified:
+            # THE HUB SAYS THE REPRESENTATION WE HOLD IS STILL CURRENT, which is
+            # the "remote equals baseline" case with zero bytes on the wire.
+            # Continuing with the baseline fields as R takes the SAME downstream
+            # path a 200 carrying identical bytes takes -- canonical projection,
+            # name-space comparison, classification, merge, apply -- so a 304 can
+            # never read as a change; `matched_revision` below keeps the revision
+            # from advancing. It is emphatically NOT a failed check.
+            document = dict(record.fields)
+            conditional_match = True
+            matched_revision = record.remote_revision or not_modified.etag
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error)
             checks.append(
@@ -717,6 +766,14 @@ def check_hub_skills(
             continue
         remote_fp = prov.fingerprint_snapshot("skill", remote)
         revision, sync_contract = _remote_meta(document)
+        if conditional_match:
+            # A 304 has no body, so no ``revision``/``sync_contract`` keys to read.
+            # The revision is the one the hub just CONFIRMED as current -- the
+            # value we already held, never an advance -- and a contract can only be
+            # observed in a body, so this response records none (the per-source
+            # attestation stays exactly as the last real response left it).
+            revision = matched_revision
+        publisher = _document_publisher(document)
         if absent:
             # NO LOCAL SIDE TO COMPARE. The remote is reported as AVAILABLE, which
             # is the action the operator still has to take (an explicit pull);
@@ -739,6 +796,7 @@ def check_hub_skills(
                     sync_contract=sync_contract,
                     served_by=_served_by(client),
                     content_state="absent",
+                    publisher=publisher,
                 )
             )
             continue
@@ -753,7 +811,7 @@ def check_hub_skills(
         # alias rename is not an eternal both-changed, and so the merge/write
         # layer speaks one name; the write re-renders the alias (see _apply_skill).
         remote_name = str(document.get("name") or "")
-        if remote_name and str(local.get("name") or "") != remote_name:
+        if not is_bundle and remote_name and str(local.get("name") or "") != remote_name:
             from local_operator.hub_sync.skill_document import SkillDocument
 
             local = SkillDocument.from_json(dict(local)).with_name(remote_name).to_json()
@@ -784,12 +842,45 @@ def check_hub_skills(
                 sync_contract=sync_contract,
                 served_by=_served_by(client),
                 content_state=record.content_state,
+                publisher=publisher,
             )
         )
     return checks
 
 
-def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, Any]:
+def _document_publisher(document: Mapping[str, Any]) -> dict[str, str] | None:
+    """The publisher a hub row NAMED (``published_by``), or None when it named none.
+
+    ``published_by.account_id`` is the binding value (design §6.2); a display
+    name is user-controlled and therefore optional. A missing object is None and
+    the CALLERS refuse or skip -- this never falls back to a top-level
+    ``account_id``, which in some envelopes is the requester's.
+    """
+
+    raw = document.get("published_by")
+    if not isinstance(raw, Mapping):
+        return None
+    account_id = raw.get("account_id")
+    if not isinstance(account_id, str) or not account_id.strip():
+        return None
+    name = raw.get("name")
+    if not isinstance(name, str) or not name.strip():
+        metadata = document.get("account_metadata")
+        candidate = metadata.get("name") if isinstance(metadata, Mapping) else None
+        name = candidate if isinstance(candidate, str) else ""
+    publisher = {"id": account_id.strip()}
+    if name.strip():
+        publisher["name"] = name.strip()
+    return publisher
+
+
+def _fetch_skill(
+    client: Any,
+    skill_id: str,
+    *,
+    timeout: float,
+    if_none_match: str | None = None,
+) -> Mapping[str, Any]:
     """Default skill fetch: the client's manifest pull, through the tested seam.
 
     PUBLIC skill rows are readable UNAUTHENTICATED -- the server registers
@@ -798,10 +889,17 @@ def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, 
     the signed-in client still carries its bearer (an org row answers 404 to
     anyone who cannot prove membership). Before this, a public skill link was
     'unavailable: Radient API key is required' with zero requests (round-2 QN3).
+
+    ``if_none_match`` is the validator the caller holds (this link's baseline
+    revision). The client turns a match into ``NotModified`` -- HTTP 304, no
+    body -- and this seam passes that through untouched: translating it here
+    would hide the one fact the caller needs, that the row did not move.
     """
 
     send_bearer = bool(getattr(client, "api_key", None))
-    return client.get_skill(skill_id, timeout=timeout, **{"with_credential": send_bearer})
+    return client.get_skill(
+        skill_id, timeout=timeout, if_none_match=if_none_match, **{"with_credential": send_bearer}
+    )
 
 
 def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:

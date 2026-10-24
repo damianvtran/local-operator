@@ -20,17 +20,18 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Annotated, Any, Iterator
+from typing import Annotated, Iterator
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Path as PathParam
 from fastapi import Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.library import index as library_index
 from local_operator.library import service
+from local_operator.library.indexer import ensure_started
 from local_operator.library.metadata import (
     MAX_TAGS_PER_ASSET,
     MetadataStore,
@@ -62,11 +63,6 @@ TagID = Annotated[str, PathParam(pattern=r"^[a-f0-9]{10}$")]
 SessionIDShape = re.compile(r"^[a-f0-9]{12}$")
 
 _CHUNK = 64 * 1024
-
-#: One background finisher per config root. A poll that arrives while the
-#: catalog is still building joins the running task instead of starting a
-#: second full journal pass — the same single-flight rule as session files.
-_IN_FLIGHT: dict[str, asyncio.Task[Any]] = {}
 
 
 def _config_dir(request: Request) -> Path:
@@ -124,7 +120,11 @@ def _field_refusal(error: TagRefused) -> HTTPException:
 
 
 def _tag_refusal(error: TagRefused) -> HTTPException:
-    if error.code in ("unknown_tag", "tag_unknown"):
+    # ``tag_not_found`` is an id that no tag carries — a missing RESOURCE, not a
+    # malformed name. Mapping it to the name-grammar envelope ("Tag names are
+    # 1-24 characters") told a client to fix the spelling of an id it had
+    # copied, which is the wrong instruction for every caller.
+    if error.code in ("unknown_tag", "tag_unknown", "tag_not_found"):
         return HTTPException(404, _wd.library_tag_unknown().envelope(code="library_tag_unknown"))
     if error.code == "tag_limit":
         return HTTPException(
@@ -144,20 +144,17 @@ def _tag_refusal(error: TagRefused) -> HTTPException:
 
 
 def _kick(config: Path) -> None:
-    key = str(config)
-    running = _IN_FLIGHT.get(key)
-    if running is not None and not running.done():
-        return
+    """Make sure the background indexer is running for this config root.
 
-    async def _run() -> None:
-        try:
-            await asyncio.to_thread(library_index.complete_in_background, config)
-        except Exception:  # noqa: BLE001 - a background finish is an optimisation
-            logger.debug("library background build failed", exc_info=True)
-        finally:
-            _IN_FLIGHT.pop(key, None)
-
-    _IN_FLIGHT[key] = asyncio.create_task(_run())
+    The catalog used to be finished here, as one asyncio task per root. The
+    indexer is a singleton with its own watch and backfill loop, so this is now
+    a start-or-return: a second call while it is building is already a no-op,
+    and the ``state=building`` the caller just saw comes from ITS progress.
+    """
+    try:
+        ensure_started(config)
+    except Exception:  # noqa: BLE001 - an index that cannot start must not 500 a list
+        logger.debug("library indexer could not be started", exc_info=True)
 
 
 async def _query_from(
@@ -285,6 +282,8 @@ async def list_library_assets(
     config = _config_dir(request)
     try:
         answer = await asyncio.to_thread(service.list_assets, config, query)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.InvalidCursor:
         raise HTTPException(
             422,
@@ -299,6 +298,8 @@ async def list_library_assets(
 async def get_library_asset(asset_id: AssetID, request: Request):
     try:
         row = await asyncio.to_thread(service.get_asset, _config_dir(request), asset_id)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     return reply(row)
@@ -318,6 +319,8 @@ async def patch_library_asset(asset_id: AssetID, body: LibraryAssetPatch, reques
             actor="user",
             source="user",
         )
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except TagRefused as error:
@@ -341,6 +344,8 @@ async def put_library_asset_tags(asset_id: AssetID, body: LibraryTagsWrite, requ
             body.primary,
             actor="user",
         )
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except TagRefused as error:
@@ -406,6 +411,8 @@ async def library_content(
     config = _config_dir(request)
     try:
         content = await asyncio.to_thread(service.resolve_content, config, asset_id)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except service.ContentUnavailable as error:
@@ -470,6 +477,8 @@ async def library_thumbnail(
     """Best-effort thumbnail. A non-image is a designed 404, not a blank pane."""
     try:
         content = await asyncio.to_thread(service.thumbnail, _config_dir(request), asset_id, w)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except service.ContentUnavailable as error:
@@ -499,6 +508,38 @@ async def library_thumbnail(
     )
 
 
+@router.get("/v1/desktop/library/assets/{asset_id}/waveform")
+async def library_waveform(asset_id: AssetID, request: Request):
+    """``{version, bars, peaks}`` for the grid's in-place player. 404 = no waveform.
+
+    Same gates as ``/content`` and ``/thumbnail`` -- the bearer (router dependency), the
+    asset-id shape (path regex), ``nosniff`` -- plus ``no-store``: the payload is derived
+    per request and the grid keeps it in memory, so a cached copy buys nothing and goes
+    stale after an edit. The decode itself runs in a worker thread and, for a path asset,
+    in a bounded child process (``service.waveform``); nothing decodes on the event loop.
+
+    A missing waveform is a designed 404, never a fabricated flat line: a surface draws
+    its no-waveform state, exactly as a non-image degrades to a placeholder above.
+    """
+    try:
+        payload = await asyncio.to_thread(service.waveform, _config_dir(request), asset_id)
+    except service.LibraryUnavailable:
+        # The index cannot answer yet -- the same 503 the thumbnail route gives; a
+        # waveform lookup must not read as a broken backend.
+        raise _unavailable() from None
+    except service.AssetNotFound:
+        raise _asset_not_found() from None
+    except service.ContentUnavailable:
+        raise HTTPException(
+            404,
+            _wd.library_content_missing().envelope(code="library_content_missing"),
+        ) from None
+    return JSONResponse(
+        payload,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
+    )
+
+
 @router.put(
     "/v1/desktop/library/assets/{asset_id}/chat",
     response_model=CRUDResponse[LibraryChatReceipt],
@@ -520,6 +561,8 @@ async def put_library_chat(asset_id: AssetID, body: LibraryChatWrite, request: R
     try:
         await asyncio.to_thread(service.set_chat_link, config, asset_id, session_id)
         chat = await asyncio.to_thread(service.chat_link, config, asset_id)
+    except service.LibraryUnavailable:
+        raise _unavailable() from None
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except MetadataUnavailable as error:

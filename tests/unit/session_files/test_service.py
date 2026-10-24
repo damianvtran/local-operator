@@ -21,6 +21,7 @@ from ._fixtures import (
     CHILD,
     GRANDCHILD,
     SESSION,
+    append_journal,
     assistant,
     call,
     generate_image_rows,
@@ -582,6 +583,43 @@ def test_materialise_is_idempotent_and_never_overwrites_a_different_file(world: 
     assert "-" in Path(third["path"]).stem
 
 
+def test_two_different_digests_with_one_display_name_both_materialise(world: World) -> None:
+    """The destination dedupes on BYTES, not on the (request-derived) name.
+
+    Two distinct generations can legitimately be described identically — the
+    naming helper deliberately does not make names unique. The session's file
+    store is where that is resolved: identical bytes reuse the file, different
+    bytes under one display name get a digest suffix, and neither overwrites.
+    """
+    name = "red-fox-in-snow.png"
+    first_digest = world.artifact(seed=1, name=name)
+    write_journal(
+        world.session_dir,
+        generate_image_rows(1, 5.0, first_digest, name=name, with_artifacts=True),
+    )
+    second_digest = world.artifact(seed=2, name=name)
+    append_journal(
+        world.session_dir,
+        generate_image_rows(2, 6.0, second_digest, name=name, with_artifacts=True),
+    )
+
+    first = service.materialise(
+        world.config, world.family(), _artifact_id(world, first_digest), home=str(world.tmp)
+    )
+    second = service.materialise(
+        world.config, world.family(), _artifact_id(world, second_digest), home=str(world.tmp)
+    )
+
+    first_path, second_path = Path(first["path"]), Path(second["path"])
+    generated = (world.session_dir / "scratchpad" / "generated").resolve()
+    assert first_path.parent == second_path.parent == generated
+    assert first_path.name == name
+    assert second_path.name == f"red-fox-in-snow-{second_digest[:8]}.png"
+    assert first_path.read_bytes() != second_path.read_bytes()
+    assert hashlib.sha256(first_path.read_bytes()).hexdigest()[:32] == first_digest
+    assert hashlib.sha256(second_path.read_bytes()).hexdigest()[:32] == second_digest
+
+
 @pytest.mark.parametrize(
     "hostile",
     [
@@ -678,6 +716,53 @@ def test_sanitise_name_unit() -> None:
     assert f(None, "abcdef0123456789" * 2, "image/webp") == "artifact-abcdef01.webp"
     assert f("", "d" * 32, "application/x-unknown") == "artifact-dddddddd.bin"
     assert f("a b!c.png", "d" * 32, "image/png") == "a b_c.png"
+    # Unicode stems survive the stem sanitiser (D1): the Library shows a
+    # request-derived name, so a CJK/accented stem must not become "artifact".
+    assert f("café-über-日本.png", "d" * 32, "image/png") == "café-über-日本.png"
+    assert f("Ünïcode Name.png", "d" * 32, "image/png") == "Ünïcode Name.png"
+    # Hostile shapes stay refused/neutralised.
+    assert f("../../etc/passwd", "d" * 32, "image/png") == "passwd.png"
+    assert f("..", "d" * 32, "image/png") == "artifact-dddddddd.png"
+    assert f("na\x00me.png", "d" * 32, "image/png") == "na_me.png"
+    assert f(".hidden.png", "d" * 32, "image/png") == "hidden.png"
+    # Ogg is the one type ``mimetypes`` spells ``.oga``; the namer and the
+    # destination must not disagree about the same asset's suffix.
+    assert f("x.ogg", "d" * 32, "audio/ogg") == "x.ogg"
+
+
+def test_the_namer_and_the_destination_agree_on_every_media_extension() -> None:
+    """The Library label and the materialised file keep the SAME name."""
+    from local_operator.artifacts.naming import media_filename
+
+    for content_type in (
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/ogg",
+        "audio/flac",
+        "video/mp4",
+        "video/webm",
+        "video/quicktime",
+    ):
+        name = media_filename("x", content_type)
+        assert service.sanitise_name(name, "d" * 32, content_type) == name, content_type
+
+
+def test_materialise_keeps_the_unicode_library_name(world: World) -> None:
+    """The Library row's name and the materialised file's name are the same."""
+    name = "café-über-日本.png"
+    digest = world.artifact(seed=3, name=name)
+    write_journal(
+        world.session_dir,
+        generate_image_rows(1, 5.0, digest, name=name, with_artifacts=True),
+    )
+    (row,) = [r for r in world.list()["rows"] if r["ref"].get("digest") == digest]
+    receipt = service.materialise(world.config, world.family(), row["id"], home=str(world.tmp))
+    target = Path(receipt["path"])
+    assert target.name == name == row["name"]
+    assert target.read_bytes() == png(seed=3)
 
 
 def test_grandchild_family_member_materialises_to_the_url_sessions_scratchpad(world: World) -> None:

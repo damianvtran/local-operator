@@ -76,6 +76,13 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
             cwd=os.getcwd(),
             yolo=bool(args.yolo),
             supervised=bool(getattr(args, "control", False)),
+            # A resumed run inherits its conversation's outstanding asks (#2803):
+            # its open asks, their deadline wakes and every response row the log
+            # owes are that conversation's work, and a turn that cannot see them
+            # leaves them stale for whichever turn comes next — the operator's
+            # #2803 report. Read with ``getattr`` for the same reason the flags
+            # above are: tests build args objects that predate the field.
+            resumed=bool(getattr(args, "resume", None)),
             # The supervisor's descriptor, if one was inherited (stage E). Read with
             # ``getattr`` for the same reason the ``control`` flag above is: this
             # runner is also driven by tests and by the detached worker, which build

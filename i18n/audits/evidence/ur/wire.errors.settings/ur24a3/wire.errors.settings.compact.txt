@@ -1,0 +1,1 @@
+wire.errors.settings.inline_credentials | Use an endpoint without inline credentials or query parameters. | ایسا اینڈ پوائنٹ استعمال کریں جس میں ان لائن کریڈینشلز یا کوئری پیرامیٹرز نہ ہوں۔

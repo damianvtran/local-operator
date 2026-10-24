@@ -1,0 +1,5 @@
+relay.ask.dismiss.open	EN="dismiss…"	UR="خارج کریں…"	OLD="ختم کریں…"
+relay.ask.dismiss.receipt	EN="Dismissed — no reply sent"	UR="خارج کیا گیا — کوئی جواب نہیں بھیجا گیا"	OLD="ختم کر دیا گیا — کوئی جواب نہیں بھیجا"
+relay.ask.dismiss.receipt_answered_in_chat	EN="Dismissed — answered in chat"	UR="خارج کیا گیا — گفتگو میں جواب موجود ہے"	OLD="ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا"
+relay.ask.dismiss.receipt_moot	EN="Dismissed — no longer needed"	UR="خارج کیا گیا — اب ضرورت نہیں"	OLD="ختم کر دیا گیا — اب ضرورت نہیں"
+relay.ask.dismiss.title	EN="Dismiss this ask"	UR="یہ سوال خارج کریں"	OLD="یہ سوال ختم کریں"

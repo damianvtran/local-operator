@@ -342,8 +342,8 @@ rules twice equals applying them once.
 `SttOutcome` and the wire payload gain:
 
 * `cleanup`: `"none" | "elevenlabs.no_verbatim" | "elevenlabs.transcript_edit" |
-  "elevenlabs.transcript_edit_failed" | "client.rules.v1"`; if a later slice
-  combines levers, a joined form such as `"elevenlabs.no_verbatim+client.rules.v1"`;
+  "elevenlabs.transcript_edit_failed" | "client.rules.v2"`; if a later slice
+  combines levers, a joined form such as `"elevenlabs.no_verbatim+client.rules.v2"`;
 * `raw_text`: the text before **client** rules; `None` when the provider itself
   removed the fillers and returned no raw copy. `raw_unavailable` names the reason
   (`provider_no_verbatim` today); `None` must never be read as "nothing was
@@ -450,7 +450,7 @@ Fixtures per language, each with a positive and a negative control:
   ElevenLabs API; record `text`, `cleanup`, `raw_text`, `language` for `auto`,
   `off`, `provider`, `client` and `edit`.
 * Replay the real dictated transcripts found on this machine (read-only) through
-  `client.rules.v1`; report before/after counts without reproducing content.
+  `client.rules.v2`; report before/after counts without reproducing content.
 * Negative controls: Portuguese `Um livro`, Arabic `أمي`, Hindi `अरे`, Japanese
   `えーと`, Chinese `嗯`, accented French, and a mixed-script sentence must not be
   damaged by `client` mode. If any is, the rule is removed, not waived.
@@ -605,7 +605,45 @@ for no_verbatim in (False, True):
 PY
 ```
 
-## Appendix B — Source references
+## Appendix B — Client rules v2 inventory and linguistic sources
+
+Added 2026-10-23. High-confidence independent pause spans are English `uh/uhm/erm/um/er`,
+German `ähm`, French `euh`, Italian `ehm`, Japanese `えーと/ええと`, and Hebrew `אממ`.
+Guarded inventory covers English `ah/hmm/mm`, German `äh`, French `ben`, Spanish `eh/este`,
+Portuguese `hã`, Japanese `あの`, Chinese `呃/嗯`, Hindi `उम्म`, and Russian `э/ну`. These forms
+require utterance-initial or post-comma pause context and, except for the sourced Hindi filler,
+an explicit ellipsis. A bare initial comma therefore cannot delete assent, backchannels,
+objections or responses such as `Mm, I know`, `Ben, oui`, `Э, нет` or `Ну, рассказывай`.
+Matching is per normalized language, exact-span, and never substring-based. Local `removed`
+coordinates refer to provider-returned text before
+the local pass; when that provider already applied no-verbatim cleanup, this is not verbatim raw.
+
+* Cambridge dictionaries — English `um`, `uh`, `er`, `erm`, `hmm`:
+  https://dictionary.cambridge.org/dictionary/english/um ,
+  https://dictionary.cambridge.org/dictionary/english/uh ,
+  https://dictionary.cambridge.org/dictionary/english/er ,
+  https://dictionary.cambridge.org/dictionary/english/erm ,
+  https://dictionary.cambridge.org/dictionary/english/hmm
+* Duden — German `äh`/`ähm`: https://www.duden.de/rechtschreibung/aeh and
+  https://www.duden.de/rechtschreibung/aehm
+* CNRTL — French `euh`: https://www.cnrtl.fr/definition/euh
+* Treccani — Italian interiezione `ehm`: https://www.treccani.it/vocabolario/ehm/
+* Kotobank — Japanese `ええと` and demonstrative `あの`: https://kotobank.jp/word/ええと and
+  https://kotobank.jp/word/あの
+* Frontiers in Psychology (2023) — Mandarin filled pauses:
+  https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2023.1071729/full
+* Taiwan Ministry of Education — `嗯` assent/question/attitude senses (the first example is the
+  negative-control sentence): https://dict.revised.moe.edu.tw/dictView.jsp?ID=10470&la=1&powerMode=0
+* Jabeen & Betz, Interspeech 2022 — Hindi/Urdu fillers and silences:
+  https://www.isca-archive.org/interspeech_2022/jabeen22_interspeech.html
+* Milog and Hebrew University — Hebrew `אממ` and its hesitation/consideration uses:
+  https://milog.co.il/אממ and
+  https://new.huji.ac.il/news/אממממ-דר-מיכל-מרמורשטיין-חקרה-למה-אנחנו-כותבים-אמממ-בשיחות-ב-whatsapp
+* Efremova dictionary — Russian `э` and `ну`: https://gufo.me/dict/efremova/э and
+  https://gufo.me/dict/efremova/ну ; Obukhova's hesitative research index:
+  https://sciup.org/ob-odnom-iz-verbalnyh-hezitativov-russkoj-ustnoj-rechikak-ego-ee-ih-v-14729267
+
+## Appendix C — Source references
 
 * `local_operator/stt/clients.py` — `ElevenLabsSttClient`, `OpenAiSttClient`
 * `local_operator/stt/cascade.py` — resolver, executor, per-rung runners

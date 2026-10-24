@@ -1,0 +1,295 @@
+{
+  "method": "Core render_message(locale=ur) for scoped maxCells and plural values; Unicode combining/Cf zero cells; pseudo=ceil(actual*1.30); /help compares text cells with the approximate 55-cell guide and is not a rendered test.",
+  "fit_key_count": 8,
+  "actual_overflow_count": 0,
+  "pseudo_30pct_overflow_count": 4,
+  "fit_rows": [
+    {
+      "key": "relay.ask.dismiss.open",
+      "maxCells": 12,
+      "params": {},
+      "rendered": "خارج کریں…",
+      "cells": 10,
+      "pseudo_30pct_cells": 13,
+      "fits": true,
+      "pseudo_fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.receipt",
+      "maxCells": 44,
+      "params": {},
+      "rendered": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
+      "cells": 39,
+      "pseudo_30pct_cells": 51,
+      "fits": true,
+      "pseudo_fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "maxCells": 44,
+      "params": {},
+      "rendered": "خارج کیا گیا — گفتگو میں جواب موجود ہے",
+      "cells": 38,
+      "pseudo_30pct_cells": 50,
+      "fits": true,
+      "pseudo_fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_moot",
+      "maxCells": 44,
+      "params": {},
+      "rendered": "خارج کیا گیا — اب ضرورت نہیں",
+      "cells": 28,
+      "pseudo_30pct_cells": 37,
+      "fits": true,
+      "pseudo_fits": true
+    },
+    {
+      "key": "relay.ask.dismiss.title",
+      "maxCells": 24,
+      "params": {},
+      "rendered": "یہ سوال خارج کریں",
+      "cells": 17,
+      "pseudo_30pct_cells": 23,
+      "fits": true,
+      "pseudo_fits": true
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "maxCells": 34,
+      "params": {},
+      "rendered": "گفتگو میں جواب دے دیا",
+      "cells": 21,
+      "pseudo_30pct_cells": 28,
+      "fits": true,
+      "pseudo_fits": true
+    },
+    {
+      "key": "tui.welcome.tip.fork_placement",
+      "maxCells": 57,
+      "params": {},
+      "rendered": "/settings → فورک → “فورک کہاں کھلے” سے مقام طے ہوتا ہے",
+      "cells": 54,
+      "pseudo_30pct_cells": 71,
+      "fits": true,
+      "pseudo_fits": false
+    },
+    {
+      "key": "tui.welcome.tip.hotkeys",
+      "maxCells": 57,
+      "params": {},
+      "rendered": "/settings → ہاٹ کیز سے یہ کلیدیں بدلیں",
+      "cells": 38,
+      "pseudo_30pct_cells": 50,
+      "fits": true,
+      "pseudo_fits": true
+    }
+  ],
+  "plural_key_count": 1,
+  "plural_render_count": 5,
+  "plural_error_count": 0,
+  "plural_category_mismatch_count": 0,
+  "plural_missing_count_count": 0,
+  "plural_rows": [
+    {
+      "key": "relay.session.tags.more",
+      "samples": [
+        {
+          "count": 0,
+          "category": "other",
+          "rendered": "0 مزید ٹیگز",
+          "count_present": true
+        },
+        {
+          "count": 1,
+          "category": "one",
+          "rendered": "1 مزید ٹیگ",
+          "count_present": true
+        },
+        {
+          "count": 2,
+          "category": "other",
+          "rendered": "2 مزید ٹیگز",
+          "count_present": true
+        },
+        {
+          "count": 21,
+          "category": "other",
+          "rendered": "21 مزید ٹیگز",
+          "count_present": true
+        },
+        {
+          "count": 1.5,
+          "category": "other",
+          "rendered": "1.5 مزید ٹیگز",
+          "count_present": true
+        }
+      ]
+    }
+  ],
+  "approximate_help_key_count": 23,
+  "approximate_help_overflow_count": 3,
+  "approximate_help_rows": [
+    {
+      "key": "wire.slash.agent",
+      "ur": "ایجنٹس دیکھیں، کسی ایجنٹ کی قسم بدلیں، یا اس سیشن سے بطور ایجنٹ بات کریں",
+      "cells": 72,
+      "approx_guide_cells": 55,
+      "overflow_risk": true
+    },
+    {
+      "key": "wire.slash.approvals",
+      "ur": "اس سیشن کے لیے ٹول منظوری کا موڈ دیکھیں یا مقرر کریں",
+      "cells": 52,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.copy",
+      "ur": "ایجنٹ کا پیغام یا کوڈ بلاک نقل کریں",
+      "cells": 35,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.credential",
+      "ur": "اسپیس کے بعد خفیہ متن لکھیں/چسپاں کریں؛ متن چھپا رہے گا",
+      "cells": 55,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.failovers",
+      "ur": "ماڈل فیل اوور کی ترتیب اور فعال ماڈل دکھائیں",
+      "cells": 44,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.fast",
+      "ur": "زیادہ قیمت پر تیز آؤٹ پٹ چالو/بند کریں",
+      "cells": 38,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.fork",
+      "ur": "اس گفتگو کی شاخ بنائیں؛ --switch یہیں، --window کہیں اور؛ <message> سے کام شروع کریں",
+      "cells": 84,
+      "approx_guide_cells": 55,
+      "overflow_risk": true
+    },
+    {
+      "key": "wire.slash.highlights",
+      "ur": "جواب کے نمایاں حصے منسوخ کریں، دوبارہ کوشش کریں یا رخ بدلیں",
+      "cells": 59,
+      "approx_guide_cells": 55,
+      "overflow_risk": true
+    },
+    {
+      "key": "wire.slash.hub",
+      "ur": "Hub روابط کھولیں — فی ربط رکنیت اور خودکار push پالیسی",
+      "cells": 54,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.links",
+      "ur": "اس گفتگو کا ربط براؤزر میں کھولیں",
+      "cells": 33,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.login",
+      "ur": "پرووائیڈر میں لاگ اِن کریں",
+      "cells": 25,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.logout",
+      "ur": "محفوظ پرووائیڈر کریڈینشلز ہٹائیں",
+      "cells": 32,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.loop",
+      "ur": "ہدف تک لوپ: /loop <goal>, <n>؛ --stop سے منسوخ",
+      "cells": 46,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.mcp",
+      "ur": "MCP سرورز دیکھیں/شامل/ہٹائیں؛ OAuth اجازت منظم کریں",
+      "cells": 51,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.move",
+      "ur": "اس سیشن کی ورکنگ ڈائریکٹری بدلیں",
+      "cells": 32,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.network",
+      "ur": "نیٹ ورکس، پیئرز اور اس ڈیوائس کی میش حالت",
+      "cells": 41,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.provider",
+      "ur": "پرووائیڈرز اور ان کے لاگ اِن/استعمال کی حالت کی فہرست",
+      "cells": 52,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.reload",
+      "ur": "موجودہ انسٹال پر یہ گفتگو دوبارہ چلائیں",
+      "cells": 39,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.search",
+      "ur": "ویب تلاش کے پرووائیڈرز اور لوڈ بیلنسنگ ترتیب دیں",
+      "cells": 48,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.team",
+      "ur": "ٹیمیں اور تنظیمی خاکہ دیکھیں؛ مینیجر کو درخواست بھیجیں",
+      "cells": 54,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.theme",
+      "ur": "رنگی تھیم بدلیں؛ ایرو کیز سے براہِ راست پیش منظر",
+      "cells": 47,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.update",
+      "ur": "PyPI سے تازہ ورژن انسٹال کر کے دوبارہ شروع کریں",
+      "cells": 47,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    },
+    {
+      "key": "wire.slash.usage",
+      "ur": "پرووائیڈر کا استعمالی کوٹہ دکھائیں",
+      "cells": 34,
+      "approx_guide_cells": 55,
+      "overflow_risk": false
+    }
+  ]
+}

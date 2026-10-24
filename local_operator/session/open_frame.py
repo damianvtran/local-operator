@@ -38,7 +38,7 @@ import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Final, Iterable, Mapping, Sequence
 
 from local_operator.harness.rows import is_harness_chrome, is_harness_injection
 from local_operator.session.transcript_index import RunRecord, TranscriptIndex
@@ -205,12 +205,53 @@ class FrameResult:
     dropped_rows: int = 0
 
 
+#: The stripped supplement payload's wire budget, in bytes. A row over it is refused
+#: unless its SOUNDS are what put it over -- see :func:`_fit_sounds_to_payload`.
+MAX_SUPPLEMENT_PAYLOAD: Final = 32768
+
+
+def _payload_size(details: Mapping[str, Any]) -> int:
+    return len(json.dumps(details, separators=(",", ":")))
+
+
+def _fit_sounds_to_payload(clean: dict[str, Any]) -> dict[str, Any] | None:
+    """The payload under the wire budget, trimming SOUNDS rather than the row.
+
+    THE RULE: a row carrying sounds is never dropped for being over budget. At
+    ``SOUNDS_MAX`` a row whose titles are near the producer's cap is already over
+    :data:`MAX_SUPPLEMENT_PAYLOAD` on its own (measured: 200 sounds at 64-character
+    names plus four file rows is 33 KB), and returning ``None`` there would delete
+    exactly the artifacts this field exists to show -- no block, no disclosure,
+    nothing on the stripped attach/history frame. Instead the TAIL is trimmed (the
+    row is in generation order, so the earliest sounds survive) and the removed count
+    is ADDED to ``sounds_more``, which is the surface's disclosure. A row still over
+    budget with its sounds gone is refused as before: that excess is not the sound
+    array's, and the old rule still applies to it.
+    """
+    if _payload_size(clean) <= MAX_SUPPLEMENT_PAYLOAD:
+        return clean
+    sounds = clean.get("sounds")
+    if not isinstance(sounds, list) or not sounds:
+        return None
+    held = clean.get("sounds_more")
+    folded = held if isinstance(held, int) and not isinstance(held, bool) else 0
+    while sounds and _payload_size(clean) > MAX_SUPPLEMENT_PAYLOAD:
+        sounds.pop()  # the tail: generation order keeps the earliest sounds
+        folded += 1
+        clean["sounds"] = sounds
+        clean["sounds_more"] = folded
+    if _payload_size(clean) > MAX_SUPPLEMENT_PAYLOAD:
+        return None
+    return clean
+
+
 def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Paint only bounded contract metadata, never component markup or arbitrary custom data."""
     import math
 
     from local_operator.redaction_shapes import scrub_shapes
     from local_operator.supplements.contract import (
+        SOUNDS_MAX,
         SupplementComponent,
         SupplementDetails,
         SupplementFile,
@@ -240,7 +281,10 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         "files": (SupplementFile, 16),
         "components": (SupplementComponent, 3),
         "images": (SupplementImage, 3),
-        "sounds": (SupplementSound, 3),
+        # The row writer's own bound, reused rather than re-chosen: a strip that cut
+        # lower would take sounds off a page the durable row already carries in full,
+        # which is exactly the "the collage shows three" defect one layer down.
+        "sounds": (SupplementSound, SOUNDS_MAX),
     }
     for key in SupplementDetails.__annotations__:
         value = details.get(key)
@@ -262,9 +306,10 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
             ]
         else:
             clean[key] = scalar(value)
-    if len(json.dumps(clean, separators=(",", ":"))) > 32768:
+    fitted = _fit_sounds_to_payload(clean)
+    if fitted is None:
         return None
-    return {"custom_type": "supplement_v1", "details": clean}
+    return {"custom_type": "supplement_v1", "details": fitted}
 
 
 def strip_entry(entry: Mapping[str, Any], *, supplements: bool = False) -> dict[str, Any] | None:

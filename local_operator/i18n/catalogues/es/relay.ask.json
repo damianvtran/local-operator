@@ -1,0 +1,13 @@
+{
+  "relay.ask.context.messages": "{count, plural, one {# mensaje tuyo desde que se hizo esta pregunta (último {time})} many {# de mensajes tuyos desde que se hizo esta pregunta (último {time})} other {# mensajes tuyos desde que se hizo esta pregunta (último {time})}}",
+  "relay.ask.dismiss.answered_in_chat": "Respondido en la conversación",
+  "relay.ask.dismiss.answered_in_chat_note": "ya respondiste en la conversación",
+  "relay.ask.dismiss.cancel": "cancelar",
+  "relay.ask.dismiss.moot": "Ya no hace falta",
+  "relay.ask.dismiss.moot_note": "el agente dejará de esperar respuesta",
+  "relay.ask.dismiss.open": "descartar…",
+  "relay.ask.dismiss.receipt": "Descartada — no se envió respuesta",
+  "relay.ask.dismiss.receipt_answered_in_chat": "Descartada — respondida en la conversación",
+  "relay.ask.dismiss.receipt_moot": "Descartada — ya no hace falta",
+  "relay.ask.dismiss.title": "Descartar esta pregunta"
+}

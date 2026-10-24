@@ -1,0 +1,27 @@
+tui.tags.added | Added “{name}”. | “{name}” شامل کی گئی۔
+tui.tags.applied | applied | لاگو
+tui.tags.cap_applied | 8 tags applied. Remove one before adding another. | 8 ٹیگز لاگو ہیں۔ دوسری شامل کرنے سے پہلے ایک ہٹائیں۔
+tui.tags.cap_registry | 32 tags exist. Use an existing tag or manage tags to remove one. | 32 ٹیگز موجود ہیں۔ کوئی موجودہ ٹیگ استعمال کریں یا ٹیگز کا انتظام کر کے ایک ہٹائیں۔
+tui.tags.create | Create and apply “{name}” | “{name}” بنائیں اور لاگو کریں
+tui.tags.create_help | Creates a shared tag and applies it here. | مشترکہ ٹیگ تیار کر کے یہاں لاگو کی جاتی ہے۔
+tui.tags.created_applied | Created and applied “{name}”. | “{name}” تیار کر کے لاگو کی گئی۔
+tui.tags.current | current | موجودہ
+tui.tags.empty | No tags yet. Type a name to create and apply one. | ابھی کوئی ٹیگ نہیں۔ تیار کر کے لاگو کرنے کے لیے نام لکھیں۔
+tui.tags.failed | Couldn't update tags: {error} | ٹیگز میں تبدیلی نہیں ہو سکی: {error}
+tui.tags.grouping_off | Sidebar tag groups off — sections are flat again. | سائیڈ بار ٹیگ گروپس بند — سیکشنز دوبارہ سادہ فہرست میں ہیں۔
+tui.tags.grouping_on | Sidebar tag groups on — sections now split by primary tag. | سائیڈ بار ٹیگ گروپس چالو — سیکشنز اب بنیادی ٹیگ کے مطابق تقسیم ہیں۔
+tui.tags.header | Tags for this conversation · {count}/8 applied | اس گفتگو کے ٹیگز · {count}/8 لاگو
+tui.tags.invalid | Tag names are 1–24 characters, with no control characters; Untagged is reserved. | ٹیگ کے نام 1–24 حروف کے ہوں، کنٹرول حروف کے بغیر؛ Untagged مخصوص ہے۔
+tui.tags.none_applied | No tags applied to this conversation. | اس گفتگو پر کوئی ٹیگ لاگو نہیں۔
+tui.tags.not_applied | not applied | لاگو نہیں
+tui.tags.off | off | بند
+tui.tags.on | on | چالو
+tui.tags.partial_create | Tag created, but couldn't apply it. Retry applying. | ٹیگ بن گئی، مگر لاگو نہیں ہو سکی۔ دوبارہ لاگو کرنے کی کوشش کریں۔
+tui.tags.primary | Primary | بنیادی
+tui.tags.removed | Removed “{name}”. | “{name}” ہٹا دی گئی۔
+tui.tags.slash_tag | Tag this conversation; Enter toggles a tag | اس گفتگو کو ٹیگ کریں؛ Enter سے ٹیگ لاگو یا ہٹائیں
+tui.tags.slash_tags | Group the sidebar by primary tag (on/off) | سائیڈ بار کو بنیادی ٹیگ سے گروپ کریں (on/off)
+tui.tags.status | Sidebar tag groups: {state} — /tags on or /tags off | سائیڈ بار ٹیگ گروپس: {state} — /tags on یا /tags off
+tui.tags.unavailable | Tags aren't available for this conversation. | اس گفتگو کے لیے ٹیگز دستیاب نہیں۔
+tui.tags.untagged | Untagged | بغیر ٹیگ
+tui.tags.usage | Use /tags on or /tags off | /tags on یا /tags off استعمال کریں

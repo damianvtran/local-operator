@@ -1622,7 +1622,81 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # moved with this change.
 # Ceiling = measured head + the 55-token band (32,119 + 55), so the next
 # field-size edit is a deliberate raise rather than silent creep.
-BUDGET_BILLED_TOKENS = 32_174
+#
+# RAISED 32,174 -> 32,396 for the redaction policy's public-copy reader
+# (PR #2796): the new tool is 121 doc tokens plus its schema and adds 167 billed
+# tokens to this arm, measured by THIS script on the branch with an isolated
+# HOME. The tool is a security control (the sanctioned route for public copy),
+# not incidental prose; ceiling = measured head 32,341 + the 55 band.
+#
+# COMPOSED WITH #2796 ON THE MOVED BASE (media artifact naming, PR #2792),
+# measured by THIS script on both trees with an isolated HOME, one run each —
+# NOT by adding this branch's old-base number to main's:
+#   base (origin/main 8426d1cac1, #2796)  89,908 chars = ~32,341 billed
+#   head (this branch)                    90,905 chars = ~32,700 billed
+#   delta                                     +997 chars = ~+359
+# The delta is the four ``filename`` properties (each carries its ~150-char
+# teaching description plus the JSON anyOf/maxLength around it), the
+# ``SoundEffectRequest.name`` description (now that item's filename stem) and
+# the ``sounds`` description's ``filename`` exclusivity clause. Those
+# descriptions are the discovery surface for a capability whose point is that
+# the agent names the asset; the sanitising and collision rules ride the three
+# generation guides, read on demand. Ceiling = measured head + the 55 band.
+#
+# COMPOSED WITH LOH-9 S4 promotion on this moved base: promotion adds one
+# `promote` enum value plus `as_name`/`confirm_replace` on BOTH authoring tools.
+# Measured by THIS script on the rebased head with an isolated HOME:
+#   base  32,755 ceiling (media naming already counted on this arm)
+#   head  91,231 chars = ~32,817 billed  +62
+# Ceiling = measured head + the 55 band. Do not pick either side of a budget
+# conflict: re-measure the composed tree.
+#
+# RAISED 32,872 -> 33,364 for STALE ASKS (PR-1, design ask-nonblocking §16 /
+# SA-D1): the guidance that tells a model WHEN to settle an ask it no longer
+# needs. Measured by THIS script on both trees with an isolated HOME, one run
+# each — tree 1 is origin/main eb21bbb5d, tree 2 this branch's review-round 1
+# head (the wording grew once in the review: the rule now names its set,
+# excludes age and a change of task order, and the description reconciles
+# "latest or earlier" with VERBATIM):
+#   base (origin/main eb21bbb5d)  91,310 chars = ~32,845 billed  PASS, 27 headroom
+#   head (this branch)            92,599 chars = ~33,309 billed
+#   delta                         +1,289 chars = ~+464
+# The whole delta is deliberate copy, in two blocks:
+#   +626 chars of instructions — ``system.md``'s queued-ask paragraph gains the
+#     settle rule (settle what the user's messages answered or made irrelevant
+#     in the same turn, an unaddressed ask stays open however old it is, an
+#     answer is never a `moot`, a 24 h timeout only for a day-long decision).
+#     It is the one place a model can learn WHEN, and the investigation measured
+#     16 of 40 asks left open until prompted without it;
+#   +663 chars of ``tool_schemas`` — one clause on the ``ask`` queued
+#     description, the moot cases, the empty-list recipe, the all-empty refusal
+#     and the earlier-or-latest rule on ``ask_withdraw``'s description, and the
+#     ids rule on ``AskWithdrawParams.answers``. The child arm does not carry
+#     either tool.
+# Both blocks are model-facing English (no i18n keys). The copy was trimmed
+# twice, once on each round; what remains states facts a model cannot infer, and
+# the alternative — keeping the floor by not saying them — is the defect the PR
+# exists to fix.
+# Ceiling = measured head + the 55 band (33,309 + 55).
+#
+# RAISED 33,364 -> 33,466 for the TEAM BRIDGE surface after #2757 and #2760
+# merged: the threads lane added the ``channel_thread`` op and the
+# ``thread_root_id`` parameter, and the reactions lane added the ``react`` op
+# and its ``emoji``/``remove`` parameters. Measured by THIS script on one tree
+# with an isolated HOME, before and after trimming the tool's prose:
+#   before trim   92,912 chars = ~33,422 billed   FAIL, 58 over
+#   after trim    92,814 chars = ~33,386 billed   FAIL, 22 over
+#   budget        33,466 (measured head + 80 headroom)
+# The trim is real and model-facing: the bridge description loses the
+# repeated op roster (Pydantic publishes it in the schema anyway), the
+# thread-reply clause moves entirely to ``thread_root_id``'s own field note in
+# ``read tool://bridge``, and ``ChannelMemberParams``' docstring keeps its rule
+# in one shorter sentence. Ops are NOT removed: all five channel ops stay
+# discoverable with their parameter names.
+# What remains is unavoidably the two ops' schema surface; the 80-token margin
+# is deliberate — the brief's point was that landing at the measured number
+# would let the next small op tip it again.
+BUDGET_BILLED_TOKENS = 33_466
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1742,7 +1816,46 @@ BUDGET_BILLED_TOKENS = 32_174
 # The same +196 chars as the top arm, which is the check that the delta is the
 # two ``scope`` enums and their one-line descriptions and nothing else. Ceiling
 # = measured head + the 55-token band (29,094 + 55), so 29,149.
-BUDGET_CHILD_BILLED_TOKENS = 29_149
+#
+# RAISED 29,149 -> 29,371 with the top arm's public-copy reader (same PR, same
+# delta): the child surface carries the tool too, measured 29,316 billed on this
+# head; ceiling = 29,316 + the 55 band.
+#
+# COMPOSED WITH #2796 ON THE MOVED BASE (media artifact naming, same pass as
+# the top arm): the child surface carries all four media tools, so it grows by
+# the SAME +997 chars:
+#   base  81,498 chars = ~29,316 billed
+#   head  82,495 chars = ~29,674 billed  -> ceiling = head + 55.
+#
+# COMPOSED WITH LOH-9 S4 promotion on the same moved base: the SAME +63 billed
+# tokens as the top arm (both authoring tools ride every surface, children
+# included), measured 82,821 chars = ~29,792. Ceiling = 29,792 + the 55 band.
+#
+# RAISED (with the top arm, same day, same trees) 29,847 -> 30,100 for STALE
+# ASKS (PR-1, design ask-nonblocking §16 / SA-D1): the child arm carries neither
+# ``ask`` nor ``ask_withdraw``, so ``tool_schemas`` does NOT move and every char
+# of this arm's delta is the shared ``system.md`` paragraph:
+#   base (origin/main eb21bbb5d)  82,900 chars = ~29,820 billed  PASS, 27 headroom
+#   head (this branch)            83,526 chars = ~30,045 billed
+#   delta                           +626 chars = ~+225
+# The +626 is the same +626 the top arm's instructions block moves by — the
+# check that the child delta is that one paragraph and nothing else.
+# KNOWN LIMITATION, measured here rather than assumed (review round 1 m4): this
+# paragraph renders for EVERY queued-arm session, and a subagent
+# (``CHILD_NEVER_HOLDS``) holds no ``ask_withdraw``, so a child pays these 626
+# chars for an instruction it cannot follow. That is the existing
+# ``ask_queued``/``ask_inline`` limit — gating the paragraph on tool presence
+# needs a third state in that flag pair, which ``prompts_api`` refuses today —
+# so it is recorded as ``deferred — needs a third flag-pair state`` (SA-D2) and
+# not solved by a new flag here.
+# Ceiling = measured head + the 55 band (30,045 + 55).
+# RAISED 30,100 -> 30,203 with the top arm above, for the same Team Bridge
+# surface (#2757 threads + #2760 reactions): the child surface publishes the
+# bridge schema too, so it carries the same two ops. Measured on this tree with
+# the same trim applied:
+#   child head  83,741 chars = ~30,123 billed
+#   child budget 30,203 (measured head + 80 headroom, same margin as the top arm)
+BUDGET_CHILD_BILLED_TOKENS = 30_203
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

@@ -348,8 +348,9 @@ justified by removal-honoring, otherwise V4 rejects).
 - **V4 drops justified**: an atom in `drops` must be a b-derived atom that one
   side removed/shortened; a `Δ` or added atom may never be dropped.
 - **V5 size**: the assembled field respects the field's cap (agents:
-  `MAX_INSTRUCTIONS_CHARS = 8_000`, `agent_profiles.py:111`; teams:
-  `MAX_TEAM_INSTRUCTIONS_CHARS = 32_768`, `teams.py:89`; team description
+  `MAX_INSTRUCTIONS_CHARS = 10_000` in `agent_profiles`, which
+  `hub_sync.service.AGENT_INSTRUCTIONS_MAX` derives from rather than restating;
+  teams: `MAX_TEAM_INSTRUCTIONS_CHARS = 32_768`, `teams.py:89`; team description
   ≤ `HUB_TEAM_DESCRIPTION_MAX_CHARS = 2000`, `teams.py:384`).
 - **V6 structure**: fenced blocks balanced; headings unchanged (the LLM may not
   rename/reorder regions).
@@ -874,10 +875,10 @@ Strategy, in escalating order (each step only if the previous doesn't fit):
 1. **Only conflicts go to the model, and only their own region text.** Because
    the deterministic core (A4) already resolved every non-conflicting atom, the
    prompt carries just the conflicting *regions* (base/local/remote of that
-   region + removal list), not the whole field. Agent instructions cap at 8 000
-   chars (`agent_profiles.MAX_INSTRUCTIONS_CHARS` `agent_profiles.py:111`) and
-   team briefs at 32 768 (`teams.MAX_TEAM_INSTRUCTIONS_CHARS` `teams.py:89`) —
-   ≈ 2k and 8k tokens: **the common case fits any modern window in one call**.
+   region + removal list), not the whole field. Agent instructions cap at 10 000
+   chars (`agent_profiles.MAX_INSTRUCTIONS_CHARS`) and team briefs at 32 768
+   (`teams.MAX_TEAM_INSTRUCTIONS_CHARS` `teams.py:89`) — ≈ 2.5k and 8k tokens:
+   **the common case fits any modern window in one call**.
 2. **One call per conflicting region** (the plan is the region list from A3; the
    recombination is mechanical concatenation in local order by the core, not by
    the model), so a 30-section brief with 3 conflicts is 3 small calls, each
@@ -942,7 +943,7 @@ literal-dotted `display.*` exception):
 |---|---|---|---|---|
 | `hub.auto_update.agents` | `("hub","auto_update","agents")` | BOOL | `True` | `Merge hub updates into pulled agents automatically.` |
 | `hub.auto_update.teams` | `("hub","auto_update","teams")` | BOOL | `True` | `Merge hub updates into pulled teams automatically.` |
-| `hub.check_interval_min` | `("hub","check_interval_min")` | INT, min 5, max 1440 | `60` | `Minutes between hub update checks (both modes).` |
+| `hub.check_interval_min` | `("hub","check_interval_min")` | INT, min 5, max 1440 | `15` | `Minutes between hub update checks (both modes).` |
 | `hub.merge_model` | `("hub","merge_model")` | TEXT, `empty_unsets=True` | `""` | `provider/model for merges; empty uses your default model.` |
 
 Module-level defaults live NEXT TO THE READER, in `local_operator/hub_sync/settings.py`:
@@ -950,7 +951,7 @@ Module-level defaults live NEXT TO THE READER, in `local_operator/hub_sync/setti
 ```python
 DEFAULT_AUTO_UPDATE_AGENTS = True
 DEFAULT_AUTO_UPDATE_TEAMS = True
-DEFAULT_CHECK_INTERVAL_MIN = 60
+DEFAULT_CHECK_INTERVAL_MIN = 15
 MIN_CHECK_INTERVAL_MIN, MAX_CHECK_INTERVAL_MIN = 5, 1440
 
 @dataclass(frozen=True)
@@ -1029,6 +1030,16 @@ class HubSyncRunner:
 - **No boot blocking**: `run_forever` first `await asyncio.sleep(45 + jitter(0-15))`
   (`reason="startup"`), then loops `tick`, then `sleep(interval_min*60 ±10 %)`.
   Interval re-read each loop (LIVE).
+- **A session start asks for one check** (added after conditional checks made an
+  unchanged tick cheap): the session-create route calls
+  `HubSyncRunner.note_session_start()` once the receipt settled, which schedules
+  `check_now` as a fire-and-forget task and returns immediately. Two throttles,
+  both claimed synchronously before the task exists: one check in flight, and
+  `SESSION_START_CHECK_THROTTLE_S` (120 s) since the last check started by any
+  route. It never merges -- auto-apply stays on the scheduled tick. The interval
+  default moved from 60 to 15 minutes in the same change; the app-focus half of
+  the trigger ("check when the window regains focus") is the desktop client's,
+  which calls the existing `POST /v1/desktop/hub/updates/check`.
 - **Only when a credential resolves**: each tick starts with
   `resolve_radient_credential(config_dir, base_url, store=…)`
   (`providers/radient_credentials.py:147-171`) and, for org items,
@@ -1221,7 +1232,7 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 {
   "generated_at": "2026-09-29T12:00:00Z",
   "credential": "ok | none",
-  "settings": {"auto_agents": true, "auto_teams": true, "interval_min": 60},
+  "settings": {"auto_agents": true, "auto_teams": true, "interval_min": 15},
   "counts": {"available": 2, "failed": 1, "updating": 0, "up-to-date": 9},
   "items": [
     {"kind":"agent","name":"coder","local_id":"…","hub_id":"…","tenant_id":null,
@@ -1474,7 +1485,7 @@ Isolated run: fresh `ISO=$(mktemp -d)`, `env -i HOME=$ISO LOCAL_OPERATOR_CONFIG_
 4. **Regrowth via stale baseline.** If a baseline record is lost (manual delete), items degrade to baseline-unknown (safe: check-only). If a baseline is *wrong* (the record says B but the user's L predates it) a deletion could be misattributed. Mitigation: records are only written by pull/publish/merge with fp recorded; tag/record disagreement ⇒ unknown.
 5. **Multi-process races.** `lop serve`, TUI, CLI and scheduler processes can each run a check. Mitigation: store lease (B4.1) + per-row fingerprint re-verify under the registry lock (agents: no lock exists — see Q4).
 6. **Boot cost / import graph.** Guarded by the lazy imports and the import-graph test; runner first tick delayed 60 s.
-7. **Hub-side caps.** A merged team/agent may exceed hub limits on a later push (`teams.py:384-389`, `agent_profiles.py:111`); pull-side enforces local caps, push-side must enforce hub caps.
+7. **Hub-side caps.** A merged team/agent may exceed hub limits on a later push (`teams.py:384-389`, `agent_profiles.MAX_INSTRUCTIONS_CHARS`); pull-side enforces local caps, push-side must enforce hub caps.
 8. **Team semantics.** Hub roster kind is free-form (`teams.py` docstring 552-556); unknown kinds map to `agent` on import (`teams.py:1620-1625`). A merge must not launder an unknown kind into `agent` on the *push* side; A7 keeps the original kind in the record.
 9. **Deleted-on-hub vs membership-lost** are indistinguishable (404); never auto-delete locally.
 

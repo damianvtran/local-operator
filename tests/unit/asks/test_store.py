@@ -514,6 +514,27 @@ def test_contract_a_a_withdrawn_row_and_an_answered_row_in_both_orders():
         assert record["answers"] == {"q": ["yes"]}
 
 
+def test_an_operator_dismissal_and_a_withdrawal_fold_the_same_in_both_orders():
+    """SA-D4's race (design §15): the operator dismisses an OPEN ask while the asker
+    retracts it. The precedence table is POSITION-based, so neither write order can
+    let the model's retraction swallow the operator's act — and the row the agent
+    is owed does not double because its id is derived from the ask."""
+    before = [
+        _queued(at=BASE, timeout_s=3600),
+        _dismissed(at=BASE + 100),
+        _withdrawn(at=BASE + 200),
+    ]
+    after = [
+        _queued(at=BASE, timeout_s=3600),
+        _withdrawn(at=BASE + 100),
+        _dismissed(at=BASE + 200),
+    ]
+    for events in (before, after):
+        record = store.fold(events, BASE + 300)[0]
+        assert record["status"] == store.STATUS_DISMISSED
+        assert store.expected_row_ids(record) == [store.response_row_id(record["ask_id"])]
+
+
 def test_an_answered_late_row_also_outranks_a_later_withdrawn():
     """The carve-out reads the ANSWERED ROW, not the folded status: an answer
     past the deadline is still the operator's answer, and the withdrawal still
@@ -812,6 +833,30 @@ def test_a_text_only_answer_folds_without_an_attachments_key() -> None:
     (record,) = store.fold([_queued(), _answered(at=1_500_000)], now=1_600_000)
     assert "attachments" not in record
     assert "attachments" not in store.pending_row(record)
+
+
+# ---------------------------------------------------------------------------
+# The card's context pair (SA-D7)
+# ---------------------------------------------------------------------------
+
+
+def test_the_context_pair_rides_the_row_only_when_it_is_counted() -> None:
+    """ADDED KEYS, never defaults: a row for an ask this runtime cannot count must
+    stay byte-identical, because every surface shows no line for it."""
+    (record,) = store.fold([_queued()], now=BASE + 1_000)
+    assert "user_messages_since" not in store.pending_row(record)
+    assert "last_user_message_at" not in store.pending_row(record)
+
+    counted = store.pending_row(record, user_messages_since=3, last_user_message_at=1_900)
+    assert counted["user_messages_since"] == 3
+    assert counted["last_user_message_at"] == 1_900
+    # A ZERO is an answer and travels: it says the ask is newer than every message.
+    zero = store.pending_row(record, user_messages_since=0, last_user_message_at=1_900)
+    assert zero["user_messages_since"] == 0
+    # Everything else on the row is untouched by the pair.
+    bare = store.pending_row(record)
+    pair = ("user_messages_since", "last_user_message_at")
+    assert {k: v for k, v in counted.items() if k not in pair} == bare
 
 
 def test_the_fold_keeps_the_first_answers_refs_across_a_revision() -> None:
