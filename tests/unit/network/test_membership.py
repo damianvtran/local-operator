@@ -1119,3 +1119,48 @@ def test_a_rotation_frame_cannot_install_an_invalid_name(root: Path) -> None:
     assert record.member(PEER).name == ""
     stored = store.load(NETWORK, root)
     assert stored.member(stranger) is not None and stored.member(stranger).name == ""
+
+
+def test_a_name_held_only_in_another_network_is_accepted(root: Path) -> None:
+    """QA round 1, Q1 — the narrowing the docstring promised, now implemented.
+
+    The collision check filtered only on ``self_device_id``, so a peer's name in a
+    record this device holds NO row in — a record ``rename_self`` never writes —
+    refused a rename that could not have collided with anything. This is the
+    two-network shape QA reproduced: the second record carries the device id but no
+    self row, and its peer's name must be accepted; a same-network collision must
+    still refuse.
+    """
+    me, _record = _renamable(root)
+    other = types.NetworkRecord(
+        network_id="n_ffffffffffffffffffffffff",
+        name="other-net",
+        epoch=1,
+        self_device_id=me.device_id,
+        self_role="read",
+        self_capabilities=sorted(types.capabilities_for_role("read")),
+    )
+    elsewhere = "d_" + "f" * 32
+    other.members.append(
+        types.MemberRecord(
+            device_id=elsewhere,
+            public_key=wire.b64u(b"f" * 32),
+            name="elsewhere-box",
+            role="drive",
+            capabilities=sorted(types.capabilities_for_role("drive")),
+            added_via="invite",
+        )
+    )
+    store.save(other, root)
+
+    # CROSS-NETWORK: accepted, because other-net has no row of this device to rename.
+    receipt = relay.rename_self("elsewhere-box", root=root)
+    assert receipt.networks == (NETWORK,)
+    home = next(row for row in store.list_networks(root) if row.network_id == NETWORK)
+    assert home.member(me.device_id).name == "elsewhere-box"
+
+    # SAME-NETWORK: still refused, and the sentence names the colliding row.
+    with pytest.raises(types.MeshRefusal) as taken:
+        relay.rename_self("laptop", root=root)
+    assert taken.value.code == "name_taken"
+    assert PEER[:8] in taken.value.sentence

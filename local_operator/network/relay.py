@@ -2003,17 +2003,19 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
     the next admission.
 
     THE COLLISION GUARD IS A LOCAL POLICY, NOT A MESH-WIDE ONE, and it is scoped to
-    ONE NETWORK (review round 1, F2): device-taking verbs resolve inside a network,
-    so a row in a different network cannot collide with anything a query here
-    answers. Within that network it refuses a name already carried by a DIFFERENT
-    row, tombstones included — a removed device's name staying visible is exactly
-    what makes a later ``_resolve_device`` query answer the wrong device (the M1
-    finding deferred on PR #2869). It cannot promise the mesh has no duplicate: a
-    joiner picks its own name from its own identity, which this device cannot
-    refuse. That is why the guard is DUAL — this command refuses a collision it can
-    see, and every receiving path (``admit``, ``adopt_members``) discards an
-    inbound label that fails the rule — and still not a uniqueness claim: two rows
-    may share a name, and resolution stays by id.
+    the records this command actually WRITES (review round 1, F2; QA round 1, Q1):
+    a record where this device holds no active row is not renamed — the write loop
+    skips it — so a name a peer holds there cannot collide with anything this
+    command changes, and it is accepted. Inside a record this device does write, the
+    guard refuses a name already carried by a DIFFERENT row, tombstones included: a
+    removed device's name staying visible is exactly what makes a later
+    ``_resolve_device`` query answer the wrong device (the M1 finding deferred on
+    PR #2869). It cannot promise the mesh has no duplicate: a joiner picks its own
+    name from its own identity, which this device cannot refuse. That is why the
+    guard is DUAL — this command refuses a collision it can see, and every receiving
+    path (``admit``, ``adopt_members``, ``apply_epoch``) discards an inbound label
+    that fails the rule — and still not a uniqueness claim: two rows may share a
+    name, and resolution stays by id.
 
     A PARTIAL WRITE IS REPORTED AS ONE (review round 1, F3). The identity file is
     written first, so a row write that fails afterwards leaves file=new,
@@ -2047,10 +2049,19 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
             "identity_missing",
             "this device has no mesh identity yet; create a network here first",
         )
-    # THE WHOLE ROW SET OF THIS NETWORK, not ``active_members()``: a tombstoned row
-    # is still a name this device can be asked about, and its id still burns.
+    # THE COLLISION CHECK IS SCOPED TO THE NETWORKS THIS COMMAND WRITES (QA round 1,
+    # Q1). The docstring said "one network" while the loop only filtered on
+    # ``self_device_id``, so a name held by a peer in a record where this device
+    # holds no row — a record the rename does not touch — was refused, which is a
+    # refusal with no consequence behind it. The write loop below skips exactly those
+    # records, so the check skips them too; inside a record this device DOES hold an
+    # active row in, the whole row set still counts: a tombstoned row is still a name
+    # a query can be answered with, and its id still burns.
     for listed in store.list_networks(root):
         if listed.self_device_id != current.device_id:
+            continue
+        myself = listed.member(current.device_id)
+        if myself is None or not myself.active:
             continue
         for row in listed.members:
             if str(row.device_id) == current.device_id:
@@ -2077,7 +2088,7 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
         try:
             with store.mutate(listed.network_id, root) as record:
                 row = record.member(current.device_id)
-                if row is None or row.name == fresh:
+                if row is None or not row.active or row.name == fresh:
                     continue
                 row.name = fresh
                 store.save(record, root)
