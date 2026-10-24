@@ -155,7 +155,7 @@ def elevenlabs_cleanup_options(mode: CleanupMode) -> ProviderCleanupOptions:
 
 
 # ---------------------------------------------------------------------------
-# Client rules v1
+# Client rules v2
 # ---------------------------------------------------------------------------
 
 #: ISO-639-1 is the only value Radient's ``language`` field accepts (a live
@@ -248,14 +248,35 @@ ISO_639_3_TO_1: dict[str, str] = {
 LANGUAGE_PROBABILITY_THRESHOLD = 0.8
 
 #: Provenance token for a text cleaned by this module's rules.
-CLIENT_RULES_PROVENANCE = "client.rules.v1"
+CLIENT_RULES_PROVENANCE = "client.rules.v2"
 
-#: Token sets. ``um`` is deliberately absent from English: it is a real
-#: Portuguese numeral/article, and one language label cannot tell an English
-#: filler from Portuguese ``Um livro`` inside a code-switched transcript.
+#: High-confidence independent pause spans only. A token is matched against the
+#: active language, never as a substring of another language's real word: this
+#: is why English ``um`` cannot affect Portuguese ``Um livro``. Sources and the
+#: ambiguity review live in docs/design/stt-transcript-cleanup.md.
 TOKEN_RULES: dict[str, tuple[str, ...]] = {
-    "en": ("uh", "uhm", "erm"),
+    "en": ("uh", "uhm", "erm", "um", "er"),
+    "de": ("ähm",),
     "fr": ("euh",),
+    "it": ("ehm",),
+    "ja": ("えーと", "ええと"),
+    "he": ("אממ",),
+}
+
+#: Ambiguous forms need a strong pause-punctuation context in addition to token
+#: boundaries. They are not independent words in every use (Chinese 呃逆 and
+#: Russian ``Э, нет`` are the controlling negative examples), so bare matches
+#: and attitude/response punctuation must survive.
+GUARDED_TOKEN_RULES: dict[str, tuple[str, ...]] = {
+    "en": ("ah", "hmm", "mm"),
+    "de": ("äh",),
+    "fr": ("ben",),
+    "es": ("eh", "este"),
+    "pt": ("hã",),
+    "ja": ("あの",),
+    "zh": ("呃", "嗯"),
+    "hi": ("उम्म",),
+    "ru": ("э", "ну"),
 }
 
 #: Closed non-speech cue lexicon. Deliberately NOT generic bracket removal:
@@ -367,6 +388,30 @@ def _cue_spans(text: str) -> list[tuple[int, int, str, str]]:
     return spans
 
 
+def _strong_pause_context(text: str, start: int, end: int, language: str) -> bool:
+    """Whether an ambiguous token is an independent pause, not a response.
+
+    Guarded forms must begin an utterance/sentence or follow a comma and be
+    followed by pause punctuation. Question/exclamation uses and a span that
+    would consume the entire response turn are excluded explicitly.
+    """
+    prefix = text[:start].rstrip()
+    if prefix and not _is_sentence_initial(text, start) and not prefix.endswith((",", "，")):
+        return False
+    cursor = end
+    while cursor < len(text) and text[cursor] in " \t":
+        cursor += 1
+    # Only Hindi's sourced filler admits a bare utterance-initial comma here.
+    # Every ambiguous backchannel/demonstrative/particle otherwise needs an
+    # ellipsis: comma alone is also assent, objection, urging or response.
+    pause_punctuation = ",，、…." if language == "hi" else "…"
+    if cursor >= len(text) or text[cursor] not in pause_punctuation:
+        return False
+    while cursor < len(text) and text[cursor] in " \t,，、….":
+        cursor += 1
+    return cursor < len(text) and text[cursor] not in "?!？！"
+
+
 def _expand_deletion(text: str, start: int, end: int, kind: str) -> list[tuple[int, int]]:
     """Expand one removed span over only the separators that existed for it.
 
@@ -382,14 +427,26 @@ def _expand_deletion(text: str, start: int, end: int, kind: str) -> list[tuple[i
             return [(start - 1, end)]
         return [(start, end)]
 
-    left_comma = start >= 2 and text[start - 2 : start] == ", "
-    right_comma = text[end : end + 2] == ", "
+    left_comma = start >= 2 and text[start - 2 : start] in (", ", "， ")
+    right_comma = text[end : end + 2] in (", ", "， ")
     if left_comma and right_comma:
         # ``I, uh, think`` -> ``I think``: remove the two commas but keep the
         # space that separated ``I`` from the first comma. Removing one
         # contiguous range would join the words as ``Ithink``.
         return [(start - 2, start - 1), (start, end + 2)]
-    if end + 1 < len(text) and text[end] in ",.;:!?" and text[end + 1] == " ":
+    if end < len(text) and text[end] in ",，、":
+        deletion_end = end + 1
+        if deletion_end < len(text) and text[deletion_end] == " ":
+            deletion_end += 1
+        return [(start, deletion_end)]
+    # CJK ellipsis and the spaced Russian hesitation use the same exact-span
+    # expansion; whitespace after the pause belongs to the removed filler.
+    cursor = end
+    while cursor < len(text) and text[cursor] in " \t…":
+        cursor += 1
+    if cursor > end:
+        return [(start, cursor)]
+    if end + 1 < len(text) and text[end] in ".;:!?" and text[end + 1] == " ":
         return [(start, end + 2)]
     if end < len(text) and text[end] == " ":
         return [(start, end + 1)]
@@ -461,14 +518,19 @@ def apply_client_rules(text: str, *, language: str | None = None) -> ClientRules
     cue_ranges = [(cue_start, cue_end) for cue_start, cue_end, _, _ in cues]
     spans: list[tuple[int, int, str, str]] = list(cues)
 
-    for token in TOKEN_RULES.get(language or "", ()):
+    candidates = [(token, False) for token in TOKEN_RULES.get(language or "", ())] + [
+        (token, True) for token in GUARDED_TOKEN_RULES.get(language or "", ())
+    ]
+    for token, guarded in candidates:
         for match in re.finditer(re.escape(token), text, re.IGNORECASE):
             start, end = match.span()
             matched = match.group(0)
-            # Abbreviations survive: UM/UH are not fillers.
+            # Abbreviations survive: UM/UH/ER/ERM are not fillers.
             if len(matched) > 1 and matched.isupper():
                 continue
             if not _boundary_ok(text, start, end):
+                continue
+            if guarded and not _strong_pause_context(text, start, end, language or ""):
                 continue
             if _inside(protected, start, end) or _inside(cue_ranges, start, end):
                 continue

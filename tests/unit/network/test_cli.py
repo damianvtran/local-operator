@@ -504,6 +504,66 @@ def test_resolve_names_an_unknown_network(root: Path, monkeypatch: pytest.Monkey
     assert net_cli._resolve("").network_id == NETWORK  # noqa: SLF001
 
 
+def test_resolve_device_refuses_a_duplicated_member_name(tmp_path: Path) -> None:
+    """Names are cosmetic and unauthenticated, so two members may share one.
+
+    A first-match here is a MISTARGET: `member rm` or `credential share --with`
+    acts on whichever device happened to be listed first, and the operator sees
+    no sign the other device exists. The refusal must name BOTH short ids so the
+    reader can act with an id immediately.
+    """
+    first, second = "d_" + "a" * 32, "d_" + "b" * 32
+    record = _record_in(tmp_path)
+    record.members.append(types.MemberRecord(device_id=first, name="helper"))
+    record.members.append(types.MemberRecord(device_id=second, name="helper"))
+    with pytest.raises(types.MeshRefusal) as excinfo:
+        net_cli._resolve_device(record, "helper")  # noqa: SLF001
+    assert excinfo.value.code == "ambiguous_member"
+    assert first[:8] in excinfo.value.sentence and second[:8] in excinfo.value.sentence
+    assert "use the device id" in excinfo.value.sentence
+    # Either exact id is still unambiguous, and a unique id-tail still resolves.
+    assert net_cli._resolve_device(record, first) == first  # noqa: SLF001
+    assert net_cli._resolve_device(record, second) == second  # noqa: SLF001
+
+
+def test_resolve_device_still_answers_a_unique_name_and_an_id_tail(tmp_path: Path) -> None:
+    """The refusal is scoped to real collisions; ordinary spellings keep working."""
+    solo = "d_" + "c" * 32
+    record = _record_in(tmp_path)
+    record.members.append(types.MemberRecord(device_id="d_" + "a" * 32, name="helper"))
+    record.members.append(types.MemberRecord(device_id=solo, name="research node"))
+    assert net_cli._resolve_device(record, "research node") == solo  # noqa: SLF001
+    assert net_cli._resolve_device(record, solo[-8:]) == solo  # noqa: SLF001
+    assert net_cli._resolve_device(record, "nobody") is None  # noqa: SLF001
+    # An ambiguous id TAIL stays refused, exactly as before this change: two ids
+    # sharing their last eight characters cannot be told apart by that spelling.
+    record.members.append(types.MemberRecord(device_id="d_" + "1" * 24 + "deadbeef", name="a"))
+    record.members.append(types.MemberRecord(device_id="d_" + "2" * 24 + "deadbeef", name="b"))
+    assert net_cli._resolve_device(record, "deadbeef") is None  # noqa: SLF001
+
+
+def test_resolve_device_refuses_a_name_that_is_another_devices_id(tmp_path: Path) -> None:
+    """The same collision from the other side: one query, two different devices.
+
+    Someone who names a device after another member's visible id can make a
+    query identify one device and name a different one. Neither reading may win
+    silently, because both interpretations are plausible to the operator.
+    """
+    identified, named = "d_" + "1" * 32, "d_" + "2" * 32
+    record = _record_in(tmp_path)
+    record.members.append(types.MemberRecord(device_id=identified, name="laptop"))
+    record.members.append(types.MemberRecord(device_id=named, name=identified))
+    with pytest.raises(types.MeshRefusal) as excinfo:
+        net_cli._resolve_device(record, identified)  # noqa: SLF001
+    assert excinfo.value.code == "ambiguous_member"
+    assert identified[:8] in excinfo.value.sentence
+    assert named[:8] in excinfo.value.sentence
+    # A member matching by BOTH its own id and its own name is one device, not
+    # a collision, so it must still resolve.
+    record.members[-1] = types.MemberRecord(device_id=named, name=named)
+    assert net_cli._resolve_device(record, named) == named  # noqa: SLF001
+
+
 # ---------------------------------------------------------------------------
 # Output contracts
 # ---------------------------------------------------------------------------
@@ -2990,3 +3050,31 @@ def test_install_receipt_carries_durability_and_warns_when_it_is_missing(
     assert result["persistent"] is persistent and result["linger"] is persistent
     assert net_cli._cmd_install(Namespace(json=False)) == 0
     assert ("durability:" in capsys.readouterr().out) is (not persistent)
+
+
+def test_set_name_reaches_its_handler_with_the_parsed_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The design names this exact failure mode (review round 1, F5).
+
+    `_guard_identity_subcommand` ends in ``return _cmd_identity_show(args)``, so a
+    verb added to the parser without its own arm answers the device's id and exits
+    0 — a rename that silently does nothing. The handler is replaced with a
+    recorder, so this proves DISPATCH and argument passing and nothing else: no
+    relay, no socket, no store write.
+    """
+    seen: list[tuple[str, bool]] = []
+
+    def record(args: argparse.Namespace) -> int:
+        seen.append((args.name, bool(args.json)))
+        return 0
+
+    monkeypatch.setattr(net_cli, "_cmd_identity_set_name", record)
+    args = _parser().parse_args(["network", "identity", "set-name", "build-box", "--json"])
+    assert net_cli._guard_identity_subcommand(args) == 0  # noqa: SLF001
+    assert seen == [("build-box", True)]
+    # Bare ``network identity`` still shows the device; it must not reach the verb.
+    bare = _parser().parse_args(["network", "identity"])
+    net_cli._guard_identity_subcommand(bare)  # noqa: SLF001
+    capsys.readouterr()
+    assert len(seen) == 1

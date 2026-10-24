@@ -35,10 +35,15 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+
+from local_operator import role_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -284,9 +289,19 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the retry does not change — offering it there reproduced the same refusal
     byte for byte. Those two name the user-surface action instead. ``sync`` is
     account-only and has no conversation retry either.
+
+    ``promote`` (S4) has no retry of ANY kind: the definition is already in this
+    conversation, and what it asks for is a second copy elsewhere. Its remedy is
+    the two surfaces that have the user in front of them — the desktop action and
+    the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
-    if reason == "declined":
+    if reason == "declined" and intent.operation == "promote":
+        opening = (
+            f"the user declined to copy this {intent.kind} into their account, so "
+            "nothing in their account was changed."
+        )
+    elif reason == "declined":
         opening = (
             f"the user declined to save this {intent.kind} for every conversation, so "
             "nothing in their account was changed."
@@ -299,10 +314,30 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
             "the confirmation channel failed before the user could answer, so nothing "
             "in their account was changed."
         )
+    elif intent.operation == "promote":
+        opening = (
+            f"copying this {intent.kind} into the user's account is their decision, and "
+            "this run has no way to ask."
+        )
     else:
         opening = (
             f"saving {article} {intent.kind} for every conversation needs the user's "
             "confirmation, and this run has no way to ask."
+        )
+    if intent.operation == "promote":
+        # The copy already exists HERE; what is missing is the user's own act on a
+        # surface that can show them exactly what will be copied.
+        noun = "/agent promote" if intent.kind == "agent" else "/team promote"
+        # The remedy names only what exists: the TUI verb. Round 1 (U3) caught the
+        # copy naming a desktop action no client draws; round 2 caught the
+        # replacement sentence still hedging with "where that client offers one",
+        # which is not a surface a user can find. The desktop ROUTE exists, but a
+        # route is not an action the person in front of the account can take, and
+        # a remedy that has to be qualified is not one.
+        return (
+            f"{opening} Ask them to run the TUI's `{noun} {intent.name}` verb "
+            "themselves: it names exactly what will be copied, and it cannot be run "
+            "on their behalf."
         )
     if intent.kind == "team":
         action = "the TUI `/team` form"
@@ -561,6 +596,226 @@ class ScopedAgentRegistry:
         with self._write_lock:
             return self._owner_for_id(agent_id).clone_agent(agent_id, new_name)
 
+    # -- promotion: copy THIS conversation's role into the account (LOH-9 S4) --
+    def promote(
+        self,
+        name: str,
+        *,
+        as_name: str | None = None,
+        replace: bool = False,
+        authorized_by: str | None = None,
+        dry_run: bool = False,
+    ) -> PromoteResult:
+        """Copy the conversation role ``name`` into the account store.
+
+        COPY, NOT MOVE: the conversation row is untouched, so this conversation
+        keeps launching its own row (session-first resolution) while every other
+        conversation gains the account copy. That is deliberate and the receipt
+        says it, because a user who promotes and then chats here still sees the
+        original — the copy is for everywhere ELSE.
+
+        ``replace`` is the caller's confirmation that an existing account row of
+        the target name may be overwritten. There is no separate confirmation
+        flag here: the human answer lives on the surface that has one (the
+        desktop body's ``confirm_replace``, the TUI's typed ``yes``, the tool's
+        ``confirm_replace``), and faking it at this layer is exactly what the
+        consent rule forbids.
+
+        ``dry_run`` runs the SAME preflight (so a rehearsal refuses for the same
+        reasons a real call would) and returns the plan with empty ids.
+
+        Raises:
+            KeyError: no such definition in this conversation or the account.
+            ValueError: any preflight refusal; nothing was written.
+            PromotionIncomplete: a write failed AND its rollback did not finish.
+        """
+
+        requested = str(name or "").strip()
+        target = str(as_name or requested).strip()
+        if not authorized_by:
+            # Every promotion is attributable: the index row names the surface the
+            # user acted on, and an account write with no origin is exactly what
+            # the consent rule (and a later audit) cannot answer for.
+            raise ValueError(
+                "a promotion must name the surface that authorized it "
+                "(surface:desktop, surface:tui, or a host consent origin)"
+            )
+        with _write_section(self):
+            plan = self._promote_plan(requested, target, replace)
+            source, prompt, existing = plan.source, plan.prompt, plan.existing
+            # The index goes LAST, but its writability is a PREFLIGHT: discovering
+            # an unwritable config root after creating the row would roll back
+            # work that was otherwise fine.
+            role_provenance.require_writable(self.config_dir)
+            if dry_run:
+                planned = {"kind": "agent", "name": target, "id": ""}
+                return PromoteResult(
+                    created=[] if existing is not None else [planned],
+                    expanded=[],
+                    replaced=[target] if existing is not None else [],
+                    provenance_ids=[],
+                    dry_run=True,
+                )
+            created: list[dict[str, Any]] = []
+            replaced: list[str] = []
+            undo: list[tuple[dict[str, Any], Callable[[], None]]] = []
+            try:
+                if existing is not None:
+                    row = {"kind": "agent", "name": target, "id": existing.id}
+                    # Registered AFTER the overwrite returns: a failed overwrite
+                    # has already restored itself and raised, so there would be
+                    # nothing here for an outer undo to do.
+                    undo.append((row, self._overwrite_agent(existing, source, target, prompt)))
+                    replaced.append(target)
+                    record_id = str(existing.id)
+                else:
+                    row_id, step = self._create_agent(source, target, prompt)
+                    row = {"kind": "agent", "name": target, "id": row_id}
+                    undo.append((row, step))
+                    created.append(row)
+                    record_id = row_id
+                provenance_ids = role_provenance.append_promotions(
+                    self.config_dir,
+                    [
+                        {
+                            "kind": "agent",
+                            "id": record_id,
+                            "name": target,
+                            "source_session": _source_session_id(self),
+                            "at": _now_iso(),
+                            "authorized_by": authorized_by,
+                            "replaced": target if existing is not None else None,
+                        }
+                    ],
+                )
+            except BaseException as error:
+                remaining = _undo_all(undo)
+                if remaining:
+                    # Only when the OUTER undo left rows: with no outer remainder
+                    # the caught exception already names its own stuck row, and
+                    # re-wrapping it would replace that precise sentence with the
+                    # generic one (MINOR-2 is about not LOSING a remainder, not
+                    # about re-wording a complete one).
+                    merged = _carried_remaining(error, remaining)
+                    raise PromotionIncomplete(
+                        _incomplete_message("agent", target, merged), merged
+                    ) from None
+                raise
+            return PromoteResult(
+                created=created,
+                expanded=[],
+                replaced=replaced,
+                provenance_ids=provenance_ids,
+            )
+
+    def _promote_plan(self, requested: str, target: str, replace: bool) -> "_AgentPromotionPlan":
+        """Every refusal a promotion can answer with, BEFORE its first write.
+
+        Runs under the caller's write section: the collision check and the write
+        must share one lock, or two promotions of the same name both pass it.
+        Callers must therefore hold the AGENT composite's lock — a team promotion
+        holds both composites' (see :meth:`ScopedTeamRegistry.promote`), because
+        it plans and writes agent rows through this same planner.
+        """
+
+        from local_operator.agent_profiles import is_role, is_specialist
+
+        source = self.session_registry.get_agent_by_name(requested)
+        if source is None:
+            if self.global_registry.get_agent_by_name(requested) is not None:
+                raise ValueError(promote_already_available("agent", requested))
+            raise KeyError(requested)
+        if not (is_role(source) or is_specialist(source)):
+            raise ValueError(
+                f"an agent named {requested!r} exists in this conversation and is not a "
+                "role or specialist, so there is nothing to promote."
+            )
+        if not target or any(char.isspace() or char in "/\\" for char in target):
+            raise ValueError("Profile names cannot contain spaces or path separators")
+        if target.casefold() != requested.casefold():
+            other = self.session_registry.get_agent_by_name(target)
+            if other is not None and other.id != source.id:
+                # An account row under a name THIS conversation also holds is the
+                # reverse of the S2 shadow rule and just as confusing: the new
+                # copy exists everywhere except here.
+                raise ValueError(shadow_refusal("agent", target, existing_scope="session"))
+        existing = _account_agent_key(self.global_registry, target)
+        if existing is not None and not replace:
+            raise ValueError(promote_collision("agent", target))
+        # Read once, before the first write: a prompt that cannot be read must
+        # refuse the promotion rather than produce a copy that runs without it.
+        prompt = self.session_registry.get_agent_system_prompt(source.id)
+        return _AgentPromotionPlan(source=source, target=target, prompt=prompt, existing=existing)
+
+    def _create_agent(
+        self, source: Any, target: str, prompt: str
+    ) -> tuple[str, Callable[[], None]]:
+        """Write the account copy; a failure after the row landed removes it."""
+
+        saved = self.global_registry.save_agent(_promoted_agent_row(source, target))
+        try:
+            self.global_registry.set_agent_system_prompt(saved.id, prompt)
+        except BaseException as error:
+            try:
+                self.global_registry.delete_agent(saved.id)
+            except Exception as rollback_error:  # noqa: BLE001 — reported below
+                raise PromotionIncomplete(
+                    f"copying {target!r} into your account wrote the row but not its "
+                    f"instructions, and removing the row also failed ({rollback_error}); "
+                    f"agent {saved.id} remains in your account.",
+                    [
+                        {
+                            "kind": "agent",
+                            "name": target,
+                            "id": saved.id,
+                            "error": str(rollback_error),
+                        }
+                    ],
+                ) from error
+            raise
+        return saved.id, lambda: self.global_registry.delete_agent(saved.id)
+
+    def _overwrite_agent(
+        self, existing: Any, source: Any, target: str, prompt: str
+    ) -> Callable[[], None]:
+        """Replace the named account row in place and return its restore step.
+
+        In place, so the row keeps its id — anything already pointing at it (a
+        schedule, a roster, a client's open editor) keeps pointing at it. The
+        snapshot is taken BEFORE the first write: after a failed prompt write the
+        only readable copy of the user's old text is the one taken here.
+        """
+
+        old_prompt = self.global_registry.get_agent_system_prompt(existing.id)
+        snapshot = _agent_edit_fields(existing)
+
+        def restore() -> None:
+            self.global_registry.update_agent(existing.id, snapshot)
+            self.global_registry.set_agent_system_prompt(existing.id, old_prompt)
+
+        try:
+            self.global_registry.update_agent(existing.id, _agent_edit_fields(source, name=target))
+            self.global_registry.set_agent_system_prompt(existing.id, prompt)
+        except BaseException as error:
+            try:
+                restore()
+            except Exception as rollback_error:  # noqa: BLE001 — reported below
+                raise PromotionIncomplete(
+                    f"overwriting agent {target!r} failed and restoring the previous "
+                    f"definition also failed ({rollback_error}); agent {existing.id} may "
+                    "now hold a mixture of both.",
+                    [
+                        {
+                            "kind": "agent",
+                            "name": target,
+                            "id": str(existing.id),
+                            "error": str(rollback_error),
+                        }
+                    ],
+                ) from error
+            raise
+        return restore
+
     # -- helpers --------------------------------------------------------------
     def _session_row(self, agent_id: str) -> Any | None:
         if not agent_id:
@@ -656,6 +911,351 @@ class ScopedTeamRegistry:
         with self._write_lock:
             self._owner_for_id(team_id).delete_team(team_id)
 
+    # -- promotion: copy THIS conversation's team, closure included (S4) ------
+    def promote(
+        self,
+        name: str,
+        *,
+        as_name: str | None = None,
+        replace: bool = False,
+        authorized_by: str | None = None,
+        agents: Any = None,
+        dry_run: bool = False,
+    ) -> PromoteResult:
+        """Copy the conversation team ``name`` into the account store.
+
+        A team is not usable from another conversation unless its session-scoped
+        MEMBERS are there too: a roster naming a role that exists only in the
+        origin conversation resolves here and breaks there. So the roster is
+        walked through the LAUNCH resolver and every conversation-scoped member —
+        and nested conversation team — is copied in the same call, bounded by
+        ``teams.MAX_ORG_DEPTH`` and :data:`MAX_PROMOTION_ROWS`. Account rows and
+        packaged starters are REUSED: they already resolve everywhere.
+
+        ``agents`` is the agent composite that overlays the SAME conversation.
+        It is required: without it the roster cannot be resolved, and resolving
+        it against the account store alone would silently pass a team that breaks
+        elsewhere.
+
+        All-or-nothing across the whole set: every write is preflighted first,
+        and a failure deletes exactly the rows this call created, in reverse.
+        Raises exactly what :meth:`ScopedAgentRegistry.promote` documents.
+        """
+
+        if agents is None:
+            raise ValueError(
+                "promoting a team needs this conversation's agent registry: its roster "
+                "members must be resolved, and conversation-scoped ones copied, in the "
+                "same call"
+            )
+        if not authorized_by:
+            raise ValueError(
+                "a promotion must name the surface that authorized it "
+                "(surface:desktop, surface:tui, or a host consent origin)"
+            )
+        from local_operator.teams import validate_team_name
+
+        requested = str(name or "").strip()
+        # BOTH composites' write locks, in the order team -> agent.
+        #
+        # A team promotion writes AGENT rows (its conversation-scoped members)
+        # through the agent composite's private writers, and those deliberately
+        # take no lock of their own. Holding only the TEAM lock left the member
+        # preflight and an `agent promote` (which takes only the AGENT lock) able
+        # to pass the same name as free and both write it; `save_agent` has no
+        # uniqueness guard, so the result was two account rows with one name and
+        # a resolver that returns whichever it finds first (agent review round
+        # 1, MAJOR-1).
+        #
+        # The ORDER is fixed team -> agent because it is the only path that ever
+        # holds both: an agent write takes the agent lock alone and a team write
+        # takes the team lock alone, so no caller can hold agent and wait for
+        # team. A fixed order is what keeps that true.
+        with _write_section(self), _write_section(agents):
+            source = self.session_registry.get_team_by_name(requested)
+            if source is None:
+                if self.global_registry.get_team_by_name(requested) is not None:
+                    raise ValueError(promote_already_available("team", requested))
+                raise KeyError(requested)
+            target = validate_team_name(str(as_name or requested).strip())
+            if target.casefold() != requested.casefold():
+                other = self.session_registry.get_team_by_name(target)
+                if other is not None and other.id != source.id:
+                    raise ValueError(shadow_refusal("team", target, existing_scope="session"))
+            existing = self.global_registry.get_team_by_name(target)
+            if existing is not None and str(existing.name).casefold() != target.casefold():
+                # The target resolves only through another team's ALIAS. A replace
+                # would RENAME that row out from under the key its own users know,
+                # which is not what the confirmation promised. The sentence names
+                # the key and its owner: the generic one would claim a team of the
+                # target name exists and advise a replace that refuses identically.
+                raise ValueError(promote_alias_target_collision(target, str(existing.name)))
+            # A SOURCE alias that the account already resolves is not a team of
+            # the target name: renaming the target (`as`) or replacing it both
+            # leave the carried alias in place and refuse identically. The hit
+            # names the alias and its owner so the sentence can offer the one edit
+            # that moves the key (agent review round 1, MINOR-2).
+            hit = _account_team_key_hit(
+                self.global_registry,
+                target,
+                list(source.aliases or []),
+                skip_id=str(existing.id) if existing is not None else None,
+            )
+            if hit is not None:
+                alias, owner = hit
+                raise ValueError(
+                    promote_source_alias_collision(source.name, alias, str(owner.name))
+                )
+            if existing is not None and not replace:
+                raise ValueError(promote_collision("team", target))
+
+            member_rows, nested_teams = _team_promotion_plan(agents, self, source)
+            # Preflight the whole closure BEFORE the first write. The agent
+            # composite's own planner answers the collision/shadow/readability
+            # questions, so a member is judged by exactly the rule a direct
+            # promote of it would be — one rule, one sentence.
+            # A MEMBER that collides is answered with THIS team's verb: the
+            # generic sentence advises promoting the colliding row directly,
+            # which replaces the member and still leaves the team unpromoted
+            # (QA round 2, Q-M1).
+            agent_plans = []
+            for row in member_rows:
+                if _account_agent_key(agents.global_registry, row.name) is not None and not replace:
+                    raise ValueError(promote_member_collision(source.name, "agent", row.name))
+                agent_plans.append(agents._promote_plan(row.name, row.name, replace))
+            team_plans: list[tuple[Any, str, Any | None]] = []
+            for nested in nested_teams:
+                member_target = validate_team_name(str(nested.name))
+                member_existing = self.global_registry.get_team_by_name(member_target)
+                if member_existing is not None and (
+                    str(member_existing.name).casefold() != member_target.casefold()
+                ):
+                    # This name resolves only through ANOTHER row's alias. A
+                    # confirmed replace would RENAME that row out from under the
+                    # key its own users know — the hazard the top-level target
+                    # refuses, and the nested branch must not be the one path that
+                    # performs it (agent review remediation, BLOCKER). Refused on
+                    # the rehearsal and the confirmed call alike.
+                    raise ValueError(
+                        promote_nested_alias_collision(
+                            source.name, member_target, member_target, str(member_existing.name)
+                        )
+                    )
+                if member_existing is not None and not replace:
+                    raise ValueError(promote_member_collision(source.name, "team", member_target))
+                # An alias the account already resolves is NOT a team of this
+                # name, and the generic sentence would send the user to replace
+                # `inner` — a name-keyed row — which leaves the alias collision
+                # untouched and reproduces itself (agent review, MINOR-2). The hit
+                # therefore names the KEY: the name key cannot be the one found
+                # here, because the branch above either resolved it or skipped
+                # the row a confirmed replace is about to overwrite.
+                hit = _account_team_key_hit(
+                    self.global_registry,
+                    member_target,
+                    list(nested.aliases or []),
+                    skip_id=str(member_existing.id) if member_existing is not None else None,
+                )
+                if hit is not None:
+                    alias, owner = hit
+                    raise ValueError(
+                        promote_nested_alias_collision(
+                            source.name, member_target, alias, str(owner.name)
+                        )
+                    )
+                team_plans.append((nested, member_target, member_existing))
+            role_provenance.require_writable(self.config_dir)
+
+            # ``created`` is what the call would CREATE, exactly as the committed
+            # result's list is: a row in ``replaced`` is not also a creation, or
+            # a rehearsal would tell the user it is making a copy of something it
+            # is about to overwrite (agent review round 1, MINOR-3's confirmation
+            # quality — the desktop client builds its sentence from this plan).
+            planned: list[dict[str, Any]] = [
+                {"kind": "agent", "name": plan.target, "id": ""}
+                for plan in agent_plans
+                if plan.existing is None
+            ] + [
+                {"kind": "team", "name": plan[1], "id": ""}
+                for plan in team_plans
+                if plan[2] is None
+            ]
+            if existing is None:
+                planned.append({"kind": "team", "name": target, "id": ""})
+            if dry_run:
+                return PromoteResult(
+                    created=planned,
+                    expanded=[
+                        row["name"]
+                        for row in planned
+                        if not (row["kind"] == "team" and row["name"] == target)
+                    ],
+                    replaced=[
+                        *[plan.target for plan in agent_plans if plan.existing is not None],
+                        *[plan[1] for plan in team_plans if plan[2] is not None],
+                        *([target] if existing is not None else []),
+                    ],
+                    provenance_ids=[],
+                    dry_run=True,
+                )
+
+            created: list[dict[str, Any]] = []
+            replaced: list[str] = []
+            records: list[dict[str, Any]] = []
+            undo: list[tuple[dict[str, Any], Callable[[], None]]] = []
+            try:
+                # Members first: a team row must never be published pointing at a
+                # role another conversation cannot resolve yet.
+                for plan in agent_plans:
+                    member_target = plan.target
+                    if plan.existing is not None:
+                        row = {"kind": "agent", "name": member_target, "id": plan.existing.id}
+                        undo.append(
+                            (
+                                row,
+                                agents._overwrite_agent(
+                                    plan.existing, plan.source, member_target, plan.prompt
+                                ),
+                            )
+                        )
+                        replaced.append(member_target)
+                        row_id = str(plan.existing.id)
+                        replaced_name: str | None = member_target
+                    else:
+                        row_id, step = agents._create_agent(plan.source, member_target, plan.prompt)
+                        row = {"kind": "agent", "name": member_target, "id": row_id}
+                        undo.append((row, step))
+                        created.append(row)
+                        replaced_name = None
+                    records.append(
+                        {
+                            "kind": "agent",
+                            "id": row_id,
+                            "name": member_target,
+                            "source_session": _source_session_id(self),
+                            "at": _now_iso(),
+                            "authorized_by": authorized_by,
+                            "replaced": replaced_name,
+                        }
+                    )
+                for nested, member_target, member_existing in team_plans:
+                    if member_existing is not None:
+                        row = {"kind": "team", "name": member_target, "id": member_existing.id}
+                        undo.append(
+                            (row, self._overwrite_team(member_existing, nested, member_target))
+                        )
+                        replaced.append(member_target)
+                        row_id = str(member_existing.id)
+                        replaced_name = member_target
+                    else:
+                        saved, step = self._create_team(nested, member_target)
+                        row = {"kind": "team", "name": member_target, "id": saved.id}
+                        undo.append((row, step))
+                        created.append(row)
+                        row_id = saved.id
+                        replaced_name = None
+                    records.append(
+                        {
+                            "kind": "team",
+                            "id": row_id,
+                            "name": member_target,
+                            "source_session": _source_session_id(self),
+                            "at": _now_iso(),
+                            "authorized_by": authorized_by,
+                            "replaced": replaced_name,
+                        }
+                    )
+                if existing is not None:
+                    row = {"kind": "team", "name": target, "id": existing.id}
+                    undo.append((row, self._overwrite_team(existing, source, target)))
+                    replaced.append(target)
+                    root_id = str(existing.id)
+                    root_replaced: str | None = target
+                else:
+                    saved, step = self._create_team(source, target)
+                    row = {"kind": "team", "name": target, "id": saved.id}
+                    undo.append((row, step))
+                    created.append(row)
+                    root_id = saved.id
+                    root_replaced = None
+                records.append(
+                    {
+                        "kind": "team",
+                        "id": root_id,
+                        "name": target,
+                        "source_session": _source_session_id(self),
+                        "at": _now_iso(),
+                        "authorized_by": authorized_by,
+                        "replaced": root_replaced,
+                    }
+                )
+                provenance_ids = role_provenance.append_promotions(self.config_dir, records)
+            except BaseException as error:
+                remaining = _undo_all(undo)
+                if remaining:
+                    # Only when the OUTER undo left rows: with no outer remainder
+                    # the caught exception already names its own stuck row, and
+                    # re-wrapping it would replace that precise sentence with the
+                    # generic one (MINOR-2 is about not LOSING a remainder, not
+                    # about re-wording a complete one).
+                    merged = _carried_remaining(error, remaining)
+                    raise PromotionIncomplete(
+                        _incomplete_message("team", target, merged), merged
+                    ) from None
+                raise
+            return PromoteResult(
+                created=created,
+                expanded=[
+                    row["name"]
+                    for row in created
+                    if not (row["kind"] == "team" and row["name"] == target)
+                ],
+                replaced=replaced,
+                provenance_ids=provenance_ids,
+            )
+
+    def _create_team(self, source: Any, target: str) -> tuple[Any, Callable[[], None]]:
+        """Write the account copy; a failure after the row landed removes it."""
+
+        saved = self.global_registry.create_team(_team_edit_fields(source, name=target))
+        return saved, lambda: self.global_registry.delete_team(saved.id)
+
+    def _overwrite_team(self, existing: Any, source: Any, target: str) -> Callable[[], None]:
+        """Replace the named account team in place and return its restore step.
+
+        The snapshot carries BOTH briefs (``get_team_by_name`` hydrates them), and
+        it is taken before the first write: ``update_team`` rewrites the fields and
+        both brief files in one publication, so a failure inside it can only be
+        undone from a copy taken here.
+        """
+
+        snapshot = _team_edit_fields(existing, name=existing.name)
+
+        def restore() -> None:
+            self.global_registry.update_team(existing.id, snapshot)
+
+        try:
+            self.global_registry.update_team(existing.id, _team_edit_fields(source, name=target))
+        except BaseException as error:
+            try:
+                restore()
+            except Exception as rollback_error:  # noqa: BLE001 — reported below
+                raise PromotionIncomplete(
+                    f"overwriting team {target!r} failed and restoring the previous "
+                    f"definition also failed ({rollback_error}); team {existing.id} may "
+                    "now hold a mixture of both.",
+                    [
+                        {
+                            "kind": "team",
+                            "name": target,
+                            "id": str(existing.id),
+                            "error": str(rollback_error),
+                        }
+                    ],
+                ) from error
+            raise
+        return restore
+
     # -- helpers --------------------------------------------------------------
     def _session_row(self, team_id: str) -> Any | None:
         if not team_id:
@@ -723,10 +1323,491 @@ def scope_session_registries(
     )
 
 
+# ---------------------------------------------------------------------------
+# Promotion: copy a conversation definition into the account (LOH-9 S4)
+# ---------------------------------------------------------------------------
+
+#: The most definitions ONE promotion may create. A team expands into the
+#: session-scoped roles and nested session teams its roster needs, so its
+#: closure is bounded here as well as by ``teams.MAX_ORG_DEPTH``: depth alone
+#: does not bound a WIDE roster of nested teams, each with its own roster.
+#: A team row caps its own slots, so 50 is far past any real team and far below
+#: anything that would hold the write lock across an unbounded walk.
+MAX_PROMOTION_ROWS = 50
+
+
+@dataclass(frozen=True)
+class PromoteResult:
+    """What one promotion did — or, with ``dry_run``, would do.
+
+    ``created`` names every row this call wrote, kind by kind. ``expanded`` is
+    the subset a TEAM needed (its conversation-scoped members and nested teams),
+    which is what a receipt lists so the user knows the copy is not just one row.
+    ``replaced`` names the account rows an authorised ``replace`` overwrote —
+    exactly what the confirmation promised to overwrite.
+    ``provenance_ids`` are the definition ids recorded in the device index, one
+    per created or replaced row, so a receipt can be joined to the index.
+
+    A dry run fills the same names with EMPTY ids and no provenance ids: it is
+    the rehearsal a surface shows before it asks for confirmation, and it must
+    be impossible to mistake for a write.
+    """
+
+    created: list[dict[str, Any]]
+    expanded: list[str]
+    replaced: list[str]
+    provenance_ids: list[str]
+    dry_run: bool = False
+
+
+class PromotionIncomplete(ValueError):
+    """Some of a promotion's rows could not be rolled back after a failure.
+
+    Raised ONLY when the undo itself failed, and then INSTEAD of the original
+    error: the caller must report what is left in the account, because a clean
+    failure that left rows behind is exactly the silent partial promotion this
+    transaction exists to prevent.
+    """
+
+    def __init__(self, message: str, remaining: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.remaining = remaining
+
+
+@dataclass(frozen=True)
+class _AgentPromotionPlan:
+    """One role's preflighted copy: what to read, where it lands, what it replaces."""
+
+    source: Any
+    target: str
+    prompt: str
+    existing: Any | None
+
+
+def promote_missing(kind: str, name: str) -> str:
+    """The refusal for a name the conversation does not hold.
+
+    Mirrors the tool's own not-found sentence (``agent_tool._op_show``), because
+    a user who mistypes a promote sees the same two-store explanation an ``agent
+    show`` would give — and promotion's extra fact, that only the conversation
+    that holds a definition can copy it, is what makes the message actionable.
+    """
+
+    noun = "role or specialist" if kind == "agent" else "team"
+    return (
+        f"no {noun} named {name!r} in this conversation or your account. Only the "
+        "conversation that holds a definition can promote it, and a definition "
+        "created in another conversation is not visible here; a fork of this "
+        "conversation starts with a copy of its definitions."
+    )
+
+
+def promote_already_available(kind: str, name: str) -> str:
+    """The refusal for a name that resolves only in the account store."""
+
+    return (
+        f"{name!r} is already in your account, so every conversation can use it. "
+        "There is nothing to promote."
+    )
+
+
+def promote_member_collision(team: str, kind: str, name: str) -> str:
+    """The refusal for a member of a team promotion that already exists.
+
+    The generic :func:`promote_collision` sentence tells the user how to promote
+    the colliding row directly. During a TEAM promotion that advice is wrong: it
+    replaces the member and still leaves the team unpromoted, so following it
+    reproduces the same refusal on the next attempt (QA round 2, Q-M1). The
+    remedy here is the team's own verb, which replaces the team and its
+    colliding members in one confirmed call.
+
+    No alternate-name remedy is offered: ``as_name`` renames the TEAM, not its
+    members, and a member's name is the key its rosters and nested teams
+    reference. `/team promote pod as pod2` therefore hits this identical refusal
+    and writes nothing (agent review, MINOR-1), so suggesting a rename here
+    would be a second remedy that cannot happen.
+    """
+
+    article = "an" if kind == "agent" else "a"
+    return (
+        f"promoting team {team!r} needs its {kind} {name!r}, and your account already "
+        f"has {article} {kind} named {name!r}, so copying would overwrite it; nothing "
+        f"was promoted. Confirm with `/team promote {team} replace` — that replaces "
+        "the team and its colliding members together."
+    )
+
+
+def promote_alias_target_collision(name: str, owner: str) -> str:
+    """The refusal for a target NAME the account resolves only through an alias.
+
+    :func:`promote_collision` would say the account has a team of that name and
+    advise replacing it — both false: no row bears the name, and a replace of it
+    finds nothing to overwrite and refuses identically. Renaming the alias-owning
+    row is exactly what a confirmation of THIS command cannot authorize, so the
+    sentence names the key, its owner, and the one edit that moves it.
+    """
+
+    return (
+        f"your account has no team named {name!r}; that key is an alias of "
+        f"{owner!r}, so promoting would rename {owner!r} out from under the name "
+        "its own users know, and nothing was promoted. Rename or drop that alias "
+        f"on {owner!r} (`/team edit {owner}`), then promote again."
+    )
+
+
+def promote_source_alias_collision(team: str, alias: str, owner: str) -> str:
+    """The refusal for a SOURCE alias the account already resolves.
+
+    :func:`promote_collision` would name the target, which is free: the
+    collision is an alias the copy CARRIES, and neither `as` nor `replace`
+    drops it, so both advised paths refuse identically. The sentence names the
+    alias and the edit that actually moves it.
+    """
+
+    return (
+        f"promoting team {team!r} would carry its alias {alias!r} into the account, "
+        f"but your account's team {owner!r} already answers to {alias!r}; the copy "
+        "would make that key ambiguous, and nothing was promoted. Rename or drop "
+        f"that alias on either team (`/team edit {team}` or `/team edit {owner}`), "
+        "then promote again."
+    )
+
+
+def promote_nested_alias_collision(team: str, member: str, key: str, owner: str) -> str:
+    """The refusal for a nested team whose key the account already resolves.
+
+    Two shapes reach it. The nested team may CARRY an alias the account already
+    resolves, in which case the generic :func:`promote_collision` sentence names
+    the nested team as if the account held it by name and advises replacing that
+    name — false, because ``replace`` skips only the row whose NAME matches. Or
+    the nested NAME may resolve only through ANOTHER row's alias, in which case a
+    confirmed replace would rename that row out from under the key its own users
+    know (the top-level path refuses exactly that). Both are refusals, and both
+    remedies are an alias edit — the only change that can move the key.
+    """
+
+    if key.casefold() == member.casefold():
+        detail = (
+            f"your account's team {owner!r} already answers to {key!r} as an alias, so "
+            f"a copy named {member!r} would leave two rows behind one key"
+        )
+        remedy = (
+            f"Rename or drop that alias on {owner!r} (`/team edit {owner}`), then promote again."
+        )
+    else:
+        detail = (
+            f"your account's team {owner!r} already answers to {key!r}, which this "
+            f"conversation's team {member!r} carries as an alias; copying would make "
+            "that key ambiguous"
+        )
+        remedy = (
+            "Rename or drop that alias on either team "
+            f"(`/team edit {member}` or `/team edit {owner}`), then promote again."
+        )
+    return (
+        f"promoting team {team!r} needs its team {member!r}, but {detail}; nothing "
+        f"was promoted. {remedy}"
+    )
+
+
+def promote_collision(kind: str, name: str) -> str:
+    """The refusal for a target name the account already holds.
+
+    Names the two ways forward rather than only the conflict: overwriting a
+    user-owned definition is a decision the user makes, and copying under
+    another name is the non-destructive answer when they did not mean THAT row.
+    """
+
+    verb = "/agent promote" if kind == "agent" else "/team promote"
+    article = "an" if kind == "agent" else "a"
+    return (
+        f"your account already has {article} {kind} named {name!r}, so promoting would "
+        "overwrite it; nothing was copied. Confirm the overwrite (the desktop promote "
+        f"request's `confirm_replace`, or `{verb} {name} replace` in the TUI) and "
+        "retry, or promote under another name."
+    )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _source_session_id(owner: Any) -> str:
+    """The session id whose conversation store a composite overlays.
+
+    ``scope_dir`` is ``<session dir>/roles`` and a session directory is named by
+    its id (``session_factory`` builds from ``transcript_dir.name``), so the
+    parent's name IS the id — no second field to keep in step.
+    """
+
+    return Path(owner.scope_dir).parent.name
+
+
+def _promoted_agent_row(source: Any, target: str) -> Any:
+    """The account row for ``source`` under ``target`` — verbatim, new identity.
+
+    A TRANSPORTED copy rather than a new ``AgentEditFields``: the row's tags are
+    the role's kind and policy (``role:``, ``class:``, ``seed:``, ``hub:``,
+    ``tools:``, ``effort:``, ``delegate:``), so re-deriving them from a tool
+    payload — what ``write_profile`` does for an authored create — would drop
+    exactly the policy that makes the copy behave like the original.
+
+    Per-copy identity and CHAT state are the only fields reset: ``id``,
+    ``created_date``, and the last-message pair. The conversation that authored
+    the source keeps its own row and history; the account copy starts with its
+    own empty ones.
+    """
+
+    now = datetime.now(timezone.utc)
+    return source.model_copy(
+        update={
+            "id": str(uuid.uuid4()),
+            "name": target,
+            "created_date": now,
+            "last_message": "",
+            "last_message_datetime": now,
+        }
+    )
+
+
+def _agent_edit_fields(row: Any, *, name: str | None = None) -> Any:
+    """Every DEFINITION field of ``row`` as edit fields, for an overwrite.
+
+    ``replace`` has to overwrite a user-owned row in place (its id, and anything
+    pointing at it, must survive), so it needs the fields rather than a copied
+    ``AgentData``. Nothing is left None: this is a whole-definition replacement,
+    and a None would mean "leave the old value", which is the one outcome the
+    confirmation did not promise.
+    """
+
+    from local_operator.agents import AgentEditFields
+
+    return AgentEditFields(
+        name=name or row.name,
+        label=row.label or "",
+        security_prompt=row.security_prompt,
+        hosting=row.hosting,
+        model=row.model,
+        description=row.description,
+        tags=list(row.tags or []),
+        categories=list(row.categories or []),
+        # Conversation state, not definition: a `replace` overwrites what the
+        # definition IS and leaves the row's own chat state alone.
+        last_message=None,
+        temperature=row.temperature,
+        top_p=row.top_p,
+        top_k=row.top_k,
+        max_tokens=row.max_tokens,
+        stop=list(row.stop) if row.stop is not None else None,
+        frequency_penalty=row.frequency_penalty,
+        presence_penalty=row.presence_penalty,
+        seed=row.seed,
+        current_working_directory=row.current_working_directory,
+    )
+
+
+def _team_edit_fields(row: Any, *, name: str) -> Any:
+    """Every definition field of ``row`` as edit fields, briefs included.
+
+    ``create_team`` is the only writer that treats supplied briefs as
+    authoritative for an id this registry has not loaded (``save_team``'s rule is
+    the opposite, deliberately), so a CREATE must go through it — passing a
+    transported ``Team`` would publish a row whose briefs are empty.
+    """
+
+    from local_operator.teams import TeamEditFields
+
+    return TeamEditFields(
+        name=name,
+        description=row.description,
+        manager=row.manager,
+        members=list(row.members),
+        label=row.label,
+        aliases=list(row.aliases or []),
+        instructions=row.instructions,
+        project=row.project,
+        model_suggestion=row.model_suggestion,
+    )
+
+
+def _account_agent_key(registry: Any, name: str) -> Any | None:
+    """The account agent whose name key equals ``name``, if any.
+
+    Casefolded, because that is how the resolver's shadow rule compares names: a
+    ``Coder`` in the account and a ``coder`` promoted from a conversation would
+    be two rows a picker cannot tell apart.
+    """
+
+    wanted = str(name or "").strip().casefold()
+    for row in registry.list_agents():
+        if str(getattr(row, "name", "") or "").strip().casefold() == wanted:
+            return row
+    return None
+
+
+def _account_team_key_hit(
+    registry: Any, name: str, aliases: list[str], *, skip_id: str | None = None
+) -> tuple[str, Any] | None:
+    """The first candidate KEY the account resolves, with the team it reaches.
+
+    A collision refusal must name the exact KEY: a team's alias collision is not
+    a team of that name, and a sentence naming the target sends the user to a
+    rename or replace that cannot clear an alias another row owns (agent review,
+    MINOR-2). ``skip_id`` exempts the row a confirmed ``replace`` is about to
+    overwrite: its former keys are replaced by this very write, so it cannot
+    collide with itself.
+    """
+
+    for key in [name, *aliases]:
+        found = registry.get_team_by_name(key)
+        if found is not None and str(found.id) != str(skip_id or ""):
+            return key, found
+    return None
+
+
+def _carried_remaining(
+    error: BaseException, remaining: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The rows BOTH failures left behind, de-duplicated by row identity.
+
+    A nested failure names its own stuck row in ``PromotionIncomplete.remaining``
+    (the create's rollback did not finish), and that row is not in the outer undo
+    list — the create raised before registering a step — so rebuilding the
+    message from the outer list alone silently dropped it (review round 1,
+    MINOR-2). Identity is ``(kind, id)``: the same row can only be named once.
+    """
+
+    carried = list(getattr(error, "remaining", ()) or ())
+    if not carried:
+        return remaining
+    merged = list(remaining)
+    seen = {(str(row.get("kind")), str(row.get("id"))) for row in merged}
+    for row in carried:
+        key = (str(row.get("kind")), str(row.get("id")))
+        if key not in seen:
+            merged.append(row)
+            seen.add(key)
+    return merged
+
+
+def _undo_all(undo: list[tuple[dict[str, Any], Callable[[], None]]]) -> list[dict[str, Any]]:
+    """Run the rollback steps in REVERSE, returning the ones that failed.
+
+    A failing step must not stop the rest: one stuck row is not a reason to
+    leave every later row behind. Each entry pairs the ROW it undoes with its
+    step, so the returned remainder names what is still in the account rather
+    than an index the caller cannot interpret.
+    """
+
+    remaining: list[dict[str, Any]] = []
+    for row, step in reversed(undo):
+        try:
+            step()
+        except Exception as error:  # noqa: BLE001 — reported, never swallowed silently
+            remaining.append({**row, "error": str(error)})
+    return remaining
+
+
+def _incomplete_message(kind: str, name: str, remaining: list[dict[str, Any]]) -> str:
+    """Name the rows a failed rollback could not remove.
+
+    A count is not enough: the operator has to find them in the store, so the
+    sentence lists them by name and the exception carries the ids in
+    ``PromotionIncomplete.remaining``.
+    """
+
+    rows = ", ".join(f"{row.get('kind', kind)} {row.get('name', '?')!r}" for row in remaining)
+    return (
+        f"promoting {kind} {name!r} failed AND its rollback did not finish: {rows} may "
+        "still be in your account. Review the account store before retrying; nothing "
+        "here reported success."
+    )
+
+
+def _team_promotion_plan(agents: Any, teams: Any, source: Any) -> tuple[list[Any], list[Any]]:
+    """The conversation rows a team's copy needs, resolved through the LAUNCH resolver.
+
+    Returns ``(agent_rows, nested_team_rows)``. The walk is exactly the one a
+    launch performs (``desktop_profiles.validate_target``): ``profile_detail``
+    per manager/member with the same ``MAX_ORG_DEPTH`` bound and the same cycle
+    refusal. A preflight that used store membership instead would refuse a
+    roster naming a PACKAGED STARTER that simply is not installed yet — a seed is
+    resolvable everywhere, so it needs no copy and must not block the promotion.
+
+    A member counts as needing promotion exactly when the resolver says its row
+    lives in THIS conversation (``scope == "session"``); everything else — an
+    account row, a packaged seed — already resolves in another conversation and
+    is reused.
+    """
+
+    from local_operator.server.utils.desktop_profiles import profile_detail
+    from local_operator.teams import MAX_ORG_DEPTH
+
+    agent_rows: list[Any] = []
+    nested_teams: list[Any] = []
+    seen_agents: set[str] = set()
+    seen_teams: set[str] = set()
+
+    def visit(team: Any, ancestors: tuple[str, ...]) -> None:
+        slots = [team.manager, *(m.role for m in team.members if m.kind != "team")]
+        for slot in slots:
+            try:
+                detail = profile_detail(agents, slot, detail=False)
+            except KeyError:
+                raise ValueError(
+                    f"the roster of {team.name!r} names {slot!r}, which does not resolve "
+                    "to a role, specialist or packaged starter; the copy would be broken "
+                    "in another conversation, so nothing was promoted."
+                ) from None
+            if detail.get("scope") != "session":
+                continue
+            row = agents.session_registry.get_agent_by_name(str(detail["name"]))
+            if row is None:  # pragma: no cover — the resolver just put it in this store
+                continue
+            if row.id not in seen_agents:
+                seen_agents.add(row.id)
+                agent_rows.append(row)
+        for member in team.members:
+            if member.kind != "team":
+                continue
+            if member.role in ancestors or len(ancestors) >= MAX_ORG_DEPTH:
+                raise ValueError(
+                    "the team roster contains a cycle or exceeds the nesting limit "
+                    f"({MAX_ORG_DEPTH}), so nothing was promoted."
+                )
+            nested = teams.get_team_by_name(member.role)
+            if nested is None:
+                raise ValueError(
+                    f"the roster of {team.name!r} nests a team named {member.role!r} which "
+                    "does not resolve in this conversation or your account, so nothing "
+                    "was promoted."
+                )
+            if teams.scope_of(nested) != "session":
+                continue
+            visit(nested, (*ancestors, team.name))
+            if nested.id not in seen_teams:
+                seen_teams.add(nested.id)
+                nested_teams.append(nested)
+
+    visit(source, ())
+    if len(agent_rows) + len(nested_teams) + 1 > MAX_PROMOTION_ROWS:
+        raise ValueError(
+            f"this team expands into {len(agent_rows) + len(nested_teams) + 1} definitions, "
+            f"past the {MAX_PROMOTION_ROWS}-definition bound for one promotion; promote "
+            "the members it needs first, or copy the team on the desktop after "
+            "narrowing its roster."
+        )
+    return agent_rows, nested_teams
+
+
 __all__ = [
+    "MAX_PROMOTION_ROWS",
+    "PromoteResult",
+    "PromotionIncomplete",
     "SESSION_ROLES_DIRNAME",
     "ScopedAgentRegistry",
     "ScopedTeamRegistry",
+    "promote_missing",
     "scope_agent_registry",
     "scope_dir_for",
     "scope_session_registries",

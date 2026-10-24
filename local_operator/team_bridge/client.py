@@ -51,7 +51,11 @@ STATUS READ DISCIPLINE (RFC §5.1). :class:`StatusDiscipline` is the only reader
 natural boundaries; the answer is cached per account for at least
 :data:`STATUS_CACHE_TTL_S`; concurrent readers coalesce onto one in-flight read; and
 there is structurally NO background poll loop — nothing here starts a task or a
-timer, and while the feature is off the module performs no traffic at all.
+timer. The sole local-identity exception is a successful, effective desktop
+settings mutation: :meth:`StatusDiscipline.reconcile_identity_mutation` permits
+one fresh, coalesced reconciliation without waiting for the 300-second floor.
+It grants no enrollment/consent authority and never runs from a cached read,
+shared settings writer, watcher or timer. See docs/design/team-bridge-identity-mutations.md.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ import logging
 import re
 import time
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
@@ -82,6 +87,7 @@ from local_operator.providers.radient_credentials import (
 )
 from local_operator.team_bridge import availability
 from local_operator.team_bridge.settings import TeamBridgeSettings
+from local_operator.team_bridge.types import validate_send_recipient
 
 logger = logging.getLogger(__name__)
 
@@ -968,6 +974,7 @@ class TeamBridgeClient:
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
         empty_result: bool = False,
     ) -> dict[str, Any]:
         """One authenticated request: resolve, send, refresh-once-on-401, map refusals.
@@ -981,7 +988,12 @@ class TeamBridgeClient:
         resolution, here.
         """
 
-        pinned = access or await self.current_access()
+        # A desktop request can wait in IPC while the signed-in account changes.
+        # Compare its captured owner against the SAME bearer snapshot used below,
+        # including when an internal caller already resolved that snapshot. Never
+        # check ownership and then resolve credentials a second time for dispatch.
+        guarded = await self._guarded_access(expected_account_id, access=access)
+        pinned = guarded if guarded is not None else await self.current_access()
         try:
             response = await self._dispatch(
                 method, path, pinned.access_token, params=params, body=body
@@ -1032,7 +1044,9 @@ class TeamBridgeClient:
             pinned.credential_id, expected_account_id=pinned.account_id, force=True
         )
 
-    async def _guarded_access(self, expected_account_id: str | None) -> OAuthAccess | None:
+    async def _guarded_access(
+        self, expected_account_id: str | None, *, access: OAuthAccess | None = None
+    ) -> OAuthAccess | None:
         """Resolve the dispatch snapshot and enforce a captured-account guard.
 
         The desktop plane's anti-replay receipt (H1 review round 1, R6/Q1): a
@@ -1040,15 +1054,18 @@ class TeamBridgeClient:
         old body must yield ZERO mutations. The comparison runs against the
         EXACT pinned access the dispatch below will use — resolving again
         inside :meth:`_send` would reopen the very race this closes — and it
-        runs BEFORE any HTTP side effect. ``None`` (no guard supplied) returns
-        ``None`` and ``_send`` resolves as usual; the desktop ROUTES require
-        the field, so the guarded path is the only one the UI can take, and
-        this optionality serves tests and non-UI callers only.
+        runs BEFORE any HTTP side effect. With no guard, preserve any supplied
+        snapshot and otherwise let ``_send`` resolve as usual. Settings require
+        the receipt; conversations accept its omission for older clients, while
+        new renderers require the owner-guard capability and always supply it.
+        An already-resolved ``access`` is compared, not replaced: resolving again
+        here would discard the caller's binding just as surely as doing so later.
         """
 
         if expected_account_id is None:
-            return None
-        access = await self.current_access()
+            return access
+        if access is None:
+            access = await self.current_access()
         if access.account_id != expected_account_id:
             raise BridgeRefusal(
                 ACCOUNT_MISMATCH_CODE,
@@ -1576,19 +1593,14 @@ class TeamBridgeClient:
         """
         if type not in SEND_TYPES:
             raise ValueError(f"type must be one of {SEND_TYPES!r}; got {type!r}")
-        if (
-            not isinstance(to, Mapping)
-            or len([key for key in ("endpoint_id", "account_id") if to.get(key)]) != 1
-        ):
-            raise ValueError(
-                "every send names `to` as exactly one of {endpoint_id} or {account_id} "
-                "(§6.2) — thread_id never stands alone"
-            )
+        # Share the tool's pre-outbox guard: direct callers and recovered intents
+        # must not silently lose unknown recipient fields at serialization either.
+        recipient = validate_send_recipient(to)
         ref = _require_client_ref(client_ref)
         normalized = _require_send_text(type, text)
         thread = str(thread_id or "").strip()
         body: dict[str, Any] = {
-            "to": {key: str(to[key]) for key in ("endpoint_id", "account_id") if to.get(key)},
+            "to": recipient,
             "type": type,
             "body": {"text": normalized},
             "client_ref": ref,
@@ -1841,6 +1853,7 @@ class TeamBridgeClient:
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Create (or find, for a dm) a conversation. The body is the wire shape.
 
@@ -1859,17 +1872,33 @@ class TeamBridgeClient:
             payload["actor_endpoint_id"] = actor_endpoint_id
         if origin_session_id:
             payload["origin_session_id"] = origin_session_id
-        return await self._send("POST", "/messaging/conversations", body=payload, access=access)
+        return await self._send(
+            "POST",
+            "/messaging/conversations",
+            body=payload,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
 
     async def conversation_lifecycle(
-        self, conversation_id: str, action: str, *, access: OAuthAccess | None = None
+        self,
+        conversation_id: str,
+        action: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Archive or unarchive. ``action`` is the closed set ``archive|unarchive``."""
 
         if action not in ("archive", "unarchive"):
             raise ValueError("action must be 'archive' or 'unarchive'")
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/{action}", access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/{action}",
+            params={"tenant_id": tenant_id} if tenant_id else None,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_members(
@@ -1879,6 +1908,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Invite members (humans become invited; agents become invited until consent)."""
 
@@ -1886,18 +1916,30 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/members", body=body, access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/members",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_remove_member(
-        self, conversation_id: str, account_id: str, *, access: OAuthAccess | None = None
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Remove a human member. Owner-only; succession is the server's rule."""
 
         return await self._send(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/members/{account_id}",
+            params={"tenant_id": tenant_id} if tenant_id else None,
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_join(
@@ -1906,6 +1948,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Accept an invitation, or self-join a tenant-visible channel."""
 
@@ -1915,15 +1958,25 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/join",
             body=body,
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_leave(
-        self, conversation_id: str, *, access: OAuthAccess | None = None
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Leave. Re-entry requires a fresh invitation (the leave/re-add boundary)."""
 
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/leave", access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/leave",
+            params={"tenant_id": tenant_id} if tenant_id else None,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_consent(
@@ -1935,6 +1988,7 @@ class TeamBridgeClient:
         consent_version: str,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Accept or decline an AGENT invitation, as the agent's owner.
 
@@ -1951,6 +2005,7 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/members/{account_id}/consent",
             body=body,
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_messages(
@@ -1994,7 +2049,9 @@ class TeamBridgeClient:
         agent_label: str | None = None,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        thread_root_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Append one message. ``client_ref`` is required and idempotent.
 
@@ -2002,7 +2059,10 @@ class TeamBridgeClient:
         message with ``origin=agent`` and the member's display label. It
         refuses ``agent_label`` on this path (provenance is the member row, not
         a request field), so the two are never combined here. ``origin_session_id``
-        rides only as opaque provenance and is never logged.
+        rides only as opaque provenance and is never logged. ``thread_root_id``
+        makes the send a reply in that root message's thread; the server validates
+        it (same conversation, root not itself a reply) and the key is omitted
+        when unset so an older server never sees an unknown field.
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
@@ -2014,8 +2074,48 @@ class TeamBridgeClient:
             body["actor_endpoint_id"] = actor_endpoint_id
         if origin_session_id:
             body["origin_session_id"] = origin_session_id
+        if thread_root_id:
+            body["thread_root_id"] = thread_root_id
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/messages", body=body, access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/messages",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def conversation_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        after_seq: int | None = None,
+        endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+
+        Same membership gate and body rule as history: for an agent member a
+        reply's body is present only after that endpoint admitted it, so a
+        thread is never a side door around screening.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        if endpoint_id:
+            params["endpoint_id"] = endpoint_id
+        return await self._send(
+            "GET",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}/replies",
+            params=params or None,
+            access=access,
         )
 
     async def conversation_body(
@@ -2051,6 +2151,7 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Record the screening verdict. ``reject`` is terminal."""
 
@@ -2064,7 +2165,46 @@ class TeamBridgeClient:
             params=params,
             body=body,
             access=access,
+            expected_account_id=expected_account_id,
         )
+
+    async def conversation_react(
+        self,
+        conversation_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        active: bool,
+        tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Set (``active=True`` -> PUT) or clear (DELETE) one emoji reaction.
+
+        Both verbs are idempotent on the hub and answer the message's full
+        reaction summary for the caller, ``{"message_id", "reactions": [...]}``.
+        The emoji is a path segment, so it is percent-encoded with NO safe
+        characters: an emoji is never allowed to contribute a ``/`` or ``?`` to
+        the upstream path. The hub alone decides whether it is one RGI emoji.
+
+        ``actor_endpoint_id`` reacts AS that agent member (the hub requires an
+        ``allow`` admission for the message first). It rides in the body for
+        PUT and in the query for DELETE, because a DELETE body is not reliably
+        forwarded by every proxy between here and the hub.
+        """
+
+        path = (
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}"
+            f"/reactions/{urllib.parse.quote(emoji, safe='')}"
+        )
+        fields: dict[str, Any] = {}
+        if tenant_id:
+            fields["tenant_id"] = tenant_id
+        if actor_endpoint_id:
+            fields["actor_endpoint_id"] = actor_endpoint_id
+        if active:
+            return await self._send("PUT", path, body=fields, access=access)
+        return await self._send("DELETE", path, params=fields or None, access=access)
 
     async def conversation_read(
         self,
@@ -2075,6 +2215,7 @@ class TeamBridgeClient:
         notify: Literal["all", "mention", "mute"] | None = None,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Advance the cursor and/or set the notification policy."""
 
@@ -2088,7 +2229,11 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/read", body=body, access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/read",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation_notify(
@@ -2098,6 +2243,7 @@ class TeamBridgeClient:
         notify: Literal["all", "mention", "mute"],
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Set the caller's own notification policy (§10.1).
 
@@ -2114,7 +2260,11 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/read", body=body, access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/read",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def unread(
@@ -2342,6 +2492,9 @@ class _AccountState:
     last_attempt: float
     check: StatusCheck
     texts: AcceptedTexts
+    # A read started before an edit cannot satisfy that edit, even if its
+    # response finishes afterwards. Ordinary reads still obey the TTL alone.
+    identity_revision: int = 0
 
 
 def _api_supported(payload: Mapping[str, Any]) -> bool:
@@ -2492,11 +2645,13 @@ class StatusDiscipline:
     Rules, from §5.1 and enforced here structurally:
 
     * read only when SIGNED IN — a signed-out account produces no traffic;
-    * read only at :class:`Boundary` points (the only public entry point);
+    * ordinary reads only at :class:`Boundary` points; successful effective UI
+      identity edits have the narrow ``reconcile_identity_mutation`` exception;
     * coalesce per account across sessions (one shared read under a per-account
       lock, the process-wide instance served by :func:`get_status_discipline`);
-    * cache the answer for at least :data:`STATUS_CACHE_TTL_S` (failures for
-      :data:`STATUS_ERROR_TTL_S`, and never AS success);
+    * cache ordinary answers for at least :data:`STATUS_CACHE_TTL_S` (failures
+      for :data:`STATUS_ERROR_TTL_S`, and never AS success); mutation revisions
+      bypass that floor only until a read started at/after the explicit edit;
     * NEVER a background poll loop — no task or timer exists in this module, and
       nothing here runs while nobody asks.
     """
@@ -2515,6 +2670,7 @@ class StatusDiscipline:
         )
         self._states: dict[str, _AccountState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._identity_revision = 0
         #: ``endpoint_id -> agent_name`` this process last re-sent SUCCESSFULLY.
         #: The debounce for :meth:`_sync_agent_name`: a hub that lags its own
         #: echo is not re-PUT on every fresh read. Recorded only after a 2xx
@@ -2552,7 +2708,31 @@ class StatusDiscipline:
         so a timeout must not blank a surface the user can still reach.
         """
 
-        check = await self._check(boundary)
+        return self._observe(await self._check(boundary))
+
+    async def reconcile_identity_mutation(self) -> StatusCheck:
+        """Reconcile a persisted, effective UI identity edit without waiting 300s.
+
+        Only the explicit desktop PATCH/reset orchestration calls this, after
+        comparing canonical identity before/after persistence. It is NOT a
+        general force-refresh flag on the status read API. Revisions are sampled
+        before a read's first await, so concurrent queued edits share the latest
+        read while an edit arriving during an older read cannot be lost. The
+        existing per-account lock, transport/auth fences and publisher guards
+        still apply; no owner receipt or consent can be created by this path.
+
+        The caller bounds the wait and reports local persistence honestly. The
+        returned payload remains the actual pre-PUT status answer, not an echo
+        invented from the desired name or an extra confirmation GET.
+        """
+
+        self._identity_revision += 1
+        revision = self._identity_revision
+        return self._observe(await self._check(Boundary.SURFACE_OPEN, identity_revision=revision))
+
+    def _observe(self, check: StatusCheck) -> StatusCheck:
+        """Record visibility identically for ordinary and explicit mutation reads."""
+
         projection = surface_projection(check)
         if projection["surface_state"] is not None or check.state == STATE_SIGNED_OUT:
             # The record carries the POSTURE, not just visibility: the two
@@ -2569,7 +2749,7 @@ class StatusDiscipline:
             )
         return check
 
-    async def _check(self, boundary: Boundary | str) -> StatusCheck:
+    async def _check(self, boundary: Boundary | str, *, identity_revision: int = 0) -> StatusCheck:
         """The cached-or-fresh read behind :meth:`check`."""
 
         boundary = Boundary.parse(boundary)
@@ -2603,17 +2783,26 @@ class StatusDiscipline:
             )
         key = access.account_id or f"credential:{access.credential_id}"
         state = self._states.get(key)
-        if state is not None and now - state.last_attempt < self._ttl(state):
+        if (
+            state is not None
+            and state.identity_revision >= identity_revision
+            and now - state.last_attempt < self._ttl(state)
+        ):
             return self._cached(state, boundary)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             # Re-check under the lock: a sibling that arrived first already read.
             state = self._states.get(key)
-            if state is not None and time.monotonic() - state.last_attempt < self._ttl(state):
+            if (
+                state is not None
+                and state.identity_revision >= identity_revision
+                and time.monotonic() - state.last_attempt < self._ttl(state)
+            ):
                 return self._cached(state, boundary)
             return await self._read(key, boundary, access)
 
     async def _read(self, key: str, boundary: Boundary, access: OAuthAccess) -> StatusCheck:
+        revision = self._identity_revision
         prior = self._states.get(key)
         texts = prior.texts if prior is not None else AcceptedTexts()
         try:
@@ -2649,13 +2838,18 @@ class StatusDiscipline:
                 texts=texts.snapshot(),
             )
             self._states[key] = _AccountState(
-                last_attempt=time.monotonic(), check=check, texts=texts
+                last_attempt=time.monotonic(),
+                check=check,
+                texts=texts,
+                identity_revision=revision,
             )
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
         check = self._sync_local_designation(check)
         await self._sync_agent_name(check, access)
-        self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
+        self._states[key] = _AccountState(
+            last_attempt=time.monotonic(), check=check, texts=texts, identity_revision=revision
+        )
         return check
 
     def _payload_check(
@@ -2768,6 +2962,9 @@ class StatusDiscipline:
         the existing, already-rate-limited boundary (§5.1: boundaries only,
         ≥ :data:`STATUS_CACHE_TTL_S` apart, coalesced per account), so this
         runs only on a FRESH read — never from the cache, never on a timer.
+        A successful effective desktop identity edit may explicitly request that
+        fresh read early via ``reconcile_identity_mutation``; other writers keep
+        the ordinary cache floor. This does not expand any publishing guard.
 
         WHY SO GUARDED. ``PUT /messaging/settings`` is a state ASSERTION with
         no precondition field: a re-sync must send ``state=active``, and if the
@@ -2839,7 +3036,10 @@ class StatusDiscipline:
                 endpoint=endpoint,
                 expected_account_id=access.account_id,
             )
-        except Exception:  # noqa: BLE001 - a display name never fails a status read
+        except Exception as exc:  # noqa: BLE001 - a display name never fails a status read
+            # Do not log exception prose/tracebacks: transport errors can carry
+            # private URLs, credentials or the name. Keep failures diagnosable.
+            logger.warning("team_bridge: name synchronization deferred (%s)", type(exc).__name__)
             return
         self._agent_name_sent[endpoint_id] = wanted
 

@@ -80,6 +80,7 @@ class RecordingClient:
         }
         self.sent_result = sent or {"message": {"id": "cmsg_1", "seq": 4}}
         self.messages_result = messages or {"messages": []}
+        self.replies_result: dict[str, Any] = {"root": {}, "replies": [], "has_more": False}
         self.calls: list[dict[str, Any]] = []
 
     async def conversations(self, **kwargs: Any) -> dict[str, Any]:
@@ -113,6 +114,7 @@ class RecordingClient:
         agent_label: str | None = None,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        thread_root_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -124,9 +126,45 @@ class RecordingClient:
                 "agent_label": agent_label,
                 "actor_endpoint_id": actor_endpoint_id,
                 "origin_session_id": origin_session_id,
+                "thread_root_id": thread_root_id,
             }
         )
         return self.sent_result
+
+    async def conversation_react(self, conversation_id, message_id, emoji, **kwargs):
+        self.calls.append(
+            {
+                "method": "conversation_react",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "emoji": emoji,
+                **kwargs,
+            }
+        )
+        return {"message_id": message_id, "reactions": []}
+
+    async def conversation_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        after_seq: int | None = None,
+        endpoint_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "method": "conversation_replies",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "tenant_id": tenant_id,
+                "limit": limit,
+                "after_seq": after_seq,
+                "endpoint_id": endpoint_id,
+            }
+        )
+        return self.replies_result
 
     async def conversation_messages(
         self,
@@ -472,3 +510,247 @@ async def test_a_whitespace_human_endpoint_is_absent_not_wired() -> None:
     members = client.calls[0]["body"]["members"]
     human = next(member for member in members if member["account_id"] == "acc_2")
     assert "endpoint_id" not in human
+
+
+@pytest.mark.asyncio
+async def test_react_is_an_agent_write_with_runtime_identity():
+    client = RecordingClient()
+    runtime = _runtime(client)
+    result = await execute_bridge(
+        runtime,
+        {
+            "op": "react",
+            "channel_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "✅",
+        },
+    )
+    assert result["ok"] is True
+    assert BRIDGE_UNTRUSTED_CLAUSE in result["content"]
+    assert client.calls == [
+        {
+            "method": "conversation_react",
+            "conversation_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "✅",
+            "active": True,
+            "tenant_id": TENANT,
+            "actor_endpoint_id": "bep_1",
+        }
+    ]
+    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    assert tool is not None
+    assert tool.call_approval_tier is not None
+    assert tool.call_approval_tier({"op": "react"}) == "write"
+    result = await execute_bridge(
+        runtime,
+        {
+            "op": "react",
+            "channel_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "✅",
+            "remove": True,
+        },
+    )
+    assert result["ok"] is True
+    assert client.calls[-1]["active"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_id,emoji", [("../other", "✅"), ("bcmsg_abcd1234", "😀" * 33)])
+async def test_react_bad_args_never_dispatch(message_id, emoji):
+    client = RecordingClient()
+    result = await execute_bridge(
+        _runtime(client),
+        {"op": "react", "channel_id": "bcv_abcd1234", "message_id": message_id, "emoji": emoji},
+    )
+    assert result["ok"] is False
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_react_paused_admission_refuses_before_write(monkeypatch):
+    client = RecordingClient()
+    reads = []
+
+    def refuse(runtime, *, is_read=False):
+        reads.append(is_read)
+        return {"code": "bridge_paused", "error": "paused"}
+
+    monkeypatch.setattr(host_mod, "admission_refusal", refuse)
+    monkeypatch.setattr(host_mod, "admit_soon", lambda runtime: None)
+    result = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "react",
+            "channel_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "✅",
+        },
+    )
+    assert result["code"] == "bridge_paused"
+    assert reads == [False], "react never uses the read-shaped admission exception"
+    assert client.calls == []
+
+
+# -- threads (agent-server feat/bridge-threads) --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_post_with_a_thread_root_replies_in_that_thread() -> None:
+    """An agent coordinates IN a thread (e.g. a QA-claim thread in #agents):
+    the root id rides to the client as ``thread_root_id``, identity stays
+    runtime-owned, and the confirmation names the thread."""
+
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "channel_post",
+            "channel_id": "bcv_abcd1234",
+            "body": "claiming QA-1426",
+            "thread_root_id": "bcmsg_root0001",
+        },
+    )
+    assert outcome["ok"] is True
+    assert "reply in thread bcmsg_root0001" in outcome["content"]
+    (call,) = client.calls
+    assert call["thread_root_id"] == "bcmsg_root0001"
+    assert call["actor_endpoint_id"] == "bep_1"
+    assert call["origin_session_id"] == "sess_1"
+
+
+@pytest.mark.asyncio
+async def test_channel_post_without_a_thread_root_stays_channel_level() -> None:
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _runtime(client), {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hi"}
+    )
+    assert outcome["ok"] is True
+    assert client.calls[0]["thread_root_id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root", ["x", "bcmsg_../../x", "bcmsg_abcd1234/replies", "bcv_abcd1234"])
+async def test_a_malformed_thread_root_never_reaches_the_client(root: str) -> None:
+    """The root id is interpolated into the replies path; the bcmsg_ grammar gates it."""
+
+    for args in (
+        {"op": "channel_post", "body": "hi", "thread_root_id": root},
+        {"op": "channel_thread", "thread_root_id": root},
+    ):
+        client = RecordingClient()
+        outcome = await execute_bridge(_runtime(client), {"channel_id": "bcv_abcd1234", **args})
+        assert outcome["ok"] is False and outcome["code"] == "invalid_request", args
+        assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_channel_thread_reads_as_the_agent_endpoint_untrusted_wrapped() -> None:
+    client = RecordingClient()
+    client.replies_result = {
+        "root": {"id": "bcmsg_root0001", "seq": 3, "reply_count": 1, "body": None},
+        "replies": [{"id": "bcmsg_rep00001", "seq": 4, "body": None}],
+        "has_more": False,
+    }
+    outcome = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "channel_thread",
+            "channel_id": "bcv_abcd1234",
+            "thread_root_id": "bcmsg_root0001",
+            "limit": 10,
+            "after_seq": 4,
+        },
+    )
+    assert outcome["ok"] is True
+    assert outcome["content"].startswith(BRIDGE_UNTRUSTED_CLAUSE)
+    assert client.calls == [
+        {
+            "method": "conversation_replies",
+            "conversation_id": "bcv_abcd1234",
+            "message_id": "bcmsg_root0001",
+            "tenant_id": TENANT,
+            "limit": 10,
+            "after_seq": 4,
+            "endpoint_id": "bep_1",
+        }
+    ]
+    page = json.loads(outcome["content"][len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])
+    assert page["replies"][0]["body"] is None
+
+
+@pytest.mark.asyncio
+async def test_channel_thread_refuses_a_before_cursor() -> None:
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "channel_thread",
+            "channel_id": "bcv_abcd1234",
+            "thread_root_id": "bcmsg_root0001",
+            "before_seq": 9,
+        },
+    )
+    assert outcome["ok"] is False and outcome["code"] == "invalid_request"
+    assert client.calls == []
+
+
+def test_channel_thread_is_a_read_tier_op() -> None:
+    tool = build_bridge_tool(ToolContext(bridge_runtime=_runtime(RecordingClient())))
+    assert tool is not None
+    assert tool.call_approval_tier is not None
+    assert tool.call_approval_tier({"op": "channel_thread"}) == "read"
+    assert tool.call_approval_tier({"op": "channel_post"}) == "write"
+
+
+@pytest.mark.asyncio
+async def test_thread_ops_reach_the_hub_with_the_exact_upstream_shape() -> None:
+    """The real client against a mock transport: the reply carries
+    ``thread_root_id`` in the body, the thread read hits the replies path with
+    the agent's endpoint, and a channel-level post sends no thread key at all
+    (an older hub never sees an unknown field)."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return _ok({"root": {"id": "bcmsg_root0001", "reply_count": 1}, "replies": []})
+        return _ok({"message": {"id": "bcmsg_reply001", "seq": 2}})
+
+    runtime = _runtime(
+        TeamBridgeClient(
+            None,
+            base_url="https://hub.example/v1",
+            store=FakeStore(),
+            transport=httpx.MockTransport(handler),
+        )
+    )
+    await execute_bridge(
+        runtime,
+        {
+            "op": "channel_post",
+            "channel_id": "bcv_abcd1234",
+            "body": "claimed",
+            "thread_root_id": "bcmsg_root0001",
+        },
+    )
+    await execute_bridge(
+        runtime, {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "top level"}
+    )
+    read = await execute_bridge(
+        runtime,
+        {"op": "channel_thread", "channel_id": "bcv_abcd1234", "thread_root_id": "bcmsg_root0001"},
+    )
+    assert read["ok"] is True
+    reply_body = json.loads(requests[0].content)
+    assert requests[0].url.path == "/v1/messaging/conversations/bcv_abcd1234/messages"
+    assert reply_body["thread_root_id"] == "bcmsg_root0001"
+    assert "thread_root_id" not in json.loads(requests[1].content)
+    assert (
+        requests[2].url.path
+        == "/v1/messaging/conversations/bcv_abcd1234/messages/bcmsg_root0001/replies"
+    )
+    assert requests[2].url.params["endpoint_id"] == "bep_1"
+    assert requests[2].url.params["tenant_id"] == TENANT

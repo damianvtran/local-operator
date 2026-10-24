@@ -47,7 +47,13 @@ from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
-from local_operator.harness.types import ImageContent, Message, ModelSpec, TextContent
+from local_operator.harness.types import (
+    DocumentContent,
+    ImageContent,
+    Message,
+    ModelSpec,
+    TextContent,
+)
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from .mine import (
@@ -520,13 +526,24 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def _content_text(message: Message) -> str:
-    """Joined text content; image blocks become ``[image]`` placeholders."""
+    """Joined text content; image and document blocks become placeholders.
+
+    A document has no text representation here — extracting a PDF inside the
+    archive writer would parse every attachment on every pass — so it becomes
+    a NAMED placeholder instead of vanishing. The durable reference (filename,
+    path, digest) survives independently in the compaction manifest (contract
+    amendment 5), which is what keeps a file usable after the pass; this
+    placeholder only stops the summary source from reading as if the user sent
+    nothing.
+    """
     parts: list[str] = []
     for block in message.content:
         if isinstance(block, TextContent):
             parts.append(block.text)
         elif isinstance(block, ImageContent):
             parts.append("[image]")
+        elif isinstance(block, DocumentContent):
+            parts.append(f"[document: {block.filename}]")
     return "".join(parts)
 
 

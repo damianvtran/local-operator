@@ -299,7 +299,8 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
                 if approval:
                     await _pump(pilot, lambda: app._approval is not None)
                     await _capture(app, pilot, f"returned-approval-{size[0]}")
-                    app._answer_live_approval_as_allowed()
+                    if app._approval is not None:
+                        app._approval.resolve(True, answer="y")
                     await asyncio.wait_for(entered.wait(), 20)
                 release.set()
                 await asyncio.wait_for(finished.wait(), 20)

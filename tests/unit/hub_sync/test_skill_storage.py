@@ -1,6 +1,8 @@
 """Narrow journal/owned-reader guards; not engine or remote publication coverage."""
 
+import os
 import shutil
+import stat
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -101,12 +103,123 @@ def test_managed_commit_is_complete_inert_and_protocol_readable(tmp_path: Path) 
     assert stored is not None and stored.identity == identity
     script = storage.path(document.name) / "scripts/inert.py"
     assert script.read_text() == "raise RuntimeError('never run')\n"
+    # A FRESH INSTALL has no local predecessor, so the default mode applies and
+    # remote content stays inert. The preservation rule below can keep an
+    # operator's local exec bit; it can never make a newly arrived file executable.
     assert script.stat().st_mode & 0o111 == 0
+    assert stat.S_IMODE(script.stat().st_mode) == 0o644
     resources, _ = discover_skills([storage.root], config_dir=storage.config_dir)
     resource = next(row for row in resources if row.name == document.name)
     assert resource.managed_config_dir == storage.config_dir
     resolved = resolve_skill_url("skill://example-skill", {resource.name: resource})
     assert resolved is not None and "# Body" in resolved
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def _apply_changed(storage: ManagedSkillStorage, identity: LinkIdentity, before: SkillDocument):
+    """A merge-pull that restages the whole tree; ``before`` is its precondition."""
+
+    _, changed, next_baseline = _input("# New body\n")
+    storage.apply(
+        identity,
+        changed.name,
+        changed,
+        next_baseline,
+        expected_fingerprint=before.fingerprint,
+    )
+    return changed
+
+
+def test_a_plain_file_with_no_local_predecessor_lands_0644(tmp_path: Path) -> None:
+    """The default is owner-read/write and group/other READ only -- never broader."""
+
+    identity, document, baseline = _input()
+    storage = ManagedSkillStorage(tmp_path / "profile")
+    storage.apply(identity, document.name, document, baseline, expected_fingerprint=None)
+    assert _mode(storage.path(document.name) / "SKILL.md") == 0o644
+    assert _mode(storage.path(document.name) / "scripts/inert.py") == 0o644
+
+
+def test_an_executable_script_keeps_its_exec_bits_across_a_pull(tmp_path: Path) -> None:
+    """Executability is a LOCAL fact: harness roots are symlinked at these files.
+
+    The whole directory is restaged and renamed on every pull, so a constant file
+    mode would silently revert a deliberate ``chmod +x`` on each sync. The mode is
+    read from the file this stage replaces, which makes the operator's choice
+    survive.
+    """
+
+    identity, document, baseline = _input()
+    storage = ManagedSkillStorage(tmp_path / "profile")
+    storage.apply(identity, document.name, document, baseline, expected_fingerprint=None)
+    script = storage.path(document.name) / "scripts/inert.py"
+    script.chmod(0o755)
+
+    changed = _apply_changed(storage, identity, document)
+
+    assert _mode(script) == 0o755
+    assert storage.snapshot(identity.local_id).document == changed
+
+
+def test_group_and_other_write_bits_are_stripped_from_the_source_mode(tmp_path: Path) -> None:
+    """``0666`` is a checkout's umask accident, not consent for others to write."""
+
+    identity, document, baseline = _input()
+    storage = ManagedSkillStorage(tmp_path / "profile")
+    storage.apply(identity, document.name, document, baseline, expected_fingerprint=None)
+    script = storage.path(document.name) / "scripts/inert.py"
+    script.chmod(0o666)
+
+    _apply_changed(storage, identity, document)
+
+    assert _mode(script) == 0o644
+
+
+@pytest.mark.parametrize(
+    "source_mode, expected",
+    [
+        (0o100755, 0o755),
+        (0o100644, 0o644),
+        (0o100666, 0o644),
+        (0o100600, 0o600),
+        (0o100400, 0o400),
+        (0o104755, 0o755),
+        (0o102755, 0o755),
+        (0o101755, 0o755),
+        (0o104666, 0o644),
+    ],
+)
+def test_only_permission_bits_survive_sanitisation(source_mode: int, expected: int) -> None:
+    """Setuid, setgid and sticky never travel; group/other write is stripped.
+
+    macOS/APFS silently clears those special bits on a user-owned regular file
+    (measured: ``chmod 4755`` reads back ``0755``), so the end-to-end fixture cannot
+    carry them; the mask is pinned on the synthetic ``st_mode`` values a Linux
+    checkout does produce. The end-to-end executable and ``0666`` cases exercise
+    the same production helper.
+    """
+
+    assert skill_storage._sanitise_staged_mode(source_mode) == expected
+
+
+def test_staged_directories_stay_private_0700(tmp_path: Path) -> None:
+    """The DIRECTORY is the privacy boundary; only the owner may traverse it."""
+
+    previous = os.umask(0o022)
+    try:
+        identity, document, baseline = _input()
+        storage = ManagedSkillStorage(tmp_path / "profile")
+        storage.apply(identity, document.name, document, baseline, expected_fingerprint=None)
+    finally:
+        os.umask(previous)
+
+    alias = storage.path(document.name)
+    assert _mode(storage.root) == 0o700
+    assert _mode(alias) == 0o700
+    assert _mode(alias / "scripts") == 0o700
 
 
 def test_crash_gap_restores_only_verified_original_backup(tmp_path: Path) -> None:

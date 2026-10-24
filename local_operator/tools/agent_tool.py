@@ -127,7 +127,16 @@ class AgentParams(BaseModel):
     # and `read tool://agent` renders the same blurbs on demand. The enum
     # literals stay, so the op set is still learnable from the wire.
     op: Literal[
-        "list", "show", "search", "install", "reset", "create", "update", "sync", "delete"
+        "list",
+        "show",
+        "search",
+        "install",
+        "reset",
+        "create",
+        "update",
+        "sync",
+        "delete",
+        "promote",
     ] = Field(description="The op to run.")
     # The no-spaces guidance is a modularity contract, not registry law: the
     # registry itself accepts any string, but a role/specialist name is also a
@@ -265,6 +274,23 @@ class AgentParams(BaseModel):
         description=(
             "'session' (default) is this conversation only; 'global' is the "
             "user's account and needs their confirmation."
+        ),
+    )
+    # ``as`` is a Python keyword, so the field carrying the design's ``[as=Y]`` is
+    # spelled ``as_name`` on the wire too: one spelling everywhere beats a wire
+    # name this module then has to translate.
+    as_name: str | None = Field(
+        default=None, description="promote: copy it under this name (default: its own)."
+    )
+    # ONE field, not ``replace`` + ``confirm_replace``: on this op the flag IS the
+    # confirmation (the desktop body and the TUI's typed ``yes`` carry the same
+    # answer), so a model cannot ask to overwrite and then omit the part that made
+    # it the user's decision.
+    confirm_replace: bool = Field(
+        default=False,
+        description=(
+            "promote: replace the account's row of that name instead of refusing. "
+            "This IS the user's confirmation — set it only when they asked."
         ),
     )
     # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not
@@ -1994,6 +2020,79 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
     )
 
 
+async def _op_promote(
+    context: ToolContext | None, tool_call_id: str, params: AgentParams
+) -> ToolResult:
+    """Copy a CONVERSATION role into the account — refused without the user's grant.
+
+    The design's rule (§3.4/§3.7) is that a durable copy is the USER's decision:
+    the model may recognise the need and propose it, but only a surface with the
+    user in front of it can authorise it. So this op asks the consent seam and,
+    with no host producer installed (today's state), REFUSES with a remedy that
+    names those surfaces — it never falls back to writing the account itself.
+
+    ``confirm_replace`` is the replace switch as well as the user's answer: an
+    overwrite is legal only when the caller claims the user asked for it, and the
+    description says so where the model reads it. A model cannot manufacture the
+    answer, and the collision refusal names the question to put to the user.
+    """
+
+    from local_operator.profile_scope import (
+        PromotionIncomplete,
+        durable_write_decision,
+        durable_write_refusal,
+        promote_missing,
+    )
+
+    registry = _registry(context)
+    if registry is None or getattr(registry, "session_registry", None) is None:
+        return _error(
+            tool_call_id,
+            "agent",
+            "this run has no conversation store, so there is no conversation-scoped role "
+            "to promote. The user can author one on their own surface instead.",
+        )
+    name = str(params.name or "").strip()
+    intent = DurableWriteIntent(kind="agent", operation="promote", name=name)
+    authorized_by, reason = await durable_write_decision(context, intent)
+    if authorized_by is None:
+        return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
+    try:
+        result = await asyncio.to_thread(
+            lambda: registry.promote(
+                name,
+                as_name=params.as_name,
+                replace=params.confirm_replace,
+                authorized_by=authorized_by,
+            )
+        )
+    except KeyError:
+        return _error(tool_call_id, "agent", promote_missing("agent", name))
+    except PromotionIncomplete as error:
+        return _error(tool_call_id, "agent", str(error))
+    except ValueError as error:
+        return _error(tool_call_id, "agent", str(error))
+    target = str(params.as_name or name)
+    extra = ""
+    if result.replaced:
+        extra = f" It overwrote the account's existing {', '.join(result.replaced)}."
+    return _text(
+        tool_call_id,
+        "agent",
+        f"copied {identifier_text(context, repr(target))} to your account{extra}. Every "
+        "other conversation can use it and this one keeps its own copy.",
+        details={
+            "name": target,
+            "scope": "global",
+            "authorized_by": authorized_by,
+            "created": result.created,
+            "expanded": result.expanded,
+            "replaced": result.replaced,
+            "provenance_ids": result.provenance_ids,
+        },
+    )
+
+
 @_guard("agent")
 async def execute_agent(
     tool_call_id: str,
@@ -2019,7 +2118,7 @@ async def execute_agent(
         return _validation_error(tool_call_id, "agent", exc)
 
     if (
-        params.op in {"show", "install", "reset", "create", "update", "delete"}
+        params.op in {"show", "install", "reset", "create", "update", "delete", "promote"}
         and not (params.name or "").strip()
     ):
         return _error(tool_call_id, "agent", f"op={params.op!r} needs 'name'.")
@@ -2038,6 +2137,8 @@ async def execute_agent(
         return await _op_reset(context, tool_call_id, str(params.name), scope=params.scope)
     if params.op == "delete":
         return await _op_delete(context, tool_call_id, str(params.name))
+    if params.op == "promote":
+        return await _op_promote(context, tool_call_id, params)
     if params.op == "sync":
         return await _op_sync(
             context, tool_call_id, str(params.name) if params.name else None, params.resolve or None

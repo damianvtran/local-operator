@@ -2896,20 +2896,22 @@ def test_the_cli_sanity_job_keeps_its_named_script_input() -> None:
 def test_the_windows_input_set_covers_what_that_job_loads() -> None:
     """R3. The Windows job loads more than the test files it names.
 
-    Its pytest run imports the `conftest.py` chain, and the root conftest does
-    `from tests import shard_stall_watchdog` at module scope; pytest also imports
+    Its pytest run imports the `conftest.py` chain, and the root conftest
+    imports the shard-side test helpers at module scope; pytest also imports
     the `__init__.py` markers for the selected modules. A change to any of
     them can change that job's behaviour without touching a file it lists, which
     is the "flag narrower than the guard's real input" pattern this classifier
     exists to avoid.
 
-    Mutation that must fail this: drop `tests/shard_stall_watchdog.py` from
-    `WINDOWS_LOADED_PATHS`.
+    Mutation that must fail this: drop either shard-side helper from
+    `WINDOWS_LOADED_PATHS`, or drop its import from the root conftest without
+    revisiting this case.
     """
     scope = _scope()
     loaded = (
         "conftest.py",
         "tests/conftest.py",
+        "tests/shard_memory_dump.py",
         "tests/shard_stall_watchdog.py",
         "tests/__init__.py",
         "tests/unit/__init__.py",
@@ -2927,10 +2929,11 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
         "tests/unit/network/test_relay_e2e.py",
     )
     conftest = (REPO / "conftest.py").read_text()
-    assert "from tests import shard_stall_watchdog" in conftest, (
-        "the root conftest no longer imports the watchdog; WINDOWS_LOADED_PATHS "
-        "can drop that name, and this assertion is why it must be revisited"
-    )
+    for helper in ("shard_memory_dump", "shard_stall_watchdog"):
+        assert helper in conftest, (
+            f"the root conftest no longer imports {helper}; WINDOWS_LOADED_PATHS "
+            "can drop that name, and this assertion is why it must be revisited"
+        )
     for path in loaded:
         assert (REPO / path).is_file(), f"{path} is gone; this case is stale"
         assert scope.classify([path])["windows"] is True, (

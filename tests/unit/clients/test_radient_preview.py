@@ -1,11 +1,13 @@
 """Radient client: the publish-preview protocol and the public team reads (p2p3 §4/§7.4).
 
 What these pin: the four preview calls' SHAPE (envelope with ``preview_version``,
-the target query params, the 60 s timeout, no redirects), the commit kwargs that
-ride on the three publish methods (``preview_token`` header,
-``accept_unresolved`` ids, ``moderation_allowance`` param), that with all three
-at their defaults the request is byte-identical to what the methods sent before
-the parameters existed, and the two public reads the CLI's new arms use.
+the target query params, the resolved preview budget, no redirects), the budget's
+resolution (default, override, floor, typo), the timeout error naming the setting and
+the budget it exceeded, the commit kwargs that ride on the three publish methods
+(``preview_token`` header, ``accept_unresolved`` ids, ``moderation_allowance`` param),
+that with all three at their defaults the request is byte-identical to what the
+methods sent before the parameters existed, and the two public reads the CLI's new
+arms use.
 
 Refusals keep their machine-readable half (``code``/``details``), because the
 CLI renders a different next step for ``preview_expired`` than for
@@ -26,11 +28,21 @@ from local_operator.clients._http import APIError
 from local_operator.clients.radient import (
     PREVIEW_ACCEPT_HEADER,
     PREVIEW_ENVELOPE_VERSION,
-    PREVIEW_TIMEOUT_SECONDS,
+    PREVIEW_TIMEOUT_DEFAULT_SECONDS,
+    PREVIEW_TIMEOUT_ENV,
+    PREVIEW_TIMEOUT_FLOOR_SECONDS,
     PREVIEW_TOKEN_HEADER,
     RadientClient,
     build_instruction_set_document,
+    preview_timeout_error,
+    resolve_preview_timeout_seconds,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_preview_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A developer's own export must never decide what these tests measure."""
+    monkeypatch.delenv(PREVIEW_TIMEOUT_ENV, raising=False)
 
 
 @pytest.fixture
@@ -86,7 +98,7 @@ def test_preview_publish_agent_wraps_the_document_in_the_envelope(
     assert args[1] == f"{base_url}/agents/publish/preview"
     assert kwargs["json"] == {"preview_version": PREVIEW_ENVELOPE_VERSION, "document": {"a": 1}}
     assert kwargs["params"] == {}
-    assert kwargs["timeout"] == PREVIEW_TIMEOUT_SECONDS
+    assert kwargs["timeout"] == PREVIEW_TIMEOUT_DEFAULT_SECONDS
     assert kwargs["allow_redirects"] is False
 
 
@@ -127,6 +139,99 @@ def test_preview_team_calls_use_the_team_target_rules(
     args, kwargs = mock_request.call_args
     assert (args[0], args[1]) == ("PUT", f"{base_url}/teams/hub-team-1/publish/preview")
     assert kwargs["params"] == {}
+
+
+def test_preview_timeout_defaults_to_a_multi_minute_budget() -> None:
+    """The default must outlast the transform, not just the 25 s attempt it priced."""
+    assert resolve_preview_timeout_seconds() == PREVIEW_TIMEOUT_DEFAULT_SECONDS
+    assert PREVIEW_TIMEOUT_DEFAULT_SECONDS > PREVIEW_TIMEOUT_FLOOR_SECONDS
+
+
+def test_preview_timeout_env_raises_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "900")
+    assert resolve_preview_timeout_seconds() == 900.0
+
+
+def test_preview_timeout_env_below_the_floor_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "5")
+    assert resolve_preview_timeout_seconds() == PREVIEW_TIMEOUT_FLOOR_SECONDS
+
+
+def test_preview_timeout_env_typo_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "5m")
+    assert resolve_preview_timeout_seconds() == PREVIEW_TIMEOUT_DEFAULT_SECONDS
+
+
+def test_preview_timeout_env_zero_and_negative_fall_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberately unlike ``resolve_mcp_timeout_s``: 0 does NOT mean "no timeout".
+
+    The MCP resolver reads 0 as "off" because an MCP server is a local transport the
+    operator can see. A preview is a PAID call to a remote hub: unbounded, it would hold
+    the caller's slot for as long as the transform runs, which is not a setting anyone
+    chooses on purpose -- it is a typo that would never fail. The divergence is pinned so
+    the next reader does not "fix" it back into the MCP shape.
+    """
+    for raw in ("0", "-5"):
+        monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, raw)
+        assert resolve_preview_timeout_seconds() == PREVIEW_TIMEOUT_DEFAULT_SECONDS
+
+
+def test_preview_request_carries_the_overridden_budget(
+    radient_client: RadientClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "1200")
+    with patch("requests.request", return_value=_envelope({})) as mock_request:
+        radient_client.preview_publish_team_document(dict(_TEAM_DOCUMENT), tenant_id="org-a")
+
+    _args, kwargs = mock_request.call_args
+    assert kwargs["timeout"] == 1200.0
+
+
+def test_preview_timeout_error_names_the_setting_and_the_budget(
+    radient_client: RadientClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure a timeout produces must be actionable, not the generic fallback."""
+    monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "400")
+    with patch("requests.request", side_effect=requests.exceptions.Timeout("timed out")):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.preview_publish_team_document(dict(_TEAM_DOCUMENT), tenant_id="org-a")
+
+    message = str(exc_info.value)
+    assert PREVIEW_TIMEOUT_ENV in message
+    assert "400 s" in message  # the budget actually used, not the fallback message
+    assert "800" in message  # a concrete next value to raise it to
+    assert "Could not preview" not in message
+    assert exc_info.value.code == "preview_timeout"
+    assert exc_info.value.status_code is None
+
+
+def test_preview_connect_timeout_keeps_the_generic_message(
+    radient_client: RadientClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ConnectTimeout`` subclasses ``Timeout`` but never reached the hub.
+
+    The budget cannot be what ran out when the connection was never made, so telling the
+    caller to raise it would send them to a knob that cannot help them.
+    """
+    monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "400")
+    with patch("requests.request", side_effect=requests.exceptions.ConnectTimeout("offline")):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.preview_publish_team_document(dict(_TEAM_DOCUMENT), tenant_id="org-a")
+
+    assert PREVIEW_TIMEOUT_ENV not in str(exc_info.value)
+    assert "Could not preview the team publication" in str(exc_info.value)
+    assert exc_info.value.status_code is None
+
+
+def test_preview_timeout_error_reports_the_floor_that_was_used() -> None:
+    """A clamped budget is reported as the floor, never as the value ignored."""
+    error = preview_timeout_error(PREVIEW_TIMEOUT_FLOOR_SECONDS)
+    assert f"{PREVIEW_TIMEOUT_FLOOR_SECONDS:g} s" in str(error)
+    assert PREVIEW_TIMEOUT_ENV in str(error)
 
 
 def test_preview_refusal_keeps_its_code_and_details(radient_client: RadientClient) -> None:

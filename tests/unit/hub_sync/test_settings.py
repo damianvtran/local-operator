@@ -18,16 +18,28 @@ def _cm(values: dict[str, Any]) -> Any:
     return SimpleNamespace(get_nested_value=nested)
 
 
-def test_defaults_are_on_and_hourly() -> None:
+def test_defaults_are_on_and_a_quarter_hour_apart() -> None:
     s = HubSyncSettings.from_config(_cm({}))
-    assert (s.auto_agents, s.auto_teams, s.interval_min, s.merge_model) == (True, True, 60, "")
+    assert (s.auto_agents, s.auto_teams, s.interval_min, s.merge_model) == (True, True, 15, "")
 
 
 def test_it_reads_the_nested_path_the_registry_writes() -> None:
     s = HubSyncSettings.from_config(
-        _cm({"hub": {"auto_update": {"agents": False, "teams": False}, "check_interval_min": 15}})
+        _cm({"hub": {"auto_update": {"agents": False, "teams": False}, "check_interval_min": 30}})
     )
-    assert (s.auto_agents, s.auto_teams, s.interval_min) == (False, False, 15)
+    assert (s.auto_agents, s.auto_teams, s.interval_min) == (False, False, 30)
+
+
+def test_an_explicit_interval_still_overrides_the_new_default() -> None:
+    """Lowering the default must not lower (or ignore) a value the user chose.
+
+    The value is deliberately different from BOTH the default and the clamp
+    bounds: a reader that fell back to the default, or one that clamped to a
+    bound, would pass with 15 or 5/1440 and fail here.
+    """
+
+    assert HubSyncSettings.from_config(_cm({"hub": {"check_interval_min": 30}})).interval_min == 30
+    assert HubSyncSettings.from_config(_cm({})).interval_min == DEFAULT_CHECK_INTERVAL_MIN == 15
 
 
 def test_a_dotted_literal_key_is_not_read() -> None:
@@ -47,7 +59,7 @@ def test_bad_types_fall_back_to_the_default_and_the_interval_is_clamped() -> Non
         == 1440
     )
     assert (
-        HubSyncSettings.from_config(_cm({"hub": {"check_interval_min": True}})).interval_min == 60
+        HubSyncSettings.from_config(_cm({"hub": {"check_interval_min": True}})).interval_min == 15
     )
 
 

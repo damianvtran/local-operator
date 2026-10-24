@@ -9,6 +9,7 @@ import { logs } from "./commands/logs";
 import { styles } from "./commands/styles";
 import { hitTest } from "./commands/hit-test";
 import { ancestors } from "./commands/ancestors";
+import { query } from "./commands/query";
 import { upload } from "./commands/upload";
 import { download } from "./commands/download";
 import { disabledCapabilities, hasConsentSwitch } from "./consent";
@@ -62,6 +63,9 @@ const HANDLERS: Record<
   styles,
   hit_test: hitTest,
   ancestors,
+  // The read-only DOM query: CSS in, element descriptors out. Served by both
+  // non-cmux hosts like the read actions above, and it never writes.
+  query,
   // Attach local files to a page's file input, and save a file the page offers.
   // BOTH are gated by the operator's own switches (`consent.ts`), which is why
   // this table is no longer the same thing as what gets advertised: `upload`

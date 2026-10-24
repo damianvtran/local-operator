@@ -41,14 +41,18 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Disclosure } from "./ui/disclosure";
 import { SupplementFrame } from "./supplement-frame";
+import { SoundPlayer, useWaveformPeaks } from "./sound-player";
 import {
 	getSupplementDocument,
 	getSupplementFile,
+	soundUrl,
+	soundWaveformUrl,
 	supplementCancel,
 	supplementRestart,
 	supplementSteer,
 } from "../api";
 import { refusalText } from "../lib/refusal";
+import { cn } from "../lib/cn";
 import {
 	COPY_ADJUST,
 	COPY_CANCEL,
@@ -72,6 +76,7 @@ import {
 	type SupplementBeat,
 	type SupplementComponent,
 	type SupplementFile,
+	type SupplementSound,
 } from "../lib/supplement";
 
 /**
@@ -89,6 +94,46 @@ const OP_LEAD = {
 	steer: "Could not adjust",
 	restart: "Could not retry",
 } as const;
+
+/**
+ * One sound in the block's grid: the beat's title, then THE shared mobile player.
+ *
+ * The peaks fetch is its own small request (`soundWaveformUrl` → the relay's
+ * digest-keyed sidecar route); a 404 is the honest no-waveform state and the
+ * player draws its flat scrubber from it. The title is drawn OUTSIDE the player
+ * so it does not wait for either request — the producer's own string is known
+ * when the beat arrives, and a name that appeared only after the bytes landed
+ * would reflow the row under the reader.
+ */
+const SoundSlot = memo(function SoundSlot({
+	sound,
+	sessionId,
+}: {
+	sound: SupplementSound;
+	sessionId: string;
+}) {
+	const peaks = useWaveformPeaks(soundWaveformUrl(sessionId, sound.attachment));
+	return (
+		<div className="flex min-w-0 flex-col gap-0.5" data-supplement-sound="">
+			{sound.title && (
+				<span
+					className="truncate text-meta text-ink-muted"
+					title={sound.title}
+					data-supplement-sound-title=""
+				>
+					{displayText(sound.title)}
+				</span>
+			)}
+			<SoundPlayer
+				variant="compact"
+				src={soundUrl(sessionId, sound.attachment)}
+				peaks={peaks}
+				label={sound.title || "Generated sound"}
+				durationHint={sound.durationS}
+			/>
+		</div>
+	);
+});
 
 export const SupplementBlock = memo(function SupplementBlock({
 	beat,
@@ -432,6 +477,33 @@ export const SupplementBlock = memo(function SupplementBlock({
 			</div>
 		) : null;
 
+	/*
+	 * The sounds, with the file callouts and OUTSIDE every disclosure. The rule
+	 * the operator stated is the one this placement encodes: collapse may hide
+	 * tool lines (`N more`), never the artifacts a reader can act on — a sound a
+	 * reader has to expand to discover is a sound the answer did not deliver.
+	 *
+	 * TWO COLUMNS when the beat carries more than one sound: a 14-item batch is
+	 * a list to scan, not fourteen full-width rows to scroll. A single sound
+	 * takes the column's whole width (one narrow player beside whitespace reads
+	 * as a broken grid), and very narrow phones fall back to one column because
+	 * two 44 px controls plus two clocks no longer fit a row.
+	 */
+	const soundsSection =
+		beat.sounds.length > 0 ? (
+			<div
+				className={cn(
+					"grid gap-2",
+					beat.sounds.length > 1 ? "grid-cols-2 max-[359px]:grid-cols-1" : "grid-cols-1",
+				)}
+				data-supplement-sounds={beat.sounds.length}
+			>
+				{beat.sounds.map((sound) => (
+					<SoundSlot key={sound.attachment} sound={sound} sessionId={sessionId} />
+				))}
+			</div>
+		) : null;
+
 	return (
 		<div
 			className="flex flex-col gap-1.5"
@@ -439,6 +511,7 @@ export const SupplementBlock = memo(function SupplementBlock({
 			data-supplement-record={beat.anchor}
 		>
 			{filesSection}
+			{soundsSection}
 			{stateLine}
 			{adjustLine}
 			{errorLine}

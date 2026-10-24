@@ -187,12 +187,15 @@ def _discard_failed_create(config_dir: Path, session_id: str) -> None:
     window this covers is between ``mkdir`` and the first append — nothing
     durable can be inside it), so it can never delete a real conversation.
     """
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.session.cleanup import remove_fresh_session_dir
 
     directory = _sessions_root(config_dir) / session_id
     try:
-        if not directory.is_dir() or (directory / TRANSCRIPT_NAME).exists():
+        # ``has_transcript`` for the reason Aida's copy states: a compressed
+        # session's conversation lives in the archive, not the plain name, and
+        # this guard exists to keep such a directory.
+        if not directory.is_dir() or compression.has_transcript(directory):
             return
         # Same audited primitive as Aida's: a ``failed-create`` receipt before
         # the removal, and a kept directory when the receipt cannot be written.
