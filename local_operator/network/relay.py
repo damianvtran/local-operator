@@ -2021,6 +2021,14 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
     That is raised as ``rename_partial`` naming both halves and the remedy; it is
     never reported as success, and it is never silently retried.
 
+    ONE PROCESS-LEVEL CONSEQUENCE, stated so it is not read as a bug: the running
+    relay's ``self.identity`` object is updated by the control handler that calls
+    this primitive, never here. A rename that lands through the CLI's LOCAL path
+    while a relay is running therefore leaves that process's in-memory name stale
+    until the command is retried through the relay (which updates it) or the relay
+    restarts; the file and the rows are already correct, and retrying is what fixes
+    the memory — that is also why the CLI tries the relay first.
+
     Callers hold no lock: the identity write is its own file, and each record is
     read and saved inside ``store.mutate`` so a live relay's writers are not
     reverted by a snapshot.
@@ -2108,7 +2116,9 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
         raise MeshRefusal(
             "rename_partial",
             f"the identity file now says {fresh!r}, but this device's member row was NOT "
-            f"updated in {', '.join(failed)}; retry when that relay is reachable — until "
+            f"updated in {', '.join(failed)}: the record store refused that write (its lock "
+            "or the file). The file already holds the new name, so retrying the command "
+            "once the store accepts writes only rewrites the rows that still differ; until "
             "then peers keep showing the old name",
         )
 
@@ -2120,11 +2130,33 @@ def rename_self(name: str, *, root: Path | None = None) -> RenameReceipt:
     )
 
 
+def _sanitise_frame_names(rows: list[MemberRecord], *, source: str) -> None:
+    """Discard any inbound label that fails the name rule, keeping every row.
+
+    THE ROTATION PATH IS A SECOND DOOR FOR THE SAME TEXT (review convergence, F1
+    residual). ``apply_epoch`` installs the frame's member table wholesale, and the
+    rows in it are exactly as peer-supplied as any member-list row: a member able to
+    emit a rotation frame could otherwise plant a never-held row whose NAME is a
+    tombstoned device id, and ``_resolve_device`` would then answer that row for the
+    burned id — the mistarget this whole change exists to close, on the surface that
+    installs a table directly rather than merging one row at a time.
+
+    The contract is the same as the other receive-time guard: the ROW IS KEPT and
+    its label is dropped (empty means "unnamed", which every surface renders as the
+    id tail). Nothing here refuses a frame or drops a member.
+    """
+    for row in rows:
+        row.name = _accepted_name(row.name, "", source=source)
+
+
 def _keep_local_authority(record: NetworkRecord, rows: list[MemberRecord]) -> None:
     """Give each incoming row this device already holds its LOCAL role, set and name.
 
     A row this device does not hold yet (a member admitted elsewhere) is taken as
-    the frame carries it, exactly as ``adopt_members`` does.
+    the frame carries it — EXCEPT its name, which is sanitised like every other
+    inbound label (F1, review convergence). That sentence used to say "exactly as
+    ``adopt_members`` does"; it stopped being true when that merge began discarding
+    invalid names, and the two paths must not describe themselves differently.
 
     ``name`` IS PRESERVED HERE TOO, and that is the half of the rule that keeps a
     ROTATION from reverting a rename: an epoch frame is a THIRD PARTY's table, and
@@ -2138,6 +2170,8 @@ def _keep_local_authority(record: NetworkRecord, rows: list[MemberRecord]) -> No
             row.role = local.role
             row.capabilities = list(local.capabilities)
             row.name = local.name or row.name
+    # LAST, so it also covers the name just copied from a held row that has none.
+    _sanitise_frame_names(rows, source="a rotation frame")
 
 
 def capability_change_lines(change: CapabilityChange, *, network_name: str) -> list[str]:
@@ -2320,6 +2354,11 @@ def apply_epoch(
         # This device was removed by the rotation that carries it. It must NOT
         # learn the new secret: it is not a member any more, and the design says so
         # explicitly ("a removed device does not learn the new secret").
+        #
+        # THE INSTALL IS SANITISED HERE TOO: this branch does not call
+        # ``_keep_local_authority``, and the table it stores is still a peer's — a
+        # label planted in it would outlive the frame that carried it.
+        _sanitise_frame_names(rows, source="a rotation frame that removed this device")
         record.members = rows
         record.epoch = incoming_epoch
         record.rotations[str(incoming_epoch)] = sender_device_id
