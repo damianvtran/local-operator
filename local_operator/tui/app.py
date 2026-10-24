@@ -48703,7 +48703,7 @@ class OperatorApp(App[None]):
                 # a dash and had to guess whether it meant unknown, unsupported
                 # or absent.
                 row = view.get(definition.id)
-                state = (row.state_detail or _VIEW_STATE_COPY[row.state]) if row is not None else ""
+                state = self._row_state_detail(row)
                 marker = "*" if definition.store_credentials_as else " "
                 items.append((f"{marker}{definition.id}", f"{definition.name} · {state}"))
             use = self._provider_usage_state()
@@ -51950,6 +51950,26 @@ class OperatorApp(App[None]):
             return None
         return {row.definition.id: row for row in rows}
 
+    @staticmethod
+    def _row_state_detail(row: Any) -> str:
+        """A view row's detail line, tolerating a row without ``state_detail``.
+
+        ``state_detail`` is a LATE field on ``ProviderViewRow``, but the row
+        contract is duck-typed: embedders and test doubles supply their own
+        row objects (the same reason ``login_providers`` is typed ``Any``),
+        and those legitimately predate the field. Reading it unguarded made
+        every picker render raise ``AttributeError`` for such a row -- the
+        listing lost the whole provider block, not just the detail.
+
+        ``getattr`` rather than a protocol/required-field change: the field is
+        presentation-only, so an absent one means "no detail", which is
+        the same answer a real row with ``state_detail=None`` gives. The
+        machine state copy is the fallback, exactly as on a real row.
+        """
+        if row is None:
+            return ""
+        return getattr(row, "state_detail", None) or _VIEW_STATE_COPY[row.state]
+
     def _login_choices(self) -> list[ArgumentChoice]:
         """Every loginable provider, with where the user stands on each.
 
@@ -52025,13 +52045,7 @@ class OperatorApp(App[None]):
                     # question is "what do I show beside this row", and a blank
                     # is honest; there it is "what will this switch do", and the
                     # note must SAY something (design review round 1, D4).
-                    detail=(
-                        (
-                            (row.state_detail or _VIEW_STATE_COPY[row.state])
-                            if row is not None
-                            else ""
-                        )
-                    ),
+                    detail=self._row_state_detail(row),
                 )
             )
         # A controller offering a row the catalogue does not know (an embedder's
@@ -52054,13 +52068,7 @@ class OperatorApp(App[None]):
                     display=definition.name,
                     description=_provider_summary(definition.id, definition.name),
                     aliases=tuple(definition.search_aliases),
-                    detail=(
-                        (
-                            (row.state_detail or _VIEW_STATE_COPY[row.state])
-                            if row is not None
-                            else ""
-                        )
-                    ),
+                    detail=self._row_state_detail(row),
                 )
             )
         return choices
