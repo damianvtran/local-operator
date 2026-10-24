@@ -116,7 +116,7 @@ async def test_cold_snapshot_live_preferences_overrides_and_cancel(
                 app._cmd_fork("--window", app._notice)
                 await asyncio.wait_for(started.wait(), 20)
                 app._cmd_fork("--window", app._notice)
-                app.action_stop()
+                await app.action_stop()
                 release.set()
                 await _pump(pilot, lambda: not app._fork_in_progress)
                 assert len(launches) == 2

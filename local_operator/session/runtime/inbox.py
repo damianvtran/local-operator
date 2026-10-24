@@ -424,7 +424,6 @@ class InboxReadBatch:
         self.chunks: list[bytes] = []
         self.rows: list[tuple[int, InboxLine]] = []
         self.handled: set[int] = set()
-        self.nested_requested = False
         self.pending_after_commit = True
         self.drop_after_release = False
         self.published = False
@@ -453,7 +452,6 @@ def try_enter_read_batch(directory: Path) -> InboxReadBatch | None:
     with _ACTIVE_READS_LOCK:
         previous = _ACTIVE_READS.get(batch.key)
         if previous is not None:
-            previous.nested_requested = True
             return None
         _ACTIVE_READS[batch.key] = batch
     return batch
@@ -482,6 +480,11 @@ def claim_inbox_batch(batch: InboxReadBatch) -> None:
                 raise OSError("unsafe inbox path")
             batch.path_identity = (stat.st_dev, stat.st_ino)
         batch.raw = raw
+        # The one-shot consumer flag reads this even when there is nothing to
+        # commit: an EMPTY inbox is the common case and must latch "nothing
+        # left", or the session acquires a seat, locks and settles on every
+        # pipeline pass for its whole lifetime.
+        batch.pending_after_commit = bool(raw)
         batch.chunks = raw.splitlines(keepends=True)
         parsed: list[tuple[int, InboxLine]] = []
         for ordinal, chunk in enumerate(batch.chunks):
@@ -545,6 +548,28 @@ def commit_inbox_batch(batch: InboxReadBatch) -> None:
                     pass
 
 
+async def claim_read_batch_or_defer(batch: InboxReadBatch) -> bool:
+    """Claim, or defer to a delivery another runtime is already running.
+
+    A held reader lease is the DESIGNED handover, not a fault: the outgoing
+    runtime keeps it across its whole delivery (owner prompts here run 27-37 s,
+    past LOCK_WAIT_S), so the successor's boot or close would otherwise fail
+    before its own admission work. The destructive drain this replaces answered
+    exactly this with an empty batch (``WakeLockBusy``/``WakeLockUnavailable``/
+    ``OSError`` -> ``[]``), so the drain's documented best-effort contract is
+    unchanged. Cancellation is NOT contained: whoever entered the seat settles
+    it, and ``settle_read_batch`` releases the lease if the claim got that far.
+    """
+    from local_operator.wakes.spooled import await_spool_write
+    try:
+        await await_spool_write(claim_inbox_batch, batch)
+    except asyncio.CancelledError:
+        raise
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return False
+    return True
+
+
 def release_inbox_batch(batch: InboxReadBatch) -> None:
     try:
         batch.reader.release()
@@ -555,6 +580,11 @@ def release_inbox_batch(batch: InboxReadBatch) -> None:
 async def finish_read_batch(batch: InboxReadBatch) -> None:
     """Commit/release complete before marker settlement or cancellation escapes."""
     from local_operator.wakes.spooled import await_spool_write
+    if not batch.acquired:
+        # A deferred claim holds no lease and has no snapshot: release the seat
+        # and leave the live owner's journal and marker alone.
+        leave_read_batch(batch)
+        return
     error: BaseException | None = None
     try:
         await await_spool_write(commit_inbox_batch, batch)
@@ -601,12 +631,20 @@ async def admit_batch_row(batch: InboxReadBatch, ordinals: tuple[int, ...], admi
 async def settle_read_batch(batch: InboxReadBatch, body_error: BaseException | None = None, *, cwd: str = "") -> None:
     """One owner joins commit/release before marker bookkeeping, retaining faults."""
     from local_operator.wakes.spooled import await_spool_write
+    owned = batch.acquired
     errors: list[BaseException] = [] if body_error is None else [body_error]
     try:
         await finish_read_batch(batch)
     except BaseException as exc:
         errors.append(exc)
     else:
+        if not owned:
+            # Deferred to the runtime that owns the lease; its settle retires the
+            # marker. Settling here would clear an obligation we never served.
+            if errors:
+                raise errors[0] if len(errors) == 1 else BaseExceptionGroup(
+                    "inbox delivery failed before a deferred claim", errors)
+            return
         try:
             if batch.drop_after_release:
                 await await_spool_write(drop_owed_turn, batch.directory)

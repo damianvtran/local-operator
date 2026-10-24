@@ -4390,7 +4390,7 @@ def _resume_consumed_ids(directory: Path) -> set[str]:
 
 async def _drain_inbox_into(handle: object) -> int:
     from local_operator.session.runtime.inbox import (
-        try_enter_read_batch, claim_inbox_batch, settle_read_batch,
+        try_enter_read_batch, claim_read_batch_or_defer, settle_read_batch,
     )
     from local_operator.wakes.spooled import await_spool_write
     directory = getattr(getattr(getattr(handle, "_session", None), "transcript", None), "directory", None)
@@ -4402,8 +4402,8 @@ async def _drain_inbox_into(handle: object) -> int:
     error: BaseException | None = None
     delivered = 0
     try:
-        await await_spool_write(claim_inbox_batch, batch)
-        delivered = await _drain_inbox_into_claimed(handle, batch)
+        if await claim_read_batch_or_defer(batch):
+            delivered = await _drain_inbox_into_claimed(handle, batch)
     except BaseException as exc:
         error = exc
     await settle_read_batch(batch, error, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))

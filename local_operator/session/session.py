@@ -9895,7 +9895,7 @@ class Session:
         paths, and every one of them is a state the settle has to be asked about.
         """
         from local_operator.session.runtime.inbox import (
-            try_enter_read_batch, claim_inbox_batch, settle_read_batch,
+            try_enter_read_batch, claim_read_batch_or_defer, settle_read_batch,
         )
         from local_operator.wakes.spooled import await_spool_write
         directory = getattr(self._transcript, "directory", None)
@@ -9906,8 +9906,8 @@ class Session:
             return  # BEFORE the rows helper's one-shot flag and any settlement
         body_error: BaseException | None = None
         try:
-            await await_spool_write(claim_inbox_batch, batch)
-            await self._drain_spooled_peer_inbox_rows(batch)
+            if await claim_read_batch_or_defer(batch):
+                await self._drain_spooled_peer_inbox_rows(batch)
         except BaseException as exc:
             body_error = exc
         await settle_read_batch(batch, body_error)

@@ -1,4 +1,5 @@
 """Deterministic storage/cancellation regressions; no running App required."""
+import ast
 import asyncio
 import json
 import os
@@ -9,7 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from local_operator.session.runtime import inbox
-from local_operator.wakes import spooled
+from local_operator.wakes import spooled, supervisor
 
 
 class JournalTests(unittest.TestCase):
@@ -233,3 +234,130 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
                 await inbox.finish_read_batch(batch)
             self.assertEqual(path.read_bytes(), b"uncooperative mutation\n")
             self.assertFalse(batch.acquired or batch.published)
+
+    async def test_a_live_foreign_reader_defers_the_claim_without_raising(self):
+        """The designed handover: the outgoing runtime still owns the lease.
+
+        Deliveries hold the reader lease across the whole batch (owner prompts
+        are measured in tens of seconds, past LOCK_WAIT_S), so a successor that
+        raised here would fail its boot/close before its own admission work.
+        """
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            inbox.append_inbox(directory, inbox.InboxLine(
+                text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER))
+            batch = inbox.try_enter_read_batch(directory)
+
+            class Busy:
+                released = False
+                def acquire(self):
+                    raise inbox.WakeLockBusy("held by the outgoing runtime")
+                def release(self):
+                    self.released = True
+            batch.reader = Busy()
+            self.assertFalse(await inbox.claim_read_batch_or_defer(batch))
+            await inbox.settle_read_batch(batch)  # must not raise, must not settle
+            self.assertFalse(Busy.released, "release without acquisition")
+            self.assertEqual([row.text for row in inbox.peek_inbox(directory)], ["owed"])
+            self.assertTrue(spooled.spool_owes_turn(directory))
+            self.assertIsNotNone(inbox.try_enter_read_batch(directory))
+
+    async def test_a_claim_failing_after_the_lease_is_taken_releases_it(self):
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            inbox.append_inbox(directory, inbox.InboxLine(
+                text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER))
+            path = inbox.inbox_path(directory)
+            target = directory / "elsewhere.jsonl"
+            target.write_bytes(path.read_bytes())
+            path.unlink()
+            path.symlink_to(target)
+            batch = inbox.try_enter_read_batch(directory)
+            try:
+                self.assertFalse(await inbox.claim_read_batch_or_defer(batch))
+            finally:
+                await inbox.settle_read_batch(batch)
+            self.assertFalse(batch.acquired)
+            self.assertEqual(target.read_bytes(), path.read_bytes())
+            lock = inbox.WakeWriteLock(directory, name=".inbox-reader.lock")
+            lock.acquire()   # a leaked lease would block here
+            lock.release()
+            self.assertIsNotNone(inbox.try_enter_read_batch(directory))
+
+    async def test_an_empty_inbox_latches_the_one_shot_flag(self):
+        """An empty inbox must not re-acquire/settle on every pipeline pass."""
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            batch = inbox.try_enter_read_batch(directory)
+            try:
+                await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
+                self.assertIs(batch.pending_after_commit, False)
+                await inbox.finish_read_batch(batch)
+                self.assertIs(batch.pending_after_commit, False)
+            finally:
+                inbox.leave_read_batch(batch)
+            inbox.append_inbox(directory, inbox.InboxLine(
+                text="owed", sender={}, mode="mailbox", written_at=1))
+            batch = inbox.try_enter_read_batch(directory)
+            try:
+                await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
+                self.assertIs(batch.pending_after_commit, True)
+            finally:
+                if batch.acquired:
+                    await spooled.await_spool_write(inbox.release_inbox_batch, batch)
+                inbox.leave_read_batch(batch)
+
+    def test_the_e2e_stop_caller_awaits_the_async_action(self):
+        """The committed caller must `await` the converted action.
+
+        Source-level contract only: importing the Textual App here would be a
+        different, separately allocated test.
+        """
+        tree = ast.parse(E2E_STOP_SOURCE, E2E_STOP_PATH)
+        awaited, bare = 0, 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Attribute) and func.attr == "action_stop":
+                    awaited += 1
+            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Attribute) and func.attr == "action_stop":
+                    bare += 1
+        self.assertEqual((awaited, bare), (1, 0))
+
+
+class SupervisorLateFatalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_late_failure_is_raised_after_every_engagement_is_joined(self):
+        sweeper = supervisor._Sweeper()
+        boom = RuntimeError("late bookkeeping failure")
+        joined = []
+
+        async def failing():
+            raise boom
+
+        async def forever():
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                joined.append("forever")
+            return False
+
+        first = asyncio.create_task(failing())
+        second = asyncio.create_task(forever())
+        sweeper._in_flight[("s", 1)] = first
+        sweeper._in_flight[("s", 2)] = second
+        first.add_done_callback(sweeper._observe)
+        await asyncio.sleep(0)
+        with self.assertRaises(RuntimeError) as caught:
+            await sweeper.drain()
+        self.assertIs(caught.exception, boom)
+        self.assertEqual(joined, ["forever"])
+        self.assertEqual(sweeper._in_flight, {})
+
+    async def test_the_same_failure_object_is_not_reported_as_a_group(self):
+        sweeper = supervisor._Sweeper()
+        boom = RuntimeError("one failure, two observers")
+        sweeper._record_failure(boom)
+        sweeper._record_failure(boom)
+        self.assertIs(sweeper._failure, boom)
