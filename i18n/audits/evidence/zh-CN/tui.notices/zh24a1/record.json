@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "audit_kind": "independent_delta_and_regression_audit",
+  "locale": "zh-CN",
+  "namespace": "tui.notices",
+  "round": 1,
+  "audit_date": "2026-10-24",
+  "key_count": 30,
+  "keys_read": 30,
+  "delta_key_count": 1,
+  "delta_keys": [
+    "tui.notices.fast_mode_refused"
+  ],
+  "delta_added": [
+    "tui.notices.fast_mode_refused"
+  ],
+  "delta_modified": [],
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "assembly_revision": "5b5367be1b4acef44d564dcf8cbc1c7c06b209e8",
+  "catalogue_diff_between_source_and_assembly": "empty",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "current_byte_peer_audit_id": null,
+  "current_byte_peer_record": null,
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "commit": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "3d1df2689651",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.notices.json",
+      "sha256": "4a159689628113c32a2df75a9e3d98d74aab790c9946848307bb267318731510"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.notices.context.json",
+      "sha256": "3f1298de1bdb84a67bde66a5bb937f05376c81e06d866e94180f21b1525c8370"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.notices.json",
+      "sha256": "40af781ff575e4571fbb4caa7f2ae55443f1bdb2c344c2e04137d59198c77c61"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision."
+  },
+  "source_receipt": null,
+  "source_companions": [
+    "audit.log",
+    "mechanical-raw.json",
+    "pseudo-evidence.json",
+    "report.md",
+    "runtime-mechanical.json",
+    "tui.notices.compact.txt",
+    "tui.notices.pairs.txt"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.notices/zh24a1/audit.log",
+      "sha256": "9bd174bbaab7f2cc311b90fc8810b5b9db260e8e5e16bc6ccc4c7ed3b7917540"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.notices/zh24a1/mechanical-raw.json",
+      "sha256": "8c71447787d5cd80ebb3b5fd6785c9dc724e9350d0f208f8fd5a169df6eb1f30"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.notices/zh24a1/pseudo-evidence.json",
+      "sha256": "5119a9657c5d08dbc8ffb481f83ab2605ae0ff395afa0c928b5f727c3b447e1c"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.notices/zh24a1/report.md",
+      "sha256": "64a48e96ee6541596cfe1a5d050d7ec3826bdab96f1952ee6224b66115e63f20"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.notices/zh24a1/runtime-mechanical.json",
+      "sha256": "07270e286db4972351f97d2c30163fa6a47f2f5b7633b201928df57edd71806d"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.notices/zh24a1/tui.notices.compact.txt",
+      "sha256": "368274353b1790e06d627b197198f311538fbf5e72b9536fe67a0c4e840110f6"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.notices/zh24a1/tui.notices.pairs.txt",
+      "sha256": "09e9d6770f725f60708459d86901dce0635cfde8508a525cdff86214b7b620c5"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "findings_total": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "source_verdict": "clean",
+    "rendered_followups": []
+  },
+  "ledger_entry": {
+    "locale": "zh-CN",
+    "namespace": "tui.notices",
+    "source_sha256": "4a159689628113c32a2df75a9e3d98d74aab790c9946848307bb267318731510",
+    "context_sha256": "3f1298de1bdb84a67bde66a5bb937f05376c81e06d866e94180f21b1525c8370",
+    "target_sha256": "40af781ff575e4571fbb4caa7f2ae55443f1bdb2c344c2e04137d59198c77c61",
+    "translator": {
+      "agent": null,
+      "session": null,
+      "model": null,
+      "date": null,
+      "commit": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+      "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "session": "3d1df2689651",
+      "model": "deepseek/deepseek-flash",
+      "independent_from_translator_session": true,
+      "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none"
+    },
+    "status": "passed",
+    "result": "clean",
+    "findings": 0,
+    "note": "Independent zh24a1 audit at c4ba95919dbea27fcf990101f9e48ed21e977e10: 30 keys read, delta 1; blocker/major 0, minor 0, nit 0."
+  },
+  "audit_notes_not_execution_log": "Independent read-only audit of the catalogue at c4ba95919dbea27fcf990101f9e48ed21e977e10. No catalogue, ledger, allowance, shipped.json or eligibility file was edited. Mechanical checks and full-message rendering were run locally; semantic findings are the auditor's own reading of en/context/zh side by side. No native TUI or desktop frame is claimed."
+}

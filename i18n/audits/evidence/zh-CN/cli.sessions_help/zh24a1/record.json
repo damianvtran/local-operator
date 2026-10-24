@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "audit_kind": "independent_delta_and_regression_audit",
+  "locale": "zh-CN",
+  "namespace": "cli.sessions_help",
+  "round": 1,
+  "audit_date": "2026-10-24",
+  "key_count": 47,
+  "keys_read": 47,
+  "delta_key_count": 1,
+  "delta_keys": [
+    "cli.sessions_help.cleanup_scratchpads_only"
+  ],
+  "delta_added": [
+    "cli.sessions_help.cleanup_scratchpads_only"
+  ],
+  "delta_modified": [],
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "assembly_revision": "5b5367be1b4acef44d564dcf8cbc1c7c06b209e8",
+  "catalogue_diff_between_source_and_assembly": "empty",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "current_byte_peer_audit_id": null,
+  "current_byte_peer_record": null,
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "commit": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "3d1df2689651",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.sessions_help.json",
+      "sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.sessions_help.context.json",
+      "sha256": "0b1f7b4fc04b7d033d9b2a495415b115bca204ce4b38f641aa42ead4bf7151bb"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.sessions_help.json",
+      "sha256": "d8e41d97fdbfdf890e14088ebdd44f87aeb3c2efb49a6401b430f45e51914bf8"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision."
+  },
+  "source_receipt": null,
+  "source_companions": [
+    "audit.log",
+    "mechanical-raw.json",
+    "pseudo-evidence.json",
+    "report.md",
+    "runtime-mechanical.json",
+    "cli.sessions_help.compact.txt",
+    "cli.sessions_help.pairs.txt"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.sessions_help/zh24a1/audit.log",
+      "sha256": "21e508d1464863b91747580fdb635edc2e543c0246c68cafed9b7d7940b07ae6"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.sessions_help/zh24a1/mechanical-raw.json",
+      "sha256": "b2c346db47ce6aacee3e2eec6a6d4b6f620c94168978226b295844c3f5dbaee7"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.sessions_help/zh24a1/pseudo-evidence.json",
+      "sha256": "5119a9657c5d08dbc8ffb481f83ab2605ae0ff395afa0c928b5f727c3b447e1c"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.sessions_help/zh24a1/report.md",
+      "sha256": "d183a01b2ce964bb728007997e4cc14fa3794ffa0d1f7ce76c3b7dbf9b2b6c7a"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.sessions_help/zh24a1/runtime-mechanical.json",
+      "sha256": "7e0b899df908244da944840f3774779a0116e2d31ff3b9b228c910bad837ecc9"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.sessions_help/zh24a1/cli.sessions_help.compact.txt",
+      "sha256": "6fe1aed02c674bff2fd3ed94a3aa349cc6f95e3784487a445d2f4ec0fae8292f"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.sessions_help/zh24a1/cli.sessions_help.pairs.txt",
+      "sha256": "c6d7c499248a83ba0079618ccae11fb9852277fa08374d42b2a320aeb730b86d"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "findings_total": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "source_verdict": "clean",
+    "rendered_followups": []
+  },
+  "ledger_entry": {
+    "locale": "zh-CN",
+    "namespace": "cli.sessions_help",
+    "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
+    "context_sha256": "0b1f7b4fc04b7d033d9b2a495415b115bca204ce4b38f641aa42ead4bf7151bb",
+    "target_sha256": "d8e41d97fdbfdf890e14088ebdd44f87aeb3c2efb49a6401b430f45e51914bf8",
+    "translator": {
+      "agent": null,
+      "session": null,
+      "model": null,
+      "date": null,
+      "commit": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+      "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "session": "3d1df2689651",
+      "model": "deepseek/deepseek-flash",
+      "independent_from_translator_session": true,
+      "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none"
+    },
+    "status": "passed",
+    "result": "clean",
+    "findings": 0,
+    "note": "Independent zh24a1 audit at c4ba95919dbea27fcf990101f9e48ed21e977e10: 47 keys read, delta 1; blocker/major 0, minor 0, nit 0."
+  },
+  "audit_notes_not_execution_log": "Independent read-only audit of the catalogue at c4ba95919dbea27fcf990101f9e48ed21e977e10. No catalogue, ledger, allowance, shipped.json or eligibility file was edited. Mechanical checks and full-message rendering were run locally; semantic findings are the auditor's own reading of en/context/zh side by side. No native TUI or desktop frame is claimed."
+}
