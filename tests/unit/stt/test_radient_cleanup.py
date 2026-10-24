@@ -43,6 +43,19 @@ def test_radient_cleanup_options(mode, remove, events):
         assert options["prompt"] is None
 
 
+@pytest.mark.parametrize("mode", ["auto", "provider", "client", "off"])
+def test_radient_cleanup_options_explicit_openai_omit_native_controls(mode):
+    options = radient_cleanup_options(mode, None, "en", provider="openai")
+
+    assert options["remove_disfluencies"] is None
+    assert options["include_audio_events"] is None
+    assert (options["prompt"] is not None) == (mode in ("auto", "provider"))
+    assert (
+        radient_cleanup_options(mode, "Caller prompt", "en", provider="openai")["prompt"]
+        == "Caller prompt"
+    )
+
+
 def test_prompt_hardening_never_overrides_or_truncates_caller_prompt():
     prompt = "Caller context " + "x" * 1100
     assert stt_cleanup_prompt("auto", prompt, "en") == prompt

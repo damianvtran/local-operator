@@ -575,6 +575,45 @@ def test_path_provider_label_names_the_rung() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_radient_adapter_preserves_unmapped_caller_language_over_detection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.clients import radient as radient_module
+    from local_operator.providers import radient_credentials
+
+    class _FakeRadientClient:
+        def __init__(self, api_key: Any, base_url: str) -> None:
+            pass
+
+        def create_transcription(
+            self, *, file_path: str, model: Any, prompt: Any, language: Any, **kwargs: Any
+        ) -> Any:
+            return SimpleNamespace(
+                text="Um, this should survive",
+                provider="elevenlabs",
+                language="eng",
+                language_probability=0.99,
+            )
+
+    async def _key(config: Any, base_url: str, *, store: Any = None) -> Any:
+        return SimpleNamespace(get_secret_value=lambda: "fixture-key")
+
+    monkeypatch.setattr(radient_module, "RadientClient", _FakeRadientClient)
+    monkeypatch.setattr(radient_credentials, "resolve_radient_credential", _key)
+
+    outcome = await transcribe_with_backend(
+        "provider_stt_radient",
+        b"RIFFfake-bytes",
+        "audio/wav",
+        language="fil-PH",
+        cleanup="client",
+        config_root=tmp_path,
+    )
+
+    assert outcome.text == "Um, this should survive"
+
+
+@pytest.mark.asyncio
 async def test_the_radient_adapter_omits_an_unmapped_language_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

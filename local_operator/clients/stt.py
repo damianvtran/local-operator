@@ -309,7 +309,7 @@ def _transcribe_radient_sync(
     normalized = normalize_radient_cleanup(
         result,
         resolve_cleanup(cleanup),
-        caller_language=language,
+        caller_language=caller_language if caller_language is not None else language,
     )
     return SttOutcome(
         text=normalized.text,
