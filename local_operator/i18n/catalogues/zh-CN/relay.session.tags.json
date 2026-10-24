@@ -6,7 +6,7 @@
   "relay.session.tags.empty_hint": "在桌面应用或终端中创建一个",
   "relay.session.tags.load_error": "无法加载标签目录。",
   "relay.session.tags.retry": "重试",
-  "relay.session.tags.limit_hint": "一个会话最多可有{count}个标签 — 移除一个才能再添加。",
+  "relay.session.tags.limit_hint": "每段对话最多可有{count}个标签 — 移除一个才能再添加。",
   "relay.session.tags.primary": "主标签",
   "relay.session.tags.make_primary": "将{name}设为主标签",
   "relay.session.tags.more": "{count, plural, other {另有#个标签}}",

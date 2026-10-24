@@ -1,11 +1,11 @@
 {
-  "tui.asks.context.messages": "{count, plural, other {提问后你发来#条消息（最后{time}）}}",
+  "tui.asks.context.messages": "{count, plural, other {此问题提出后你发来#条消息（最近{time}）}}",
   "tui.asks.dismiss.answered_in_chat": "已在聊天中回答",
   "tui.asks.dismiss.answered_in_chat_note": "你已在对话中回复",
   "tui.asks.dismiss.fleet_gone": "此问题已不在该会话的记录中。",
   "tui.asks.dismiss.hint": "enter忽略 · esc取消",
   "tui.asks.dismiss.moot": "不再需要",
-  "tui.asks.dismiss.moot_note": "不再等待此问题",
+  "tui.asks.dismiss.moot_note": "智能体不再等待回答",
   "tui.asks.dismiss.notice_answered_in_chat": "已忽略 — 已在聊天中回答",
   "tui.asks.dismiss.notice_moot": "已忽略 — 不再需要",
   "tui.asks.dismiss.notice_no_reply": "已忽略 — 未发送回复",

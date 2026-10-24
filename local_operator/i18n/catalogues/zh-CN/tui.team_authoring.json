@@ -9,7 +9,7 @@
   "tui.team_authoring.aliases": "别名",
   "tui.team_authoring.instructions": "指令",
   "tui.team_authoring.project": "项目简报",
-  "tui.team_authoring.members_hint": "逗号分隔：coder、coder:2、team:pod",
+  "tui.team_authoring.members_hint": "逗号分隔：coder, coder:2, team:pod",
   "tui.team_authoring.aliases_hint": "逗号分隔的名称 · 留空即清除别名",
   "tui.team_authoring.instructions_hint": "常驻团队指引 · Tab跳至下一字段",
   "tui.team_authoring.overrides_hint": "现有成员覆盖项将保留。在桌面端编辑覆盖项。",
