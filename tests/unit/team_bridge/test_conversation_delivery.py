@@ -756,9 +756,7 @@ def test_mutated_body_is_not_screened_admitted_or_rendered(tmp_path, monkeypatch
     assert held is not None and held["retry_at"] > 0
 
 
-def test_a_confirmed_reject_retires_its_row_on_the_retry_pass(
-    tmp_path, monkeypatch
-) -> None:
+def test_a_confirmed_reject_retires_its_row_on_the_retry_pass(tmp_path, monkeypatch) -> None:
     """A bounce is terminal on the re-drive path too — not re-asked forever."""
 
     a = _owner("a", 1)
