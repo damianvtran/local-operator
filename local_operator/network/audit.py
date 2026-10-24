@@ -750,13 +750,17 @@ OUTCOMES = ("ok", "refused", "failed", "partial")
 #: emitters back to three values: "device" is a peer acting under its own key, which
 #: is neither a person at this keyboard nor an agent process here.
 #:
-#: NOT every device-shaped row carries it, deliberately, and this names WHICH ones
-#: rather than implying one exception: the LOCAL ``epoch_rotated`` refusal after
-#: ``member rm`` (its ``actor`` is this device, but the initiator is the operator —
-#: "who is named" and "who acted" are different questions, and this value answers
-#: the second), and the three emitters deferred because what they audit is THIS
-#: device's own act described from a peer's row — ``membership_learned``,
-#: ``member_admitted`` and ``panic_received``.
+#: NOT every device-shaped row carries it, and the rule matters more than a list:
+#: this value answers WHO ACTED, not who is NAMED. It is passed where the audited
+#: action is a device acting under its own key (the credential emitters, a rename, a
+#: rotation — the list above), and withheld where the actor id names a device but the
+#: initiator was the operator at this keyboard (the LOCAL ``epoch_rotated`` refusal
+#: after ``member rm``; ``member_removed``, ``invite_minted``, ``trust_changed``) or
+#: where the event audits THIS device's own act described from a peer's row
+#: (``membership_learned``, ``member_admitted``, ``panic_received``, and the link,
+#: pairing, reconcile, session-stream, authorisation and definitions families). Those
+#: keep the default deliberately; reclassifying them is a per-event decision and not
+#: a sweep, which is why the review's three examples are examples and not the tail.
 ACTOR_KINDS = ("human", "agent", "relay", "device", "unknown")
 
 
