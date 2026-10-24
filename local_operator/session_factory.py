@@ -2669,6 +2669,7 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     "generate_voiceover",
     "generate_sound_effect",
     "code_requests",
+    "secret",
 )
 
 #: One tool row's description bound — the same scannable-row precedent the
