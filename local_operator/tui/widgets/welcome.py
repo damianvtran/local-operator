@@ -128,11 +128,31 @@ from local_operator.tui.widgets.transcript import NOTICE_GLYPHS, wrap_cells
 # from the resolved strings, so every cell-length claim in this file is
 # measured on exactly the text a user reads; the en-only context sidecar
 # (`tui.welcome.context.json`) carries the per-entry maxCells contract.
+#: Commands authored INSIDE translated welcome prose. Each is an LTR island in
+#: its sentence; the real `ur` catalogue embeds them (`/network new <name>`,
+#: `/login {provider}`, `/model <provider>/<id>`), and without the declaration an
+#: RTL paragraph re-orders the command into gibberish (QA round 2, Q-6).
+_WELCOME_COMMANDS = (
+    "/update",
+    "/login",
+    "/approvals <ask|auto>",
+    "/network new <name>",
+    "/model <provider>/<id>",
+    "/team <name> <message>",
+    "/fork <message>",
+    "/fork",
+    "/resume",
+    "/settings",
+    "lop login <radient|typesafe|openrouter>",
+    "lop config edit classification.auto false",
+)
+
 _t = display_tr(
     "tui.welcome",
-    technical_params=("version",),
-    # `/update` is authored in the prose itself, not supplied as a parameter.
-    technical_literals=("/update",),
+    # `provider` is a command argument (the `/login` row); `version` the update
+    # release. Both are technical values, not prose.
+    technical_params=("version", "provider"),
+    technical_literals=_WELCOME_COMMANDS,
 )
 #: Raw counterpart for rows that WRAP: an isolate must not straddle a fold,
 #: so the sentence is wrapped first and each final line is projected once.
@@ -1619,8 +1639,21 @@ def build_welcome_lines(
     # Therefore a taller terminal can only add a section; it can never trade two
     # useful rows for a larger decoration. This is intentionally boring — no
     # "refund" special case whose truth changes when the mark crosses its tier.
-    while len(status) > 1 and total() > height:
-        status.pop(min(range(len(status)), key=lambda index: status[index][0]))
+    while status and total() > height:
+        victim = min(range(len(status)), key=lambda index: status[index][0])
+        if status[victim][0] == _PRIORITY_UPDATE:
+            # The update sentence can WRAP into several rows. They are one fact,
+            # and shedding one line left a contextless tail ("/update" without
+            # the sentence) at tiny heights — the half-drawn defect this ladder
+            # exists to prevent. The group is kept whole or dropped whole.
+            remaining = [row for row in status if row[0] != _PRIORITY_UPDATE]
+            if len(remaining) == len(status):
+                break
+            status = remaining
+            continue
+        if len(status) <= 1:
+            break
+        status.pop(victim)
 
     show_hints = bool(hints)
     if total() > height:

@@ -59,7 +59,15 @@ def technical_literal_spans(
             widened = _with_single_letter_prefix(record.text, occurrence)
             if _at_token_boundary(record.text, widened):
                 spans.append(widened)
-    return tuple(sorted(spans, key=lambda span: span.start))
+    # One owner may declare both `/fork` and `/fork <message>`. The longer
+    # declaration IS the token; the nested prefix is not a second island, and
+    # emitting both would overlap and be refused downstream.
+    kept: list[TechnicalSpan] = []
+    for span in sorted(spans, key=lambda item: (item.start, item.start - item.end)):
+        if kept and span.start < kept[-1].end:
+            continue
+        kept.append(span)
+    return tuple(kept)
 
 
 def balance_display_line(line: Text) -> None:

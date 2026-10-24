@@ -181,13 +181,21 @@ def urdu_app_corpus(tmp_path, monkeypatch):
     (root / "ur").mkdir()
     overlays = {
         "tui.transcript": {
-            "tui.transcript.queued.newest": "قطار میں — واپس لینے کے لیے esc دبائیں",
-            "tui.transcript.queued.older": "قطار میں",
+            "tui.transcript.queued.newest": "· قطار میں — واپس لینے کے لیے esc دبائیں",
+            "tui.transcript.queued.older": "· قطار میں",
             "tui.transcript.catchup.missed": "{count, plural, one {# کم} other {# کم}}",
             "tui.transcript.catchup.headline": "اپ ڈیٹ: {label}",
         },
         "tui.welcome": {
             "tui.welcome.status.update": "ورژن {version} پر اپ ڈیٹ کریں — /update",
+            # Real `feat/i18n-ur-core@1c6c7d0d` bytes for the command-bearing
+            # surfaces (QA Q-6); the fixture exists because this branch has no
+            # ur package, and these two strings are copied verbatim.
+            "tui.welcome.status.login_required": "آپ لاگ ان نہیں ہیں — /login {provider}",
+            "tui.welcome.tip.mesh": "/network new <name> سے دوسرے ڈیوائسز کا میش بنائیں",
+            "tui.welcome.tip.model": "/model <provider>/<id> صرف اسی سیشن پر لاگو ہوتا ہے",
+            "tui.welcome.tip.team": "/team <name> <message> مینیجر کو کام بھیجتا ہے",
+            "tui.welcome.tip.fork": "/fork شاخ بناتا ہے؛ /fork <message> الگ کام شروع کرتا ہے",
         },
         "tui.small": {
             "tui.small.settings_view.bool_on": "فعال",
@@ -234,8 +242,8 @@ def native_urdu_update(tmp_path, monkeypatch):
     (root / "ur" / "tui.welcome.json").write_text(
         json.dumps(
             {
-                "tui.welcome.status.update": "تازہ ترین v{version} ہے — /update۔",
-                "tui.welcome.status.update.short": "تازہ ترین v{version} ہے۔",
+                "tui.welcome.status.update": "تازہ ترین v{version} ہے — /update",
+                "tui.welcome.status.update.short": "تازہ ترین v{version} ہے",
             }
         ),
         encoding="utf-8",
@@ -502,8 +510,7 @@ def test_native_urdu_version_prefix_is_one_island(native_urdu_update):
     set_active_locale("ur")
     full = welcome._t(tui_welcome.status_update(version="9.9.9"))
     assert LRI + "v9.9.9" + PDI in full
-    assert LRI + "/update" + PDI + "۔" in full
-    assert "/update۔" not in full.replace(LRI + "/update" + PDI, "X")
+    assert LRI + "/update" + PDI in full
     _assert_balanced(full)
     short = welcome._t(tui_welcome.status_update_short(version="9.9.9"))
     assert LRI + "v9.9.9" + PDI in short
@@ -610,6 +617,19 @@ def test_peer_pid_row_stays_balanced_at_narrow_widths(urdu_app_corpus) -> None:
             assert LRI + "4321" + PDI in row.plain, row.plain
 
 
+def test_queued_dot_stays_outside_the_rtl_run(urdu_app_corpus) -> None:
+    """R2-2: exact order — `· ` then RLI, never RLI then the dot."""
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    set_active_locale("ur")
+    rows = [row for row in UserBlock("", queued=True, fold_width=40)._rows(40) if row]
+    painted = "\n".join(rows)
+    assert rows[0].startswith("· " + RLI), rows[0]
+    assert RLI + "·" not in painted, painted
+    assert "قطار" in painted
+    _assert_balanced(painted)
+
+
 def test_quiet_group_row_stays_balanced_at_narrow_widths(urdu_app_corpus) -> None:
     """M-1 for the folded bar: the group sentence is fitted raw then projected."""
     from local_operator.tui.widgets import transcript as transcript_mod
@@ -670,6 +690,97 @@ def test_palette_settings_are_never_rtl_wrapped() -> None:
     painted = palette._label_display(entry).plain
     assert painted == "Terminal title"
     assert not any(control in painted for control in (RLI, LRI, PDI))
+
+
+def test_variant_update_copy_with_urdu_full_stop_keeps_it_outside(native_urdu_update):
+    """Constructed variant, not the core-wave catalogue: ۔ is prose, not token."""
+    from local_operator.i18n.keys import tui_welcome
+    from local_operator.tui.widgets import welcome
+
+    (native_urdu_update / "ur" / "tui.welcome.json").write_text(
+        json.dumps(
+            {
+                "tui.welcome.status.update": "تازہ ترین v{version} ہے — /update۔",
+                "tui.welcome.status.update.short": "تازہ ترین v{version} ہے۔",
+            }
+        ),
+        encoding="utf-8",
+    )
+    messages._namespace_for.cache_clear()
+    text._sources.cache_clear()
+    set_active_locale("ur")
+
+    full = welcome._t(tui_welcome.status_update(version="9.9.9"))
+    assert LRI + "/update" + PDI + "۔" in full
+    _assert_balanced(full)
+    rows = [
+        line.plain
+        for _, line in welcome._status_rows(welcome.WelcomeInfo(update_available="9.9.9"), 60)
+    ]
+    assert any(LRI + "/update" + PDI + "۔" in line for line in rows)
+
+
+def test_real_welcome_tip_and_login_commands_are_ltr_islands(urdu_app_corpus) -> None:
+    """Q-6: commands inside translated prose are whole LTR islands."""
+    from local_operator.i18n.keys import tui_welcome
+    from local_operator.tui.widgets import welcome
+
+    set_active_locale("ur")
+    # Tips are import-time constants; the fixture's locale move refreshed them.
+    assert LRI + "/network new <name>" + PDI in welcome.TIP_MESH, welcome.TIP_MESH
+    _assert_balanced(welcome.TIP_MESH)
+    for tip in (welcome.TIP_MESH,):
+        assert "<network new <name/" not in tip, tip
+
+    login = welcome._t(tui_welcome.status_login_required(provider="radient"))
+    assert LRI + "/login" + PDI in login, login
+    assert LRI + "radient" + PDI in login, login
+    _assert_balanced(login)
+    rows = [
+        line.plain
+        for _, line in welcome._status_rows(welcome.WelcomeInfo(missing_credential="radient"), 100)
+    ]
+    login_rows = [line for line in rows if "/login" in line]
+    assert login_rows, rows
+    assert LRI + "/login" + PDI in login_rows[0], login_rows[0]
+    assert LRI + "radient" + PDI in login_rows[0], login_rows[0]
+
+    # Nested declarations (`/fork` inside `/fork <message>`) stay ONE island.
+    fork = welcome._t(tui_welcome.tip_fork())
+    assert LRI + "/fork <message>" + PDI in fork, fork
+    # Every island closes; the extra PDI is the sentence's own RLI wrapper.
+    assert fork.count(PDI) == fork.count(LRI) + fork.count(RLI), fork
+
+    # English stays byte-identical: no controls at all.
+    set_active_locale("en")
+    english = welcome._t(tui_welcome.status_login_required(provider="radient"))
+    assert english == "not logged in — /login radient", english
+    assert not any(control in english for control in (RLI, LRI, PDI))
+
+
+@pytest.mark.parametrize("height", [1, 2, 3])
+@pytest.mark.asyncio
+async def test_wrapped_update_group_is_whole_or_absent(height, native_urdu_update) -> None:
+    """R2-1: a tiny splash never keeps only the contextless `/update` tail."""
+    from local_operator.tui.widgets import welcome
+
+    set_active_locale("ur")
+    info = welcome.WelcomeInfo(
+        version="0.27.0",
+        model_label="test/model",
+        cwd="/tmp/project",
+        update_available="9.9.9",
+    )
+    lines = [line.plain for line in welcome.build_welcome_lines(info, 28, height)]
+    has_command = any("/update" in line for line in lines)
+    has_sentence = any("تازہ" in line for line in lines)
+    # Whole or absent: the tail alone is the defect, a whole group is not.
+    assert has_command == has_sentence, lines
+    if has_command:
+        # Whole sentence: version value present in the same wrapped group.
+        assert any("9.9.9" in line for line in lines), lines
+    if height == 1:
+        assert not has_command, lines
 
 
 @pytest.mark.asyncio
