@@ -27,6 +27,19 @@ normal redaction pass.  A genuine credential read with ``bash``, ``read`` or
 IDENTITY in :data:`local_operator.harness.redaction.PUBLIC_COPY_TOOLS`, never to
 an argument the caller supplies, so another tool cannot borrow it.
 
+WHICH CHECKOUTS
+---------------
+Two separate checkouts publish copy through this route: this repository
+(``local_operator/i18n/...`` plus the mobile web key maps) and the companion
+UI repository (``src/i18n/catalogues/*/*.json`` and ``src/i18n/keys.gen.ts``).
+The UI checkout is a different repository, but its committed product copy is
+equally public — an auditor has to be able to read a catalogue key where it
+lives, and the alternative is the workaround this route exists to replace. The
+roots stay an EXACT GLOB LIST in both checkouts: no directory rule
+(``src/i18n/*``) and no extension rule (``*.json`` under any root), because
+either would admit files nobody reviewed as public copy. The commit-clean /
+``HEAD``-blob / audit-log requirements below apply unchanged to both.
+
 THE TRUST BOUNDARY
 ------------------
 The allowlisted roots are public copy by repository policy
@@ -63,12 +76,21 @@ TOOL_NAME = "read_public_copy"
 #: Public-copy roots, relative to the session working directory (the checkout).
 #: These are the only paths this reader will open.  No directory rule and no
 #: extension rule: an exact glob list, so adding a root is a reviewed policy
-#: change rather than an accident.
+#: change rather than an accident.  The list spans two checkouts — this
+#: repository and the companion UI repository — because both publish committed
+#: product copy; a session resolves the roots against its own working directory,
+#: so each checkout only ever exposes its own copy.
 PUBLIC_COPY_GLOBS: tuple[str, ...] = (
+    # This repository: TUI/server catalogues, key modules and mobile web maps.
     "local_operator/i18n/catalogues/*/*.json",
     "local_operator/i18n/keys/*.py",
     "local_operator/mobile/web/src/i18n/keys.gen.ts",
     "local_operator/mobile/web/src/i18n/bundled.gen.ts",
+    # The companion UI checkout: a separate repository whose committed product
+    # copy is equally public.  Its roots are spelled from that checkout's own
+    # root, so they cannot alias a path inside this repository.
+    "src/i18n/catalogues/*/*.json",
+    "src/i18n/keys.gen.ts",
 )
 
 #: The same list as anchored patterns. ``fnmatch``'s ``*`` crosses ``/``, which
@@ -79,6 +101,10 @@ _PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"local_operator/i18n/keys/[^/]+\.py"),
     re.compile(r"local_operator/mobile/web/src/i18n/keys\.gen\.ts"),
     re.compile(r"local_operator/mobile/web/src/i18n/bundled\.gen\.ts"),
+    # The companion UI checkout's roots.  Anchored at ``src/``, so a lookalike
+    # deeper in a tree (``vendor/src/i18n/keys.gen.ts``) is still refused.
+    re.compile(r"src/i18n/catalogues/[^/]+/[^/]+\.json"),
+    re.compile(r"src/i18n/keys\.gen\.ts"),
 )
 
 #: The policy document this route cites.  The tool's details carry it so a

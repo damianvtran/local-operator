@@ -124,8 +124,13 @@ is **not** a redaction toggle:
 * It opens only these roots: `local_operator/i18n/catalogues/*/*.json`,
   `local_operator/i18n/keys/*.py`,
   `local_operator/mobile/web/src/i18n/keys.gen.ts`,
-  `local_operator/mobile/web/src/i18n/bundled.gen.ts`. There is no directory
-  rule and no extension rule; adding a root is an amendment under §5.
+  `local_operator/mobile/web/src/i18n/bundled.gen.ts`, and — in the companion
+  UI checkout — `src/i18n/catalogues/*/*.json` and `src/i18n/keys.gen.ts`.
+  The UI repository is a separate checkout, but its committed product copy is
+  equally public, so an auditor must be able to read a catalogue key where it
+  lives. There is no directory rule and no extension rule for either checkout;
+  adding a root is an amendment under §5, and the commit-clean/`HEAD`-blob and
+  audit-record requirements below apply identically in both.
 * It serves **the committed blob only**: the file must be tracked and its
   working tree clean against `HEAD` (`git ls-files --error-unmatch` plus
   `git diff --quiet HEAD --`). A working-tree difference or an untracked file is
