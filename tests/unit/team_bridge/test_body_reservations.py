@@ -36,7 +36,7 @@ from local_operator.team_bridge.store import (
 CONVERSATION_ID = "bcv_abcdefgh"
 MESSAGE_ID = "bcmsg_abcdef01"
 DIGEST = "9f2a" * 16
-FINGERPRINT = "aa11" * 32
+FINGERPRINT = "aa11" * 16
 
 
 def _owner() -> OwnerSnapshot:
@@ -126,6 +126,108 @@ def test_a_v7_store_gains_the_table_keeps_rows_and_stamps_v8(tmp_path) -> None:
     # The upgrade is ADDITIVE: authority rows written before it survive.
     assert enrollments == 1
     assert policy == 1
+
+
+def test_a_real_v6_store_without_the_table_migrates(tmp_path) -> None:
+    """B1: a genuine v6 store predates the table and must MIGRATE, not refuse."""
+
+    store = _store(tmp_path)
+    assert _reserve(store)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        conn.execute("DROP TABLE body_reservations")
+        conn.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+        conn.commit()
+
+    _open(store)
+
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        version = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert version == str(SCHEMA_VERSION) == "8"
+    assert "body_reservations" in tables
+
+
+def test_a_partial_reservation_table_is_a_typed_refusal(tmp_path) -> None:
+    """M1: a partial table must refuse as schema_damaged, not raise raw SQL."""
+
+    store = _store(tmp_path)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        conn.execute("DROP TABLE body_reservations")
+        conn.execute("CREATE TABLE body_reservations (owner_key TEXT)")
+        conn.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+        conn.commit()
+
+    with pytest.raises(StoreRefused) as refused:
+        _open(store)
+    assert refused.value.code == "schema_damaged"
+
+
+def test_write_path_refuses_text_in_identity_columns(tmp_path) -> None:
+    """B2: the DDL has no body column; the write path must not smuggle text."""
+
+    store = _store(tmp_path)
+    with pytest.raises(StoreRefused) as body_in_id:
+        store.record_body_reservation(
+            _owner(),
+            conversation_id=CONVERSATION_ID,
+            message_id="bcmsg_x/body=SECRET",
+            conversation_seq=1,
+            mention=False,
+            body_sha256=DIGEST,
+            screening_fingerprint=FINGERPRINT,
+            policy_epoch=3,
+            consent_version="bridge_consent_v1",
+            designated_session="sess_cos",
+            now=time.time(),
+        )
+    assert body_in_id.value.code == "invalid_body_reservation"
+
+    with pytest.raises(StoreRefused):
+        store.record_body_reservation(
+            _owner(),
+            conversation_id=CONVERSATION_ID,
+            message_id=MESSAGE_ID,
+            conversation_seq=1,
+            mention=False,
+            body_sha256="not-a-digest-SECRET",
+            screening_fingerprint=FINGERPRINT,
+            policy_epoch=3,
+            consent_version="bridge_consent_v1",
+            designated_session="sess_cos",
+            now=time.time(),
+        )
+
+
+def test_release_refuses_a_reason_outside_the_closed_vocabulary(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve(store)
+    now = time.time()
+    store.claim_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="tok-a",
+        turn_token="turn-a",
+        now=now,
+        ttl=300,
+    )
+
+    with pytest.raises(StoreRefused) as refused:
+        store.release_body_claim(
+            _owner(),
+            conversation_id=CONVERSATION_ID,
+            message_id=MESSAGE_ID,
+            claim_token="tok-a",
+            reason="the body said SECRET",
+            now=now + 1,
+        )
+    assert refused.value.code == "invalid_body_reason"
+    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    assert row["state"] == "claimed" and row["last_error"] is None
 
 
 def test_two_consumers_cannot_both_claim(tmp_path) -> None:
