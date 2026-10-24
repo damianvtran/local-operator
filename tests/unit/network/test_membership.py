@@ -908,8 +908,11 @@ def test_rename_self_moves_only_the_row_it_owns(root: Path) -> None:
     assert receipt.name == "build-box"
     assert receipt.networks == (NETWORK,)
     after = next(row for row in store.list_networks(root) if row.network_id == NETWORK)
-    assert after.member(me.device_id).name == "build-box"
-    assert after.member(PEER).name == "laptop"
+    own_row = after.member(me.device_id)
+    peer_row = after.member(PEER)
+    assert own_row is not None and peer_row is not None
+    assert own_row.name == "build-box"
+    assert peer_row.name == "laptop"
     # THE DIGEST DOES NOT MOVE, and that is what makes a cosmetic rename safe: a
     # digest that changed on a name would turn "did your list match mine" into a
     # false mismatch, which is why ``members_digest_of`` excludes it by design.
@@ -953,17 +956,19 @@ def test_a_name_is_believed_only_from_the_device_it_names() -> None:
     may not — which is the whole reason no new wire op is needed."""
     record, _state = _record()
     _admit_peer(record)
-    own = record.member(PEER).to_json()
+    peer_row = record.member(PEER)
+    assert peer_row is not None
+    own = peer_row.to_json()
     own["name"] = "build-box"
     changed, added = relay.adopt_members(record, [own], sender_device_id=PEER)
     assert (changed, added) == (True, [])
-    assert record.member(PEER).name == "build-box"
+    assert peer_row.name == "build-box"
     # A DIFFERENT device relays the same row with an invented name.
-    third_party = record.member(PEER).to_json()
+    third_party = peer_row.to_json()
     third_party["name"] = "impostor"
     changed, added = relay.adopt_members(record, [third_party], sender_device_id=SELF)
     assert (changed, added) == (False, [])
-    assert record.member(PEER).name == "build-box"
+    assert peer_row.name == "build-box"
 
 
 def test_a_rotation_frame_may_not_revert_a_rename() -> None:
@@ -990,11 +995,13 @@ def test_a_peer_cannot_store_an_invalid_label_as_its_name() -> None:
     device. The ROW IS KEPT: a cosmetic label is not a reason to drop a member."""
     record, _state = _record()
     _admit_peer(record)
-    hostile = record.member(PEER).to_json()
+    peer_row = record.member(PEER)
+    assert peer_row is not None
+    hostile = peer_row.to_json()
     hostile["name"] = "d_" + "a" * 32  # this record's OWN id, as a "name"
     changed, added = relay.adopt_members(record, [hostile], sender_device_id=PEER)
     assert (changed, added) == (False, [])
-    assert record.member(PEER).name == "laptop"
+    assert peer_row.name == "laptop"
 
     # A NEWCOMER is still adopted — with no name at all when the frame's is invalid.
     newcomer_id = "d_" + "d" * 32
@@ -1007,7 +1014,9 @@ def test_a_peer_cannot_store_an_invalid_label_as_its_name() -> None:
     ).to_json()
     changed, added = relay.adopt_members(record, [newcomer], sender_device_id=PEER)
     assert added == [newcomer_id]
-    assert record.member(newcomer_id).name == ""
+    newcomer_row = record.member(newcomer_id)
+    assert newcomer_row is not None
+    assert newcomer_row.name == ""
 
     # The admission path applies the same rule to the join name.
     joiner = "d_" + "e" * 32
@@ -1068,10 +1077,10 @@ def test_a_row_write_that_fails_is_reported_as_a_partial_rename(
     # the identity file already carries the new name.
     monkeypatch.setattr(store, "mutate", real_mutate)
     assert identity.load(root).name == "build-box"
-    reread = next(
-        row for row in store.list_networks(root) if row.network_id == second.network_id
-    )
-    assert reread.member(me.device_id).name == "ip-172-31-18-0"
+    reread = next(row for row in store.list_networks(root) if row.network_id == second.network_id)
+    reread_row = reread.member(me.device_id)
+    assert reread_row is not None
+    assert reread_row.name == "ip-172-31-18-0"
 
 
 def test_a_rotation_frame_cannot_install_an_invalid_name(root: Path) -> None:
@@ -1112,13 +1121,16 @@ def test_a_rotation_frame_cannot_install_an_invalid_name(root: Path) -> None:
     outcome = relay.apply_epoch(record, state, incoming, sender_device_id=PEER, root=root)
     assert outcome.applied is True
     # The ROWS SURVIVE — a cosmetic label never costs a member or refuses a frame.
-    assert record.member(stranger) is not None
-    assert record.member(PEER) is not None
+    stranger_row = record.member(stranger)
+    peer_row = record.member(PEER)
+    assert stranger_row is not None and peer_row is not None
     # Neither invalid label is stored.
-    assert record.member(stranger).name == ""
-    assert record.member(PEER).name == ""
+    assert stranger_row.name == ""
+    assert peer_row.name == ""
     stored = store.load(NETWORK, root)
-    assert stored.member(stranger) is not None and stored.member(stranger).name == ""
+    stored_stranger = stored.member(stranger)
+    assert stored_stranger is not None
+    assert stored_stranger.name == ""
 
 
 def test_a_name_held_only_in_another_network_is_accepted(root: Path) -> None:
@@ -1157,7 +1169,9 @@ def test_a_name_held_only_in_another_network_is_accepted(root: Path) -> None:
     receipt = relay.rename_self("elsewhere-box", root=root)
     assert receipt.networks == (NETWORK,)
     home = next(row for row in store.list_networks(root) if row.network_id == NETWORK)
-    assert home.member(me.device_id).name == "elsewhere-box"
+    home_row = home.member(me.device_id)
+    assert home_row is not None
+    assert home_row.name == "elsewhere-box"
 
     # SAME-NETWORK: still refused, and the sentence names the colliding row.
     with pytest.raises(types.MeshRefusal) as taken:

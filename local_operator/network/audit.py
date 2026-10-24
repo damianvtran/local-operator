@@ -127,6 +127,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # newcomer as having always been a member.
         "membership_learned",
         "device_rotated",
+        # A device renaming ITSELF (identity set-name). Cosmetic, never authority —
+        # which is why it is registered here and NOT added to DURABLE_EVENTS: a lost
+        # rename costs a label, while the durable list is the events whose loss would
+        # hide who could do what.
+        "device_renamed",
         "epoch_rotated",
         "epoch_conflict",
         "handshake_refused",
@@ -412,6 +417,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "member_capabilities_changed": frozenset({"added", "removed", "capabilities", "initiated_by"}),
     "member_left": frozenset({"epoch"}),
     "device_rotated": frozenset({"old_device", "new_device"}),
+    "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
     "epoch_conflict": frozenset({"epoch", "rotation_id", "winner"}),
     "handshake_refused": frozenset(
