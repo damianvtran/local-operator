@@ -1535,6 +1535,42 @@ KIMI_USAGE_BODY = {
 
 
 @pytest.mark.asyncio
+async def test_kimi_oauth_usage_enforces_the_real_device_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """An enforcing endpoint 401s if ANY of the six device headers is absent."""
+    from local_operator.providers.oauth.kimi import kimi_common_headers
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    expected = kimi_common_headers()
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.headers.get("Authorization") != "Bearer tok" or any(
+            request.headers.get(name) != value for name, value in expected.items()
+        ):
+            return httpx.Response(401, json={"error": "device identity required"})
+        return httpx.Response(200, json=KIMI_USAGE_BODY)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None, "the enforcing endpoint rejected the outgoing request"
+    assert len(captured) == 1
+    assert {name for name in expected if name.startswith("X-Msh-")} == {
+        "X-Msh-Platform",
+        "X-Msh-Version",
+        "X-Msh-Device-Name",
+        "X-Msh-Device-Model",
+        "X-Msh-Os-Version",
+        "X-Msh-Device-Id",
+    }
+    assert captured[0].headers["X-Msh-Device-Id"] == expected["X-Msh-Device-Id"]
+    assert captured[0].headers["User-Agent"] == "KimiCLI/1.0.0"
+
+
+@pytest.mark.asyncio
 async def test_kimi_oauth_reads_the_top_level_usage_and_limits() -> None:
     """The regression: the rows are at the top level, not under a ``data``
     envelope, so the fetcher returned None before parsing anything."""

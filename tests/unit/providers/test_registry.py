@@ -523,7 +523,7 @@ def test_provider_brand_strips_one_trailing_parenthetical() -> None:
 
 
 def test_every_registry_brand_is_pinned() -> None:
-    """All 26 brands, spelled out.
+    """Every brand, spelled out.
 
     Written as a table rather than derived from ``name`` in the test, because a
     property written the way the code computes it agrees with the code by
@@ -539,6 +539,9 @@ def test_every_registry_brand_is_pinned() -> None:
         "openai-device": "OpenAI",
         "anthropic": "Anthropic",
         "kimi": "Kimi",
+        # The WeChat entry has its own brand so both Kimi rows are tellable
+        # apart without reading the parenthetical.
+        "kimi-wechat": "Kimi WeChat",
         "xai": "xAI",
         "xai-oauth": "xAI",
         "deepseek": "DeepSeek",

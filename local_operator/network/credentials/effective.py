@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.network.credentials.types import (
-    DEVICE_BOUND_PROVIDERS,
     BrokerError,
     Grant,
+    is_device_bound_provider,
 )
 
 _lock = threading.Lock()
@@ -179,7 +179,7 @@ def effective_access(
     source = mesh if mesh is not None else MeshCredentialClient.for_this_device(root)
     from dataclasses import replace
 
-    if provider in DEVICE_BOUND_PROVIDERS:
+    if is_device_bound_provider(provider):
         if receipt is not None:
             return replace(receipt, state="device_bound", eligible=False)
         return EffectiveAccess(

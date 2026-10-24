@@ -79,13 +79,13 @@ from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.messages import render_repair_notice
 from local_operator.network.credentials.placement import PlacementDocument
 from local_operator.network.credentials.types import (
-    DEVICE_BOUND_PROVIDERS,
     BrokerError,
     CredentialPlacementEntry,
     CredentialRef,
     Grant,
     GrantScope,
     device_bound_refusal,
+    is_device_bound_provider,
     is_mcp_key,
     mcp_url_from_key,
     peer_int,
@@ -444,7 +444,7 @@ class MeshCredentialBroker:
         #    answer does not depend on placement, and refusing it late would mean a
         #    document written before this rule could still broker it. (Checked again
         #    against the entry's own provider below, which is the one served.)
-        if provider in DEVICE_BOUND_PROVIDERS or key in DEVICE_BOUND_PROVIDERS:
+        if is_device_bound_provider(provider) or is_device_bound_provider(key):
             return self._refuse(
                 link, key, provider, by, "device_bound", device_bound_refusal(provider)
             )
@@ -469,7 +469,7 @@ class MeshCredentialBroker:
         # ``provider`` instead let a holder of one key name another of the owner's
         # logins and be served it (found auditing F1's class).
         provider = entry.provider or provider
-        if provider in DEVICE_BOUND_PROVIDERS:
+        if is_device_bound_provider(provider):
             return self._refuse(
                 link, key, provider, by, "device_bound", device_bound_refusal(provider)
             )
@@ -1642,7 +1642,7 @@ class MeshCredentialBroker:
             )
         for item in entries:
             key = item["credential_key"]
-            if key in DEVICE_BOUND_PROVIDERS:
+            if is_device_bound_provider(key):
                 # Like ``grant``: the device-bound answer does not depend on placement
                 # (and placement refuses to declare such a key at all).
                 continue
@@ -1697,8 +1697,8 @@ class MeshCredentialBroker:
                 out.append(row)
                 continue
             entry = self._entry(key)
-            if key in DEVICE_BOUND_PROVIDERS or (
-                entry is not None and entry.provider in DEVICE_BOUND_PROVIDERS
+            if is_device_bound_provider(key) or (
+                entry is not None and is_device_bound_provider(entry.provider)
             ):
                 row["state"] = lifecycle_mod.STATE_NON_PORTABLE
                 out.append(row)
