@@ -864,7 +864,101 @@ async def test_settings_get_passes_the_payload_through(api):
     FakeClient.behavior["settings"] = payload
     response = await client.get("/v1/desktop/team-bridge/settings?tenant_id=tnt_1")
     assert response.status_code == 200
-    assert response.json()["result"] == payload
+    # Passed through untouched, plus the ONE additive provenance flag.
+    assert response.json()["result"] == {**payload, "default_on": False}
+
+
+# -- default-on (bridge_consent_v2) additive contract ------------------------
+
+
+def _v2_check() -> StatusCheck:
+    base = _status_check()
+    payload = dict(base.payload or {})
+    payload["consent"] = {
+        "version": "bridge_consent_v2",
+        "text": "the served text",
+        "accepted_versions": ["bridge_consent_v1", "bridge_consent_v2"],
+    }
+    texts = {
+        "consent": AcceptedText(
+            version="bridge_consent_v2", text="the served text", sha256="x", accepted_at=1.0
+        )
+    }
+    return replace(base, payload=payload, texts=texts)
+
+
+async def test_status_exposes_the_default_on_inputs_for_the_banner(api):
+    client, _root, discipline = api
+    discipline.check_result = _v2_check()
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    # An absent key reads ON only while v2 is in force; the banner flag is pending
+    # until dismissed. The full v2 text rides ``consent`` for "Read what this means".
+    assert result["default_on"] == {"in_force": True, "notice_pending": True}
+    assert result["local"]["enabled"] is True
+    assert result["consent"]["version"] == "bridge_consent_v2"
+    assert result["consent"]["text"] == "the served text"
+
+
+async def test_status_v1_payload_is_unchanged_apart_from_the_additive_block(api):
+    client, _root, _discipline = api
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["default_on"] == {"in_force": False, "notice_pending": True}
+    assert result["local"] == {"enabled": False, "onboarding": "", "session": ""}
+
+
+async def test_an_explicit_local_off_wins_over_a_served_v2(api):
+    client, root, discipline = api
+    discipline.check_result = _v2_check()
+    from local_operator.team_bridge.settings import record_local_enabled
+
+    record_local_enabled(root, False)
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["local"]["enabled"] is False
+    assert result["default_on"]["in_force"] is True
+
+
+async def test_settings_get_flags_default_on_provenance(api):
+    client, _root, _discipline = api
+    for via, expected in (("default_on", True), ("settings", False), ("dialog", False)):
+        FakeClient.behavior["settings"] = {
+            "endpoint": {
+                "id": "bep_1",
+                "consent": {"version": "bridge_consent_v2", "consented_via": via},
+            },
+            "settings": {},
+        }
+        result = (await client.get("/v1/desktop/team-bridge/settings")).json()["result"]
+        assert result["default_on"] is expected
+        # The hub's own block passes through untouched.
+        assert result["endpoint"]["consent"]["consented_via"] == via
+
+
+async def test_dismiss_marks_the_notice_seen_idempotently_and_it_never_returns(api):
+    client, root, discipline = api
+    discipline.check_result = _v2_check()
+    for _ in range(2):
+        response = await client.post("/v1/desktop/team-bridge/onboarding/dismiss")
+        assert response.status_code == 200
+        assert response.json()["result"] == {"onboarding": "seen"}
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["default_on"]["notice_pending"] is False
+    assert result["local"]["onboarding"] == "seen"
+
+
+async def test_a_client_surface_can_never_claim_default_on(api):
+    client, _root, _discipline = api
+    calls = FakeClient.calls
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={
+            "state": "active",
+            "consent_version": "bridge_consent_v2",
+            "consented_via": "default_on",
+            "expected_account_id": "acc_1",
+        },
+    )
+    assert response.status_code == 422
+    assert FakeClient.calls == calls
 
 
 # -- the directory read (pair backend: GET /v1/messaging/directory) ----------
