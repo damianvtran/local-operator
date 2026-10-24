@@ -487,40 +487,102 @@ def test_a_percent_row_keeps_a_sub_one_percent_reading_visible() -> None:
     assert format_amount(UsageAmount(used_fraction=0.0006, unit="percent")) == "<1% used"
 
 
+def _live_kimi_report() -> UsageReport:
+    """The two rows the redacted live body produces: absolute 5h and monthly."""
+    return _report(
+        UsageLimit(
+            id="kimi:0",
+            label="5h limit",
+            amount=UsageAmount(used=1.0, limit=100.0, remaining=99.0, unit="unknown"),
+            window="5h limit",
+            resets_at_ms=1_792_883_373_000,
+            shared=True,
+        ),
+        UsageLimit(
+            id="kimi:monthly-total",
+            label="Monthly total",
+            amount=UsageAmount(
+                used=0.06,
+                remaining=99.94,
+                used_fraction=0.0006,
+                unit="percent",
+            ),
+            window="monthly",
+            resets_at_ms=1_795_564_800_000,
+            shared=True,
+        ),
+        provider="kimi",
+    )
+
+
+def test_a_sub_one_percent_binding_window_is_not_shown_as_zero() -> None:
+    """The headline asks the same question as the rows and must not answer it
+    with a different number: a 0.06% monthly pool binding over a 0% 5h window
+    printed ``Monthly total 0%`` above a row that said ``<1%``."""
+    report = _report(
+        _percent("kimi:0", "5h limit", 0.0, window="5h limit", shared=True),
+        UsageLimit(
+            id="kimi:monthly-total",
+            label="Monthly total",
+            amount=UsageAmount(
+                used=0.06,
+                remaining=99.94,
+                used_fraction=0.0006,
+                unit="percent",
+            ),
+            window="monthly",
+            shared=True,
+        ),
+        provider="kimi",
+    )
+    header = _lines([report])[0]
+    assert "Monthly total <1%" in header, header
+    assert "Monthly total 0%" not in header, header
+
+
+@pytest.mark.parametrize("width", range(24, 111))
+def test_rows_never_compose_wider_than_the_body(width: int) -> None:
+    """A 41-cell row on a 40-cell body wraps mid-countdown and pushes the footer
+    off the card. Widths down to 24 keep the whole row inside the body."""
+    long_label = _report(
+        UsageLimit(
+            id="kimi:long",
+            label="An extremely long provider window label that cannot fit",
+            amount=UsageAmount(
+                used=42.0,
+                limit=100.0,
+                remaining=58.0,
+                used_fraction=0.42,
+                unit="percent",
+            ),
+            window="monthly",
+            shared=True,
+        ),
+        provider="kimi",
+    )
+    for report in (_live_kimi_report(), long_label):
+        lines = _lines([report], width=width)
+        assert max(cell_len(line) for line in lines) <= width, (width, lines)
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_pilot_frame_keeps_the_footer_under_the_kimi_rows() -> None:
+    """The 40x24 body is 31 cells. Both live rows and the recovery keys must fit
+    rather than wrapping the countdown and clipping the footer."""
+    async with _panel_app(size=(40, 24)) as panel:
+        panel.show_reports([_live_kimi_report()])
+        rows = panel.render_lines_for_test()
+        content_width = panel._content_width()
+    assert max(cell_len(row) for row in rows) <= content_width, rows
+    assert "r refresh" in rows[-1] and "esc close" in rows[-1], rows
+
+
 def test_the_live_kimi_rows_render_beside_each_other_with_countdowns() -> None:
     """The two rows the live body produces: the absolute 5h window and the
     percent-only monthly pool. Both are legible, both count down, and a new
     plan shows no weekly row."""
     now_ms = 1_792_880_000_000
-    lines = _lines(
-        [
-            _report(
-                UsageLimit(
-                    id="kimi:0",
-                    label="5h limit",
-                    amount=UsageAmount(used=1.0, limit=100.0, remaining=99.0, unit="unknown"),
-                    window="5h limit",
-                    resets_at_ms=1_792_883_373_000,
-                    shared=True,
-                ),
-                UsageLimit(
-                    id="kimi:monthly-total",
-                    label="Monthly total",
-                    amount=UsageAmount(
-                        used=0.06,
-                        remaining=99.94,
-                        used_fraction=0.0006,
-                        unit="percent",
-                    ),
-                    window="monthly",
-                    resets_at_ms=1_795_564_800_000,
-                    shared=True,
-                ),
-                provider="kimi",
-            )
-        ],
-        now=now_ms,
-    )
+    lines = _lines([_live_kimi_report()], now=now_ms)
     joined = "\n".join(lines)
     assert "5h limit" in joined and "1 / 100" in joined, lines
     assert "Monthly total" in joined and "<1%" in joined, lines

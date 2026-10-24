@@ -1768,8 +1768,8 @@ def _kimi_ratio_label(key: str) -> str:
         return ""
     words = [_KIMI_RATIO_WORDS.get(token, token) for token in tokens]
     label = " ".join(words)
-    # A bare period describes a window, not a quota: "Monthly limit" reads as a
-    # cap, while "Monthly" beside "Monthly total" reads as a fragment.
+    # A bare period names a window ("Weekly limit", "Monthly limit"); a key
+    # with a qualifier already names the quota ("Monthly total").
     if len(words) == 1:
         label += " limit"
     return label[:1].upper() + label[1:]
@@ -1797,6 +1797,68 @@ def _kimi_ratio_value(entry: dict[str, Any]) -> float | None:
     if ratio is None or not 0.0 <= ratio <= 1.0:
         return None
     return ratio
+
+
+def _kimi_window_seconds(window: dict[str, Any]) -> int | None:
+    """The window's length in seconds, or None when it is not parseable.
+
+    Dedupe needs a duration, not the display label: the same 5-hour window can
+    arrive as 300 minutes in ``limits[]`` and as ``5h`` in ``usages``, and a
+    label-equality check missed it. This is the machine-readable counterpart to
+    :func:`_kimi_window_label` and never replaces it on a rendered row.
+    """
+    duration = _num(window.get("duration"))
+    unit = str(window.get("timeUnit") or window.get("time_unit") or "").upper()
+    if duration is None or not unit or duration < 0:
+        return None
+    seconds = int(duration)
+    if "MINUTE" in unit:
+        return seconds * 60
+    if "HOUR" in unit:
+        return seconds * 3600
+    if "DAY" in unit:
+        return seconds * 86400
+    if "SECOND" in unit:
+        return seconds
+    return None
+
+
+def _kimi_ratio_period_seconds(key: str) -> int | None:
+    """Canonical period of a ``usages`` key, for DEDUPE only.
+
+    ``month`` maps to 30 days because that is how a monthly pool is recognised
+    against a ``limits[]`` window quoted in days; a calendar month is not a
+    fixed duration, and this number never feeds a displayed amount, a reset or
+    a countdown. Duration tokens (``5h``, ``7d``) parse from their suffix.
+    """
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    for token in key.strip().lower().removeprefix("limit_").split("_"):
+        if token == "month":
+            return 30 * 86400
+        if token == "week":
+            return 7 * 86400
+        if len(token) >= 2 and token[-1] in units and token[:-1].isdigit():
+            return int(token[:-1]) * units[token[-1]]
+    return None
+
+
+def _kimi_ratio_window(key: str) -> str:
+    """Canonical period token for a ratio row's ``window`` field.
+
+    ``window`` is read by downstream surfaces as a period, not as display copy:
+    a label such as "Weekly limit" there is an unknown value. The label carries
+    the user-facing name; this carries the machine-ish one.
+    """
+    tokens = key.strip().lower().removeprefix("limit_").split("_")
+    if "month" in tokens:
+        return "monthly"
+    if "week" in tokens or "7d" in tokens:
+        return "weekly"
+    if "5h" in tokens:
+        return "5h"
+    if "day" in tokens or "1d" in tokens:
+        return "daily"
+    return ""
 
 
 async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
@@ -1835,9 +1897,12 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
                 )
             )
 
-    # Window names the absolute rows above actually rendered, so the ratio
-    # object can be deduplicated against them below.
+    # Window names and durations the absolute rows above actually rendered, so
+    # the ratio object can be deduplicated against them below. Periods are the
+    # real key: labels miss the same window quoted in different units or under a
+    # custom name, and a legacy weekly window can appear in both shapes at once.
     rendered_windows: set[str] = set()
+    rendered_periods: set[int] = set()
 
     raw_limits = data.get("limits")
     if isinstance(raw_limits, list):
@@ -1859,6 +1924,12 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
                 continue
             if window_label:
                 rendered_windows.add(window_label.casefold())
+            # Custom `name`/`title` rows have no derived window label; their
+            # final label is what a ratio label can collide with.
+            rendered_windows.add(label.casefold())
+            window_seconds = _kimi_window_seconds(window_data)
+            if window_seconds is not None:
+                rendered_periods.add(window_seconds)
             amount, detail_reset = row
             # The WINDOW's own reset wins when it has one; Kimi usually leaves it
             # on the detail instead, which is why the fallback exists at all —
@@ -1877,15 +1948,20 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
     # The ratio object is a SECOND spelling of some windows, not another quota.
     # On live accounts its `limit_5h` disagrees with `limits[]`, and the Kimi
     # website matches `limits[]` — so the map's 5h entry is ignored whenever an
-    # absolute 5h row rendered, never merged or overridden. The same-name rule
-    # below does that: a ratio whose derived label equals a window already
-    # rendered describes the same window.
+    # absolute 5h row rendered, never merged or overridden. Period catches the
+    # same window even when it is quoted in different units (300 minutes vs
+    # 18000 seconds vs 5h); the label catches a custom-named row that carries no
+    # parseable window.
     raw_usages = data.get("usages")
     if isinstance(raw_usages, dict):
         monthly = raw_usages.get("limit_month_total")
         if isinstance(monthly, dict):
             ratio = _kimi_ratio_value(monthly)
-            if ratio is not None:
+            monthly_period = _kimi_ratio_period_seconds("limit_month_total")
+            already_rendered = "monthly total" in rendered_windows or (
+                monthly_period is not None and monthly_period in rendered_periods
+            )
+            if ratio is not None and not already_rendered:
                 limits.append(
                     UsageLimit(
                         id="kimi:monthly-total",
@@ -1915,6 +1991,9 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
             label = _kimi_ratio_label(key)
             if not label or label.casefold() in rendered_windows:
                 continue
+            period = _kimi_ratio_period_seconds(key)
+            if period is not None and period in rendered_periods:
+                continue
             ratio = _kimi_ratio_value(entry)
             if ratio is None:
                 continue
@@ -1923,7 +2002,7 @@ async def fetch_kimi_oauth(client: httpx.AsyncClient, access_token: str) -> Usag
                     id=f"kimi:{key}",
                     label=label,
                     amount=UsageAmount(used_fraction=ratio, unit="percent"),
-                    window=label,
+                    window=_kimi_ratio_window(key),
                     resets_at_ms=_kimi_reset_ms(entry, now_ms),
                     shared=True,
                 )

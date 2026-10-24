@@ -297,6 +297,11 @@ def format_countdown(ms: int | None) -> str:
 #: same string and the reset column always fits its own content.
 _RESET_PREFIX = "resets in "
 
+#: Prefixes the countdown column may use, longest first. A narrow card buys the
+#: label its cells before it spends them on the words around the countdown: the
+#: number is the measurement, the prefix is prose that a reader can infer.
+_RESET_PREFIXES = (_RESET_PREFIX, "in ", "")
+
 
 def _format_percent(value: float) -> str:
     """A percent for a row, without rounding a real reading down to nothing.
@@ -432,6 +437,7 @@ class _Columns:
     numbers: int
     reset: int
     bar: int
+    reset_prefix: str = _RESET_PREFIX
 
 
 def _measure_columns(reports, width: int, now_ms: float) -> _Columns:  # noqa: ANN001
@@ -451,14 +457,44 @@ def _measure_columns(reports, width: int, now_ms: float) -> _Columns:  # noqa: A
     reset_cells = [cell_len(format_countdown(limit.resets_in_ms(now_ms))) for limit in limits]
     # The label truncates rather than pushing the numbers off the row: it is the
     # one column whose content the user can still identify from a prefix.
-    label = min(max(label_cells, default=0), max(12, width // 3))
+    capped = min(max(label_cells, default=0), max(12, width // 3))
     numbers = max(numbers_cells, default=0)
     longest_reset = max(reset_cells, default=0)
-    # `resets in ` is only paid for when some row actually has a countdown.
-    reset = (len(_RESET_PREFIX) + longest_reset) if longest_reset else 0
+
+    def composed(label: int, prefix: str) -> tuple[int, int]:
+        """``(countdown cell, total row width)`` for this label and prefix."""
+        reset = (len(prefix) + longest_reset) if longest_reset else 0
+        fixed = 2 + label + 2 + numbers + (2 + reset if reset else 0)
+        return reset, fixed
+
+    # Buy the words around the countdown last: the longest prefix that leaves
+    # room for the label wins, and a row wider than its body is never emitted.
+    label, reset_prefix, reset = capped, _RESET_PREFIX, 0
+    for prefix in _RESET_PREFIXES:
+        candidate_reset, fixed = composed(capped, prefix)
+        if fixed <= width:
+            reset_prefix, reset = prefix, candidate_reset
+            break
+    else:
+        # No prefix fits the capped label. Spend the remaining cells on a
+        # shorter label under the shortest prefix; drop the countdown only if
+        # even one label cell cannot sit beside it.
+        reset_prefix = _RESET_PREFIXES[-1]
+        reset, fixed = composed(0, reset_prefix)
+        label = max(1, min(capped, width - fixed))
+        if fixed + label > width:
+            reset_prefix, reset = "", 0
+            label = max(1, min(capped, width - (2 + 2 + numbers)))
+
     fixed = 2 + label + 2 + numbers + (2 + reset if reset else 0)
     bar = max(0, min(BAR_MAX_CELLS, width - fixed - 2))
-    return _Columns(label=label, numbers=numbers, reset=reset, bar=bar)
+    return _Columns(
+        label=label,
+        numbers=numbers,
+        reset=reset,
+        bar=bar,
+        reset_prefix=reset_prefix,
+    )
 
 
 def _limit_row(  # noqa: ANN001
@@ -516,7 +552,7 @@ def _limit_row(  # noqa: ANN001
         # A window with no countdown still pads its cell, so the rows that do
         # have one stay in a column rather than starting wherever their numbers
         # happened to end.
-        text = f"{_RESET_PREFIX}{countdown}" if countdown else ""
+        text = f"{columns.reset_prefix}{countdown}" if countdown else ""
         row.append("  ")
         row.append(text.ljust(columns.reset), style=faint)
     return row
@@ -728,7 +764,7 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
         fraction = binding.amount.fraction() or 0.0
         tint = Style(color=_status_color(binding.effective_status()))
         row.append("  ·  ", style=dim)
-        row.append(f"{binding.label} {fraction * 100:.0f}%", style=tint)
+        row.append(f"{binding.label} {_format_percent(fraction * 100)}%", style=tint)
         countdown = format_countdown(binding.resets_in_ms(now_ms))
         if countdown:
             row.append(_t(_x.resets_in(value=countdown)), style=dim)
