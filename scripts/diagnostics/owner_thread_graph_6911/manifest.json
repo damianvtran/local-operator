@@ -1,0 +1,18 @@
+{
+  "schema": "owner_thread_python_resumption_graph_v1",
+  "base": "df895e8f357bee2ea8902edcc54e85e256211cce",
+  "component_only": true,
+  "sources": {
+    "scripts/diagnostics/owner_thread_graph_6911/collector.py": "080e178d49c6fa4e71c6db4b94c2a4b5cbc5ff5e73edd6786ca81f407022015e",
+    "scripts/diagnostics/owner_thread_graph_6911/controls.py": "7181166fb8dba18e200f22db360f7562191fbbc91b6efafc6b0cb5da1621c5d3"
+  },
+  "caps": {
+    "codes": 128,
+    "edges": 256,
+    "stack": 64,
+    "events": 20000
+  },
+  "unit": "instrumented_owner_thread_cpu_ns",
+  "native_verified": false,
+  "integration_remaining": "source-qualified 3.12 header/catalog; direct hook/root driver; existing canonical lifecycle/controller; four phases plus fixed-operation overhead control; independent reviews and explicit GO before native; no App authorization"
+}
