@@ -304,10 +304,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # 729 -> 747 (PR #2828): the closed recipient schema now exposes its allowed
     # endpoint/account properties in the opt-in reference. Then 747 -> 773 with
     # #2757: the channel_thread op and the thread_root_id parameter add 26
-    # tokens. Neither number was right alone — the merged tree was re-measured
-    # here with both changes present, which is the only measurement that counts.
+    # tokens. Then 773 -> 798 with #2760: the react op plus its emoji parameter
+    # and the reaction reference prose add 25. Each number was measured on the
+    # MERGED tree with the preceding changes present — never carried across.
+    # 798 -> 777 after trimming the tool's prose for the context budget: the
+    # repeated op roster left the description and the thread-reply clause moved
+    # to thread_root_id's own field note. Every op is still discoverable.
     # Neither the document soft cap nor the start-context budget changes.
-    "bridge": 773,
+    "bridge": 777,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
