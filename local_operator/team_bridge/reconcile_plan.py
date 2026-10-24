@@ -60,6 +60,15 @@ class Reason(StrEnum):
     TENANT_REMOVED = "tenant_removed"
 
 
+#: The only legal reason -> kind pairs. The planner derives a kind this way and
+#: the type enforces the same mapping, so a public constructor cannot express a
+#: decision the planner would never emit.
+_KIND_FOR_REASON = {
+    Reason.NEW_ENROLLMENT: IntentKind.CREATE,
+    Reason.CURRENT_BINDING: IntentKind.ATTACH_CURRENT,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class OwnerKey:
     hub: str
@@ -168,12 +177,21 @@ class Intent:
     offer_text_ref: str | None = None
 
     def __post_init__(self) -> None:
+        # One decision function owns this mapping: only NEW_ENROLLMENT may be a
+        # CREATE and only CURRENT_BINDING may ATTACH; every other reason is a
+        # HOLD. Refusing a disagreement here means a public constructor cannot
+        # express a decision the planner would never emit.
+        expected_kind = _KIND_FOR_REASON.get(self.reason, IntentKind.HOLD)
+        if self.kind is not expected_kind:
+            raise ValueError("intent kind disagrees with its reason")
         # Membership revision is required for every decision about a tenant the
-        # snapshot still contains. Only the removed-tenant hold can lack one,
-        # because no fresh revision exists for an org the account left. Making
-        # this a construction invariant keeps a future caller from expressing
-        # "unknown membership" on an intent that might otherwise attach.
-        if self.membership_revision is None and self.reason is not Reason.TENANT_REMOVED:
+        # snapshot still contains. Only the removed-tenant hold (kind HOLD, a
+        # reason the mapping already fixes) can lack one, because no fresh
+        # revision exists for an org the account left. Keyed on the KIND, not
+        # merely the reason, so the pair cannot be smuggled together.
+        if self.membership_revision is None and (
+            self.kind is not IntentKind.HOLD or self.reason is not Reason.TENANT_REMOVED
+        ):
             raise ValueError("membership revision missing for a non-removal intent")
 
 

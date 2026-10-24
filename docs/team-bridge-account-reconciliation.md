@@ -199,10 +199,13 @@ only the two new Python files; formatting uses existing cached Black 26.1.0 and
 isort 5.13.2. Actual frozen-head results and resource measurements belong in the
 PR evidence, not a promise that broader gates passed.
 
-A non-removal intent always carries a membership revision; the `Intent` type
-refuses construction with `membership_revision=None` unless the reason is
-`tenant_removed`. The removed-tenant hold is the only shape without a fresh
-revision, and that invariant is construction-time, not a caller convention.
+A non-removal intent always carries a membership revision; `Intent` refuses
+construction with `membership_revision=None` unless the intent is the removal
+hold (`kind=HOLD`, `reason=tenant_removed`). The type also enforces the planner's
+reason-to-kind mapping — `new_enrollment` is the only CREATE, `current_binding`
+the only ATTACH_CURRENT, every other reason a HOLD — so a public constructor
+cannot carry a disagreeing pair. Both invariants are construction-time, not
+caller conventions.
 
 No reconciliation worker, enrollment I/O, account receiver factory, service
 ensure/autoconfiguration, native compiler path, or end-to-end integration is

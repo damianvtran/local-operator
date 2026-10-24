@@ -236,16 +236,15 @@ def test_generation_is_required_to_attach_and_compared_when_supplied() -> None:
     assert missing.owner is None and missing.generation is None
 
 
-def test_only_a_removal_intent_may_carry_a_missing_membership_revision() -> None:
-    """The invariant is enforced at construction, not by convention.
+def test_only_the_removal_hold_may_carry_a_missing_membership_revision() -> None:
+    """The invariant is enforced on the KIND, not smuggled through the reason.
 
-    Every non-removal decision is about a tenant the snapshot still contains and
-    therefore has a membership revision. Expressing "unknown" on an intent that
-    might attach is the same class of hole as an uncaptured generation, so the
-    type itself refuses it.
+    The public constructor must refuse the pair the planner never emits: an
+    ATTACH_CURRENT carrying TENANT_REMOVED, with or without a revision. A
+    genuine removal hold is HOLD + TENANT_REMOVED and is the only shape allowed
+    to omit the revision.
     """
     fields = dict(
-        kind=IntentKind.HOLD,
         hub=HUB,
         account_id="acc_a",
         device_id="dev_1",
@@ -257,9 +256,28 @@ def test_only_a_removal_intent_may_carry_a_missing_membership_revision() -> None
         pre_enable_head=None,
         receipt_version=None,
     )
+    # The reviewer's exact hole: a mismatched kind/reason pair with no revision.
     with pytest.raises(ValueError):
-        Intent(reason=Reason.CURRENT_BINDING, membership_revision=None, **fields)
-    removed = Intent(reason=Reason.TENANT_REMOVED, membership_revision=None, **fields)
+        Intent(
+            kind=IntentKind.ATTACH_CURRENT,
+            reason=Reason.TENANT_REMOVED,
+            membership_revision=None,
+            **fields,
+        )
+    # Even with a revision, the pair itself is illegal.
+    with pytest.raises(ValueError):
+        Intent(
+            kind=IntentKind.HOLD,
+            reason=Reason.CURRENT_BINDING,
+            membership_revision="membership-7",
+            **fields,
+        )
+    removed = Intent(
+        kind=IntentKind.HOLD,
+        reason=Reason.TENANT_REMOVED,
+        membership_revision=None,
+        **fields,
+    )
     assert removed.membership_revision is None
 
 
