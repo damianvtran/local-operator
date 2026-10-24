@@ -455,6 +455,74 @@ def test_ready_reports_an_open_wal_as_unavailable_not_empty_or_stale(tmp_path: P
         auth.close()
 
 
+@pytest.mark.parametrize("store_state", ["corrupt", "open_wal"])
+def test_unknown_store_never_renders_ok_with_placement(tmp_path: Path, store_state: str) -> None:
+    """Placement must not mask an unknown store (review round 1, F-1)."""
+    from local_operator.network import store
+    from local_operator.network.credentials import placement as placement_mod
+    from tests.unit.mcp.test_credential_status import NETWORK
+    from tests.unit.mcp.test_credential_status import PEER as OWNER
+    from tests.unit.mcp.test_credential_status import SELF, URL, _place, _record
+
+    root = tmp_path / "cfg"
+    root.mkdir()
+    store.save(_record(), root)
+    _place(root)
+    with placement_mod.mutate(NETWORK, root, self_device=OWNER) as document:
+        document.declare(
+            "openai",
+            owner_device=OWNER,
+            owner_device_name="macbook",
+            provider="openai",
+            kind="oauth-rotating",
+            by=OWNER,
+        )
+        document.grant("openai", SELF, scope="session", by=OWNER)
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+    (root / "config.yml").write_text(
+        'version: "0.0.0"\nvalues:\n  hosting: openai\n  model_name: gpt-5\n',
+        encoding="utf-8",
+    )
+    auth = None
+    if store_state == "open_wal":
+        auth = _seed_mcp_row(root, URL)
+        auth.upsert_credential("openai", {"type": "oauth", "access": "ready-openai-fixture"})
+        assert auth.read_only_sidecar_present()
+    else:
+        (root / "auth.db").write_bytes(b"not a database")
+    try:
+        facts = readiness.collect_peer_facts(root)
+        assert facts["has_local"] is None
+        assert facts["mcp"]["servers"][0]["has_row"] is None
+        viewer = _FakeViewer(
+            device_id=OWNER,
+            placement={
+                "owner_device": OWNER,
+                "owner_device_name": "macbook",
+                "holders": [{"device": SELF, "scope": "session"}],
+            },
+        )
+        member = SimpleNamespace(device_id=SELF, name="holder")
+        model_row = readiness.model_credential_row(
+            member, facts, viewer=viewer, peer_label="holder"
+        )
+        mcp_row = readiness.mcp_credential_rows(member, facts, viewer=viewer, peer_label="holder")[
+            0
+        ]
+
+        assert model_row["ok"] is False and model_row["code"] == readiness.CODE_UNKNOWN
+        assert mcp_row["ok"] is False and mcp_row["code"] == readiness.CODE_UNKNOWN
+        lines = readiness.render_check_lines([model_row, mcp_row])
+        assert len(lines) == 4  # one verdict and one remedy per capability
+        assert sum("could not be read" in line for line in lines) == 2
+    finally:
+        if auth is not None:
+            auth.close()
+
+
 def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
     """An ``auth.db`` that exists but cannot be opened is "could not be read",
     never a crash (convergence round 2, MAJOR class): every open keeps

@@ -1998,6 +1998,23 @@ def model_credential_row(
             detail=f"{peer_label} serves {provider} from its own login",
             source=SOURCE_PEER,
         )
+    # Placement is only a borrow ROUTE, not proof that the peer's store is
+    # readable. An unknown peer fact must reach the verdict before placement's
+    # ok fast-paths; the viewer read stays in its established order below.
+    if held is None:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "a credential store could not be read (this side or the peer's), so "
+                "whether this provider can be served is not known"
+            ),
+            remedies=[f"check the credential store on {peer_label} and here, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
     owner = str(placement.get("owner_device") or "")
     peer_is_holder = member.device_id in _holder_names(placement)
     if owner and peer_is_holder:
@@ -2119,7 +2136,7 @@ def model_credential_row(
             remedies=[f"share it with {peer_label} (run here)"],
             source=SOURCE_LOCAL,
         )
-    if held is None or mine is None:
+    if mine is None:
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -2432,6 +2449,23 @@ def _mcp_credential_row(
             source=SOURCE_PEER,
             observed={"server": name, "url": url},
         )
+    # As with the provider row, placement cannot substitute for a readable
+    # peer store. Check its tri-state fact before any self-borrow shortcut.
+    if has_row is None:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"{peer_label}'s credential store could not be read, so whether it holds "
+                f"a login for {name} is not known"
+            ),
+            remedies=[f"check the credential store on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+            observed={"server": name, "url": url},
+        )
     if owner and peer_is_holder:
         # THE PULL GAP, per server: this device's own document says the peer is a
         # holder, but the peer's OWN answer says it has no placement entry for
@@ -2518,21 +2552,6 @@ def _mcp_credential_row(
             ),
             remedies=[f"share it with {peer_label} (run here)"],
             source=SOURCE_LOCAL,
-            observed={"server": name, "url": url},
-        )
-    if has_row is None:
-        return _capability_row(
-            device_id=member.device_id,
-            device_name=peer_label,
-            capability=CAPABILITY_MCP_CREDENTIAL,
-            ok=False,
-            code=CODE_UNKNOWN,
-            detail=(
-                f"{peer_label}'s credential store could not be read, so whether it holds "
-                f"a login for {name} is not known"
-            ),
-            remedies=[f"check the credential store on {peer_label}, then re-check"],
-            source=SOURCE_UNKNOWN,
             observed={"server": name, "url": url},
         )
     if server.get("auth_declared"):
