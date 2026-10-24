@@ -413,6 +413,27 @@ export interface PendingAsk {
 	    advance past them, and the log still holds nothing until the last question
 	    lands. Absent on every ask answered the atomic way. */
 	draft_question_ids?: string[];
+	/** THE CARD'S CONTEXT LINE (SA-D7), the pair the ask card draws as
+	    "3 messages from you since this was asked (last 19:36)": operator messages
+	    admitted after this ask was raised, and when the latest one was (epoch ms).
+
+	    ABSENT IS NOT ZERO. The runtime omits both when it cannot count them — an
+	    older daemon, an ask older than its retained window — and the card then
+	    draws no line at all. A present `0` is a fact (the ask is newer than every
+	    message) and draws no line either: there is nothing stale to report. */
+	user_messages_since?: number;
+	last_user_message_at?: number;
+	/** WHY and WHEN this ask was dismissed (SA-D8, design §17). `dismissed_at` is
+	    the stamp the daemon's shared visibility rule reads — a dismissal BEFORE
+	    the deadline keeps a settled row, one at or after it leaves — and
+	    `dismissed_reason` is the operator's own word (`moot` |
+	    `answered_in_chat`), which the settled card states under its badge.
+
+	    ABSENT on every other status, and absent on a dismissal recorded by an
+	    older runtime: the card then keeps the sentence it always had rather than
+	    inventing a reason. */
+	dismissed_at?: number;
+	dismissed_reason?: string;
 }
 
 /** One aggregated row of the published `spend_channels` object
@@ -870,8 +891,14 @@ export type CommandOp =
 	/* Dismiss is VIEW-ONLY: it removes the row from the queue's front end and asks
 	   the model nothing — no turn is bought HERE. The one thing it can still owe is
 	   the deadline notice that ask never got (design `ask-nonblocking.md` §14),
-	   delivered on the conversation's next run. */
-	| { op: "ask_dismiss"; ask_id: string }
+	   delivered on the conversation's next run.
+
+	   `reason` (R5) is the operator's word for WHY an OPEN ask is going away:
+	   `moot` says the question stopped mattering, `answered_in_chat` says it was
+	   already answered in the conversation. It is OPTIONAL because a lapsed ask's
+	   one-key door sends the body it always did — the queue then records its own
+	   default, and an older daemon sees exactly the frame it always accepted. */
+	| { op: "ask_dismiss"; ask_id: string; reason?: "moot" | "answered_in_chat" }
 	| { op: "snapshot" }
 	/* THE TURN-SUPPLEMENT FAMILY (memo §2.7). Additive ops the runtime's dispatch
 	   answers with its own receipt (`cancelled` / `steering` / `restarting` / the

@@ -1510,7 +1510,7 @@ def _plant_proof(
                     )
 
 
-def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
+def _enroll(root: Path, *, enabled: bool = True, account_id: str = "acc_1") -> OwnerSnapshot:
     """Commit the owner + consent receipt H4 commits, and set the local switch.
 
     The switch is the DOCUMENT the running daemon reads (`values.team_bridge.
@@ -1518,7 +1518,7 @@ def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
     the file from disk, never a long-lived manager, so a fixture that set an
     in-memory value would test nothing.
     """
-    owner = _owner()
+    owner = replace(_owner(), account_id=account_id)
     Store(root).commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
     (root / "config.yml").write_text(
         yaml.safe_dump({"values": {"team_bridge": {"enabled": enabled}}})
@@ -1652,6 +1652,77 @@ def _seed_allow_receipt(root: Path, message_id: str) -> None:
                 0.0,
             ),
         )
+
+
+# Synthetic canonical UUIDs exercise the production identity SHAPE, not a real account.
+UUID_ACCOUNT = "12345678-1234-4234-8234-123456789abc"
+UUID_SENDER = "87654321-4321-4321-8321-cba987654321"
+
+
+@pytest.mark.parametrize("account_id", ["acc_1", UUID_ACCOUNT])
+@pytest.mark.parametrize("sender_id", ["acc_9", UUID_SENDER])
+async def test_uuid_account_inbox_preserves_metadata_and_authority(api, account_id, sender_id):
+    client, root, _discipline = api
+    _enroll(root, account_id=account_id)
+    FakeClient.behavior["access"] = _access(account_id)
+    FakeClient.behavior["inbox"] = _page(_item(recipient_account=account_id))
+    before = _digest(root)
+    response = await client.get(
+        INBOX, params=_query(expected_account_id=account_id, sender_account_id=sender_id)
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_inbox_kwargs"]["sender_account_id"] == sender_id
+    assert _digest(root) == before
+
+
+@pytest.mark.parametrize("account_id", ["acc_1", UUID_ACCOUNT])
+async def test_uuid_account_all_read_query_and_path_guards_accept(account_id):
+    desktop_team_bridge.TeamBridgeMessageQuery(expected_account_id=account_id, tenant_id="tnt_1")
+    desktop_team_bridge.TeamBridgeInboxQuery(
+        expected_account_id=account_id, tenant_id="tnt_1", sender_account_id=account_id
+    )
+    desktop_team_bridge._require_account_id(account_id)
+
+
+@pytest.mark.parametrize(
+    "account_id",
+    [
+        "",
+        "../acc_1",
+        "acc_1\n",
+        UUID_ACCOUNT + "\n",
+        " " + UUID_ACCOUNT,
+        UUID_ACCOUNT.replace("-", ""),
+        "{" + UUID_ACCOUNT + "}",
+        "urn:uuid:" + UUID_ACCOUNT,
+        UUID_ACCOUNT + "?tenant_id=tnt_other",
+    ],
+)
+async def test_account_identity_negative_guards_remain_closed(account_id):
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        desktop_team_bridge.TeamBridgeMessageQuery(
+            expected_account_id=account_id, tenant_id="tnt_1"
+        )
+    for field in ("expected_account_id", "sender_account_id"):
+        with pytest.raises(ValidationError):
+            desktop_team_bridge.TeamBridgeInboxQuery(**_query(**{field: account_id}))
+    with pytest.raises(HTTPException):
+        desktop_team_bridge._require_account_id(account_id)
+
+
+async def test_uuid_account_read_still_refuses_wrong_authority(api):
+    client, root, _discipline = api
+    _enroll(root, account_id=UUID_ACCOUNT)
+    FakeClient.behavior["access"] = _access(UUID_SENDER)
+    before = _digest(root)
+    response = await client.get(INBOX, params=_query(expected_account_id=UUID_ACCOUNT))
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "account_mismatch"
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+    assert _digest(root) == before
 
 
 async def test_the_inbox_read_needs_the_desktop_bearer(api):
@@ -2850,10 +2921,13 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
 
 
 def test_account_grammar_matches_the_reader():
-    from local_operator.server.routes.desktop_team_bridge import _ACCOUNT_ID
-    from local_operator.team_bridge.read_context import ACCOUNT_ID_PATTERN
+    from local_operator.server.routes.desktop_team_bridge import (
+        is_account_id as route_guard,
+    )
+    from local_operator.team_bridge.read_context import is_account_id as read_guard
+    from local_operator.team_bridge.types import is_account_id
 
-    assert _ACCOUNT_ID.pattern == ACCOUNT_ID_PATTERN
+    assert route_guard is read_guard is is_account_id
 
 
 async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):

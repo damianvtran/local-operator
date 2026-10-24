@@ -9010,7 +9010,13 @@ class ServingSessionHandle(SessionHandle):
         """
         name, _, request = arg.partition(" ")
         name = name.strip()
-        if name.startswith("="):
+        # A leading ``=`` means "literal name, never a verb": captured before
+        # the strip so the detach below cannot fire on a team literally named
+        # ``clear``/``none``. Without this the TUI and the owner disagreed —
+        # `/team =clear` attached locally but detached on an attached session
+        # (command-palette round 3, MAJOR).
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_team`` and
@@ -9018,7 +9024,7 @@ class ServingSessionHandle(SessionHandle):
         # #2014), so detaching it is the ONE way to free that slot again, and a
         # request after the verb is a mistyped attach that falls through to the
         # ordinary name lookup below (which reports the unknown name).
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "attach_team", None)
             if not callable(detach):
                 # Same shape as the attach guard below: state what this session
@@ -9247,13 +9253,14 @@ class ServingSessionHandle(SessionHandle):
         # review round 4, R4-2). The local seam has had this since U1; without
         # it here the routed owner refused ``/agent =class`` while the same
         # command worked locally — the drift class U1 found.
-        if name.startswith("="):
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_agent``: only
         # the bare verb detaches, so ``/agent clear <text>`` stays a (mistyped)
         # attach and reports the unknown name rather than silently detaching.
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")

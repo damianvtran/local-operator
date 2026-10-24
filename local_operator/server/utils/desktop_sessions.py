@@ -110,6 +110,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
+    bound_ask_snapshot_in_place,
     bound_delta_rows_in_place,
     job_trajectory_wire_value,
     sync_wire_payload,
@@ -3295,6 +3296,72 @@ class DesktopSessionBridge:
             )
         )
 
+    def _cold_verdict(self) -> bool:
+        """Whether this bridge's facade is COLD, read now, with no I/O.
+
+        ONE spelling of the override's own gate, asked twice: before the index
+        read (so a warm owner pays nothing) and again immediately before the rows
+        are applied (so a facade that resynced during the await cannot have index
+        rows laid over its live fold — review round 1, m1). Three local reads, no
+        round trip, which is what makes the second ask free.
+
+        ``remote is None`` is "no facade yet", not cold: there is nothing to
+        override and ``state()`` would raise.
+        """
+        remote = self.remote
+        return remote is not None and self.remote_row is None and remote.is_cold
+
+    async def _cold_ask_rows(self) -> tuple[list[dict[str, Any]] | None, int] | None:
+        """This conversation's ask rows from the DERIVED INDEX, or ``None``.
+
+        ``None`` means "do not override": a live owner's own frame is
+        authoritative (it carries the drafts the index deliberately does not), and
+        a PEER's rows are the peer's to serve. The gate is :meth:`_cold_verdict`,
+        re-asked by the caller before it applies — so a frame can neither claim to
+        be cold while serving a live owner's stale rows, nor serve index rows over
+        a facade that warmed up while this read was in flight.
+
+        A cold facade that ATTACHED and is mid-resync (``is_cold`` while its
+        owner still answers) also lands here. That is not a regression: the
+        runtime writes this index on every ask change (``AskQueue._refresh``), so
+        the rows are the same ones its next frame will carry.
+
+        Off the loop: one small file read per cold snapshot, on the route that
+        already reads a journal page off it.
+
+        AN INDEX WITH NO ENTRY IS NOT AN EMPTY QUEUE (QA round 1, Q1): the caller
+        leaves the facade's own values alone, because absence of the file means
+        "this conversation has no queued-ask entry" — including the case QA named,
+        where the TTL sweep has removed an entry whose rows are all terminal and
+        past the horizon while a retained fold still carries them.
+        """
+        if not self._cold_verdict():
+            return None
+        from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
+
+        root = self.root
+        try:
+            entry = await asyncio.to_thread(store.read_entry, root, self.session_id)
+            if entry is None:
+                return None
+            # The same window the aggregate route applies (``asks.lapsed_visible_for``,
+            # decision D8), polled on the loop with its listener fan-out.
+            window = lapsed_visible_ms(root, poll_now=True)
+            rows = await asyncio.to_thread(
+                store.session_asks,
+                root,
+                self.session_id,
+                lapsed_visible_ms=window,
+            )
+        except Exception:  # noqa: BLE001 — a read of derived data never fails a paint
+            logger.debug("cold ask rows unavailable for %s", self.session_id, exc_info=True)
+            return None
+        # ``None`` rows beside a count is the wire's LIVE-BUT-EMPTY shape: the
+        # tally is the capability signal, and this conversation plainly has the
+        # engine (its index entry exists) while showing nothing.
+        return (rows or None), sum(1 for row in rows if store.is_outstanding(row.get("status")))
+
     def _shared_attention_refresh(self) -> asyncio.Task[dict[str, Any]]:
         """The one in-flight attention read, started if none is running.
 
@@ -3461,7 +3528,58 @@ class DesktopSessionBridge:
         # is already inside ``frontend``. Do NOT introduce an await between these
         # two lines and the ``return``; ``tests/unit/server/test_desktop_sessions.py``
         # pins it.
+        # COLD ASK ROWS COME FROM THE DURABLE INDEX (#1363 QA Q-1, SA-D8).
+        #
+        # A COLD FACADE'S ASK FOLD IS NOT DERIVABLE AND NOT TRUSTWORTHY. Two
+        # shapes reach here and both were the bug: a retained viewer that went
+        # cold keeps the LAST canonical state it was handed (``_go_cold`` keeps
+        # the conversation on screen), so its ``asks`` still say ``open`` long
+        # after the ask settled; and a fresh cold facade carries no asks at all,
+        # so a settled receipt never reaches the card. Neither can be repaired
+        # from the runtime — there is none — while the DURABLE answer is already
+        # on this disk: ``<config_dir>/asks/<sid>.json`` is what the cold door
+        # writes and what ``GET /v1/desktop/asks`` reads, and this method's own
+        # ``cold`` verdict is exactly "no verified owner to ask".
+        #
+        # READ BEFORE ``state()``, and that ordering is the contract above rather
+        # than tidiness: no await may sit between the state read, the watermark
+        # read and the return, or a subscriber's queued frame could be dropped as
+        # superseded on a watermark that never contained it. ``_cold_ask_rows`` is
+        # the one await, so it happens first. An index with no entry for this
+        # session leaves the facade's own values alone: absence of the file is
+        # "this conversation has no queued-ask entry", not a claim that its queue
+        # is empty, and a runtime that never ran the engine must keep reading as a
+        # host that cannot answer (``asks_open`` absent).
+        cold_asks = await self._cold_ask_rows()
         state = self.state()
+        # THE VERDICT IS ASKED AGAIN HERE, not carried over (review round 1, m1).
+        # The read above yields the loop twice, and a facade can finish a resync
+        # in that window; applying rows judged "cold" a moment ago would then lay
+        # index rows OVER a live owner's own fold — and a delta at or below this
+        # frame's watermark would be dropped as superseded while the frame carried
+        # the older rows. The verdict is three local reads, so it is cheap to ask
+        # again, and this is the last look before the assignment.
+        if cold_asks is not None and self._cold_verdict():
+            rows, open_count = cold_asks
+            snapshot = state.get("snapshot")
+            if isinstance(snapshot, dict):
+                if rows is None:
+                    snapshot.pop("asks", None)
+                else:
+                    snapshot["asks"] = rows
+                # ``asks_open`` counts OUTSTANDING rows over the WHOLE list, taken
+                # before the bound — the live path's own rule (a capped frame
+                # states the real tally, not the prefix's).
+                snapshot["asks_open"] = open_count
+                # THE WIRE'S OWN BOUND, on THESE rows (review m2). This override
+                # runs after ``sync_wire_payload`` bounded the FACADE's list, so
+                # without it a cold frame could ship every fat index row past the
+                # budget while ``asks_truncated`` still described the facade's
+                # list — the "bound on one route only" leak that file records
+                # twice. The flag is cleared first so it can only ever describe
+                # the rows this frame carries.
+                snapshot.pop("asks_truncated", None)
+                bound_ask_snapshot_in_place(snapshot)
         seq, epoch = self.sequence, self.epoch
         if open_trace.enabled():
             open_trace.mark(
@@ -8395,6 +8513,42 @@ class DesktopSessions:
             del self.drafts[session_id]
             return None
         return draft
+
+    def session_id_servable(self, session_id: str) -> bool:
+        """Whether this daemon still has ``session_id`` to serve.
+
+        THE REPLAY QUESTION, asked by the mint's receipt journal. A mint's
+        ``draft:<request_id>`` row exists so a lost response cannot register a
+        SECOND draft for one pane, and the id it records is the whole answer.
+        That id is not durable: the registry entry expires after
+        :data:`DRAFT_TTL_S`, and a draft that materialised can have its
+        conversation deleted. Replaying either hands the client an id the
+        session door answers "Unknown session" for — its ``/events`` streams
+        404, and a brand-new chat paints the terminal missing state over work
+        the user has not started. So a replay is conditional on exactly this.
+
+        TWO STATES ANSWER YES, and they are the two the doors resolve as local
+        (``files_target``, ``session``): a REGISTERED unexpired draft, through
+        :meth:`_draft_for` so expiry is answered where it is asked rather than
+        by a sweeper; and a MATERIALISED session, read off the marker
+        (``desktop.json``) — the same fact ``create`` writes and
+        ``assert_draft_unmaterialised`` reads, so the two cannot disagree about
+        which side of materialisation an id is on.
+
+        MARKER, NOT ``_door_may_open``, and the difference is load-bearing: a
+        warmed draft's engage leaves a residue directory (``.execution-lease`` +
+        ``.session.pid``, no marker, no transcript) whose origin reads as the
+        user's, so the door's origin predicate alone would call it openable
+        while the door itself still refuses it (M1's second leg). The marker is
+        both the cheaper fact and the stricter one.
+
+        Loop-only, like :meth:`_draft_for`: one dict lookup plus one ``is_file``
+        — no registry scan, no catalogue, no peer dial. A receipt only ever
+        names an id THIS daemon minted, so a peer cannot be the answer.
+        """
+        if self._draft_for(session_id) is not None:
+            return True
+        return (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file()
 
     def _draft_listing_exclusions(self) -> set[str]:
         """Ids no listing may carry: drafts not yet materialised, however known.

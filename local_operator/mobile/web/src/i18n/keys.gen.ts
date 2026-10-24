@@ -15,6 +15,17 @@ export type MessageParams = {
   "relay.account_policy.scope": undefined;
   "relay.account_policy.title": undefined;
   "relay.account_policy.unavailable": undefined;
+  "relay.ask.context.messages": { "count": number; "time": string };
+  "relay.ask.dismiss.answered_in_chat": undefined;
+  "relay.ask.dismiss.answered_in_chat_note": undefined;
+  "relay.ask.dismiss.cancel": undefined;
+  "relay.ask.dismiss.moot": undefined;
+  "relay.ask.dismiss.moot_note": undefined;
+  "relay.ask.dismiss.open": undefined;
+  "relay.ask.dismiss.receipt": undefined;
+  "relay.ask.dismiss.receipt_answered_in_chat": undefined;
+  "relay.ask.dismiss.receipt_moot": undefined;
+  "relay.ask.dismiss.title": undefined;
   "relay.library.count": { "count": number };
   "relay.login.error.password": undefined;
   "relay.login.page.title": undefined;

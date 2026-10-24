@@ -322,6 +322,7 @@ class RadientTranscriptionResponseData(BaseModel):
     status: str
     error: Optional[str] = None
     duration: Optional[float] = None
+    model: Optional[str] = None
     #: Additive cleanup provenance (LOH-5). ``none`` means no client rules ran;
     #: ``raw_text`` is the provider text before them. ``removed`` is a list of
     #: span dicts in raw-string coordinates.
@@ -2604,6 +2605,9 @@ class RadientClient:
         provider: Optional[str] = None,
         session_id: Optional[str] = None,
         client_request_id: Optional[str] = None,
+        remove_disfluencies: Optional[bool] = None,
+        include_audio_events: Optional[bool] = None,
+        edit_instruction: Optional[str] = None,
     ) -> RadientTranscriptionResponseData:
         """Create an audio transcription using the Radient API.
 
@@ -2630,6 +2634,11 @@ class RadientClient:
                 byte-identical, when None or ungrammatical.
             client_request_id (Optional[str]): Optional correlation id for THIS
                 call (``X-Radient-Client-Request-Id``); see ``session_id``.
+            remove_disfluencies (Optional[bool]): Provider-neutral native cleanup
+                control. None omits it; explicit false is serialized as false.
+            include_audio_events (Optional[bool]): Native audio-event annotation control.
+            edit_instruction (Optional[str]): Optional provider edit, max 2000 characters.
+                Core cleanup mode ``edit`` remains refused; this is a transport capability.
 
         Returns:
             RadientTranscriptionResponseData: The transcription result.
@@ -2671,6 +2680,22 @@ class RadientClient:
             form_data["language"] = language
         if provider:
             form_data["provider"] = provider
+        for name, value in (
+            ("remove_disfluencies", remove_disfluencies),
+            ("include_audio_events", include_audio_events),
+        ):
+            if value is not None:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{name} must be a boolean.")
+                # Multipart has no boolean primitive: explicit false must not
+                # collapse into omission or a truthiness check.
+                form_data[name] = "true" if value else "false"
+        if edit_instruction is not None:
+            if not isinstance(edit_instruction, str):
+                raise ValueError("edit_instruction must be a string.")
+            if len(edit_instruction) > 2000:
+                raise ValueError("edit_instruction cannot exceed 2000 characters.")
+            form_data["edit_instruction"] = edit_instruction
 
         # Bound before the try so the parse-failure handler inside can still
         # report the upstream status and body when requests.post() itself never

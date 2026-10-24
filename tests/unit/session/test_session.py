@@ -3145,9 +3145,10 @@ async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
     job.consumed = True
     await session._on_job_completed(consumed_id, "done", job)
 
-    # A streaming session stays quiet too: the in-turn model owns the floor.
-    # The runner must still be RUNNING when the flag flips, or the manager's
-    # own settle-delivery wins the race and delivers while idle.
+    # Setting the flag WITHOUT a live loop leaves no safe boundary to drain
+    # the result, so this synthetic busy session stays quiet. The runner must
+    # still be RUNNING when the flag flips, or the manager's own settle-
+    # delivery wins the race and delivers while idle.
     async def slow_runner(job_id, signal, report_progress):
         await asyncio.sleep(0.3)
         return "done"
@@ -5083,9 +5084,10 @@ async def test_a_settled_result_is_readable_as_it_lands_not_at_turn_end(tmp_path
     morning at 09:06:52. The operator read that as an aggregation of
     job-completed notices bunched at the end of the conversation.
 
-    The fix keeps the model's batched hand-over exactly as it was and makes
-    only the ROW early: durable at settle, and the batch reuses that message,
-    so the conversation holds one row.
+    The ROW is durable at settle, and both safe-boundary delivery and the
+    fallback below reuse that message, so the conversation holds one row.
+    This cell exercises the fallback explicitly; the real-loop safe-boundary
+    cells live in ``test_job_result_safe_boundary.py``.
     """
     stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
     session = make_session(tmp_path, stream)
@@ -5104,7 +5106,7 @@ async def test_a_settled_result_is_readable_as_it_lands_not_at_turn_end(tmp_path
         "j1"
     ], "the row must be durable as the job settles, not at the turn's end"
     early_id = rows[0].id
-    assert session._deferred_job_results, "precondition: the model's hand-over is still deferred"
+    assert session._deferred_job_results, "precondition: the model's hand-over is still pending"
     assert prompts == [], "the human's copy must not buy a turn while the turn is streaming"
 
     session._is_streaming = False
