@@ -791,6 +791,9 @@ class QueuedAskHarness:
         self.answers: dict[str, dict[str, list[str]]] = {}
         self.declined: list[str] = []
         self.dismissed: list[str] = []
+        #: The reason each dismissal carried, by ask id — ``None`` for the lapsed
+        #: door's one-key tap, which names none.
+        self.dismiss_reasons: dict[str, str | None] = {}
         #: Called after every settlement, so the runtime repaints its attached
         #: readers. A REAL handle has its own event stream driving that push
         #: (``subscribe_events``); this one has no events, so the fixture wires
@@ -874,8 +877,22 @@ class QueuedAskHarness:
         self._settle(str(ask_id), "declined", None)
         return "declined"
 
-    async def ask_dismiss(self, ask_id: str, by: str = "") -> str:
+    async def ask_dismiss(self, ask_id: str, by: str = "", *, reason: str | None = None) -> str:
+        """The dismissal door, WITH the operator's reason.
+
+        ``reason`` used to be missing from this signature, so a reasoned dismissal
+        through the repo's own phone rig died inside the fixture and the daemon
+        relayed the raw ``TypeError`` to the card (UX round 1's rig note).
+
+        A NAMED reason is the OPEN-ask door (§15): the row settles and KEEPS the
+        stamp a settled receipt is judged by (SA-D8, §17). NO reason is the lapsed
+        door: that dismissal removes the row everywhere, and leaving
+        ``dismissed_at`` unset is how this fixture reproduces "it leaves" without
+        running a clock.
+        """
         self.dismissed.append(str(ask_id))
+        self.dismiss_reasons[str(ask_id)] = reason
+        self._settle(str(ask_id), "dismissed", None, reason=reason)
         return "dismissed"
 
     def _publish_index(self) -> None:
@@ -900,7 +917,14 @@ class QueuedAskHarness:
             asks=[row.to_json() for row in (self.projection.asks or [])],
         )
 
-    def _settle(self, ask_id: str, status: str, answers: dict[str, list[str]] | None) -> None:
+    def _settle(
+        self,
+        ask_id: str,
+        status: str,
+        answers: dict[str, list[str]] | None,
+        *,
+        reason: str | None = None,
+    ) -> None:
         """Flip the row the way the queue's fold does, so the pushed projection
         is the state a real runtime would publish (a settled row, and the open
         count falling with it)."""
@@ -911,6 +935,12 @@ class QueuedAskHarness:
             row.delivered = True
             row.answers = answers
             row.answered_by = {"surface": "phone"}
+            if status == store.STATUS_DISMISSED and reason:
+                # The pair a settled receipt is judged and worded by (§17). Only a
+                # NAMED reason stamps it: the lapsed door's tap names none and must
+                # leave the row, which an unstamped dismissal already does.
+                row.dismissed_at = int(time.time() * 1000)
+                row.dismissed_reason = reason
         open_rows = [row for row in (self.projection.asks or []) if row.status == store.STATUS_OPEN]
         # The tallies the phone renders come from the OUTSTANDING set (open
         # asks; a timed-out one is settled, #2388), the rule the real wire publishes —

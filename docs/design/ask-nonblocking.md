@@ -434,6 +434,10 @@ PendingAsk (frontend_state.asks[] and SessionProjection.asks[] and index entry)
              persist}],
   answers?  {qid:[str]}        // secret: [<key>] only
   answered_by?  {surface}
+  dismissed_at?   int (epoch ms)   // §17: when the ask was put away. Present only on
+                                  // `dismissed`, and absent on rows an older build wrote.
+  dismissed_reason?  "moot"|"answered_in_chat"   // §17: the operator's own word; absent
+                                  // with `dismissed_at` when the writer recorded none.
 SessionProjection.asks: PendingAsk[]  (cap 20 newest; open first)   asks_open: int
                      // asks_open = OPEN asks (§13, 2026-10-16); a timed_out row rides
                      // `asks` but is settled and not counted
@@ -1788,3 +1792,111 @@ while it falls overturns SA-D1's wording, not the mechanism.
 is untouched by the whole set — and no change to the ask caps or the timeout policy. Nothing here
 settles an ask on the user's behalf: every new door is the operator's own act, and the agent's settle
 stays `ask_withdraw`.
+
+## 17. Amendment (2026-10-23): a dismissed ask stays visible as a settled row (SA-D8)
+
+**The gap.** Dismissal is the only settled outcome with no row. Withdrawn keeps a chip (§4), an
+answer keeps its receipt, an expiry keeps a line — but `dismiss` made the ask vanish from every list,
+so the one outcome a user cannot audit afterwards is the one where they decided to stop waiting. Two
+independent UX reviews found it on the same week (#2841 U2 and round 2, #1363 U1), and the reason the
+operator chose — `moot` or `answered_in_chat`, §15 — was visible only in a 5 s receipt.
+
+**What changes.** Timing decides the row, because the fold already records it (`dismissed_at` against
+`expires_at`) and because the two dismissals are different acts:
+
+1. **Dismissed before the deadline** (`dismissed_at < expires_at` — the open-ask dismissal of §15)
+   is a SETTLED RECEIPT. It stays in every list for 7 d counted from `expires_at`, the same horizon
+   an answered row gets, and it **ignores `asks.lapsed_visible_for`**: that setting is the display
+   window for rows settled by the deadline ALONE, so `at_expiry` or an hour would delete this receipt
+   at — or an hour after — the ask's own deadline, shorter than any answered ask's.
+2. **Dismissed at or after the deadline** keeps leaving every list, as today. That is the lapsed
+   row's own Dismiss, and its whole effect is to clear the row (§13); a receipt there would relabel
+   it instead.
+3. **A row with no `dismissed_at`** — an index entry written by a build before the key — is hidden,
+   as today. Absence means the old behaviour.
+4. **Relay rows** stay hidden when dismissed. A pointer to another conversation's ask is out of
+   scope here, as it was in §14.
+
+**One predicate, two readers.** `asks/store.py` gains `dismissed_hidden(status, dismissed_at,
+expires_at, now, *, relay=False)` beside `lapsed_hidden`, and both `_shown_rows` (the aggregate index
+and the per-session read) and `AskQueue.projection` call it. `relay` is passed IN rather than inferred
+from the fields, because case 4 must not depend on which keys happen to be absent — a relay record's
+`expires_at` is 0 until a derivation copies the origin's, and an index row can carry any shape. A
+FALSY `dismissed_at` is read as absent, because `fold` records `int(at or 0)`: a damaged event
+stamping zero would otherwise be an early stamp to the projection and an unpublished key to the
+index, and the two readers would disagree about one row. A third surface that re-spells the status test
+is the drift `OUTSTANDING_STATUSES` was created to stop: the desktop card, the phone sheet and a
+running session's own bar must hide a dismissed row at the same instant, and the only way to be sure
+is one function.
+
+**The wire.** Two OPTIONAL keys on the frozen `PendingAsk` (§4 amendment above): `dismissed_at` (int
+ms) and `dismissed_reason` (`moot` | `answered_in_chat`), present only on a `dismissed` row and
+absent when the writer recorded none. `asks/store.pending_row` adds them after `answered_at`, so
+every other status's row stays byte-identical; `mobile/types.PendingAskWire` and
+`session/frontend_state.PendingAskState` gain both, because `mobile/projection.py` keeps only fields
+its dataclass declares and the phone would otherwise never see them. Additive only, no
+`PROTOCOL_VERSION` bump: an older client renders a dismissed row as an inert settled line with the
+generic sentence it already has.
+
+**What each surface renders.** The vocabulary already existed; only the reason is new. Every sentence
+below is an existing key — nothing here adds copy.
+
+- **TUI** (`tui/widgets/ask_queue.py`): the muted `dismissed` chip stays, and the row's detail line
+  carries the reason — `tui.asks.dismiss.notice_moot` / `notice_answered_in_chat`, the same keys the
+  dismissal receipt uses. No controls on the row.
+- **Phone** (`lib/asks.ts`, the settled card): `dismissedReasonKey` names
+  `relay.ask.dismiss.receipt_moot` / `receipt_answered_in_chat` through the message catalogue, so the
+  card says it in the operator's language; a row that recorded no reason keeps the existing state
+  line. The sheet's own session-local receipt (§15) becomes the INSTANT ECHO it was described as: it
+  renders only while no listed row carries its `ask_id`, because the row is the statement — the
+  LAPSED door excepted, whose row still leaves, so its receipt stays unconditionally. On a dismissed
+  row the questions are plain lines rather than a description list with no descriptions, and the
+  settled answer slot is omitted rather than left as a bare `—`: the operator did not answer, they
+  put the question away, and the placeholder reads as a value that failed to load.
+- **Desktop**: renders `dismissed_reason` when present and falls back otherwise (local-operator-ui
+  #1363), which is why the keys had to land here first.
+- **Fallback with no reason known**: the existing "no reply was sent" sentence. It is deliberately
+  NOT used when the reason is known: since §15 the agent IS told (`ask-response-<id>`), so that
+  sentence would be false for an open-ask dismissal. It is a DEFENSIVE arm rather than a live state:
+  both writers normalise a missing reason (`store.fold` and `dismiss_cold` both go through
+  `normalize_dismiss_reason`), so a dismissed row a current runtime publishes always carries the
+  pair, and an unstamped legacy row is hidden before any surface sees it. The arm exists for an index
+  row written by hand or by a future writer that records the stamp and not the reason.
+
+**The cold mirror reads the index (#1363 QA Q-1).** A dismissal taken with no runtime writes the log
+and the derived index (`_dismiss_in_index`), and it now writes `status`, `dismissed_at` and
+`dismissed_reason` together: a stopped session has no runtime to reconcile the entry from its log, so
+that write is the row's only chance to state when and why. The desktop's session snapshot serves a
+COLD facade's ask rows from that same index — the reader `GET /v1/desktop/asks` already uses — because
+`_go_cold` keeps the last canonical state on screen, so the retained rows kept saying `open` for
+minutes after the log and the index said `dismissed`. A live owner's own frame is untouched: it is
+authoritative, and it carries the drafts the index deliberately omits.
+
+**Why.** The only settled outcome with no row was the one whose reason cannot be recalled later. The
+code that hid it (`store._shown_rows`, `queue.projection`, from `6f7c2fdca`) dates from when dismiss
+was `timed_out`-only and meant "put a lapsed ask away"; §15 made it a settling act that owes the
+agent a response row, so hiding its receipt stopped being right. §13's promise — the lapsed row is
+shown with Dismiss, and Dismiss is what makes it leave — is preserved by case 2, which is why the
+rule splits on timing rather than showing every dismissal.
+
+**Commits us to:** two permanent optional wire keys once clients read them; one shared predicate both
+readers must call; `_dismiss_in_index` owning three index fields instead of one; up to 7 d of
+dismissed receipts in a Settled list, bounded by `PROJECTION_CAP = 20` with open rows sorting first,
+so a dismissed row can never evict a live ask. **Rejected:** keep hiding (leaves both UX findings
+open and the one unaudited outcome); show every dismissal for `lapsed_visible_for` (a dismissed
+timed-out row would stop leaving, and with the operator's `1h` window it would outlive the undismissed
+one); a client-side-only receipt (lost on reload, never reaches a cold phone or a second device).
+**Overturned by:** the operator saying a dismissed receipt should leave sooner than answered ones
+(then it needs its own window, not `lapsed_visible_for`); evidence that a native client mis-renders a
+dismissed row or an unknown key (then gate the row on a capability flag); a post-release Settled list
+measured as noise — more than a handful of dismissed rows per operator per week.
+
+**Not in this change.** No new event kind, no fold change, no `PROTOCOL_VERSION` bump, no change to
+the caps or the timeout policy, and no change to what a dismissal tells the model. A settled receipt
+keeps the card's chrome on the phone: giving declined/dismissed/withdrawn rows one receipt shape is a
+design decision covering three statuses, and the design round judged the present shape honest rather
+than this PR's to change. Two instances are on record so that work starts from evidence rather than a
+tidy-up: the LAPSED door's receipt is a lone unattributed sentence with no row to name its ask, and a
+named dismissal whose row is absent can stack its sentence over a settled row that repeats it (design
+round 2, D2) — attribution is the same chrome decision, since a receipt that named its question could
+not stack.

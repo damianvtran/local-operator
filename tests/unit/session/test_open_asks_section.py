@@ -508,6 +508,61 @@ async def test_settling_mid_turn_shrinks_the_section_then_removes_it(
 
 
 @pytest.mark.asyncio
+async def test_a_dismissal_never_reaches_the_open_asks_reminder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2837 reads the queue's OPEN rows; SA-D8 keeps a pre-deadline dismissal
+    as a row on every LIST surface (§17). The two meet here.
+
+    The row stays visible to a human — the projection carries it — while the
+    reminder the MODEL reads must not name it, at the moment of the dismissal
+    or once its deadline has passed. The guard is ``open_records()``
+    (``status == STATUS_OPEN``); this cell is what stops a later widening of
+    that filter to "not expired" from telling the model that an ask the
+    operator put away is still waiting (review round 3, MINOR 1).
+    """
+    goal_state = GoalState()
+    stream = ScriptedStream()
+    session = _make_session(tmp_path / "sess", stream, goal_state)
+    clock = {"now": 1_800_000_000_000}
+    queue = _install_queue(session, monkeypatch)
+    # The queue's own injectable clock: the deadline is crossed by moving it,
+    # never by waiting (AGENTS.md, timing).
+    queue._now = lambda: clock["now"]
+    try:
+        await session.prompt("freeze the prefix")
+        ask_id = _ask(queue, "Rotate the deploy key before the cutover?", "q1")
+        assert ask_id in (session._render_open_asks_section() or "")
+
+        (queued,) = queue.records()
+        deadline = int(queued["expires_at"])
+        assert session.dismiss_ask(ask_id, by="terminal", reason="moot")["ok"]
+
+        record = next(r for r in queue.records() if r["ask_id"] == ask_id)
+        assert record["status"] == "dismissed"
+        assert int(record["dismissed_at"]) < deadline, "pre-deadline: the kept-row case"
+
+        # BEFORE the deadline: the row is inside its visibility window, and the
+        # reminder is the empty section rather than a line about it.
+        assert clock["now"] < deadline
+        assert session._render_open_asks_section() == ""
+        assert ask_id in [row["ask_id"] for row in queue.projection()]
+
+        # AFTER it: the row's status has not moved, so neither has the answer —
+        # while the projection still shows the receipt.
+        clock["now"] = deadline + 60_000
+        assert session._render_open_asks_section() == ""
+        assert ask_id in [row["ask_id"] for row in queue.projection()]
+
+        # No shipped section ever names it either (the delta route reads the
+        # same ``open_records``; its ship-then-empty behaviour for a settle is
+        # the ``withdraw`` cell's subject, not re-proven here).
+        assert all(ask_id not in text for text in _open_asks_sections(session))
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_resumed_session_keeps_the_replayed_section_across_a_minute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

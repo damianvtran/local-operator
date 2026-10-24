@@ -2356,10 +2356,22 @@ class AskQueue:
         rows: list[dict[str, Any]] = []
         for record in self.records(stamp):
             status = record["status"]
-            if status in (store.STATUS_EXPIRED, store.STATUS_DISMISSED):
+            if status == store.STATUS_EXPIRED:
                 continue
             expires_at = int(record.get("expires_at") or 0)
             if expires_at and stamp - expires_at > horizon_ms:
+                continue
+            # SA-D8's rule, from the ONE predicate the index readers call
+            # (``store.dismissed_hidden``): a dismissal before the deadline keeps
+            # a settled receipt for the answered row's 7 d, one at or after it
+            # still leaves every list.
+            if store.dismissed_hidden(
+                status,
+                record.get("dismissed_at"),
+                expires_at,
+                stamp,
+                relay=bool(record.get("relay")),
+            ):
                 continue
             if store.lapsed_hidden(status, expires_at, stamp, lapsed_visible_ms):
                 continue
