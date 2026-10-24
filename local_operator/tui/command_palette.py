@@ -57,7 +57,9 @@ def _label_display(entry: "PaletteEntry") -> Text:
     """Commands are LTR islands; names and settings retain prose direction."""
     if entry.kind == KIND_COMMAND:
         return technical_display(entry.label)
-    return localized_display(entry.label)
+    # Settings labels are registry English and session/agent names are user
+    # data; neither is catalogue prose, so neither may acquire RLI (M-2).
+    return localized_display(entry.label, source_locale="en")
 
 
 #: What a palette row IS. The value is also the i18n key suffix for the dim tag
@@ -133,7 +135,7 @@ class PaletteEntry:
         description = (
             technical_display(self.description)
             if self.kind == KIND_SESSION
-            else localized_display(self.description)
+            else localized_display(self.description, source_locale="en")
         )
         return escape(f"{tag} · {description.plain}")
 

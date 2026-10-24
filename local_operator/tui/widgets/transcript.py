@@ -78,6 +78,7 @@ from local_operator.tui.composer_focus import (
     return_focus_to_composer,
 )
 from local_operator.tui.i18n_status import (
+    balance_display_line,
     display_tr,
     localized_display,
     strip_display_controls,
@@ -1417,13 +1418,18 @@ QUEUED_ROW_TEXT = _raw_t(tui_transcript.queued_newest())
 #: the same key promises a recall that press will decline — measured: two rows
 #: offering, one honouring (UX round 2, U4).
 QUEUED_ROW_TEXT_OLDER = _raw_t(tui_transcript.queued_older())
+#: Where QUEUED_ROW_TEXT actually came from. An English fallback under an Urdu
+#: preference must stay byte-identical — its leading `·` belongs at the LEFT
+#: edge, while an RTL paragraph resolves it to the right (M-2).
+_QUEUED_SOURCE: str = _record_t(tui_transcript.queued_newest()).source_locale or "en"
 
 
 def _reload_copy() -> None:
     """Remove old-locale isolates from import-time rows on every live switch."""
-    global QUEUED_ROW_TEXT, QUEUED_ROW_TEXT_OLDER
+    global QUEUED_ROW_TEXT, QUEUED_ROW_TEXT_OLDER, _QUEUED_SOURCE
     QUEUED_ROW_TEXT = _raw_t(tui_transcript.queued_newest())
     QUEUED_ROW_TEXT_OLDER = _raw_t(tui_transcript.queued_older())
+    _QUEUED_SOURCE = _record_t(tui_transcript.queued_newest()).source_locale or "en"
 
 
 register_refresh(_reload_copy)
@@ -1764,7 +1770,12 @@ class UserBlock(TranscriptBlock):
             marker = QUEUED_ROW_TEXT if self._queued_offer else QUEUED_ROW_TEXT_OLDER
             mark = wrap_cells(marker, max(body, 1))
             start = len(rows)
-            rows.extend(localized_display(line, technical_literals=("esc",)).plain for line in mark)
+            rows.extend(
+                localized_display(
+                    line, source_locale=_QUEUED_SOURCE, technical_literals=("esc",)
+                ).plain
+                for line in mark
+            )
             # EVERY row the marker wrapped onto is receipt ink, not just its
             # last: the receipt token means "the app is talking here", and a
             # control row painted half in the prompt's own colour reads as
@@ -2804,6 +2815,14 @@ class PeerMessageBlock(ExpandableActionBlock):
     #: peer session reached in. The icon carries the direction.
     tool_name = "peer"
 
+    #: Provenance of the identity this row's raw `_summary` fitted; ``None``
+    #: for a sender NAME (user data), which is never catalogue prose.
+    _summary_source_locale: str | None = None
+    #: Technical tokens inside that raw identity (the pid), isolated as LTR
+    #: islands exactly as `display_tr(technical_params=("pid",))` did before
+    #: the row fitted RAW.
+    _summary_literals: tuple[str, ...] = ()
+
     #: Floor for the width the expansion reasons about, in cells. Two uses,
     #: which must agree or the card contradicts itself: :meth:`_header`'s
     #: model-fit test (does the model label still leave the identity on one
@@ -3029,8 +3048,10 @@ class PeerMessageBlock(ExpandableActionBlock):
         identity survives either way because it leads.
         """
         name, quoted = self._sender_name()
+        self._summary_literals = ()
         if name:
             identity = f'"{name}"' if quoted else name
+            self._summary_source_locale = None
         else:
             pid = self._sender_pid()
             # "another session" is the same fallback vocabulary
@@ -3038,11 +3059,12 @@ class PeerMessageBlock(ExpandableActionBlock):
             # the two spellings identical so a reader meeting one in a
             # transcript and one in a tool result does not think they are
             # different states.
-            identity = (
-                _t(tui_transcript.sender_pid(pid=pid))
-                if pid
-                else _t(tui_transcript.sender_unknown())
+            record = _record_t(
+                tui_transcript.sender_pid(pid=pid) if pid else tui_transcript.sender_unknown()
             )
+            identity = record.text
+            self._summary_source_locale = record.source_locale
+            self._summary_literals = (str(pid),) if pid else ()
         # The SNIPPET is stripped of control sequences and Cf; the body is not.
         #
         # `text()` and the expansion must stay byte-verbatim or `/copy` stops
@@ -3268,6 +3290,16 @@ class PeerMessageBlock(ExpandableActionBlock):
         #   notice does not have, so the two never align.
         composed = f"{identity} · {snippet}" if snippet else identity
         summary = truncate_cells(composed, budget)
+        # Fit RAW, then project the final line: truncating projected text can
+        # place the cut inside an island and leave unmatched delimiters on a
+        # pinned one-row receipt (M-1, the WakeBlock rule). The pid survives as
+        # an LTR island exactly as it did through the namespace resolver.
+        if self._summary_source_locale is not None:
+            summary = localized_display(
+                summary,
+                source_locale=self._summary_source_locale,
+                technical_literals=self._summary_literals,
+            ).plain
 
         row = Text(no_wrap=True, overflow="ellipsis")
         if indent:
@@ -3286,6 +3318,7 @@ class PeerMessageBlock(ExpandableActionBlock):
             pad = max(1, width - used - cell_len(slot))
             row.append(" " * pad, style=dim)
             row.append(slot, style=dim)
+        balance_display_line(row)
         return row
 
     def _body_rows(self, body: int) -> list[str]:
@@ -3511,26 +3544,27 @@ class HubMessageBlock(PeerMessageBlock):
             else "Subagent" if direction == "to_parent" else "Hub"
         ), False
 
-    def _intent(self) -> str:
+    def _intent(self, *, raw: bool = False) -> str:
+        resolve = _raw_t if raw else _t
         return " · ".join(
             word
             for flag, word in (
                 (
                     self.hub_details.get("expects_reply") is True,
-                    _t(tui_transcript.hub_reply_requested()),
+                    resolve(tui_transcript.hub_reply_requested()),
                 ),
-                (self.hub_details.get("steer") is True, _t(tui_transcript.hub_steered())),
+                (self.hub_details.get("steer") is True, resolve(tui_transcript.hub_steered())),
             )
             if flag
         )
 
     def _summary(self) -> tuple[str, str]:
         identity, snippet = super()._summary()
-        intent = self._intent()
+        intent = self._intent(raw=True)
+        record = _record_t(tui_transcript.hub_from(identity=identity))
+        self._summary_source_locale = record.source_locale or "en"
         return (
-            " · ".join(
-                part for part in (_t(tui_transcript.hub_from(identity=identity)), intent) if part
-            ),
+            " · ".join(part for part in (record.text, intent) if part),
             snippet,
         )
 
@@ -3772,6 +3806,10 @@ class QuietGroupBlock(ExpandableActionBlock):
         locale = active_locale()
         return str(count) if locale == "en" else format_number(count, locale)
 
+    #: Provenance of the raw group sentence; ``None`` for internal work names,
+    #: which are not catalogue copy.
+    _summary_source_locale: str | None = None
+
     def _summary_text(self) -> str:
         """The bar's one sentence: ``messages · 12`` (``12+`` when cut).
 
@@ -3788,11 +3826,14 @@ class QuietGroupBlock(ExpandableActionBlock):
             for record, block in zip(records, self._members, strict=True)
             if block.internal_work_membership is not None
         }
+        self._summary_source_locale = None
         clauses = owned_work_clauses(records, memberships, partial=self.partial)
         if clauses is not None:
             return " · ".join(clauses)
         count = self._count_label(self.group.count) + ("+" if self.partial else "")
-        parts = [_t(tui_transcript.group_messages(count=count))]
+        message = _record_t(tui_transcript.group_messages(count=count))
+        self._summary_source_locale = message.source_locale or "en"
+        parts = [message.text]
         # ICU selects the locale's noun form with the number, but the count label
         # stays the existing raw decimal text; formatting that selector would add
         # thousands separators and change already-reviewed English frame bytes.
@@ -3807,7 +3848,7 @@ class QuietGroupBlock(ExpandableActionBlock):
         # `0 actions`; the one-row guarantee is in `_build_row`'s truncation.
         if self.group.actions:
             parts.append(
-                _t(
+                _raw_t(
                     tui_transcript.group_actions(
                         count=self.group.actions, label=self._count_label(self.group.actions)
                     )
@@ -3815,7 +3856,7 @@ class QuietGroupBlock(ExpandableActionBlock):
             )
         if self.group.reply_requested:
             parts.append(
-                _t(
+                _raw_t(
                     tui_transcript.group_reply_requested(
                         count=self.group.reply_requested,
                         label=self._count_label(self.group.reply_requested),
@@ -3824,7 +3865,7 @@ class QuietGroupBlock(ExpandableActionBlock):
             )
         if self.group.steered:
             parts.append(
-                _t(
+                _raw_t(
                     tui_transcript.group_steered(
                         count=self.group.steered, label=self._count_label(self.group.steered)
                     )
@@ -3874,6 +3915,8 @@ class QuietGroupBlock(ExpandableActionBlock):
         slot_cells = cell_len(slot) + 1 if slot else 0
         budget = max(0, remaining - slot_cells)
         summary = truncate_cells(summary, budget)
+        if self._summary_source_locale is not None:
+            summary = localized_display(summary, source_locale=self._summary_source_locale).plain
 
         row = Text(no_wrap=True, overflow="ellipsis")
         if indent:
@@ -3891,6 +3934,7 @@ class QuietGroupBlock(ExpandableActionBlock):
             pad = max(1, width - used - cell_len(slot))
             row.append(" " * pad, style=dim)
             row.append(slot, style=dim)
+        balance_display_line(row)
         return row
 
     def _build_content(self, width: int) -> Text:

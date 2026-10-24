@@ -90,15 +90,15 @@ from local_operator import keymap as keymap_mod
 from local_operator import terminals
 from local_operator.i18n.keys import tui_status, tui_welcome
 from local_operator.i18n.messages import Msg
-from local_operator.i18n.text import register_refresh
+from local_operator.i18n.text import register_refresh, tr_record
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
-from local_operator.tui.i18n_status import display_tr, technical_display
+from local_operator.tui.i18n_status import display_tr, localized_display, technical_display
 from local_operator.tui.link_targets import _URL_START_RE, _body_end, _trim
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.status_line import format_model_label
-from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
+from local_operator.tui.widgets.transcript import NOTICE_GLYPHS, wrap_cells
 
 # ---------------------------------------------------------------------------
 # Catalogued copy: resolved through the i18n runtime (RFC §2.2/§3.1)
@@ -130,6 +130,9 @@ _t = display_tr(
     # `/update` is authored in the prose itself, not supplied as a parameter.
     technical_literals=("/update",),
 )
+#: Raw counterpart for rows that WRAP: an isolate must not straddle a fold,
+#: so the sentence is wrapped first and each final line is projected once.
+_record = tr_record("tui.welcome")
 
 
 #: The status namespace (T2): the model row's state words are catalogued with the
@@ -1220,14 +1223,36 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
         shown = _fit_tail(_shorten_home(info.cwd), width)
         rows.append((_PRIORITY_CWD, Text(technical_display(shown).plain, style=dim, no_wrap=True)))
     if info.update_available:
-        # Same glyph/tint as the other ``!`` rows. The command is dropped
-        # WHOLE when it does not fit — a half-printed ``/upd…`` is an
-        # instruction nobody can follow, same rule as the login warning.
+        # Same glyph/tint as the other ``!`` rows. The command is never
+        # HALF-printed — a ``/upd…`` is an instruction nobody can follow — but
+        # it is also never silently dropped for one locale when the other keeps
+        # it at the same width (design round 1, D2). The sentence WRAPS instead:
+        # every row is whole, and ``/update`` survives in both languages.
         glyph = NOTICE_GLYPHS["warning"]
-        body = f"{glyph} {_t(tui_welcome.status_update(version=info.update_available))}"
-        if cell_len(body) > width:
-            body = f"{glyph} {_t(tui_welcome.status_update_short(version=info.update_available))}"
-        rows.append((_PRIORITY_UPDATE, Text(body, style=warn, no_wrap=True)))
+        record = _record(tui_welcome.status_update(version=info.update_available))
+        # The glyph stays OUTSIDE the projection, exactly as the notice row
+        # prefixes its own: inside an RLI it resolves to the RIGHT edge (the
+        # M-2 class of defect), where a status marker belongs at the left.
+        wrapped = wrap_cells(record.text, max(1, width))
+        if cell_len(wrapped[0]) + cell_len(glyph) + 1 > width:
+            # Only the FIRST line pays for the glyph; the tail keeps the row.
+            head = wrap_cells(record.text, max(1, width - (cell_len(glyph) + 1)))
+            wrapped = (
+                [head[0], *wrap_cells(" ".join(head[1:]), max(1, width))] if len(head) > 1 else head
+            )
+        islands = tuple(literal for literal in (info.update_available, "/update") if literal)
+        for index, line in enumerate(wrapped):
+            # Project AFTER the fold: a line that ends mid-isolate paints an
+            # unmatched delimiter and lets the terminal re-order the rest of
+            # the screen (design round 1, D2 + review R1-2).
+            painted = localized_display(
+                line,
+                source_locale=record.source_locale,
+                technical_literals=islands,
+            ).plain
+            if index == 0:
+                painted = f"{glyph} {painted}"
+            rows.append((_PRIORITY_UPDATE, Text(painted, style=warn, no_wrap=True)))
     if info.notice:
         # KIND-AWARE GLYPH AND INK (design round 2, M2). This row used to paint
         # EVERY notice in the warning treatment — amber, `!` — so the login

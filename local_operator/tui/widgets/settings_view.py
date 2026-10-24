@@ -56,7 +56,7 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
@@ -72,9 +72,11 @@ from local_operator.tui.widgets.command_picker import ghost_for
 from local_operator.tui.widgets.model_picker import ModelRow, rank_rows
 from local_operator.tui.widgets.subagent_view import HintButton
 from local_operator.tui.widgets.tool_card import truncate_cells
+from local_operator.tui.widgets.transcript import wrap_cells
 
 _t = display_tr("tui.small")
 _raw_t = tr("tui.small")
+_record_t = tr_record("tui.small")
 
 
 def _paint(text: str, *, source_locale: str | None = None) -> str:
@@ -399,6 +401,9 @@ _VALUE_COLUMN = 34
 #: Extra indent for an expanded enum's choices — one level in from the row that
 #: owns them, which is what makes the expansion read as belonging to that row.
 _CHOICE_INDENT = _ROW_INDENT + 4
+#: A capability note's indent: the old inline two-space prefix, kept so the
+#: wrapped note sits under its choice rather than at the page's left edge.
+_NOTE_INDENT = 2
 
 #: Fallback rows per wheel notch, used only when `App.scroll_sensitivity_y` is
 #: unreachable (before the widget is mounted). The live value is read from the
@@ -1326,6 +1331,10 @@ class SettingsView(Vertical):
             self._editing,
             self._expanded,
             expanded_choices,
+            # A language choice's capability note is WRAPPED to the list
+            # width, so the row COUNT depends on it. Without this key a
+            # resize would paint a stale wrap from the old width.
+            self._list_width(),
             self._chain,
             tuple(sorted((name, tuple(hops)) for name, hops in chains.items())),
             cascade,
@@ -1399,6 +1408,13 @@ class SettingsView(Vertical):
                     # synthesised rather than registered (see `_choices_for`).
                     for choice in _choices_for(setting):
                         rows.append(_Row(kind="choice", setting=setting, choice=choice))
+                        if setting.key == "language" and getattr(choice, "description", ""):
+                            # The Urdu capability note is longer than the
+                            # narrowest list, and single-line fitting turned
+                            # it into "Terminal: best ef…" — dropping the
+                            # caveat. Unselectable rows keep one line per
+                            # index while showing the whole sentence.
+                            rows.extend(_note_rows(choice.description, self._list_width()))
         return rows
 
     def _cascade_rows(self, setting: Setting) -> list["_Row"]:
@@ -2080,10 +2096,11 @@ class SettingsView(Vertical):
         self._reveal_cursor()
         last = self._selected
         for index in range(self._selected + 1, len(self._rows)):
-            # Choices belong to an enum row; hops (and the trailing "+ add a
-            # hop") belong to a chain row. Both are the group the press just
-            # opened, and both were off-screen for a row near the bottom edge.
-            if self._rows[index].kind not in ("choice", "hop", "hop_add"):
+            # Choices belong to an enum row, its capability NOTE rows too; hops
+            # (and the trailing "+ add a hop") belong to a chain row. They are
+            # all the group the press just opened, and leaving the notes out of
+            # this walk kept the D1 caveat below the fold.
+            if self._rows[index].kind not in ("choice", "hop", "hop_add", "note"):
                 break
             last = index
         offset = self._body.scroll_offset.y
@@ -3904,6 +3921,17 @@ class SettingsView(Vertical):
         marker = f"{_CURSOR} " if selected else "  "
         base = fg if selected else (muted if hovered else muted)
 
+        if row.kind == "note":
+            # ``muted``, not ``faint``: the design round 1 gate measured
+            # ``faint`` at 1.97:1 on the dark ground and 2.08:1 on the
+            # light one, and this sentence is the only user-facing
+            # statement of the Urdu limitation. ``muted`` measures
+            # 8.62:1 dark and 7.18:1 light.
+            line = Text(no_wrap=True, overflow="ellipsis")
+            line.append(" " * _NOTE_INDENT, style=styles.dim)
+            line.append(_paint(row.text, source_locale="en"), style=styles.muted)
+            return line
+
         if row.kind == "choice" and row.choice is not None and row.setting is not None:
             current = settings_io.read_setting(self._manager, row.setting)
             chosen = current == row.choice.value
@@ -3918,9 +3946,13 @@ class SettingsView(Vertical):
                 if row.setting.key == "language"
                 else _paint(
                     row.choice.label,
-                    # Synthesised BOOL labels are TUI-owned localized copy;
+                    # BOOL labels carry the provenance resolved beside them;
                     # registry choices are English-source fallback prose.
-                    source_locale=None if row.setting.kind == Kind.BOOL else "en",
+                    source_locale=(
+                        _BOOL_SOURCES[bool(row.choice.value)]
+                        if row.setting.kind is Kind.BOOL
+                        else "en"
+                    ),
                 )
             )
             line.append(choice_label, style=base)
@@ -3933,8 +3965,11 @@ class SettingsView(Vertical):
                 # see the difference between "I chose this" and "this is what
                 # it came with" before touching anything.
                 line.append(_t(_x.settings_view_default_marker()), style=dim)
-            if row.choice.description:
+            if row.choice.description and row.setting.key != "language":
                 line.append(f"  {_paint(row.choice.description, source_locale='en')}", style=faint)
+            # The language row's note is painted by `_note_rows` above it,
+            # wrapped whole; repeating it here is the truncated copy the
+            # expansion exists to stop showing.
             return line
 
         if row.kind == "chain" and row.chain is not None:
@@ -6330,7 +6365,7 @@ class _Row:
         by a highlight that must survive the buffer being re-filtered under it,
         which a `_selected` index into a rebuilt row list does not.
         """
-        return self.kind not in ("header", "empty", "suggest")
+        return self.kind not in ("header", "empty", "suggest", "note")
 
     @property
     def identity(self) -> tuple[str, str, int]:
@@ -6354,6 +6389,19 @@ class _Row:
 #: The two members a BOOL row expands into, in the order they are offered.
 #: `on` first so the list reads the way the value column does, and so the
 #: cursor's resting position on a defaulted flag is the top row.
+def _bool_sources() -> dict[bool, str]:
+    """Provenance of the two BOOL labels, so an English fallback stays raw.
+
+    ``tui.small`` may have no ``ur`` catalogue in a given wave; its labels are
+    then English source and must not acquire RLI under an Urdu preference
+    (review M-2). Resolved beside the labels, from the same messages.
+    """
+    return {
+        True: _record_t(_x.settings_view_bool_on()).source_locale or "en",
+        False: _record_t(_x.settings_view_bool_off()).source_locale or "en",
+    }
+
+
 def _bool_choices() -> tuple[settings_io.Choice, ...]:
     """The two members a BOOL row expands into, built from the live locale.
 
@@ -6370,7 +6418,19 @@ def _bool_choices() -> tuple[settings_io.Choice, ...]:
     )
 
 
+def _note_rows(text: str, width: int) -> list["_Row"]:
+    """One capability note as unselectable rows, wrapped to ``width``.
+
+    A list row is one painted line (``_index_at`` maps a click's y to
+    ``_rows[y]``), so a sentence that does not fit cannot become a taller
+    row. It becomes SEVERAL rows instead, which keeps the contract one-to-one
+    without ellipsising the caveat away.
+    """
+    return [_Row(kind="note", text=line) for line in wrap_cells(text, max(1, width - _NOTE_INDENT))]
+
+
 _BOOL_CHOICES: tuple[settings_io.Choice, ...] = _bool_choices()
+_BOOL_SOURCES: dict[bool, str] = _bool_sources()
 
 
 def _reload_copy() -> None:
@@ -6386,8 +6446,9 @@ def _reload_copy() -> None:
     (docs/I18N.md, "Resolve at render time"), and the one QA round 1 (Q1)
     reproduced with a fixture catalogue before this was added.
     """
-    global _BOOL_CHOICES
+    global _BOOL_CHOICES, _BOOL_SOURCES
     _BOOL_CHOICES = _bool_choices()
+    _BOOL_SOURCES = _bool_sources()
 
 
 register_refresh(_reload_copy)
@@ -6423,9 +6484,18 @@ def _choices_for(setting: Setting) -> tuple[settings_io.Choice, ...]:
         declared = setting.choices
         if len(declared) == 2 and {c.value for c in declared} == {True, False}:
             ordered = sorted(declared, key=lambda c: not bool(c.value))
+            # Live localized labels, not `_render_value`'s English "on"/"off"
+            # and not the declared choice's own label either: `settings_io`'s
+            # `_bool_choices()` resolved its labels ONCE at import, so reusing
+            # them would still read English after a locale switch (QA round 2,
+            # Q-4). `_BOOL_CHOICES` is rebuilt per locale; only the declared
+            # descriptions are kept.
+            labels = {bool(choice.value): choice.label for choice in _BOOL_CHOICES}
             return tuple(
                 settings_io.Choice(
-                    value=c.value, label=_render_value(c.value), description=c.description
+                    value=c.value,
+                    label=labels[bool(c.value)],
+                    description=c.description,
                 )
                 for c in ordered
             )
