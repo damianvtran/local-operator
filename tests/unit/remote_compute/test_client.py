@@ -63,7 +63,11 @@ from local_operator.remote_compute.errors import (
     Unreachable,
     UnreadableEnvelope,
 )
-from local_operator.remote_compute.request import is_commit_sha, is_repo_url
+from local_operator.remote_compute.request import (
+    MAX_RUN_NAME_BYTES,
+    is_commit_sha,
+    is_repo_url,
+)
 from local_operator.tunnels.config import DEFAULT_API_URL
 from local_operator.tunnels.errors import LoginRequired
 
@@ -221,8 +225,11 @@ async def test_create_sends_the_contract_fields_and_the_tenant(
     assert body["repo_sha"] == SHA
     assert (body["hosting"], body["model"]) == ("openai", "gpt-5")
     assert (body["size"], body["max_hours"]) == ("m", 2.0)
-    # Optional fields are OMITTED, not sent as null.
-    assert "budget_usd" not in body and "name" not in body
+    # ``budget_usd`` is OMITTED, not sent as null. ``name`` is no longer one
+    # of the optional fields: the server refuses a run without one, so the
+    # spec always carries one.
+    assert "budget_usd" not in body
+    assert body["name"] == "fix the flaky test"
 
 
 @pytest.mark.asyncio
@@ -913,7 +920,13 @@ def _fields(**overrides: Any) -> dict[str, Any]:
     return values
 
 
-def test_a_spec_carries_the_contract_fields_and_omits_unset_optionals() -> None:
+def test_a_spec_carries_the_contract_fields_and_derives_the_name() -> None:
+    """Every field the contract names, and a name that is never absent.
+
+    ``name`` used to be omitted here — it is now DERIVED when the caller gives
+    none, because the server refuses a run whose name is missing or blank and a
+    spec is the last place before the body exists.
+    """
     body = RunSpec(**_fields()).to_body()
     assert body == {
         "prompt": "fix the flaky test",
@@ -923,8 +936,210 @@ def test_a_spec_carries_the_contract_fields_and_omits_unset_optionals() -> None:
         "model": "gpt-5",
         "size": "m",
         "max_hours": 2.0,
+        "name": "fix the flaky test",
     }
     assert "budget_usd" not in body and "network_id" not in body
+
+
+def test_a_multiline_prompt_names_the_run_after_its_first_line() -> None:
+    body = RunSpec(**_fields(prompt="Run the checks\nthen the report\n\nand stop")).to_body()
+    assert body["name"] == "Run the checks"
+
+
+def test_whitespace_and_control_characters_are_collapsed_out_of_the_name() -> None:
+    body = RunSpec(**_fields(prompt="  run\tthe\u00a0\x07 checks  \nnext")).to_body()
+    assert body["name"] == "run the checks"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # 60 CJK characters are 180 UTF-8 bytes: over the bound, and every one
+        # of them is three bytes, so a byte slice would cut a character in half.
+        "修复流水线" * 10,
+        # A single astral emoji is already four bytes per character.
+        "🧪" * 40,
+        "é" * 60,
+    ],
+)
+def test_a_long_prompt_is_cut_on_a_character_boundary(prompt: str) -> None:
+    name = RunSpec(**_fields(prompt=prompt)).to_body()["name"]
+    encoded = name.encode("utf-8")
+    assert 0 < len(encoded) <= MAX_RUN_NAME_BYTES
+    # Round-tripping is what "a character boundary" means: a slice inside a
+    # multibyte character decodes to U+FFFD, which is not what the prompt said.
+    assert encoded.decode("utf-8") == name
+    assert "\ufffd" not in name
+    assert name.endswith("…")
+
+
+def test_a_first_line_with_nothing_printable_falls_back_to_the_checkout() -> None:
+    # ``strip`` does not remove a NUL, so this prompt is accepted as non-empty
+    # and still has no printable first line to name the run after.
+    body = RunSpec(**_fields(prompt="\x00")).to_body()
+    assert body["name"] == f"lop exec repo@{SHA[:7]}"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # A lone combining acute: it attaches to the character before it, and
+        # here there is none, so the row would paint a blank name.
+        "\u0301",
+        "\u0301\u0302 \u20dd",
+        # Enclosing mark (Me) on its own is the same empty row.
+        "\u20dd",
+    ],
+)
+def test_a_first_line_of_only_marks_falls_back_to_the_checkout(prompt: str) -> None:
+    """N5 — a mark with no base character paints nothing, so it is not a name."""
+    assert RunSpec(**_fields(prompt=prompt)).to_body()["name"] == f"lop exec repo@{SHA[:7]}"
+
+
+def test_a_marked_letter_still_names_the_run() -> None:
+    """The fallback must not swallow a normal accented word: ``é`` decomposes."""
+    name = RunSpec(**_fields(prompt="cafe\u0301 review\nmore")).to_body()["name"]
+    assert name == "cafe\u0301 review"
+
+
+def test_a_given_name_is_carried_exactly_as_typed() -> None:
+    given = "  audit · 日本  "
+    assert RunSpec(**_fields(name=given)).to_body()["name"] == given
+
+
+@pytest.mark.parametrize("given", ["", "   ", "é" * 51, "a" * MAX_RUN_NAME_BYTES + "b"])
+def test_a_blank_or_oversize_given_name_is_refused(given: str) -> None:
+    """The server's own rule, checked here so the refusal costs no request.
+
+    ``é`` is two UTF-8 bytes, so 51 of them are 102 bytes: the bound is bytes,
+    not characters. A spec refuses by ``ValueError``, like every other field
+    rule here, and the CLI maps that through ``remote compute failed:``.
+    """
+    with pytest.raises(ValueError, match="at most 100 bytes of UTF-8"):
+        RunSpec(**_fields(name=given))
+
+
+def test_the_trim_this_client_measures_with_is_the_server_s_trim() -> None:
+    """N1 — ``str.strip`` is WIDER than Go's ``strings.TrimSpace``.
+
+    Python's ``isspace`` adds U+001C-U+001F, so a client that measured with
+    ``strip`` read ``"\\x1c" + "a"*100`` as exactly at the bound and sent 101
+    bytes, which the server answers with a 400. The measure has to be the
+    server's own set: Unicode White_Space.
+    """
+    for separator in "\x1c\x1d\x1e\x1f":
+        with pytest.raises(ValueError):
+            RunSpec(**_fields(name=separator + "a" * MAX_RUN_NAME_BYTES))
+        with pytest.raises(ValueError):
+            RunSpec(**_fields(name="a" * MAX_RUN_NAME_BYTES + separator))
+
+
+@pytest.mark.parametrize(
+    "whitespace",
+    [
+        "\t",
+        "\n",
+        "\v",
+        "\f",
+        "\r",
+        " ",
+        "\x85",
+        "\xa0",
+        "\u1680",
+        "\u2000",
+        "\u200a",
+        "\u2028",
+        "\u2029",
+        "\u202f",
+        "\u205f",
+        "\u3000",
+    ],
+)
+def test_every_white_space_code_point_the_server_trims_is_trimmed_here(
+    whitespace: str,
+) -> None:
+    """The other half of N1: a name padded with server-trimmed space is AT the
+    bound, not over it, and is still carried exactly as typed."""
+    given = whitespace * 5 + "a" * MAX_RUN_NAME_BYTES
+    assert RunSpec(**_fields(name=given)).to_body()["name"] == given
+    # And the padding does not buy room: one more character is still refused.
+    with pytest.raises(ValueError):
+        RunSpec(**_fields(name=whitespace * 5 + "a" * (MAX_RUN_NAME_BYTES + 1)))
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "a\nb",
+        "a\x00b",
+        "a\x1cb",
+        "a\x7fb",
+        # Round-2 MINOR-1: separators break the row like \n does, and the
+        # bidi controls let one label render as another.
+        "a\u2028b",
+        "a\u2029b",
+        "a\u202eb",
+        "a\u202ab",
+        "a\u2066b",
+        "a\u2069b",
+    ],
+)
+def test_a_given_name_must_be_one_line(given: str) -> None:
+    """Q3 — a run name is a single-line label, so an interior control character
+    is refused rather than shipped to every surface that lists runs."""
+    with pytest.raises(ValueError, match="one line with no control"):
+        RunSpec(**_fields(name=given))
+
+
+_REFUSED_INTERIOR = (
+    "\n",
+    "\x00",
+    "\x1c",
+    "\x7f",
+    "\x85",
+    "\u2028",
+    "\u2029",
+    *(chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))),
+)
+
+
+@pytest.mark.parametrize("bad", _REFUSED_INTERIOR)
+@pytest.mark.parametrize(
+    "shape", ["ship {0} the fix", "{0}ship the fix", "ship the fix{0}", "{0}{0}\nship it"]
+)
+def test_a_derived_name_never_carries_a_refused_character(bad: str, shape: str) -> None:
+    """Round-3 MINOR-3: a bare ``--remote`` must never derive a name the explicit
+    check would refuse. The derivation path skips that check, so this pins the
+    invariant it relies on instead of leaving it to two helpers' current shape."""
+    import unicodedata
+
+    from local_operator.remote_compute.request import resolve_run_name
+
+    derived = RunSpec(**_fields(prompt=shape.format(bad), name=None)).to_body()["name"]
+    assert derived
+    assert len(derived.encode("utf-8")) <= MAX_RUN_NAME_BYTES
+    assert not any(
+        unicodedata.category(ch) in {"Cc", "Zl", "Zp"} or ch in _REFUSED_INTERIOR for ch in derived
+    ), repr(derived)
+    # And the explicit check accepts it verbatim, which is the real contract.
+    assert (
+        resolve_run_name(derived, prompt="p", repo_url="https://x/r.git", repo_sha="0" * 40)
+        == derived
+    )
+
+
+@pytest.mark.parametrize("given", ["\U0001f468\u200d\U0001f4bb deploy", "caf\u00e9 \u00b7 review"])
+def test_a_given_name_keeps_ordinary_format_characters(given: str) -> None:
+    """Only the bidi controls among ``Cf`` are refused: a ZWJ emoji sequence or
+    ordinary punctuation is a legitimate label and is sent as typed."""
+    assert RunSpec(**_fields(name=given)).to_body()["name"] == given
+
+
+def test_a_given_name_may_be_padded_with_the_whitespace_the_server_trims() -> None:
+    """Q3's other edge: leading/trailing whitespace CONTROLS are trimmed by the
+    server, so they are not the interior newline the refusal is about."""
+    given = "\t \r\n audit \t"
+    assert RunSpec(**_fields(name=given)).to_body()["name"] == given
 
 
 def test_a_spec_with_optionals_sends_them() -> None:
