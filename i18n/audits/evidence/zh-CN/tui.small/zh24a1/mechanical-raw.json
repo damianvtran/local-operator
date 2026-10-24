@@ -1,0 +1,386 @@
+{
+  "namespace": "tui.small",
+  "generated_by": "translation-auditor (lopdev team), independent read-only audit",
+  "checks": {
+    "key_parity": {
+      "en_keys": 137,
+      "zh_keys": 137,
+      "missing": [],
+      "extra": []
+    },
+    "argument_parity": {
+      "keys_checked": 137,
+      "failures": []
+    },
+    "plural_structure": {
+      "plural_keys": [
+        "tui.small.draft.attachment_count",
+        "tui.small.ask_queue.question_waiting",
+        "tui.small.ask_queue.question_timed_out",
+        "tui.small.copy_picker.more_lines",
+        "tui.small.wake_panel.monitors_need_attention",
+        "tui.small.wake_panel.monitors_armed",
+        "tui.small.network_panel.member_count",
+        "tui.small.wake_panel.scheduled_count",
+        "tui.small.settings_view.hop_count",
+        "tui.small.command_picker.projects",
+        "tui.small.command_picker.entries"
+      ],
+      "rows": [
+        {
+          "key": "tui.small.draft.attachment_count",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.ask_queue.question_waiting",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.ask_queue.question_timed_out",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.copy_picker.more_lines",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.wake_panel.monitors_need_attention",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.wake_panel.monitors_armed",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.network_panel.member_count",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.wake_panel.scheduled_count",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.settings_view.hop_count",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.command_picker.projects",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        },
+        {
+          "key": "tui.small.command_picker.entries",
+          "en": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh": [
+            [
+              "other"
+            ]
+          ]
+        }
+      ],
+      "failures": [],
+      "note": "zh-CN legally uses other-only where en has one/other (style guide: no plural agreement); only structural failures are counted."
+    },
+    "hard_token_parity": {
+      "patterns": {
+        "backtick_span": "`[^`\\n]+`",
+        "long_flag": "(?<![\\w/])--[a-zA-Z0-9][a-zA-Z0-9_-]*",
+        "angle_token": "<[a-zA-Z][^>\\n]*>",
+        "url": "(?:https?|ssh)://[^\\s，。；）)]+",
+        "path": "(?:~/[\\w./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]+)",
+        "percent_token": "%[sdif]"
+      },
+      "failures": []
+    },
+    "width": {
+      "rows": [
+        {
+          "key": "tui.small.spend.no_charge",
+          "mode": "static",
+          "maxCells": 9,
+          "measured_cells": 6,
+          "en_cells": 9,
+          "growth_25pct_cells": 8,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_failed_wide",
+          "mode": "static",
+          "maxCells": 30,
+          "measured_cells": 17,
+          "en_cells": 27,
+          "growth_25pct_cells": 22,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_failed",
+          "mode": "static",
+          "maxCells": 24,
+          "measured_cells": 13,
+          "en_cells": 19,
+          "growth_25pct_cells": 17,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_failed_short",
+          "mode": "static",
+          "maxCells": 24,
+          "measured_cells": 6,
+          "en_cells": 10,
+          "growth_25pct_cells": 8,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_failed_mixed",
+          "mode": "static",
+          "maxCells": 30,
+          "measured_cells": 18,
+          "en_cells": 30,
+          "growth_25pct_cells": 23,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_failed_mixed_mid",
+          "mode": "static",
+          "maxCells": 24,
+          "measured_cells": 13,
+          "en_cells": 19,
+          "growth_25pct_cells": 17,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_failed_mixed_short",
+          "mode": "static",
+          "maxCells": 12,
+          "measured_cells": 9,
+          "en_cells": 11,
+          "growth_25pct_cells": 12,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_cancelled_wide",
+          "mode": "static",
+          "maxCells": 38,
+          "measured_cells": 21,
+          "en_cells": 36,
+          "growth_25pct_cells": 27,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_cancelled",
+          "mode": "static",
+          "maxCells": 30,
+          "measured_cells": 19,
+          "en_cells": 29,
+          "growth_25pct_cells": 24,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_cancelled_short",
+          "mode": "static",
+          "maxCells": 24,
+          "measured_cells": 10,
+          "en_cells": 20,
+          "growth_25pct_cells": 13,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_cancelled_shortest",
+          "mode": "static",
+          "maxCells": 12,
+          "measured_cells": 8,
+          "en_cells": 12,
+          "growth_25pct_cells": 10,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_ok",
+          "mode": "static",
+          "maxCells": 24,
+          "measured_cells": 16,
+          "en_cells": 22,
+          "growth_25pct_cells": 20,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_ok_short",
+          "mode": "static",
+          "maxCells": 15,
+          "measured_cells": 10,
+          "en_cells": 15,
+          "growth_25pct_cells": 13,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_partial",
+          "mode": "static",
+          "maxCells": 24,
+          "measured_cells": 14,
+          "en_cells": 22,
+          "growth_25pct_cells": 18,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_partial_short",
+          "mode": "static",
+          "maxCells": 15,
+          "measured_cells": 10,
+          "en_cells": 13,
+          "growth_25pct_cells": 13,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "tui.small.spend.unpriced_partial_shortest",
+          "mode": "static",
+          "maxCells": 12,
+          "measured_cells": 8,
+          "en_cells": 12,
+          "growth_25pct_cells": 10,
+          "fits": true,
+          "growth_fits": true
+        }
+      ],
+      "over_budget": []
+    },
+    "punctuation": {
+      "failures": []
+    },
+    "latin_spacing": {
+      "failures": []
+    },
+    "register": {
+      "address": "你",
+      "nin_occurrences": []
+    },
+    "encoding": {
+      "non_nfc": [],
+      "bidi_controls": []
+    },
+    "numbers": {
+      "failures": []
+    },
+    "render": {
+      "keys_checked": 137,
+      "failures": []
+    }
+  }
+}
