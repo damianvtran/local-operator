@@ -7978,6 +7978,12 @@ class RelayServer:
                     subject=record.network_id,
                     network_id=record.network_id,
                     epoch=record.epoch,
+                    # A ROTATION IS INITIATED BY THE DEVICE, not by a person here and
+                    # not by this relay: it is that peer presenting a signed
+                    # continuity statement under its old key. Omitting this was the
+                    # last row of the class this change fixes, and it was invisible
+                    # while the prose enumerated modules rather than call sites.
+                    actor_kind="device",
                     detail={
                         "old_device": str(statement.get("old_device_id") or ""),
                         "new_device": rotation.member.device_id,

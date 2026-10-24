@@ -457,8 +457,22 @@ def test_a_device_actor_is_recorded_as_a_device(root: Path) -> None:
             detail={"previous": "old-box", "name": "build-box", "networks": [], "failed": []},
         )
     )
+    # BOTH ROTATION-FAMILY EMITTERS, because the omission the review caught was the
+    # rotation one: it passed no kind at all while the prose said rotation did.
+    log.record(
+        AuditEvent(
+            event="device_rotated",
+            network_id=NETWORK,
+            actor="d_" + "b" * 32,
+            actor_kind="device",
+            detail={"old_device": "d_" + "b" * 32, "new_device": "d_" + "c" * 32},
+        )
+    )
     log.close()
-    assert _lines(root)[0]["actor_kind"] == "device"
+    records = _lines(root)
+    by_event = {record["event"]: record for record in records}
+    assert by_event["device_renamed"]["actor_kind"] == "device"
+    assert by_event["device_rotated"]["actor_kind"] == "device"
 
 
 def test_the_closed_set_still_coerces_an_unknown_actor_kind(root: Path) -> None:
