@@ -46,6 +46,9 @@ async def test_mcp_diagnostics_reach_actual_network_tool_without_claiming_inheri
     )
     with closing(AuthStore(db_path=server_b.root / "auth.db", config_dir=server_b.root)) as store:
         await _sdk_login(store, monkeypatch)
+        # Quiesce the WAL before checking ready's immutable snapshot. The open-WAL
+        # unknown arm has its own focused regression in test_readiness.py.
+        store.close()
         result = await tool.execute_network(
             "synthetic-mcp-ready",
             {"action": "ready", "peer": server_b.identity.name},
@@ -68,11 +71,13 @@ async def test_mcp_diagnostics_reach_actual_network_tool_without_claiming_inheri
         assert "[redacted]" not in json.dumps(item)
         from local_operator.mcp.auth import TOKENS_OBTAINED_AT_KEY, McpTokenStorage
 
+        store = AuthStore(db_path=server_b.root / "auth.db", config_dir=server_b.root)
         storage = McpTokenStorage(URL, store)
         data = dict(store.list_credentials("mcp-oauth")[0].data)
         data["tokens"] = {"access_token": "[redacted]", "token_type": "Bearer", "expires_in": 1}
         data[TOKENS_OBTAINED_AT_KEY] = time.time() - 120
         assert storage._write(data)
+        store.close()
         expired = await tool.execute_network(
             "synthetic-mcp-expired",
             {"action": "ready", "peer": server_b.identity.name},
