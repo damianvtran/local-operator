@@ -21859,6 +21859,13 @@ class Session:
         cuts to already-persisted history, which is where a cut belongs
         mid-run anyway.
         """
+        # TOOL-BATCH BOUNDARY: this runs after each tool batch and before the
+        # next model call, so it is the second place (besides every provider
+        # call) where a live turn can prove it still holds its BODY lease.
+        # Renewing here is what keeps a long tool run from letting the lease
+        # expire and a second turn claim the same reservation (S-12).
+        if self._pending_body_turn is not None:
+            self._pending_body_turn.renew()
         if self._disposed:
             return None
         # Durability FIRST, unconditionally, and before any compaction

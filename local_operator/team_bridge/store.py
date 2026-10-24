@@ -2656,6 +2656,26 @@ class Store:
                 ),
             )
             conn.execute("INSERT OR IGNORE INTO sync (owner_key) VALUES (?)", (_owner_key(owner),))
+            # A generation bump makes every reservation bound to an older
+            # credential/generation permanently unclaimable: ``owner_key`` is
+            # unchanged across a same-account re-login, so nothing else will
+            # ever match those rows. Retiring them HERE — at the one moment the
+            # new generation becomes live, inside the same transaction — is what
+            # stops them sitting ``pending`` with no live owner (S-3b).
+            conn.execute(
+                "UPDATE body_reservations SET state = 'retired', "
+                "terminal_code = 'binding_mismatch', last_error = NULL, "
+                "claim_token = NULL, turn_token = NULL, claim_expires_at = NULL, "
+                "updated_at = ? WHERE owner_key = ? "
+                "AND (credential_id != ? OR enrollment_generation != ?) "
+                "AND state IN ('pending', 'claimed')",
+                (
+                    time.time(),
+                    _owner_key(owner),
+                    owner.credential_id,
+                    owner.enrollment_generation,
+                ),
+            )
 
     def invalidate(self, owner: OwnerSnapshot) -> int:
         """Fence pending results/claims and bump the generation. Returns it.
