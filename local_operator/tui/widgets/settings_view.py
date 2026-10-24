@@ -56,13 +56,14 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import register_refresh
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
 from local_operator.tui.error_text import error_text
 from local_operator.tui.i18n_status import (
+    balance_display_line,
     display_tr,
     localized_display,
     technical_display,
@@ -73,6 +74,7 @@ from local_operator.tui.widgets.subagent_view import HintButton
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 _t = display_tr("tui.small")
+_raw_t = tr("tui.small")
 
 
 def _paint(text: str, *, source_locale: str | None = None) -> str:
@@ -3663,6 +3665,9 @@ class SettingsView(Vertical):
             # row occupying two lines would make every click below it land on
             # the wrong setting.
             line.truncate(width, overflow="ellipsis")
+            # Fitting can move the ellipsis ahead of a closing PDI; rebuild only
+            # the delimiters still open on this FINAL painted row.
+            balance_display_line(line)
             return line
 
         # WHICH LINES MAY HAVE CHANGED.
@@ -3826,7 +3831,7 @@ class SettingsView(Vertical):
             # answers "when does this take effect" once per group rather than
             # fifty times down the page. See the module docstring.
             head = Text(no_wrap=True)
-            head.append(_paint(row.section.title), style=fg + Style(bold=True))
+            head.append(_paint(row.section.title, source_locale="en"), style=fg + Style(bold=True))
             # The tag sheds its PREFIX before it sheds the scope itself: on a
             # narrow body "takes effect: new sessions" does not fit beside the
             # title, and the half that carries the meaning is the scope. Dropped
@@ -3911,7 +3916,12 @@ class SettingsView(Vertical):
             choice_label = (
                 technical_display(str(row.choice.label)).plain
                 if row.setting.key == "language"
-                else _paint(row.choice.label)
+                else _paint(
+                    row.choice.label,
+                    # Synthesised BOOL labels are TUI-owned localized copy;
+                    # registry choices are English-source fallback prose.
+                    source_locale=None if row.setting.kind == Kind.BOOL else "en",
+                )
             )
             line.append(choice_label, style=base)
             if row.choice.value == row.setting.default:
@@ -3924,14 +3934,7 @@ class SettingsView(Vertical):
                 # it came with" before touching anything.
                 line.append(_t(_x.settings_view_default_marker()), style=dim)
             if row.choice.description:
-                # The Urdu terminal-capability note is English renderer guidance,
-                # not translated catalogue prose; do not give it RTL provenance.
-                source = (
-                    "en" if row.setting.key == "language" and row.choice.value == "ur" else None
-                )
-                line.append(
-                    f"  {_paint(row.choice.description, source_locale=source)}", style=faint
-                )
+                line.append(f"  {_paint(row.choice.description, source_locale='en')}", style=faint)
             return line
 
         if row.kind == "chain" and row.chain is not None:
@@ -3977,7 +3980,11 @@ class SettingsView(Vertical):
             return line
         line.append(" " * _ROW_INDENT)
         line.append(marker, style=accent if selected else dim)
-        label = truncate_cells(_paint(setting.label), _LABEL_BUDGET)
+        # Fit registry source first; projection controls must never be sliced.
+        label = _paint(
+            truncate_cells(setting.label, _LABEL_BUDGET),
+            source_locale="en",
+        )
         line.append(label, style=base)
         pad = max(1, _VALUE_COLUMN - cell_len(line.plain))
         line.append(" " * pad)
@@ -4730,7 +4737,7 @@ class SettingsView(Vertical):
                 # finding names.
                 clause_style = _bridge_ink()
             width = self._detail_width()
-            help_text = _paint(row.setting.help)
+            help_text = _paint(row.setting.help, source_locale="en")
             if row.setting.hotkey_scope == "desktop":
                 # The desktop sentence REPLACES the registry help on this page,
                 # for the reason `_DESKTOP_HOTKEY_DETAIL` states. The registry
@@ -6356,8 +6363,10 @@ def _bool_choices() -> tuple[settings_io.Choice, ...]:
     finding rather than a nuisance.
     """
     return (
-        settings_io.Choice(value=True, label=_t(_x.settings_view_bool_on())),
-        settings_io.Choice(value=False, label=_t(_x.settings_view_bool_off())),
+        # Keep registry-shaped values RAW. The expanded row projects them once,
+        # at its final paint boundary, exactly like every other choice label.
+        settings_io.Choice(value=True, label=_raw_t(_x.settings_view_bool_on())),
+        settings_io.Choice(value=False, label=_raw_t(_x.settings_view_bool_off())),
     )
 
 

@@ -124,7 +124,12 @@ from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 # from the resolved strings, so every cell-length claim in this file is
 # measured on exactly the text a user reads; the en-only context sidecar
 # (`tui.welcome.context.json`) carries the per-entry maxCells contract.
-_t = display_tr("tui.welcome", technical_params=("version",))
+_t = display_tr(
+    "tui.welcome",
+    technical_params=("version",),
+    # `/update` is authored in the prose itself, not supplied as a parameter.
+    technical_literals=("/update",),
+)
 
 
 #: The status namespace (T2): the model row's state words are catalogued with the

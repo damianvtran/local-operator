@@ -69,7 +69,7 @@ from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.harness.peer_cycles import PeerCycleCertificate
 from local_operator.i18n.format import format_number
 from local_operator.i18n.keys import tui_transcript
-from local_operator.i18n.text import active_locale, register_refresh, tr
+from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.composer_focus import (
@@ -77,7 +77,11 @@ from local_operator.tui.composer_focus import (
     focus_is_claimed,
     return_focus_to_composer,
 )
-from local_operator.tui.i18n_status import display_tr
+from local_operator.tui.i18n_status import (
+    display_tr,
+    localized_display,
+    strip_display_controls,
+)
 from local_operator.tui.internal_work_membership import (
     WorkGroupIdentity,
     WorkGroupSnapshot,
@@ -972,6 +976,9 @@ class TranscriptBlock(Static):
             return None
         copied: list[str] = []
         for index, row in enumerate(visual.plain.split("\n")):
+            # Isolates are paint metadata, never clipboard content. Strip before
+            # applying cell-based selection offsets as well as before returning.
+            row = strip_display_controls(row)
             span = selection.get_span(index)
             if span is None or self.copy_row_is_chrome(index):
                 continue
@@ -1398,25 +1405,25 @@ class ExpandableActionBlock(TranscriptBlock):
 #: en catalogue's ``tui.transcript.queued.*`` values — the leading middle dot and
 #: every word — so a wave moves them like every other extracted area.
 _raw_t = tr("tui.transcript")
+_record_t = tr_record("tui.transcript")
+_t = display_tr("tui.transcript", technical_params=("pid",), technical_literals=("esc",))
 
-
-_t = display_tr("tui.transcript", technical_params=("pid",))
-
-
-QUEUED_ROW_TEXT = _t(tui_transcript.queued_newest())
+# Raw constants are layout inputs. Projection happens after each marker line is
+# wrapped, so a narrow frame can never cut through an isolate.
+QUEUED_ROW_TEXT = _raw_t(tui_transcript.queued_newest())
 #: The same state WITHOUT the offer, for every queued message but the newest.
 #: Only the newest is recallable (``app._withdraw_queued_prompt`` lifts one at a
 #: time, the sibling steer channel's rule), so a second marked row advertising
 #: the same key promises a recall that press will decline — measured: two rows
 #: offering, one honouring (UX round 2, U4).
-QUEUED_ROW_TEXT_OLDER = _t(tui_transcript.queued_older())
+QUEUED_ROW_TEXT_OLDER = _raw_t(tui_transcript.queued_older())
 
 
 def _reload_copy() -> None:
     """Remove old-locale isolates from import-time rows on every live switch."""
     global QUEUED_ROW_TEXT, QUEUED_ROW_TEXT_OLDER
-    QUEUED_ROW_TEXT = _t(tui_transcript.queued_newest())
-    QUEUED_ROW_TEXT_OLDER = _t(tui_transcript.queued_older())
+    QUEUED_ROW_TEXT = _raw_t(tui_transcript.queued_newest())
+    QUEUED_ROW_TEXT_OLDER = _raw_t(tui_transcript.queued_older())
 
 
 register_refresh(_reload_copy)
@@ -1757,7 +1764,7 @@ class UserBlock(TranscriptBlock):
             marker = QUEUED_ROW_TEXT if self._queued_offer else QUEUED_ROW_TEXT_OLDER
             mark = wrap_cells(marker, max(body, 1))
             start = len(rows)
-            rows.extend(mark)
+            rows.extend(localized_display(line, technical_literals=("esc",)).plain for line in mark)
             # EVERY row the marker wrapped onto is receipt ink, not just its
             # last: the receipt token means "the app is talking here", and a
             # control row painted half in the prompt's own colour reads as
@@ -2478,7 +2485,13 @@ class WakeBlock(ExpandableActionBlock):
                 slot = offer
         slot_cells = cell_len(slot) + 1 if slot else 0
         budget = max(0, remaining - slot_cells)
+        # `_summary` is raw source plus provenance. Fit first, then project the
+        # final line so truncation cannot orphan a bidi delimiter. No provenance
+        # (`None`) means this identity is not catalogue copy: external tool and
+        # model prose passes through untouched even under an Urdu preference.
         summary = truncate_cells(identity, budget)
+        if self._summary_source_locale is not None:
+            summary = localized_display(summary, source_locale=self._summary_source_locale).plain
 
         summary_style = Style(color=theme_mod.semantic_color(self._summary_ink()))
         row = Text(no_wrap=True, overflow="ellipsis")
@@ -2537,6 +2550,10 @@ class WakeBlock(ExpandableActionBlock):
                     row.append(truncate_cells(wrapped, line_width), style=dim)
         return row
 
+    #: Provenance of the raw `_summary` currently being fitted; non-catalogue
+    #: wake prose stays unprojected even while Urdu is the active preference.
+    _summary_source_locale: str | None = None
+
     def _summary_ink(self) -> str:
         """The theme ink a receipt's summary line is painted in.
 
@@ -2577,7 +2594,9 @@ class WakeBlock(ExpandableActionBlock):
             # Nest RAW localized prose: painting the inner label first would
             # inject controls into the outer message and double-isolate it.
             label = _raw_t(tui_transcript.catchup_missed(count=count))
-            headline = _t(tui_transcript.catchup_headline(label=label))
+            record = _record_t(tui_transcript.catchup_headline(label=label))
+            self._summary_source_locale = record.source_locale
+            headline = record.text
             if ids:
                 # The same label treatment the single-delivery fold applies
                 # (UX review round 2, U5 / QA Q3): this branch composes its
@@ -2587,6 +2606,7 @@ class WakeBlock(ExpandableActionBlock):
                 # shared lookup, so the two shapes cannot drift.
                 headline += f" ({', '.join(wake_display_name(i) for i in ids)})"
             return headline, message
+        self._summary_source_locale = None
         # The envelope strip is shared with the phone fold
         # (``harness.rows.wake_receipt_headline``): while it lived only here,
         # the phone rendered the raw model-facing envelope verbatim.
