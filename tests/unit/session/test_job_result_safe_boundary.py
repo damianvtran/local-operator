@@ -16,6 +16,7 @@ from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, JobType
 from local_operator.harness.loop import AgentLoop
 from local_operator.harness.types import (
     AbortSignal,
+    AgentEndEvent,
     AgentMessage,
     AgentTool,
     ChatRequest,
@@ -135,6 +136,242 @@ async def test_job_result_reaches_tool_boundary_before_parent_final(tmp_path: Pa
         if not parent.done():
             parent.cancel()
             await asyncio.gather(parent, return_exceptions=True)
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_writes, expected_requests", [(1, 2), (2, 3)])
+async def test_result_commits_only_after_its_canonical_row_is_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_writes: int,
+    expected_requests: int,
+) -> None:
+    """Transient journal failures retry before ANY automatic context commit.
+
+    One failure is repaired at the safe boundary and keeps same-run delivery.
+    Two refuse that boundary, so the existing finally fallback owns recovery
+    and buys the only legitimate later delivery request.
+    """
+    tool_entered = asyncio.Event()
+    release_tool = asyncio.Event()
+    rows_at_request: list[int] = []
+
+    async def execute(call_id, args, signal, on_update, context):
+        tool_entered.set()
+        await release_tool.wait()
+        return ToolResult(
+            tool_call_id=call_id,
+            tool_name="slow",
+            content=[TextContent(text="slow completed")],
+        )
+
+    tool = AgentTool(
+        name="slow",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+
+    class Stream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            rows_at_request.append(len(_job_result_rows(session)))
+            self.requests.append(request)
+
+            async def generate():
+                if len(self.requests) == 1:
+                    yield StreamToolCallDelta(
+                        index=0, id="slow-call", name="slow", argument_delta="{}"
+                    )
+                    yield StreamEndEvent(stop_reason="tool_calls")
+                else:
+                    yield StreamTextDelta(delta="parent response")
+                    yield StreamEndEvent(stop_reason="stop")
+
+            return generate()
+
+    stream = Stream()
+    session = make_session(tmp_path, stream, tools=[tool])
+    real_append = session._transcript.append_message
+    failures_left = failed_writes
+
+    async def fail_job_row_writes(message, *args, **kwargs):
+        nonlocal failures_left
+        if (
+            isinstance(message, CustomMessage)
+            and message.custom_type == JOB_RESULT_MESSAGE_TYPE
+            and failures_left > 0
+        ):
+            failures_left -= 1
+            raise OSError("injected transient job-row write failure")
+        return await real_append(message, *args, **kwargs)
+
+    monkeypatch.setattr(session._transcript, "append_message", fail_job_row_writes)
+    parent = asyncio.create_task(session.prompt("preserve the canonical result"))
+    try:
+        await asyncio.wait_for(tool_entered.wait(), 5)
+
+        async def runner(job_id, signal, report_progress):
+            return "durable before delivery"
+
+        job_id = session.jobs.register("task", "transient-journal-failure", runner)
+        await wait_for(lambda: job_id in session._deferred_job_results)
+        assert _job_result_rows(session) == []
+
+        release_tool.set()
+        await parent
+        await wait_for(lambda: not session._background_tasks)
+
+        assert failures_left == 0
+        assert len(stream.requests) == expected_requests
+        assert rows_at_request == [0] * (expected_requests - 1) + [1]
+        for request in stream.requests[1:-1]:
+            assert "durable before delivery" not in _wire(request)
+        assert "durable before delivery" in _wire(stream.requests[-1])
+        assert len(_job_result_rows(session)) == 1
+        assert not session._deferred_job_results
+        if failed_writes == 1:
+            assert _job(session, job_id).consumed is True
+    finally:
+        release_tool.set()
+        if not parent.done():
+            parent.cancel()
+            await asyncio.gather(parent, return_exceptions=True)
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_result_after_last_yield_uses_the_finally_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely late result still gets one later delivery turn."""
+    real_collect_yield = AgentLoop._collect_yield_injections
+    job_ids: list[str] = []
+
+    async def settle_after_last_yield(config):
+        late = await real_collect_yield(config)
+        if not late and not job_ids:
+            # The yield snapshot is already fixed. Settling now is after this
+            # run's LAST safe boundary but while Session is still streaming, so
+            # only its finally fallback can own the pending result.
+            async def runner(job_id, signal, report_progress):
+                return "genuinely post-last-boundary result"
+
+            job_ids.append(session.jobs.register("task", "last-boundary", runner))
+            await wait_for(lambda: job_ids[0] in session._deferred_job_results)
+            assert session._is_streaming
+        return late
+
+    monkeypatch.setattr(
+        AgentLoop, "_collect_yield_injections", staticmethod(settle_after_last_yield)
+    )
+
+    class Stream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+
+            async def generate():
+                yield StreamTextDelta(delta="response")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return generate()
+
+    stream = Stream()
+    session = make_session(tmp_path, stream)
+    try:
+        await session.prompt("do work")
+        await wait_for(lambda: not session._background_tasks)
+
+        assert len(stream.requests) == 2
+        assert "genuinely post-last-boundary result" not in _wire(stream.requests[0])
+        assert "genuinely post-last-boundary result" in _wire(stream.requests[1])
+        assert len(_job_result_rows(session)) == 1
+        assert not session._deferred_job_results
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_peer_run_records_job_origin_only_after_result_commit(
+    tmp_path: Path,
+) -> None:
+    """A job incorporated into a peer run retains the job's loud completion policy."""
+    tool_entered = asyncio.Event()
+    release_tool = asyncio.Event()
+    ends: list[AgentEndEvent] = []
+
+    async def execute(call_id, args, signal, on_update, context):
+        tool_entered.set()
+        await release_tool.wait()
+        return ToolResult(
+            tool_call_id=call_id,
+            tool_name="slow",
+            content=[TextContent(text="slow completed")],
+        )
+
+    tool = AgentTool(
+        name="slow",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+
+    class Stream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+
+            async def generate():
+                if len(self.requests) == 1:
+                    yield StreamToolCallDelta(
+                        index=0, id="slow-call", name="slow", argument_delta="{}"
+                    )
+                    yield StreamEndEvent(stop_reason="tool_calls")
+                else:
+                    yield StreamTextDelta(delta="important final B was incorporated")
+                    yield StreamEndEvent(stop_reason="stop")
+
+            return generate()
+
+    stream = Stream()
+    session = make_session(tmp_path, stream, tools=[tool])
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    try:
+        await session.receive_peer_message(
+            "Continue the outstanding research",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 42, "conversation_name": "synthetic-peer"},
+        )
+        await asyncio.wait_for(tool_entered.wait(), 5)
+
+        async def runner(job_id, signal, report_progress):
+            return "distinct important final B"
+
+        job_id = session.jobs.register("task", "research", runner)
+        await wait_for(lambda: job_id in session._deferred_job_results)
+        release_tool.set()
+        await wait_for(
+            lambda: bool(ends) and not session.is_streaming and not session._background_tasks
+        )
+
+        assert len(stream.requests) == 2
+        assert "distinct important final B" in _wire(stream.requests[1])
+        assert len(ends) == 1
+        assert ends[0].notify is True
+        assert session._run_input_types == {"peer_message", "job_result"}
+        assert _job(session, job_id).consumed is True
+        assert (await session.refresh_attention())["unseen"] is True
+    finally:
+        release_tool.set()
         await session.dispose()
 
 
@@ -442,44 +679,99 @@ async def test_budget_exhaustion_leaves_result_for_the_finally_fallback(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("departure", ["abort", "leaving"])
 async def test_departure_after_materialization_does_not_acknowledge(
-    tmp_path: Path, departure: str
+    tmp_path: Path, departure: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Departure between materialization and commit retains the pending row."""
-    stream = ScriptedEmptyStream()
+    """A latch between materialization and commit buys NO provider continuation."""
+    boundary_entered = asyncio.Event()
+    release_boundary = asyncio.Event()
+    real_loop_config = session_module.LoopConfig
+
+    def with_yield_gate(**kwargs: Any):
+        config = real_loop_config(**kwargs)
+        config.on_before_yield = gated_boundary
+        return config
+
+    monkeypatch.setattr(session_module, "LoopConfig", with_yield_gate)
+    real_drain = AgentLoop._drain_pending
+    armed: list[bool] = []
+
+    def arm_then_drain(pending: list[AgentMessage], context: Any) -> int:
+        if any(
+            isinstance(message, CustomMessage) and message.custom_type == JOB_RESULT_MESSAGE_TYPE
+            for message in pending
+        ):
+            armed.append(True)
+            if departure == "abort":
+                session.abort("abort after materialization")
+            else:
+                session.retire_job_deliveries_to_transcript()
+        return real_drain(pending, context)
+
+    monkeypatch.setattr(AgentLoop, "_drain_pending", staticmethod(arm_then_drain))
+
+    class Stream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+
+            async def generate():
+                yield StreamTextDelta(delta="unexpected post-latch continuation")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return generate()
+
+    stream = Stream()
     session = make_session(tmp_path, stream)
-    session._is_streaming = True
+    real_fallback = session._deliver_deferred_job_results
+    fallback_entered = asyncio.Event()
+    release_fallback = asyncio.Event()
 
-    async def runner(job_id, signal, report_progress):
-        return "pending through departure"
+    async def gated_fallback() -> None:
+        fallback_entered.set()
+        await release_fallback.wait()
+        await real_fallback()
 
-    job_id = session.jobs.register("task", f"{departure}-after-materialization", runner)
+    monkeypatch.setattr(session, "_deliver_deferred_job_results", gated_fallback)
+
+    async def gated_boundary() -> None:
+        boundary_entered.set()
+        await release_boundary.wait()
+
+    parent = asyncio.create_task(session.prompt("depart at the yield commit"))
     try:
-        await wait_for(lambda: bool(_job_result_rows(session)))
-        carriers: list[AgentMessage] = [
-            message
-            for message in await session._drain_asides()
-            if isinstance(message, CustomMessage) and message.custom_type == JOB_RESULT_MESSAGE_TYPE
-        ]
-        assert len(carriers) == 1
-        if departure == "abort":
-            session.abort("abort after materialization")
-        else:
-            session.retire_job_deliveries_to_transcript()
+        await asyncio.wait_for(boundary_entered.wait(), 5)
 
-        AgentLoop._drain_pending(carriers, session._context)
-        assert carriers[0] not in session._context.messages
+        async def runner(job_id, signal, report_progress):
+            return "pending through departure"
+
+        job_id = session.jobs.register("task", f"{departure}-after-materialization", runner)
+        await wait_for(lambda: job_id in session._deferred_job_results)
+        release_boundary.set()
+        await asyncio.wait_for(fallback_entered.wait(), 5)
+
+        assert armed == [True]
+        assert len(stream.requests) == 1
+        assert "pending through departure" not in _wire(stream.requests[0])
         assert _job(session, job_id).consumed is False
         assert job_id in session._deferred_job_results
+        assert "job_result" not in session._run_input_types
+        assert len(_job_result_rows(session)) == 1
 
-        session._is_streaming = False
-        await session._deliver_deferred_job_results()
+        release_fallback.set()
+        await parent
         await wait_for(lambda: not session._background_tasks)
-        assert not stream.requests
-        assert not session._deferred_job_results
+        assert len(stream.requests) == 1
         assert _job(session, job_id).consumed is False
+        assert not session._deferred_job_results
         assert len(_job_result_rows(session)) == 1
     finally:
-        session._is_streaming = False
+        release_boundary.set()
+        release_fallback.set()
+        if not parent.done():
+            parent.cancel()
+            await asyncio.gather(parent, return_exceptions=True)
         await session.dispose()
 
 
