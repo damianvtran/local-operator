@@ -71,7 +71,7 @@ import unicodedata
 import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 
 import httpx
 
@@ -86,7 +86,14 @@ from local_operator.providers.radient_credentials import (
     org_oauth_destination_allowed,
 )
 from local_operator.team_bridge import availability
-from local_operator.team_bridge.settings import TeamBridgeSettings
+from local_operator.team_bridge.settings import (
+    DEFAULT_ENROLLMENT_DONE,
+    DEFAULT_ON_CONSENT_VERSION,
+    TeamBridgeSettings,
+    record_default_enrollment,
+    record_local_enabled,
+    record_local_enabled_if_unset,
+)
 from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
     validate_send_recipient,
@@ -116,6 +123,11 @@ TEXT_CAP_BYTES = 2048
 SEED_HEAD_TIMEOUT_S = 3.0
 
 CONSENT_VERSION_V1 = "bridge_consent_v1"
+#: The opt-out disclosure. Only a hub SERVING it (and listing it as accepted)
+#: lets the status discipline enrol anybody automatically; see
+#: :func:`default_on_in_force`. An explicit enable is version-agnostic and
+#: echoes whatever the hub served.
+CONSENT_VERSION_V2 = DEFAULT_ON_CONSENT_VERSION
 SCREENING_VERSION_V1 = "bridge-screen-v1"
 GUIDANCE_VERSION_V1 = "bridge-guidance-v1"
 
@@ -1622,7 +1634,114 @@ class TeamBridgeClient:
             access=access,
             head=head,
         )
+        if state == "disabled":
+            # The one-click Turn off: the hub answered, so make the opt-out
+            # sticky on this machine too (see _apply_local_opt_out).
+            opted_account = getattr(access, "account_id", None) or expected_account_id
+            self._apply_local_opt_out(opted_account)
         return result
+
+    async def enroll_default_on(
+        self,
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+        may_commit_local: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """``POST /messaging/enrollment``: the hub's default-on enrolment.
+
+        WHY A ROUTE OF ITS OWN. Under ``bridge_consent_v2`` the hub enrols an
+        eligible member with no endpoint and records the provenance itself
+        (``consented_via = default_on``). The body therefore carries ONLY
+        ``consent_version`` (always v2) and the tenant: there is deliberately no
+        ``consented_via`` parameter anywhere on this path, because provenance is
+        a fact the server establishes by which route wrote it, never a claim the
+        client makes (pinned by a test that fails if the key ever appears).
+
+        ``expected_account_id`` is REQUIRED (not optional like on
+        :meth:`put_settings`): an automatic write has no dialog whose captured
+        account could go stale, so the account the status answer was read for is
+        the capture, and a login switch in between refuses locally with zero
+        writes.
+
+        THE LOCAL COMMIT. The native owner + receipt are committed through the
+        same machinery as an explicit enable, but ONLY when the hub's answer
+        proves THIS call created an active, v2, ``default_on`` endpoint. The hub
+        answers a no-op (200, current settings) when an endpoint already exists
+        in any state; committing a v2 receipt for a consent that was actually
+        collected as ``dialog``/``settings`` on another machine would invent a
+        consent record this one never saw. Errors (404/405 from an older hub, a
+        409 ``consent_version_unknown``, transport failures) propagate as
+        :class:`BridgeRefusal`; the caller decides they are silent.
+
+        ``may_commit_local`` is the caller's LAST-MOMENT veto (review round 1,
+        M1). The caller's gates were read before this method's awaited round
+        trips (the head read and the POST), so an explicit local OFF (a settings
+        edit, another surface) can land in that window. Asked synchronously
+        right before the commit, with no await between the answer and the
+        commit, a ``False`` leaves the owner and receipt UNCOMMITTED: "explicit
+        false always wins" is cheaper to keep by never committing than by
+        un-committing (a committed owner is the authority every fence trusts,
+        and the store has no retire-on-race path). The hub endpoint the POST
+        created stays; with no owner there is no device behind it, and the
+        member's next Turn off (or the unchanged explicit OFF) governs.
+        """
+
+        body: dict[str, Any] = {"consent_version": CONSENT_VERSION_V2, "tenant_id": tenant_id}
+        _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
+        access = await self._guarded_access(expected_account_id)
+        head = await self._pre_enable_head(tenant_id=tenant_id, access=access)
+        result = await self._send("POST", "/messaging/enrollment", body=body, access=access)
+        endpoint = result.get("endpoint") if isinstance(result, Mapping) else None
+        consent = endpoint.get("consent") if isinstance(endpoint, Mapping) else None
+        if (
+            isinstance(consent, Mapping)
+            and consent.get("consented_via") == "default_on"
+            and consent.get("version") == CONSENT_VERSION_V2
+            and (may_commit_local is None or may_commit_local())
+        ):
+            await self._commit_explicit_enable(
+                state="active",
+                tenant_id=tenant_id,
+                consent_version=CONSENT_VERSION_V2,
+                result=result,
+                access=access,
+                head=head,
+            )
+        return result
+
+    def _apply_local_opt_out(self, account_id: str | None) -> None:
+        """The local half of the one-click Turn off, after the hub accepted it.
+
+        Two independent best-effort effects (the hub is already ``disabled``,
+        which is sticky server-side too, so a local write failure must not turn
+        a successful opt-out into an error):
+
+        * ``team_bridge.enabled = false`` — the explicit local OFF every fence
+          and the automatic-enrolment gate read from disk;
+        * the per-account ``default_enrollment`` marker, so nothing here
+          re-enrols the account even if the explicit key is later removed.
+
+        The committed owner and receipt are deliberately LEFT in place, exactly
+        as an explicit disable always left them: ``team_bridge.enabled = false``
+        is read from disk at every send/receive/wake boundary (host, read
+        context, authority, wake, engagement), so it is the teardown, and an
+        explicit re-enable reuses the same enrolment instead of needing a new
+        generation.
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None:
+            return
+        try:
+            record_local_enabled(config_dir, False)
+        except Exception:  # noqa: BLE001 - the hub opt-out already succeeded
+            logger.warning("team_bridge: could not persist the local opt-out")
+        if isinstance(account_id, str) and account_id:
+            try:
+                record_default_enrollment(config_dir, account_id)
+            except Exception:  # noqa: BLE001 - bookkeeping only
+                pass
 
     async def _commit_explicit_enable(
         self,
@@ -3030,6 +3149,46 @@ def _surface_visible(check: StatusCheck) -> bool:
     return bool(surface_projection(check)["visibility"]["settings"])
 
 
+def default_on_in_force(check: StatusCheck) -> bool:
+    """Whether this answer proves the hub's opt-out default is in force for the caller.
+
+    ALL of: a READY answer; an eligible selected organization (the hub omits
+    ``consent`` for everyone else); the served ``consent.version`` is EXACTLY
+    ``bridge_consent_v2`` (the disclosure whose copy offers the opt-out) AND the
+    hub lists it in ``consent.accepted_versions``; and this client ACCEPTED those
+    bytes on this answer (a refused text — backwards, changed-in-place, oversized
+    — is in ``check.rejected`` and never authorises anything).
+
+    A missing or malformed accepted set reads False, never "anything goes":
+    that is also what a hub predating the set looks like, and such a hub must
+    keep the consent hold. Exact string membership, never version ordering: v3
+    would be a new disclosure this build has not been taught to default on.
+    """
+
+    if check.state != STATE_READY or not isinstance(check.payload, Mapping):
+        return False
+    selected = select_tenant(check.payload)
+    if selected is None or not bool(selected.get("eligible")):
+        return False
+    consent = check.payload.get("consent")
+    if not isinstance(consent, Mapping):
+        return False
+    accepted = consent.get("accepted_versions")
+    if (
+        consent.get("version") != CONSENT_VERSION_V2
+        or not isinstance(accepted, list)
+        or CONSENT_VERSION_V2 not in accepted
+        or "consent" in check.rejected
+    ):
+        return False
+    record = check.texts.get("consent")
+    return (
+        record is not None
+        and record.version == CONSENT_VERSION_V2
+        and record.text == consent.get("text")
+    )
+
+
 class StatusDiscipline:
     """The ONE reader of ``GET /v1/messaging/status`` on this machine.
 
@@ -3069,6 +3228,15 @@ class StatusDiscipline:
         #: a rename must not suppress that name for the life of the process; a
         #: failed attempt is retried at the next fresh read (≥ the cache TTL).
         self._agent_name_sent: dict[str, str] = {}
+        #: ``(account_id, tenant_id)`` pairs this process already ASKED the hub to
+        #: enrol, whatever the answer. The debounce for :meth:`_default_enroll`:
+        #: a 404/405 (older hub), a 409, a transport failure or a no-op must not
+        #: be retried on every fresh read (the cache TTL is the only pacing a
+        #: status read has), so one attempt per process per account+organization.
+        #: A restart, or a fresh sign-in as a different account, tries again —
+        #: which is safe because the hub's route is a no-op once any endpoint
+        #: exists. Memory only: it is never authority for a write.
+        self._default_enroll_attempted: set[tuple[str, str]] = set()
 
     @property
     def base_url(self) -> str:
@@ -3236,6 +3404,7 @@ class StatusDiscipline:
             )
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+        check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
         check = self._sync_local_designation(check)
         await self._sync_agent_name(check, access)
         self._states[key] = _AccountState(
@@ -3296,6 +3465,143 @@ class StatusDiscipline:
             check = replace(check, state_note=STATE_NOTE_NEUTRAL)
         return check
 
+    async def _default_enroll(
+        self,
+        check: StatusCheck,
+        *,
+        boundary: Boundary,
+        access: OAuthAccess,
+        texts: AcceptedTexts,
+    ) -> StatusCheck:
+        """The ONE automatic enrolment: ``bridge_consent_v2``, opt-out, nothing fired.
+
+        WHY IT EXISTS. The consent hold (#2712) forbade a status read from
+        enrolling under v1, whose copy never offered an opt-out. v2 is the
+        disclosure that says "on by default, turn it off in Settings", so once
+        the hub SERVES it an eligible member with no endpoint is enrolled here,
+        with nothing sent at enrolment: the endpoint and the native owner +
+        receipt are created, and the member then sees a dismissible notice with
+        Turn off. Enrolling is not sending — every send, receive and wake path
+        still needs the committed owner and a current receipt.
+
+        EVERY gate must hold, each failing individually means ZERO writes (a
+        table test pins each):
+
+        1. v2 is served AND accepted by the hub (:func:`default_on_in_force`);
+        2. the surface state is exactly B — eligible, NO endpoint. Never C/D/E
+           (an endpoint in any state, so an opt-out is never reversed by a
+           default) and never A/F/G;
+        3. the local ``team_bridge.enabled`` key is not an explicit OFF (the
+           member opted out on this machine; an unreadable local document
+           also reads as "cannot tell", so no write);
+        4. this account was not already default-enrolled/opted out by this
+           machine (the ``default_enrollment`` marker — memory, never
+           authority) and this process has not already asked for it;
+        5. the signed-in account is the answer's account: the account this write
+           is pinned to (``expected_account_id``), compared by the client
+           against the exact dispatch snapshot before the first byte leaves;
+        6. this machine can COMMIT the enrolment (no owner already committed).
+
+        FAILURE IS SILENT. A 404/405 from an older hub, a 409, a refusal, a
+        transport error or a local commit problem leaves the status answer
+        untouched and surfaces nothing; the debounce above prevents a loop.
+        Only an answer that PROVES this call created a ``default_on`` endpoint
+        records the marker, writes ``team_bridge.enabled = true`` (so the
+        offline fences that read the key from disk agree with the owner just
+        committed) and adopts a refreshed status answer.
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None or not default_on_in_force(check):
+            return check
+        if _surface_state(check) != "B" or not access.account_id:
+            return check
+        if check.account_id != access.account_id:
+            return check
+        tenant_id = selected_tenant_id(check.payload)
+        if tenant_id is None:
+            return check
+        local = _local_settings_snapshot(config_dir)
+        if local is None or (local.enabled_is_set and not local.enabled):
+            return check
+        if local.default_enrollment.get(access.account_id) == DEFAULT_ENROLLMENT_DONE:
+            return check
+        try:
+            from local_operator.team_bridge.store import Store
+
+            # A machine that already holds a committed owner (any account, or an
+            # ambiguous store) cannot commit this one: ``commit_settings_enrollment``
+            # refuses. Creating the hub endpoint anyway would show the member as
+            # "on" to teammates with no device behind it, so ask the hub for
+            # nothing. Unreadable store reads as "cannot commit": no write.
+            if Store(config_dir).committed_owner_count() != 0:
+                return check
+        except Exception:  # noqa: BLE001
+            return check
+        attempt = (access.account_id, tenant_id)
+        if attempt in self._default_enroll_attempted:
+            return check
+        self._default_enroll_attempted.add(attempt)
+        account_id = access.account_id
+
+        def _local_still_open() -> bool:
+            # The gates above were read BEFORE the awaited head read + POST; an
+            # explicit OFF or a Turn off (which writes the marker) may have
+            # landed since. Re-read right before the owner commit. Unreadable
+            # means "cannot tell": no commit.
+            now = _local_settings_snapshot(config_dir)
+            return (
+                now is not None
+                and not (now.enabled_is_set and not now.enabled)
+                and now.default_enrollment.get(account_id) != DEFAULT_ENROLLMENT_DONE
+            )
+
+        try:
+            result = await self._client.enroll_default_on(
+                tenant_id=tenant_id,
+                expected_account_id=account_id,
+                may_commit_local=_local_still_open,
+            )
+        except (BridgeRefusal, BridgeSignInRequired, ValueError):
+            # An older hub (404/405), 409 consent_version_unknown, a transport
+            # failure, a stale account: an enrolment problem, never a status one.
+            return check
+        endpoint = result.get("endpoint") if isinstance(result, Mapping) else None
+        consent = endpoint.get("consent") if isinstance(endpoint, Mapping) else None
+        if not (
+            isinstance(consent, Mapping)
+            and consent.get("consented_via") == "default_on"
+            and isinstance(endpoint, Mapping)
+            and endpoint.get("state") == "active"
+        ):
+            # The hub's no-op (an endpoint already existed): nothing was
+            # created here, so nothing is recorded and the answer stands.
+            return check
+        try:
+            record_default_enrollment(config_dir, access.account_id)
+        except Exception:  # noqa: BLE001 - the enrolment already succeeded
+            pass
+        try:
+            from local_operator.team_bridge.store import Store
+
+            owner = Store(config_dir).active_owner()
+            if owner is not None and owner.account_id == access.account_id:
+                # Never over an explicit value: a Turn off / settings edit that
+                # landed after the commit above keeps its ``false``.
+                record_local_enabled_if_unset(config_dir)
+        except Exception:  # noqa: BLE001 - no local authority beats a loud failure
+            pass
+        # Adopt the post-enrolment answer: returning B after enrolling would
+        # tell the surface this machine is still un-enrolled for a whole cache
+        # TTL. A failed refresh keeps the original answer.
+        try:
+            payload = await self._client.status(access=access)
+        except (BridgeRefusal, BridgeSignInRequired):
+            return check
+        if not isinstance(payload, dict):
+            return check
+        return self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+
     def _sync_designation(self, store: Any, owner: Any, session: str) -> None:
         """Apply the current ``team_bridge.session`` to the native record.
 
@@ -3316,10 +3622,13 @@ class StatusDiscipline:
     def _sync_local_designation(self, check: StatusCheck) -> StatusCheck:
         """Keep the wake designation in step with ``team_bridge.session``.
 
-        A STATUS READ IS NOT AN ENROLLMENT PATH (consent hold, #2712). It never
+        A STATUS READ IS NOT AN ENROLLMENT PATH (consent hold, #2712), with ONE
+        gated exception that runs BEFORE this (:meth:`_default_enroll`, only
+        under a served+accepted ``bridge_consent_v2``). This method itself never
         performs the settings PUT and never writes an ``OwnerReceipt``: an
         active endpoint in a server answer can come from another surface or an
-        older build, so only the user's explicit settings write may enroll.
+        older build, so only the user's explicit settings write (or that gated
+        v2 enrolment, which the hub itself created) may enroll.
 
         The one local write left here is the designation for an ALREADY
         committed owner: the setting the user chose must reach the native record

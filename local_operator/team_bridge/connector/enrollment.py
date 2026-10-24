@@ -13,7 +13,10 @@ generic ``{enabled, session}`` preference has NO path into that record
   USER's explicit ``PUT /messaging/settings`` answered 200 with an ACTIVE
   endpoint and the consent echo that machine sent. That user action is the
   source; served/cached text alone never reaches it, and a status read never
-  calls it (consent hold: #2712's auto-enrollment is disabled).
+  calls it (consent hold: #2712's auto-enrollment is disabled) — except the
+  hub-created ``default_on`` endpoint of the gated ``bridge_consent_v2``
+  enrolment (``TeamBridgeClient.enroll_default_on``), which commits through the
+  same function only after the hub's answer proves it created that endpoint.
 
 Neither invents a consent: the first needs the captured-owner receipt, the
 second needs the server's successful write to the user's own enable. Neither
