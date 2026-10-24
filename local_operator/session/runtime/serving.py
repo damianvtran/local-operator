@@ -9850,7 +9850,7 @@ class ServingSessionHandle(SessionHandle):
                 kind="notice",
                 text=(
                     f"language: {resolved} ({language_name(resolved)}) — "
-                    f"/language <{'|'.join(options)}>; space"
+                    "/language <value>; space browses"
                 ),
                 style="info",
             )
@@ -9864,7 +9864,7 @@ class ServingSessionHandle(SessionHandle):
             # unaudited locale keys no catalogue and would render codes.
             return SlashResult(
                 kind="notice",
-                text=f"unknown language {wanted!r} — available: {', '.join(options)}",
+                text=f"unknown language {wanted!r} — /language lists the values",
                 style="warning",
             )
         stored = config_value()

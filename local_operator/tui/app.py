@@ -45951,9 +45951,13 @@ class OperatorApp(App[None]):
         if not wanted:
             # Within the picker's receipt budget; the space is the browse
             # (`_language_choices`), and the /settings row has the same list.
+            # The value space is NOT enumerated here: shipped locales grow, and
+            # a one-line receipt holds 70 cells at 80 columns (design D2). The
+            # space key opens the picker, which lists every accepted value, and
+            # the refusal below still names them for a typed mistake.
             self._system_notice(
                 f"language: {resolved} ({language_name(resolved)}) — "
-                f"/language <{'|'.join(options)}>; space"
+                "/language <value>; space browses"
             )
             return
         key = (
@@ -45963,7 +45967,7 @@ class OperatorApp(App[None]):
         )
         if key not in options:
             self._system_notice(
-                f"unknown language {wanted!r} — available: {', '.join(options)}", "warning"
+                f"unknown language {wanted!r} — /language lists the values", "warning"
             )
             return
         if key == self._language_current():
