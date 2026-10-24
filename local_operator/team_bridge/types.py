@@ -22,6 +22,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, NewType
+
 # WHY the two imports differ from the branch's original pair: ``quote`` /
 # ``unquote`` left with #2856 (durable refs no longer carry display labels, so
 # nothing here percent-encodes them); ``UUID`` arrived with #2828's canonical
