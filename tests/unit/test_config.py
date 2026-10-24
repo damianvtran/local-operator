@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 import tempfile
 from argparse import Namespace
 from collections.abc import Mapping
@@ -1716,6 +1717,44 @@ def test_the_startup_report_names_the_settings_an_external_write_removed(
     assert any("language" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
 
 
+def test_a_captured_run_keeps_the_drift_notice_out_of_stderr(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The 2026-10-24 modal: the notice is true, but a pipe must not carry it.
+
+    The desktop app captures the update child's stderr and diagnoses from its
+    head; a startup advisory there displaced the updater's own cause. The record
+    must still exist — it is what ``lop mobile logs`` and a terminal run show.
+    """
+    from local_operator import advisories
+    from local_operator.config_migrations import run_startup_migrations
+
+    path = _write_incident_config(tmp_path)
+    run_startup_migrations(tmp_path, surface="cli")
+    run_startup_migrations(tmp_path, surface="cli")
+    path.write_bytes(_INCIDENT_EXTERNAL_WRITE)
+
+    # The handler ``configure_cli_logging`` installs: stderr, advisory-filtered.
+    # pytest's captured stderr is not a terminal, which is the case under test.
+    handler = logging.StreamHandler(sys.stderr)
+    handler.addFilter(advisories.console_filter(sys.stderr))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            run_startup_migrations(tmp_path, surface="cli")
+    finally:
+        root.removeHandler(handler)
+
+    assert "lost" not in capsys.readouterr().err
+    recorded = [r for r in caplog.records if getattr(r, "lop_advisory", False)]
+    assert recorded, "the advisory must still be recorded"
+    assert any("lost" in record.getMessage() for record in recorded)
+
+
 def test_the_key_inventory_is_not_rewritten_when_nothing_changed(tmp_path: Path) -> None:
     """An unchanged launch stays WRITE-FREE once a baseline exists.
 
@@ -1988,13 +2027,16 @@ def test_a_declared_reset_is_not_reported_as_an_outside_loss(
     assert capsys.readouterr().err == ""
 
 
-def test_the_cli_prints_the_shrink_notice_exactly_once(tmp_path: Path) -> None:
-    """n3 on the real command path: one paragraph, one line, one channel.
+def test_the_cli_keeps_the_shrink_notice_off_a_captured_stream(tmp_path: Path) -> None:
+    """n3 + 2026-10-24 on the real command path: one channel, and a pipe is none.
 
     The unit-level surface assertions cannot see the CLI's logging handler, and
-    that handler is exactly what made the notice appear twice (`logger.warning`
-    plus an explicit `print`). Driven through `python -m local_operator.cli` in an
-    isolated HOME, the way the operator runs it.
+    that handler is two things at once: the channel that made the notice appear
+    twice before n3, and the channel that filled the desktop update modal's
+    diagnosis head on 2026-10-24. It now filters advisories on a non-terminal,
+    so a captured run carries NONE of the paragraph — the terminal half (a
+    person still sees it, once) is pinned in
+    ``tests/unit/test_advisories.py``, where a stream can claim to be a TTY.
     """
     import os
     import subprocess
@@ -2036,10 +2078,7 @@ def test_the_cli_prints_the_shrink_notice_exactly_once(tmp_path: Path) -> None:
 
     second = launch()
     assert second.returncode == 0, second.stderr
-    lost_lines = [line for line in second.stderr.splitlines() if "lost" in line]
-    assert len(lost_lines) == 1, second.stderr
-    assert "language" in lost_lines[0]
-    assert "config.yml.pre-cleanup-migration" in lost_lines[0]
+    assert not [line for line in second.stderr.splitlines() if "lost" in line], second.stderr
 
 
 def test_an_empty_mapping_is_not_a_leaf_in_either_reader() -> None:
