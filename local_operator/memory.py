@@ -1897,10 +1897,12 @@ class MemoryStore:
     def journal_plan(self) -> dict[str, Any]:
         """What :meth:`compact` would delete and roughly what it would free.
 
-        Read-only by construction: no INSERT/UPDATE/DELETE, and a store that
-        does not exist is not created (``connection()`` would create it). This
-        is the operator's preview — the pass refuses to run without the
-        fingerprint it prints.
+        Read-only by construction: no INSERT/UPDATE/DELETE of journal or
+        materialised rows, and a store that does not exist is not created.
+        (``connection()`` re-runs the schema block, as every read path here does;
+        that is idempotent DDL — it adds ``journal_prune`` to an older store — not
+        a data change.) This is the operator's preview — the pass refuses to run
+        without the fingerprint it prints.
         """
         if not self.path.exists():
             return {**self._empty_journal_plan(self.path), "read_only": True}
