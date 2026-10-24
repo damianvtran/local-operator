@@ -5,7 +5,7 @@
   "scope": "six owned relay SPA namespaces together, plus the separate SSR relay.login namespace",
   "base_revision": "bdb8083cb06d109d5a0cf0ec21a93078478a400e",
   "date": "2026-10-24",
-  "status": "translation_complete_pending_two_independent_audits",
+  "status": "round_1_remediation_complete_pending_scoped_round_2_audits",
   "source_set": {
     "reference_locale": "en",
     "namespace_count": 7,
@@ -80,7 +80,7 @@
       "namespace": "relay.shell",
       "key_count": 44,
       "en_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
-      "ur_sha256": "2a493cc7aad00e87b9014b505029f12c97e77bde918dfc0655823ee97b628bf1",
+      "ur_sha256": "8370737fcb67775696b04f9331b91eb7db70dc1f848bc11c51d35142aa00ab0c",
       "context_sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea",
       "translator_session": "905e702c8399"
     },
@@ -132,5 +132,19 @@
       "context_sha256": "9fcd5a1669e6831b10b7041d82f77c69e858183c001ba9faa949532b4d71980a",
       "translator_session": "905e702c8399"
     }
-  ]
+  ],
+  "updated_date": "2026-10-24",
+  "round_1_remediation": {
+    "date": "2026-10-24",
+    "audited_revision": "9dc317f46f9283d050c6ea7d5841626f062022d1",
+    "findings": [
+      {
+        "id": "UR-RELAY-R1-001",
+        "disposition": "fixed",
+        "namespace": "relay.shell",
+        "key": "relay.shell.usage.as_of",
+        "note": "Cached-at timestamp now uses کے مطابق for as-of semantics; تک incorrectly implied until/expiry. ICU order and skeletons unchanged."
+      }
+    ]
+  }
 }
