@@ -44,6 +44,10 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   hash) of messages it has not admitted, with ``body`` null, and only the
   admitted bodies. There is intentionally no local body cache here.
 
+- **react** — set an emoji on an admitted conversation message (or remove it
+  with ``remove=true``). This is a screened agent WRITE, never an ack; the hub
+  refuses a message this endpoint has not admitted. Reactions never wake agents.
+
 IDENTITY is never a model argument: the actor endpoint and provenance session
 come from ``runtime.owner.endpoint_id`` and ``runtime.session_id``. Every send
 carries that session id as origin provenance (the server stores it and never
@@ -66,6 +70,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,6 +103,7 @@ CHANNEL_OPS: tuple[str, ...] = (
     "channel_create",
     "channel_post",
     "channel_history",
+    "react",
     "channel_thread",
 )
 BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", *CHANNEL_OPS)
@@ -159,7 +165,7 @@ class BridgeRuntime:
 
 
 class ChannelMemberParams(BaseModel):
-    """One invited member: an agent names its endpoint, a human must not."""
+    """One invited member. An agent names its endpoint; a human must not."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -196,6 +202,7 @@ class BridgeToolParams(BaseModel):
         "channel_create",
         "channel_post",
         "channel_history",
+        "react",
         "channel_thread",
     ]
     message_id: str = ""
@@ -220,6 +227,10 @@ class BridgeToolParams(BaseModel):
     visibility: Literal["tenant", "private"] | None = None
     members: list[ChannelMemberParams] = Field(default_factory=list)
     body: str = ""
+    # A reaction is a write, not a read or an acknowledgement. The actor is the
+    # enrolled endpoint; the model supplies only the message and emoji.
+    emoji: str = ""
+    remove: bool = False
     limit: int = 50
     cursor: str | None = None
     before_seq: int | None = None
@@ -580,6 +591,39 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             content += f" at seq {seq}"
         return {"ok": True, "message_id": message_id, "state": "sent", "content": content}
 
+    if params.op == "react":
+        channel_id = params.channel_id.strip()
+        if _CONVERSATION_ID.fullmatch(channel_id) is None:
+            return _error("react needs a conversation id (bcv_…)")
+        if re.fullmatch(r"bcmsg_[0-9a-z]{8,64}", params.message_id) is None:
+            return _error("react needs a conversation message id (bcmsg_…)")
+        emoji = unicodedata.normalize("NFC", params.emoji)
+        if not emoji or len(emoji.encode("utf-8")) > 128:
+            return _error("react needs one emoji, at most 128 UTF-8 bytes")
+        # No body fetch, local cache, or implicit admission here: the server
+        # requires this exact endpoint's prior allow verdict before a reaction
+        # can act on a message. It is a normal write at both admission and tool
+        # approval boundaries, never an ack-shaped bypass.
+        try:
+            result = await runtime.client.conversation_react(
+                channel_id,
+                params.message_id,
+                emoji,
+                active=not params.remove,
+                tenant_id=runtime.tenant_id,
+                actor_endpoint_id=endpoint_id,
+            )
+        except Exception as failure:
+            return _error(f"the reaction did not confirm: {failure}", code="react_failed")
+        return {
+            "ok": True,
+            "state": "removed" if params.remove else "reacted",
+            "message_id": params.message_id,
+            # Labels in reaction summaries are member-authored external data,
+            # just like a history sender label: keep the untrusted framing.
+            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+        }
+
     if params.op == "channel_history":
         channel_id = params.channel_id.strip()
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
@@ -728,10 +772,9 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         name="bridge",
         label="Team Bridge",
         description=(
-            "Team Bridge: take_up/ack delivered messages, send/reply, and channel ops "
-            "(channels, channel_create, channel_post [thread_root_id replies in a thread], "
-            "channel_history, channel_thread) as this session's "
-            "agent. This tool cannot approve or deny — that is the human's ask queue."
+            "Team Bridge as this session's agent: take_up/ack, send/reply, and "
+            "channel ops (channels, channel_create, channel_post, channel_history, "
+            "channel_thread, react). Cannot approve or deny."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
