@@ -16,6 +16,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 4
       - uses: actions/setup-python@v7
         timeout-minutes: 1
         with:
@@ -26,6 +27,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -B -m scripts.diagnostics.core2852_type_6911.runner --preflight
           command -v node; command -v npm
           remaining=$((120-$(date +%s)+$(cat "$RUNNER_TEMP/core2852-setup-start")))
           test "$remaining" -gt 0

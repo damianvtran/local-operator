@@ -47,6 +47,37 @@ def validate_report(report,rc,root,kind):
     return dict(kind=kind,rc=rc,error_count=wanted,warnings=summary['warningCount'],files_analyzed=2,errors=safe,qualified=True)
 
 
+def verify_sources(m):
+    for p,sha in m['execution_sources'].items():
+        path=ROOT/p
+        if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=sha:raise ValueError('execution source STOP')
+    for label,ref in (('BASELINE',m['baseline']),('FIXED',m['fixed'])):
+        subprocess.check_output(['git','cat-file','-e',ref+'^{commit}'],cwd=ROOT,timeout=10)
+        for p,sha in m['snapshots'][label].items():
+            data=subprocess.check_output(['git','show',ref+':'+p],cwd=ROOT,timeout=10)
+            if hashlib.sha256(data).hexdigest()!=sha:raise ValueError('snapshot STOP')
+    data=subprocess.check_output(['git','show',m['fixed']+':pyproject.toml'],cwd=ROOT,timeout=10)
+    if hashlib.sha256(data).hexdigest()!=m['config_sha256']:raise ValueError('config source STOP')
+    return data
+
+
+def available_case(kind,bindings,rc=None,report=None,root=None):
+    out=dict(kind=kind,stage='EXECUTION',failure_reason=None,qualified=False,rc=rc if type(rc) is int else None,source_sha256=dict(bindings),summary=None,errors=None)
+    if type(report) is dict:
+        summary=report.get('summary')
+        if type(summary) is dict:
+            out['summary']={k:v if type(v:=summary.get(k)) is int and 0<=v<=100000 else None for k in ('filesAnalyzed','errorCount','warningCount','informationCount')}
+        rows=report.get('generalDiagnostics')
+        if type(rows) is list and len(rows)<=20:
+            out['errors']=[]
+            for row in rows:
+                if type(row) is not dict or row.get('severity')!='error':continue
+                file=row.get('file');rule=row.get('rule');line=row.get('range',{}).get('start',{}).get('line') if type(row.get('range')) is dict and type(row['range'].get('start')) is dict else None
+                if type(file) is str and root is not None and Path(file) in tuple(root/p for p in FILES) and rule=='reportMissingTypeArgument':
+                    out['errors'].append(dict(file=str(Path(file).relative_to(root)),rule=rule,line=line+1 if type(line) is int and 0<=line<=100000 else None))
+    return out
+
+
 def capped_file():resource.setrlimit(resource.RLIMIT_FSIZE,(CAP,CAP))
 
 
@@ -55,11 +86,7 @@ def main():
     work=Path(tempfile.mkdtemp(prefix='core2852-type-',dir=os.environ['RUNNER_TEMP']))
     try:
         m=json.loads((HERE/'manifest.json').read_bytes())
-        for p,sha in m['execution_sources'].items():
-            path=ROOT/p
-            if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=sha:raise ValueError('execution source STOP')
-        config_source=subprocess.check_output(['git','show',m['fixed']+':pyproject.toml'],cwd=ROOT,timeout=10)
-        if hashlib.sha256(config_source).hexdigest()!=m['config_sha256']:raise ValueError('config source STOP')
+        config_source=verify_sources(m)
         settings=tomllib.loads(config_source.decode())['tool']['pyright']
         if settings.get('reportMissingTypeArgument') is not True:raise ValueError('strictness STOP')
         node=shutil.which('node');tool=Path(os.environ['TYPE_PREFLIGHT_TOOL'])
@@ -75,7 +102,7 @@ def main():
         if version!='pyright 1.1.414' or '--outputjson' not in help_text or '--project' not in help_text:raise ValueError('CLI STOP')
         configs=[]
         for kind,ref in (('BASELINE',m['baseline']),('FIXED',m['fixed'])):
-            receipt['status']=kind;root=work/kind;root.mkdir()
+            receipt['status']=kind;root=work/kind;root.mkdir();case=available_case(kind,m['snapshots'][kind]);receipt['cases'].append(case)
             for p in FILES+INITS:
                 data=subprocess.check_output(['git','show',ref+':'+p],cwd=ROOT,timeout=10)
                 if hashlib.sha256(data).hexdigest()!=m['snapshots'][kind][p]:raise ValueError('snapshot STOP')
@@ -91,14 +118,23 @@ def main():
             with target.open('wb') as stdout,errors.open('wb') as stderr:
                 command=[sys.executable,'-B',str(ROOT/'scripts/run_bounded.py'),'--timeout','60','--grace','5','--memory-mb','512','--',node,'--max-old-space-size=256',str(tool/'index.js'),'--outputjson','--project',str(config),*FILES]
                 proc=subprocess.run(command,cwd=root,stdout=stdout,stderr=stderr,preexec_fn=capped_file)
+            case['rc']=proc.returncode if type(proc.returncode) is int else None;case['stage']='OUTPUT_CAP'
             if target.stat().st_size>CAP or errors.stat().st_size>CAP:raise ValueError('cap STOP')
-            row=validate_report(json.loads(target.read_bytes()),proc.returncode,root,kind);row['source_sha256']=m['snapshots'][kind];receipt['cases'].append(row)
+            case['stage']='JSON_PARSE';parsed=json.loads(target.read_bytes())
+            case.update(available_case(kind,m['snapshots'][kind],proc.returncode,parsed,root));case['stage']='VALIDATE_REPORT'
+            row=validate_report(parsed,proc.returncode,root,kind);case.update(row,stage='COMPLETE')
         if configs[0]!=configs[1]:raise ValueError('config mismatch STOP')
         receipt['qualified']=True;receipt['status']='COMPLETE'
-    except Exception:pass
+    except Exception:
+        if receipt['cases']:
+            case=receipt['cases'][-1]
+            if case['qualified'] is not True:case['failure_reason']=case['stage'] if case['stage'] in ('EXECUTION','OUTPUT_CAP','JSON_PARSE','VALIDATE_REPORT') else 'UNKNOWN'
+        receipt['failure_reason']='CASE_FAILED' if receipt['cases'] else 'SETUP_FAILED'
     finally:
         shutil.rmtree(work);receipt['root_removed']=True;(out/'typing.json').write_text(json.dumps(receipt,allow_nan=False)+'\n')
     raise SystemExit(0 if receipt['qualified'] else 1)
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    if sys.argv[1:]==['--preflight']:verify_sources(json.loads((HERE/'manifest.json').read_bytes()))
+    else:main()
