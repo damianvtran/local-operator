@@ -140,6 +140,27 @@ class PublicationError(UpdateError):
     """
 
 
+class PublicationFetchError(UpdateError):
+    """PyPI could not be READ at the publication gate at all.
+
+    The sibling of :class:`PublicationError`, and a different fact: ``None``
+    from a fetch means "no answer" as well as "no version", and only the read
+    object can tell them apart (:func:`_fetch_pypi_read`). A transport fault is
+    ``kind: network`` and is refused immediately — waiting 10 s for a cached
+    version that a dead route will never return is not a retry, it is a delay.
+    """
+
+
+class LayoutRefusal(UpdateError):
+    """This platform/install cannot finish the generation layout; nothing ran.
+
+    Structural for the same reason as the two above: the report's ``kind`` is
+    ``refused`` (the updater declined), never ``network``/``unknown`` — and the
+    gate is raised before any install step, so the step must say
+    ``environment``.
+    """
+
+
 #: The stages the frozen failure report may name, in the order a healthy run
 #: reaches them. ``lock`` is a stage only in the sense that no stage ran — a
 #: writer held the root — and ``report`` covers a failure while assembling the
@@ -173,12 +194,18 @@ _UPDATE_FAILURE_KINDS = (
 #: refuses, and how long it waits between reads.
 #:
 #: THE MEASURED FAILURE (2026-10-24): 0.89.0's wheels landed on PyPI at
-#: 20:38:40-20:38:45Z, a `lop update` at 20:42:08Z built the 0.89.0 candidate
+#: 20:38:40-20:38:45Z. A `lop update` at 20:42:08Z built the 0.89.0 candidate
 #: correctly and then refused because the project-JSON endpoint (CDN-cached,
-#: unlike the files) still named 0.88.4. A manual retry 74 s later succeeded.
-#: Three reads ~5 s apart (two waits, 10 s total, inside the 15 s bound) ride
-#: out the observed ~4-5 minute tail on most occasions and cost a healthy run
-#: nothing: the first read agrees and no sleep happens.
+#: unlike the files) still named 0.88.4; a second attempt at 20:42:26Z refused
+#: identically, and the attempt that worked ran at 20:43:22Z. So the stale
+#: answer persisted for at least 74 s after the first refusal (and at most
+#: ~4 m 42 s after upload).
+#:
+#: WHAT THIS BOUND DOES AND DOES NOT DO: three reads ~5 s apart cover 10 s of
+#: that 74 s window, so they NARROW it — a press near the end recovers without
+#: a second command — and do not close it. A healthy run pays nothing (the
+#: first read agrees, no sleep happens), and an exhausted bound still refuses
+#: in the same sentence.
 _PUBLICATION_CONFIRM_ATTEMPTS = 3
 _PUBLICATION_CONFIRM_DELAY_S = 5.0
 
@@ -271,6 +298,10 @@ def _classify_failure(step: str, exc: BaseException | None) -> str:
             return "lock"
         if isinstance(candidate, PublicationError):
             return "publication"
+        if isinstance(candidate, PublicationFetchError):
+            return "network"
+        if isinstance(candidate, LayoutRefusal):
+            return "refused"
     for candidate in chain:
         if isinstance(candidate, PermissionError):
             return "ownership"
@@ -2604,7 +2635,17 @@ def _fresh_publication(target: str, mode: str) -> PublicationEvidence | None:
     if mode == "latest":
         latest: str | None = None
         for attempt in range(1, _PUBLICATION_CONFIRM_ATTEMPTS + 1):
-            latest = _fetch_pypi_version()
+            # READ, not ``_fetch_pypi_version``: the read object separates "the
+            # index did not answer" (a network fault, refuse now) from "the
+            # index answered with another version" (the cache window, retry).
+            # Collapsing both to ``None`` is what made a dead route look like a
+            # publication race in the first report.
+            read = _fetch_pypi_read()
+            if read.version is None and not read.answered:
+                raise PublicationFetchError(
+                    f"could not reach PyPI to confirm {target} is published; retry lop update"
+                )
+            latest = read.version
             if latest == target:
                 break
             if attempt < _PUBLICATION_CONFIRM_ATTEMPTS:
@@ -3762,11 +3803,15 @@ def install_into_generation(
     one of them would name the renamed-away directory and dangle. Reserved-and-
     built-in-place keeps uv's own artefacts pointing at paths that survive.
     """
+    # BEFORE the gate: a refusal here is an ENVIRONMENT fact, and the caller's
+    # step must not still name whatever it was doing (``download``, on the
+    # snapshot path).
+    _reach("environment")
     if not generation_layout_supported():
         # REFUSED BEFORE the reservation, the installer and the flip: the reason
         # this gate exists is that the same refusal discovered later costs a
         # whole built venv, and leaves nothing behind to show for it.
-        raise UpdateError(generation_layout_refusal())
+        raise LayoutRefusal(generation_layout_refusal())
     token = commit[:12] or version or "pypi"
     mode = "source" if source is not None else target_mode
     # The publication gate is its own stage, marked by the caller as well as by
@@ -3940,7 +3985,7 @@ def clone_into_generation(
         # Same gate as the other builder, and it has to be here too: the
         # migration copies a tree and flips the pointer, so a platform that
         # cannot link would build a 136 MB copy and then fail on the pointer.
-        raise UpdateError(generation_layout_refusal())
+        raise LayoutRefusal(generation_layout_refusal())
     origin = Path(source) if source is not None else Path(sys.prefix)
     if not origin.is_dir():
         raise UpdateError(f"nothing to clone: {origin} is not a directory")
@@ -7261,6 +7306,7 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
                 "installed daemons were not refreshed; run lop browser restart, "
                 "lop mobile restart and lop tunnel restart to pick it up",
             ),
+            statuses=_completed_statuses(name, ()),
         )
     argv, executable = invocation
     timeout = _bounded_timeout(_DAEMON_REFRESH_TIMEOUT_S, deadline)
@@ -7282,18 +7328,20 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
         return DaemonRefresh(
             name,
             warnings=(_bound_fired_sentence(exc.stdout, exc.stderr, bound=timeout),),
-            statuses=_child_daemon_statuses(exc.stdout, exc.stderr),
+            statuses=_completed_statuses(name, _child_daemon_statuses(exc.stdout, exc.stderr)),
         )
     except Exception as exc:  # noqa: BLE001 — a failed repair must not fail the update
         warning = f"warning: could not refresh installed daemons: {exc}"
-        return DaemonRefresh(name, warnings=(warning,))
+        return DaemonRefresh(name, warnings=(warning,), statuses=_completed_statuses(name, ()))
     lines = _result_lines(completed.stdout)
     statuses = _child_daemon_statuses(completed.stdout, completed.stderr)
     if completed.returncode != 0:
         tail = "\n".join(_result_lines(completed.stderr or completed.stdout))
         detail = tail.splitlines()[-1][:200] if tail else f"exit {completed.returncode}"
         warning = f"warning: could not refresh installed daemons: {detail}"
-        return DaemonRefresh(name, warnings=(warning,), statuses=statuses)
+        return DaemonRefresh(
+            name, warnings=(warning,), statuses=_completed_statuses(name, statuses)
+        )
     warnings = _result_lines(completed.stderr)
     return DaemonRefresh(name, lines=lines, warnings=warnings, statuses=statuses)
 
@@ -7473,6 +7521,10 @@ def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
             results[key] = DaemonRefresh(
                 label,
                 warnings=(f"warning: the {label} refresh failed unexpectedly: {exc}",),
+                # A STATUS-LESS ENTRY IS NOT AN ABSENT ONE (review round 1, B3):
+                # without this, the other unit's statuses were the whole report
+                # and a half-measured stage could read as complete.
+                statuses=(DaemonStatus(label, "failed"),),
             )
 
     def _services() -> None:
@@ -8002,6 +8054,17 @@ def _run_daemon_repair(*, services_only: bool) -> int:
     child reports a refusal as a printed warning and exit 0, which the caller cannot
     tell from "nothing needed repairing"). A repair that is not allowed to rewrite a
     plist must not restart the operator's daemon as a consolation.
+
+    NO REPORTS ON THIS FLAG'S STDOUT, DELIBERATELY. This command is spawned by
+    :func:`refresh_daemons_after_upgrade` with its stdout as a LINE PROTOCOL —
+    ``refreshing:`` announcements and ``daemon_report:`` results — which the
+    parent parses and re-emits as the update's summary; the parent also copies
+    the child's last line into its one-line failure sentence. A machine report
+    here would be a third protocol on that channel and could be spliced into a
+    human sentence. The failure is not silent: every exit code is turned into a
+    ``daemons[].status`` row by the parent, and an update that then continues
+    reports it (``central_services_complete`` false, reason named). The report
+    belongs to the update run, and that is where it is emitted.
     """
     code = daemons_refresh_command()
     if services_only or _repair_refusal() is not None:
@@ -8042,6 +8105,13 @@ def mobile_refresh_command() -> int:
     ``not-addressable`` outcome) and the bounce succeeded — or was skipped because
     the daemon was already on the current generation; 1 when either half did — the
     last stderr line is what the parent's failure sentence carries.
+
+    NO REPORT LINE, for the same protocol reason as :func:`_run_daemon_repair`:
+    this command IS a child of :func:`refresh_mobile_after_upgrade`, whose
+    stdout carries ``daemon_report:`` lines and whose last stderr line becomes
+    the parent's failure sentence. The parent turns this exit into
+    ``daemons[].status = "failed"``, which is the machine-readable trace the
+    update's own report carries.
     """
     refusal = _repair_refusal()
     if refusal is not None:
@@ -8219,6 +8289,20 @@ def _serve_moves(before: dict[int, Any], after: dict[int, Any]) -> tuple[ServeMo
     return tuple(moves)
 
 
+def _completed_statuses(name: str, statuses: tuple[DaemonStatus, ...]) -> tuple[DaemonStatus, ...]:
+    """A refresh unit that did not complete reports ITSELF as failed.
+
+    A unit that could not run (its interpreter vanished, the spawn raised, the
+    bound killed it before it named a daemon) has no per-daemon rows to report.
+    That must not read as "nothing to report": the update report's ``daemons``
+    is the census, and an empty census is exactly what made
+    ``central_services_complete`` able to be right about a partial stage
+    (review round 1, B3). ``failed`` is the vocabulary's own word for a repair
+    that was attempted and did not complete.
+    """
+    return statuses or (DaemonStatus(name, "failed"),)
+
+
 def _collect_daemon_statuses(refreshes: Sequence[Any]) -> tuple[DaemonStatus, ...]:
     """Every machine-readable status the given refresh entries carry, in order.
 
@@ -8386,6 +8470,10 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
             measured = False
     serving: list[dict[str, Any]] = []
     serving_measured = True
+    # DISTINCT FROM ``serving_measured``: whether the census could be READ at
+    # all. An empty-but-readable listing is not an unreadable one, and the
+    # reason string must not call it that (review round 1, B3).
+    serving_readable = True
     try:
         from local_operator.server import registry as serve_registry
         from local_operator.session.runtime.types import SERVE_RUN_DIRNAME
@@ -8399,6 +8487,7 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
                 root / SERVE_RUN_DIRNAME, before, after, len(rows)
             )
             serving_measured = serving_measured and not unreadable
+            serving_readable = serving_readable and not unreadable
             serving_rows.extend((record, state) for record, state in rows if state != "stale")
         if not serving_rows:
             # Empty discovery does not prove no pre-protocol API is serving.
@@ -8423,6 +8512,7 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
             )
     except Exception:  # noqa: BLE001 — failed inventory is explicit
         serving_measured = False
+        serving_readable = False
     supervised = [{"name": item.name, "state": item.status, "reason": ""} for item in stage.daemons]
     # Completeness is a CONJUNCTION of measurements, never an assumption:
     # a census that could not be read cannot prove anything, and an empty
@@ -8432,13 +8522,27 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
     if not stage.daemons:
         incomplete.append("no supervised daemons reported")
     for item in stage.daemons:
-        if item.status not in ("refreshed", "already"):
+        if item.status in ("refreshed", "already"):
+            continue
+        # THE WORD IS NOT A SYNONYM FOR failed (review round 1, B3):
+        # unsupervised means no LaunchAgent owns the daemon, pending means the
+        # stage did not finish it, and an entry with no usable status is the
+        # census saying it could not answer.
+        if item.status == "failed":
             incomplete.append(f"daemon {item.name} failed")
+        elif item.status == "unsupervised":
+            incomplete.append(f"daemon {item.name} is unsupervised")
+        elif item.status == "pending":
+            incomplete.append(f"daemon {item.name} is pending")
+        else:
+            incomplete.append(f"daemon {item.name} reported no usable status ({item.status!r})")
     pending_serve = [row for row in serving if row["state"] != "current"]
     if pending_serve:
         incomplete.append(f"{len(pending_serve)} serving row(s) pending")
     if not serving_measured:
-        incomplete.append("serving census unreadable")
+        incomplete.append(
+            "serving census unreadable" if not serving_readable else "no serving rows discovered"
+        )
     if not measured:
         incomplete.append("runtime census unreadable")
     return {
@@ -8723,8 +8827,16 @@ def _snapshot_command(
             try:
                 install_into_generation(None, version=route.version, note=note)
             except UpdateError as exc:
-                print(str(exc), file=sys.stderr)
-                return 1
+                # The sibling of the source-tree branch below: this route used
+                # to print and return, which was the one failing update exit
+                # with no report at all (review round 1, B1).
+                step = _progress().step
+                return _fail(
+                    step,
+                    _classify_failure(step, exc),
+                    str(exc),
+                    target=route.version,
+                )
             installed_version = route.version
         else:
             # The mobile bundle, built INTO the snapshot before uv copies it: a
@@ -8887,9 +8999,22 @@ def _update_command_body(
     ``--refresh-mobile`` (:func:`mobile_refresh_command`), which owns that daemon's
     plist repair and its bounce as one actor.
 
-    A successful exit prints ONE machine-readable line last (:func:`_emit_update_report`),
-    the ``update_report`` the desktop app parses; the human sentences above it
-    are unchanged and it is additive to them.
+    A successful UPDATE exit prints ONE machine-readable line last
+    (:func:`_emit_update_report`), and every failing update exit prints one too
+    (:func:`_emit_update_failure`); the human sentences above it are unchanged
+    and both are additive to them.
+
+    THE TWO HIDDEN REFRESH FLAGS ARE NOT UPDATE RUNS, and they are the one
+    exception: ``--refresh-daemons`` / ``--refresh-mobile`` are children whose
+    stdout is the parent's marker protocol (``refreshing:`` / ``daemon_report:``
+    lines, see :data:`_PROGRESS_PREFIX`). A JSON line there would be a third
+    protocol on the same channel, and the parent copies the child's LAST line
+    into its one-line failure sentence — so it would either corrupt the parse
+    or the sentence. Their failure is carried by the parent's own report
+    instead: the refresh entry that did not complete appears as
+    ``daemons[].status = "failed"`` and, for the update's run,
+    ``central_services_complete`` is false with a reason naming it. See
+    :func:`_run_daemon_repair`.
 
     ``--from-snapshot`` is checked before the PyPI call for the same reason: it
     installs a build that is already on this machine, so a host with no route to

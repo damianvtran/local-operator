@@ -1421,10 +1421,15 @@ def test_rolling_receipt_reports_central_completion_from_measured_rows(
     assert [row["state"] for row in rolling["services"] if "pid" in row] == ["current"]
 
 
-def test_rolling_receipt_names_an_unreadable_serving_census(
+def test_rolling_receipt_names_an_empty_serving_census_as_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A census that could not be read can never prove completion."""
+    """A listing that READ cleanly and found nothing is not "unreadable".
+
+    ``serving_measured`` stays False — empty discovery never proves no
+    pre-protocol API is serving — but the reason must say what was observed
+    (review round 1, B3).
+    """
     from local_operator import update
 
     stage = update.StageReport(daemons=(update.DaemonStatus("mobile", "refreshed"),))
@@ -1434,7 +1439,74 @@ def test_rolling_receipt_names_an_unreadable_serving_census(
     rolling = update._rolling_receipt(None, stage)
 
     assert rolling["central_services_complete"] is False
-    assert rolling["central_services_incomplete_reason"] == "serving census unreadable"
+    assert rolling["central_services_incomplete_reason"] == "no serving rows discovered"
+
+
+def test_rolling_receipt_names_an_unreadable_serving_census(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A census whose scan raised can never prove completion."""
+    from local_operator import update
+    from local_operator.server import registry as serve_registry
+
+    stage = update.StageReport(daemons=(update.DaemonStatus("mobile", "refreshed"),))
+    monkeypatch.setattr(update, "_config_roots", lambda: [tmp_path / "run"])
+    monkeypatch.setattr(update, "current_generation", lambda: None)
+    monkeypatch.setattr(
+        serve_registry,
+        "scan",
+        lambda root, reap=False: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+
+    rolling = update._rolling_receipt(None, stage)
+
+    assert rolling["central_services_complete"] is False
+    assert "serving census unreadable" in rolling["central_services_incomplete_reason"]
+
+
+def test_rolling_receipt_does_not_call_unsupervised_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``unsupervised`` is its own word; the reason must use it (B3)."""
+    from local_operator import update
+
+    stage = update.StageReport(
+        daemons=(
+            update.DaemonStatus("mobile", "unsupervised"),
+            update.DaemonStatus("tunnel", "refreshed"),
+        )
+    )
+    monkeypatch.setattr(update, "_config_roots", lambda: [])
+    monkeypatch.setattr(update, "current_generation", lambda: None)
+
+    rolling = update._rolling_receipt(None, stage)
+
+    assert rolling["central_services_complete"] is False
+    assert "daemon mobile is unsupervised" in rolling["central_services_incomplete_reason"]
+    assert "failed" not in rolling["central_services_incomplete_reason"]
+
+
+def test_rolling_receipt_rejects_a_status_less_daemon_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry with no usable status is an unanswerable census, not a pass."""
+    from local_operator import update
+
+    stage = update.StageReport(
+        daemons=(
+            update.DaemonStatus("mobile", "refreshed"),
+            update.DaemonStatus("service daemons", ""),  # type: ignore[arg-type]
+        )
+    )
+    monkeypatch.setattr(update, "_config_roots", lambda: [])
+    monkeypatch.setattr(update, "current_generation", lambda: None)
+
+    rolling = update._rolling_receipt(None, stage)
+
+    assert rolling["central_services_complete"] is False
+    assert "service daemons reported no usable status" in (
+        rolling["central_services_incomplete_reason"]
+    )
 
 
 def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
@@ -3033,13 +3105,19 @@ def test_the_publication_guard_rereads_before_it_refuses(
     and that each gap was the bounded 5 s, which is the total-bound evidence
     without a 10 s wall clock in the suite.
     """
-    reads = iter(["0.88.4", "0.88.4", "0.89.0"])
+    reads = iter(
+        [
+            update_mod._PypiRead(version="0.88.4", answered=True, named_version="0.88.4"),
+            update_mod._PypiRead(version="0.88.4", answered=True, named_version="0.88.4"),
+            update_mod._PypiRead(version="0.89.0", answered=True, named_version="0.89.0"),
+        ]
+    )
     sleeps: list[float] = []
 
     class _ReachedDocument(Exception):
         pass
 
-    monkeypatch.setattr(update_mod, "_fetch_pypi_version", lambda: next(reads))
+    monkeypatch.setattr(update_mod, "_fetch_pypi_read", lambda **kwargs: next(reads))
     monkeypatch.setattr(update_mod, "_sleep", sleeps.append)
     monkeypatch.setattr(
         update_mod,
@@ -3060,7 +3138,13 @@ def test_the_publication_guard_refuses_after_its_bound(monkeypatch: pytest.Monke
     disagreement into a promotion.
     """
     sleeps: list[float] = []
-    monkeypatch.setattr(update_mod, "_fetch_pypi_version", lambda: "0.88.4")
+    monkeypatch.setattr(
+        update_mod,
+        "_fetch_pypi_read",
+        lambda **kwargs: update_mod._PypiRead(
+            version="0.88.4", answered=True, named_version="0.88.4"
+        ),
+    )
     monkeypatch.setattr(update_mod, "_sleep", sleeps.append)
 
     with pytest.raises(update_mod.PublicationError) as caught:
@@ -3142,6 +3226,125 @@ def test_a_failed_services_tail_fails_the_run_and_names_serve(
     assert report["failure"]["step"] == "services"
     assert report["failure"]["kind"] == "serve"
     assert report["failure"]["error"] == "the serve daemon did not move"
+
+
+def test_a_failed_wheel_route_reports_step_publish_and_kind_publication(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """B1: the wheel route used to print and return — the one exit with no report.
+
+    The failure comes from inside the REAL ``install_into_generation`` (its
+    publication gate), so the step is the one the pipeline marks, not one the
+    test supplied.
+    """
+    from local_operator import update
+
+    sentence = "cannot freshly confirm published 0.89.0: version disagrees; retry lop update"
+    source = update.SnapshotSource(path=tmp_path, commit="c" * 12, ref="v0.89.0", version="0.89.0")
+    monkeypatch.setattr(update, "install_kind", lambda **kwargs: update.InstallKind.UV_TOOL)
+    monkeypatch.setattr(update, "resolve_snapshot", lambda value: source)
+    monkeypatch.setattr(
+        update,
+        "classify_snapshot_downgrade",
+        # An empty classification means "not a downgrade": ``is_downgrade`` is
+        # the classifier's answer, not a comparison of the two fields.
+        lambda snapshot, allow_downgrade=False: update.SnapshotDowngrade(),
+    )
+    monkeypatch.setattr(
+        update,
+        "classify_snapshot_install",
+        lambda snapshot: update.SnapshotRoute(
+            install_from_wheel=True, version="0.89.0", artifact="local_operator-0.89.0.whl"
+        ),
+    )
+    monkeypatch.setattr(update, "disk_build", lambda: None)
+    monkeypatch.setattr(update, "generation_layout_supported", lambda: True)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise update.PublicationError(sentence)
+
+    monkeypatch.setattr(update, "_fresh_publication", refuse)
+
+    assert update_command(from_snapshot="v0.89.0", services=False) == 1
+
+    report = _reported_failure(capsys.readouterr())
+    assert report["failure"]["step"] == "publish"
+    assert report["failure"]["kind"] == "publication"
+    assert report["failure"]["error"] == sentence
+    assert report["failure"]["exit_code"] == 1
+    assert report["target"] == "0.89.0"
+
+
+def test_a_dead_index_at_the_publish_gate_is_network_not_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2: no answer is a transport fault; a different answer is the cache race.
+
+    A dead route must be refused immediately — the bounded re-read exists for a
+    STALE answer, not for an absent one — and classified ``network``.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        update_mod,
+        "_fetch_pypi_read",
+        lambda **kwargs: update_mod._PypiRead(version=None),
+    )
+    monkeypatch.setattr(update_mod, "_sleep", sleeps.append)
+
+    with pytest.raises(update_mod.PublicationFetchError) as caught:
+        update_mod._fresh_publication("0.89.0", "latest")
+
+    assert (
+        str(caught.value) == "could not reach PyPI to confirm 0.89.0 is published; retry lop update"
+    )
+    assert sleeps == [], "a transport fault must not burn the publication retry"
+    assert update_mod._classify_failure("publish", caught.value) == "network"
+
+
+def test_a_layout_refusal_is_an_environment_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B6: the gate raises before any install work, so the step says environment.
+
+    On the snapshot path the step was still ``download`` when the layout gate
+    refused, and the cause read as ``network``.
+    """
+    from local_operator import update
+
+    update._begin_update()
+    monkeypatch.setattr(update, "generation_layout_supported", lambda: False)
+
+    with pytest.raises(update.LayoutRefusal) as caught:
+        update.install_into_generation(None, version="0.89.0")
+
+    assert update._progress().step == "environment"
+    assert update._classify_failure("environment", caught.value) == "refused"
+
+
+def test_a_unit_that_raises_is_a_failed_census_not_an_absent_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B3: the other unit's statuses must not stand in for the one that died."""
+    from local_operator import update
+
+    monkeypatch.setattr(
+        update,
+        "refresh_service_daemons_after_upgrade",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(
+        update,
+        "refresh_mobile_after_upgrade",
+        lambda **kwargs: update.MobileRefresh(kind="already"),
+    )
+
+    refreshes = update.refresh_daemons_after_upgrade()
+    statuses = update._collect_daemon_statuses(refreshes)
+
+    assert update.DaemonStatus("service daemons", "failed") in statuses
+    assert update.DaemonStatus("mobile", "already") in statuses
 
 
 def test_the_snapshot_path_emits_the_report_line(capsys: pytest.CaptureFixture[str]) -> None:
