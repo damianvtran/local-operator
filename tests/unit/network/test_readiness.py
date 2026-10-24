@@ -571,6 +571,88 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
 
 
+def test_mcp_owner_expiry_names_the_owner_in_the_row_and_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The peer's last broker refusal is evidence about the OWNER, not itself.
+
+    Drive the normal fact collector against real placement/evidence documents,
+    then compose the row exactly as ``ready`` does. No token material is needed
+    for this attribution check.
+    """
+    from local_operator.network import store
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+    from tests.unit.mcp.test_credential_status import NETWORK
+    from tests.unit.mcp.test_credential_status import PEER as OWNER
+    from tests.unit.mcp.test_credential_status import SELF, URL, _place, _record
+
+    root = tmp_path / "cfg"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    store.save(_record(), root)
+    _place(root)
+    mcp_state.record(
+        NETWORK,
+        credential_key_for_mcp(URL),
+        state="expired",
+        code="interactive_required",
+        owner_device=OWNER,
+        owner_name="macbook",
+        root=root,
+    )
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+
+    fact = readiness.mcp_servers_fact(root)
+    evidence = fact["servers"][0]["auth_evidence"]
+    assert evidence["code"] == "interactive_required"
+    viewer = _FakeViewer(
+        device_id=OWNER,
+        placement={
+            "owner_device": OWNER,
+            "owner_device_name": "macbook",
+            "holders": [{"device": SELF, "scope": "session"}],
+        },
+    )
+    rows = readiness.mcp_credential_rows(
+        SimpleNamespace(device_id=SELF, name="holder"),
+        _facts(mcp=fact),
+        viewer=viewer,
+        peer_label="holder",
+    )
+
+    assert rows[0]["ok"] is False
+    assert rows[0]["code"] == readiness.CODE_OBSERVED_FAILURE
+    assert "macbook: sign in again" in rows[0]["detail"]
+    assert "holder's stored login" not in rows[0]["detail"]
+    assert rows[0]["remedies"] == ["sign in again on macbook"]
+
+
+def test_mcp_local_expiry_names_the_peer_in_the_row_and_remedy() -> None:
+    """With no owner-expiry evidence, a local dead row remains a local repair."""
+    server = {
+        "name": "local",
+        "url": "https://local.example.test/mcp",
+        "transport": "http",
+        "has_row": True,
+        "has_placement": False,
+        "auth_diagnostics": {"sharing_mode": "unavailable", "access_state": "expired"},
+    }
+    rows = readiness.mcp_credential_rows(
+        _member(),
+        _facts(mcp={"servers": [server]}),
+        viewer=_FakeViewer(),
+        peer_label="cloud-node-1",
+    )
+
+    assert rows[0]["code"] == "local_grant_unavailable"
+    assert "cloud-node-1's stored login" in rows[0]["detail"]
+    assert rows[0]["remedies"] == ["sign in again on cloud-node-1"]
+
+
 def test_stdio_reference_rows_answer_from_the_peers_ref_states() -> None:
     """A stdio server is no longer skipped: its spawn environment is checked.
 

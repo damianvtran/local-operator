@@ -595,6 +595,10 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — an unreadable file already reads as no servers
         literal_keys = []
     presence: dict[str, bool | None] = {}
+    # One evidence read per network, not per server. These are the same durable,
+    # value-free broker outcomes ``server_states`` already renders: readiness must
+    # not replace an observed owner refusal with a guess from a local row.
+    evidence_by_network: dict[str, dict[str, dict[str, Any]]] = {}
     store = None
     store_unreadable = False
     try:
@@ -623,6 +627,7 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
             has_row: bool | None = None
             has_placement = False
             diagnostics: dict[str, Any] | None = None
+            auth_evidence: dict[str, Any] | None = None
             if transport in ("http", "sse") and url:
                 from local_operator.mcp.auth import mcp_grant_diagnostics
 
@@ -636,11 +641,18 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                 # on an explicit act (``lop network credentials``), never on the
                 # provider path, so a peer that has not pulled cannot borrow and
                 # must not be reported as ready to.
+                from local_operator.network.credentials import mcp_state
                 from local_operator.network.credentials.placement import (
                     placement_entries_for,
                 )
 
-                has_placement = placement_entries_for(mcp_url=url, root=root) is not None
+                placed = placement_entries_for(mcp_url=url, root=root)
+                has_placement = placed is not None
+                if placed is not None:
+                    network_id, _entry = placed
+                    if network_id not in evidence_by_network:
+                        evidence_by_network[network_id] = mcp_state.load(network_id, root)
+                    auth_evidence = evidence_by_network[network_id].get(f"mcp:{url}")
             servers.append(
                 {
                     "name": _safe_text(name, limit=120),
@@ -656,6 +668,7 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                         dict(row) for row in literal_keys if str(row.get("server")) == str(name)
                     ],
                     **({"auth_diagnostics": diagnostics} if diagnostics is not None else {}),
+                    **({"auth_evidence": auth_evidence} if auth_evidence else {}),
                 }
             )
     finally:
@@ -2299,14 +2312,50 @@ def _mcp_credential_row(
 ) -> dict[str, Any]:
     has_row = server.get("has_row")
     diagnostics = server.get("auth_diagnostics")
-    if (
+    local_unavailable = (
         isinstance(diagnostics, Mapping)
         and has_row is True
         and diagnostics.get("sharing_mode") == "unavailable"
-    ):
+    )
+    placement = viewer.placement(mcp_url=url)
+    owner = str(placement.get("owner_device") or "")
+    peer_is_holder = member.device_id in _holder_names(placement)
+    evidence = server.get("auth_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    evidence_owner = str(evidence.get("owner_device") or "")
+    current_owner_evidence = (
+        bool(owner)
+        and peer_is_holder
+        and server.get("has_placement") is True
+        and evidence_owner == owner
+        and (local_unavailable or has_row is False)
+    )
+    if current_owner_evidence and evidence.get("state") == "expired":
+        # This is an OBSERVED owner refusal, not an inference from a copied row
+        # or an expiry stamp. The session warning already names this device; the
+        # readiness detail and its remedy must send the operator to that same one.
+        owner_label = _bounded(evidence.get("owner_name") or "", 120) or _owner_label(
+            placement, fallback=owner
+        )
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_OBSERVED_FAILURE,
+            detail=(
+                f"{owner_label}: sign in again — {peer_label} cannot borrow the login "
+                f"for {name} ({url}) until then"
+            ),
+            remedies=(f"sign in again on {owner_label}",),
+            source=SOURCE_PEER,
+            observed={"server": name, "url": url, "auth_evidence": dict(evidence)},
+        )
+    if local_unavailable:
         # A present but dead/expired-unrefreshable grant cannot satisfy the
-        # existing local-login branch. Do not silently fall through to a
-        # placement: the runtime also prioritizes this local grant.
+        # existing local-login branch. Without current owner-expiry evidence this
+        # is a LOCAL repair, and both sentences must name the same device.
+        assert isinstance(diagnostics, Mapping)  # narrowed by local_unavailable
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -2315,9 +2364,9 @@ def _mcp_credential_row(
             code="local_grant_unavailable",
             detail=(
                 f"{peer_label}'s stored login for {name} ({url}) is unavailable; "
-                "sign in again there"
+                f"sign in again on {peer_label}"
             ),
-            remedies=(mcp_login_remedy(url),),
+            remedies=(f"sign in again on {peer_label}",),
             source=SOURCE_PEER,
             observed={"server": name, "url": url, "auth_diagnostics": dict(diagnostics)},
         )
@@ -2331,9 +2380,6 @@ def _mcp_credential_row(
             source=SOURCE_PEER,
             observed={"server": name, "url": url},
         )
-    placement = viewer.placement(mcp_url=url)
-    owner = str(placement.get("owner_device") or "")
-    peer_is_holder = member.device_id in _holder_names(placement)
     if owner and peer_is_holder:
         # THE PULL GAP, per server: this device's own document says the peer is a
         # holder, but the peer's OWN answer says it has no placement entry for
