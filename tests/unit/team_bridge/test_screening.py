@@ -19,6 +19,7 @@ from local_operator.team_bridge.client import (
     SCREENING_VERSION_V1,
 )
 from local_operator.team_bridge.store import (
+    SCHEMA_VERSION,
     OwnerReceipt,
     Store,
     StoreRefused,
@@ -776,8 +777,12 @@ def test_v2_store_migrates_additively_preserving_owner_and_tuple(tmp_path) -> No
         is None
     )
     conn = sqlite3.connect(state_db_path(tmp_path))
+    # The stamp is CURRENT, never a literal: this test asserts that a v2 store
+    # migrates to head, and the head moved to v8 with the BODY reservation
+    # table. A hard-coded "7" would pin an older head and fail on every
+    # additive schema bump while proving nothing about the migration.
     assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone() == (
-        "7",
+        str(SCHEMA_VERSION),
     )
 
 

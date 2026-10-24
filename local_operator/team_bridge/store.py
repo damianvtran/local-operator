@@ -57,9 +57,10 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 7
-# V7 changes durable key contents, not the table layout. Older structural
-# upgrades still validate/build the v6 floor before the atomic key migration.
+SCHEMA_VERSION = 8
+# V7 changes durable key contents, not the table layout. V8 adds the
+# contentless BODY reservation table. Older structural upgrades still
+# validate/build the v6 floor before the atomic key migration.
 _LAYOUT_VERSION = 6
 
 #: Every table a stamped-V3 database must carry. A stamped store missing any
@@ -1013,6 +1014,99 @@ def _contentless_delivery_key(value: str) -> str:
     return ref.encode()
 
 
+#: The conversation BODY reservation table (seam design, Revision 5).
+#:
+#: WHY a separate table from ``deliveries``/``claims``: a conversation message
+#: has no ``thread_id`` (that column is NOT NULL there) and no pair delivery
+#: state machine, while a reservation must order by ``conversation_seq``. A
+#: row here is a CONTENTLESS promise — it names the message and its admission
+#: evidence and never stores the body or either display label, because the
+#: body must not become a durable cache (see the seam design, Revision 5).
+_BODY_RESERVATIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS body_reservations (
+    owner_key TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    endpoint_id TEXT NOT NULL,
+    credential_id INTEGER NOT NULL,
+    canonical_base_url TEXT NOT NULL,
+    enrollment_generation INTEGER NOT NULL,
+    conversation_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    conversation_seq INTEGER NOT NULL,
+    mention INTEGER NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    screening_fingerprint TEXT NOT NULL,
+    policy_epoch INTEGER NOT NULL,
+    consent_version TEXT,
+    designated_session TEXT NOT NULL,
+    state TEXT NOT NULL,
+    claim_token TEXT,
+    turn_token TEXT,
+    claim_expires_at REAL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    completed_entry_id TEXT,
+    terminal_code TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, conversation_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS body_reservations_eligible
+    ON body_reservations(state, designated_session);
+"""
+
+#: Every column a carrying store must have. A stamped store missing any is
+#: DAMAGED and refuses rather than being re-created empty.
+_BODY_RESERVATION_COLUMNS = frozenset(
+    {
+        "owner_key",
+        "account_id",
+        "tenant_id",
+        "endpoint_id",
+        "credential_id",
+        "canonical_base_url",
+        "enrollment_generation",
+        "conversation_id",
+        "message_id",
+        "conversation_seq",
+        "mention",
+        "body_sha256",
+        "screening_fingerprint",
+        "policy_epoch",
+        "consent_version",
+        "designated_session",
+        "state",
+        "claim_token",
+        "turn_token",
+        "claim_expires_at",
+        "attempts",
+        "last_error",
+        "completed_entry_id",
+        "terminal_code",
+        "created_at",
+        "updated_at",
+    }
+)
+
+#: Closed lifecycle vocabulary. ``completed`` and ``retired`` are terminal;
+#: every other transition is retryable by a later turn, so a refusal never
+#: silently consumes an admitted message.
+BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
+
+#: Terminal codes (design S-9). Kept distinct so a capacity stop is never
+#: confused with "nobody ran", and neither can be read as delivered.
+BODY_TERMINAL_CODES = (
+    "capacity_exhausted",
+    "expired_unconsumed",
+    "designation_moved",
+    "screening_rejected",
+    "consent_revoked",
+    "binding_mismatch",
+    "admission_drift_terminal",
+)
+
+
 class Store:
     """Transactional metadata access. Construct per operation, not long-lived."""
 
@@ -1102,6 +1196,7 @@ class Store:
             if version != str(_LAYOUT_VERSION):
                 raise StoreRefused("schema_unsupported", "unexpected ref migration source")
             self._migrate_conversation_ref_keys(conn)
+            self._ensure_body_reservations(conn)
             conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -1163,6 +1258,24 @@ class Store:
                         (canonical, row["migration_rowid"]),
                     )
 
+    @staticmethod
+    def _ensure_body_reservations(conn: sqlite3.Connection) -> None:
+        """Create the reservation table additively, or validate a carrying one.
+
+        ``IF NOT EXISTS`` keeps a store that already carries it untouched; an
+        existing table is VALIDATED rather than silently accepted, because a
+        half-built table is damage, not an upgrade. No row of any other table
+        is read or written here.
+        """
+
+        conn.executescript(_BODY_RESERVATIONS_SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if not _BODY_RESERVATION_COLUMNS <= columns:
+            raise StoreRefused(
+                "schema_damaged",
+                f"body_reservations lacks {sorted(_BODY_RESERVATION_COLUMNS - columns)}",
+            )
+
     def _init_layout(self, conn: sqlite3.Connection) -> None:
         """Validate BEFORE any DDL; refuse damage instead of repairing it.
 
@@ -1199,6 +1312,7 @@ class Store:
                 conn.executescript(_FLOORS_SCHEMA)
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
+            conn.executescript(_BODY_RESERVATIONS_SCHEMA)
             conn.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -1323,7 +1437,7 @@ class Store:
             )
             return
 
-        if version in (str(_LAYOUT_VERSION), str(SCHEMA_VERSION)):
+        if version in (str(_LAYOUT_VERSION), "7", str(SCHEMA_VERSION)):
             # Stamped V5: VERIFY, never re-create. Missing tables or missing
             # binding/policy columns mean damage — refuse, no DDL at all.
             missing = (_V3_TABLES | _V4_ADDED) - pre_existing
@@ -1361,6 +1475,26 @@ class Store:
                     "schema_damaged",
                     f"screened_request_deliveries lacks {missing}",
                 )
+            if version == "7":
+                # V7 is fully verified above; the ONLY remaining step is
+                # the additive reservation table (IF NOT EXISTS, so a
+                # carrying store is untouched) plus the stamp, so a v7
+                # store that crashed mid-upgrade simply retries.
+                self._ensure_body_reservations(conn)
+                conn.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                    (str(SCHEMA_VERSION),),
+                )
+                return
+            if "body_reservations" not in pre_existing:
+                raise StoreRefused(
+                    "schema_damaged",
+                    f"stamped-{version} store missing body_reservations",
+                )
+            body_columns = {r[1] for r in conn.execute("PRAGMA table_info(body_reservations)")}
+            if not _BODY_RESERVATION_COLUMNS <= body_columns:
+                missing = sorted(_BODY_RESERVATION_COLUMNS - body_columns)
+                raise StoreRefused("schema_damaged", f"body_reservations lacks {missing}")
             return
 
         raise StoreRefused(
@@ -1792,6 +1926,317 @@ class Store:
                 return None
             value = row["designated_session"]
             return value if isinstance(value, str) and value else None
+
+    # -- conversation BODY reservations --------------------------------------
+    #
+    # Every method here is CONTENTLESS by construction: the table has no body
+    # and no label column, so no call can persist third-party text even by
+    # mistake. The reservation is a promise that one designated session owes
+    # this message a body; the bytes are re-fetched and re-verified at the
+    # turn that consumes it (see the seam design, Revision 5).
+
+    @staticmethod
+    def _reservation(row: Any) -> dict[str, Any] | None:
+        return dict(row) if row is not None else None
+
+    def record_body_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        conversation_seq: int,
+        mention: bool,
+        body_sha256: str,
+        screening_fingerprint: str,
+        policy_epoch: int,
+        consent_version: str | None,
+        designated_session: str,
+        now: float,
+    ) -> bool:
+        """Record one admitted message. Idempotent by primary key.
+
+        Returns True only when THIS call created the row. The connector's own
+        retry path may emit the same reservation again after a crash; a second
+        insert must be a no-op rather than a duplicate promise.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "INSERT INTO body_reservations (owner_key, account_id, tenant_id, "
+                "endpoint_id, credential_id, canonical_base_url, enrollment_generation, "
+                "conversation_id, message_id, conversation_seq, mention, body_sha256, "
+                "screening_fingerprint, policy_epoch, consent_version, designated_session, "
+                "state, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?) "
+                "ON CONFLICT(owner_key, conversation_id, message_id) DO NOTHING",
+                (
+                    _owner_key(owner),
+                    owner.account_id,
+                    owner.tenant_id,
+                    owner.endpoint_id,
+                    owner.credential_id,
+                    owner.canonical_base_url,
+                    owner.enrollment_generation,
+                    conversation_id,
+                    message_id,
+                    int(conversation_seq),
+                    1 if mention else 0,
+                    body_sha256,
+                    screening_fingerprint,
+                    int(policy_epoch),
+                    consent_version,
+                    designated_session,
+                    float(now),
+                    float(now),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def body_reservation(
+        self, owner: OwnerSnapshot, conversation_id: str, message_id: str
+    ) -> dict[str, Any] | None:
+        """The reservation row for one message, or None (never creates)."""
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            return self._reservation(
+                conn.execute(
+                    "SELECT * FROM body_reservations WHERE owner_key = ? "
+                    "AND conversation_id = ? AND message_id = ?",
+                    (_owner_key(owner), conversation_id, message_id),
+                ).fetchone()
+            )
+
+    def claim_body_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        claim_token: str,
+        turn_token: str,
+        now: float,
+        ttl: float,
+    ) -> bool:
+        """CAS ``pending`` (or an EXPIRED claim) into this turn's claim.
+
+        One statement, so two consumers cannot both win: the reclaim arm is
+        inside the same WHERE, which is what makes an abandoned claim
+        recyclable without a separate sweep. False means someone else holds it
+        and this turn must inject nothing.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'claimed', claim_token = ?, "
+                "turn_token = ?, claim_expires_at = ?, attempts = attempts + 1, "
+                "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
+                "AND message_id = ? AND (state = 'pending' OR "
+                "(state = 'claimed' AND claim_expires_at IS NOT NULL "
+                "AND claim_expires_at < ?))",
+                (
+                    claim_token,
+                    turn_token,
+                    float(now) + float(ttl),
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                    float(now),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def renew_body_claim(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        claim_token: str,
+        turn_token: str,
+        now: float,
+        ttl: float,
+    ) -> bool:
+        """Extend THIS turn's claim. False means the claim was lost."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET claim_expires_at = ?, updated_at = ? "
+                "WHERE owner_key = ? AND conversation_id = ? AND message_id = ? "
+                "AND state = 'claimed' AND claim_token = ? AND turn_token = ?",
+                (
+                    float(now) + float(ttl),
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                    claim_token,
+                    turn_token,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def release_body_claim(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        claim_token: str,
+        reason: str,
+        now: float,
+    ) -> bool:
+        """Return a claim to ``pending`` with its reason recorded.
+
+        Used for refusals that are NOT terminal (an unverified admission read,
+        a capacity refusal). A lost token is a no-op: the row belongs to
+        whoever holds it now.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'pending', claim_token = NULL, "
+                "turn_token = NULL, claim_expires_at = NULL, last_error = ?, "
+                "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
+                "AND message_id = ? AND state = 'claimed' AND claim_token = ?",
+                (
+                    reason[:64],
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                    claim_token,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def complete_body_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        claim_token: str,
+        entry_id: str,
+        now: float,
+    ) -> bool:
+        """Record durable completion, guarded by the claim token.
+
+        Zero rows is NOT an error and NOT a completion: a turn that lost its
+        claim must not write ``completed`` over a row another turn is serving.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'completed', completed_entry_id = ?, "
+                "terminal_code = NULL, last_error = NULL, updated_at = ? "
+                "WHERE owner_key = ? AND conversation_id = ? AND message_id = ? "
+                "AND state = 'claimed' AND claim_token = ?",
+                (
+                    entry_id,
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                    claim_token,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def retire_body_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        terminal_code: str,
+        now: float,
+    ) -> bool:
+        """End a reservation with a recorded reason. Never silent."""
+
+        if terminal_code not in BODY_TERMINAL_CODES:
+            raise StoreRefused("invalid_terminal_code", terminal_code)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'retired', terminal_code = ?, "
+                "claim_token = NULL, turn_token = NULL, claim_expires_at = NULL, "
+                "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
+                "AND message_id = ? AND state != 'completed'",
+                (
+                    terminal_code,
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def per_call_admission_state(
+        self, owner: OwnerSnapshot, designated_session: str
+    ) -> dict[str, Any] | None:
+        """The four local facts one provider call must still satisfy.
+
+        WHY one method: the individual accessors open their own connection
+        each, so four calls per provider step would multiply the busy-handler
+        wait. This reads them over ONE read-only connection, never creates the
+        file (``_connect_readonly``), and never migrates.
+
+        ``None`` means "could not verify" — an absent store, a fenced owner,
+        no row. Callers treat it as drift and send the request without the
+        frame; it is never evidence of withdrawal (design S-24).
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT consent_version, designated_session FROM enrollments "
+                "WHERE owner_key = ? AND enrollment_generation = ?",
+                (_owner_key(owner), owner.enrollment_generation),
+            ).fetchone()
+            if row is None:
+                return None
+            live_designation = row["designated_session"]
+            if not isinstance(live_designation, str) or not live_designation:
+                return None
+            policy = conn.execute(
+                "SELECT epoch FROM screening_policy WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchone()
+            consent_version = row["consent_version"]
+            return {
+                "owner_live": True,
+                "designated_session": live_designation,
+                "designation_matches": live_designation == designated_session,
+                "policy_epoch": int(policy["epoch"]) if policy is not None else None,
+                "consent_version": (consent_version if isinstance(consent_version, str) else None),
+            }
 
     def screening_hold_readonly(
         self, owner: OwnerSnapshot, message_id: str
