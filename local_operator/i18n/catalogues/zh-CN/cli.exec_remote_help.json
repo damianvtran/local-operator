@@ -2,7 +2,7 @@
   "cli.exec_remote_help.budget_usd": "本次运行的花费上限，单位为美元（默认：服务器的准入默认值）",
   "cli.exec_remote_help.cancel": "取消一次远程运行并退出",
   "cli.exec_remote_help.detach": "打印运行ID和幂等键后退出，而不是监视该运行",
-  "cli.exec_remote_help.idempotency_key": "复用此幂等键而不生成新键，使已提交运行的重试不会运行两次",
+  "cli.exec_remote_help.idempotency_key": "要复用的幂等键（而非新生成的键），以免已提交的运行在重试时执行两次",
   "cli.exec_remote_help.max_hours": "远程运行在服务器停止它之前可执行的小时数（默认：2；最大值由服务器限制）",
   "cli.exec_remote_help.network": "提交运行所用的网络，按名称或ID指定。本设备位于多个网络时必须指定",
   "cli.exec_remote_help.remote": "在Radient远程计算上运行此任务（第1档：短时运行），而非在本机运行",
