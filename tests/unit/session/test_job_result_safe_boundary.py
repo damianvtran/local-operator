@@ -140,18 +140,26 @@ async def test_job_result_reaches_tool_boundary_before_parent_final(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failed_writes, expected_requests", [(1, 2), (2, 3)])
+@pytest.mark.parametrize(
+    "failed_writes, expected_requests, fallback_owns_result",
+    [
+        pytest.param(1, 2, False, id="first-safe-retry"),
+        pytest.param(2, 3, False, id="later-safe-retry"),
+        pytest.param(4, 3, True, id="finally-fallback-after-safe-retries"),
+    ],
+)
 async def test_result_commits_only_after_its_canonical_row_is_durable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failed_writes: int,
     expected_requests: int,
+    fallback_owns_result: bool,
 ) -> None:
     """Transient journal failures retry before ANY automatic context commit.
 
-    One failure is repaired at the safe boundary and keeps same-run delivery.
-    Two refuse that boundary, so the existing finally fallback owns recovery
-    and buys the only legitimate later delivery request.
+    One failure is repaired at the first safe boundary; two move recovery to a
+    later safe boundary in the same run. Four exhaust every safe retry, so the
+    existing finally fallback must own the pending result before delivering it.
     """
     tool_entered = asyncio.Event()
     release_tool = asyncio.Event()
@@ -194,6 +202,14 @@ async def test_result_commits_only_after_its_canonical_row_is_durable(
 
     stream = Stream()
     session = make_session(tmp_path, stream, tools=[tool])
+    real_fallback = session._deliver_deferred_job_results
+    fallback_pending_snapshots: list[list[str]] = []
+
+    async def observe_fallback() -> None:
+        fallback_pending_snapshots.append(list(session._deferred_job_results))
+        await real_fallback()
+
+    monkeypatch.setattr(session, "_deliver_deferred_job_results", observe_fallback)
     real_append = session._transcript.append_message
     failures_left = failed_writes
 
@@ -232,7 +248,10 @@ async def test_result_commits_only_after_its_canonical_row_is_durable(
         assert "durable before delivery" in _wire(stream.requests[-1])
         assert len(_job_result_rows(session)) == 1
         assert not session._deferred_job_results
-        if failed_writes == 1:
+        if fallback_owns_result:
+            assert fallback_pending_snapshots == [[job_id], []]
+        else:
+            assert fallback_pending_snapshots == [[]]
             assert _job(session, job_id).consumed is True
     finally:
         release_tool.set()
