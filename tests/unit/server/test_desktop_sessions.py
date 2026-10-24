@@ -2778,8 +2778,16 @@ CHOSEN_MODEL = {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning
 CONFIGURED = {"hosting": "anthropic", "model_name": "claude-sonnet-5"}
 
 
-def draft_model(provider: str = "deepseek", model_id: str = "deepseek-flash", effort=None):
-    return {"provider": provider, "model_id": model_id, "reasoning_effort": effort}
+def draft_model(
+    provider: str = "deepseek", model_id: str = "deepseek-flash", effort=None, fast=None
+):
+    body = {"provider": provider, "model_id": model_id, "reasoning_effort": effort}
+    # Omitted unless a test names it, so every pre-existing call builds the exact
+    # body it built before this field existed (``None`` and absence are distinct
+    # on this wire: absence is what an older client sends).
+    if fast is not None:
+        body["fast_mode"] = fast
+    return body
 
 
 @pytest.mark.asyncio
@@ -2865,6 +2873,10 @@ REFUSED_DRAFT_MODELS = [
     (draft_model("anthropic", "claude-opus-9"), "model_unknown"),
     (draft_model("deepseek", "deepseek-flash", "turbo"), "effort_unsupported"),
     (draft_model("anthropic", "claude-opus-5", "xhighz"), "effort_unsupported"),
+    # The speed dial is the OTHER per-request capability a pick can name, and a
+    # model that does not sell the tier must be refused rather than silently
+    # answered at standard speed: the pane drew a toggle the user turned on.
+    (draft_model("deepseek", "deepseek-flash", fast=True), "fast_mode_unsupported"),
 ]
 
 
@@ -2954,6 +2966,75 @@ async def test_an_effort_on_a_model_with_no_ladder_is_refused(draft_api) -> None
     assert result.json()["detail"]["code"] == "effort_unsupported"
 
 
+@pytest.mark.asyncio
+async def test_a_draft_preview_publishes_the_fast_dial_it_will_run_on(draft_api) -> None:
+    """The draft chip reads the dial off the SAME spec the first turn gets.
+
+    ``selected_model`` is a ``ModelSpec`` on the wire, so both halves of the
+    question — whether this route sells the tier at all, and whether the user
+    asked for it — ride the frame the pane already renders. A preview that
+    dropped them would leave the chip unable to say "available" before the
+    first message, which is the reported blocker (ui#1265).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    result = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "model": draft_model("anthropic", "claude-opus-5", fast=True),
+        },
+    )
+    assert result.status_code == 200, result.text
+    model = result.json()["result"]["frontend"]["snapshot"]["selected_model"]
+    assert model["fast_mode"] is True, "the pane must show the dial it was asked for"
+    assert model["supports_fast_mode"] is True, "and that this route sells it"
+    assert not (root / "sessions").exists(), "a preview still costs nothing durable"
+
+
+@pytest.mark.asyncio
+async def test_the_preview_says_a_model_with_no_tier_cannot_go_fast(draft_api) -> None:
+    """The other half of the chip: the pair, refused, with nothing durable left.
+
+    ``deepseek-flash`` is a shipped row with no fast tier, so this is the shape
+    a released client's picker meets when it offers the toggle anyway.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    result = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "model": draft_model("deepseek", "deepseek-flash", fast=True),
+        },
+    )
+    assert result.status_code == 422, result.text
+    assert result.json()["detail"]["code"] == "fast_mode_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_the_backend_advertises_that_a_draft_can_pick_fast(draft_api) -> None:
+    """A client must be able to ASK before it sends the dial.
+
+    ``DraftModel`` inherits ``extra="forbid"``, so an older backend refuses the
+    whole create body over one unknown field — not just the dial. That is the
+    rule ``draft_selection`` sits beside ``draft_preview`` to state, one field
+    down: a renderer that does not see ``draft_fast`` keeps its speed toggle
+    inert rather than letting it dispatch into a 422, while the model and effort
+    chips it already had keep working.
+    """
+    client, _root = draft_api
+
+    capabilities = (await client.get("/v1/capabilities")).json()["result"]["features"]
+
+    assert capabilities["draft_fast"] == 1
+    assert capabilities["draft_selection"] == 1, "the picker the dial rides on must stay advertised"
+
+
 def _marker(root: Path, session_id: str) -> dict[str, Any]:
     return json.loads((root / "sessions" / session_id / "desktop.json").read_text())
 
@@ -3014,6 +3095,36 @@ async def test_a_created_drafts_choice_is_what_a_snapshot_reports(draft_api) -> 
     # The spec a cold frame carries comes from the same synth the preview used,
     # so the draft chip and the first real frame cannot disagree.
     assert tuple(model["reasoning_efforts"]) == ("none", "low", "high", "max")
+
+
+@pytest.mark.asyncio
+async def test_a_created_drafts_fast_dial_is_the_one_its_first_turn_runs_on(draft_api) -> None:
+    """The dial travels marker → birth selection → first cold frame.
+
+    Additive like the pair and the level beside it: a body that names no dial
+    writes the marker it always wrote (the equality case above pins that).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    picked = draft_model("anthropic", "claude-opus-5", fast=True)
+
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": picked},
+    )
+    assert created.status_code == 200, created.text
+    session_id = created.json()["result"]["session_id"]
+    assert _marker(root, session_id)["model"]["fast_mode"] is True
+
+    from local_operator.server.utils.desktop_sessions import draft_birth_selection
+
+    seeded = draft_birth_selection(root, session_id)
+    assert seeded is not None and seeded.fast_mode is True
+
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert model["fast_mode"] is True, "the first cold frame must agree with the chip"
 
 
 @pytest.mark.asyncio

@@ -327,6 +327,15 @@ _AMBIENT_VARS = (
     # ``session/runtime/process.py``; the ambient-env test is what holds this
     # entry to that (QA round 1 of #1110).
     "LOP_MOBILE_CHILD_EFFORT",
+    # The SPEED dial the desktop plane pins for a draft born on a chosen model
+    # (ui#1265), read beside the level above and for the same reason: every
+    # child the test process spawns would otherwise construct its spec at a
+    # stranger's tier, so a provider-call or journal assertion measures the
+    # operator's shell rather than the fixture -- and fails nothing by itself,
+    # the same silent shape as RESUME and EFFORT (the fix for ui#1266 is what
+    # gave this name a reader; the ambient-env test is what caught it missing
+    # here). It is read by ``session/runtime/process.py``.
+    "LOP_MOBILE_CHILD_FAST",
     "LOP_MODEL_SELECTION_OVERRIDE",
     # The eval worker's scrub-channel transport (R1). The parent sets it per
     # spawn, but a worker that inherited a STALE value from the operator's own

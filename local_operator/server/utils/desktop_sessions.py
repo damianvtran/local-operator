@@ -441,10 +441,14 @@ def resolve_working_directory(cwd: str) -> Path:
 DRAFT_MODEL_KEY = "model"
 
 
-#: The three fields the draft selection travels with, on the HTTP wire and inside
-#: the marker: the same shape the canonical frontend state publishes for a
+#: The fields the draft selection travels with, on the HTTP wire and inside the
+#: marker: the same shape the canonical frontend state publishes for a
 #: conversation's model, so the picker's row can be handed back unmodified.
-DRAFT_MODEL_FIELDS = ("provider", "model_id", "reasoning_effort")
+#:
+#: ``fast_mode`` is the OPTIONAL member (ui#1265) — see the writer, which omits
+#: it when the call did not name one so a client that never sends the field
+#: still gets the document the pre-fast-mode build wrote.
+DRAFT_MODEL_FIELDS = ("provider", "model_id", "reasoning_effort", "fast_mode")
 
 
 def _door_may_open(path: Path) -> bool:
@@ -494,7 +498,7 @@ def read_desktop_marker(session_dir: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, str | None] | None:
+def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, Any] | None:
     """The draft selection a marker carries, or ``None`` when it carries none.
 
     Every field is re-checked here rather than trusted: the marker is a plain
@@ -512,11 +516,17 @@ def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, str | None] |
     if not isinstance(model_id, str) or not model_id:
         return None
     effort = choice.get("reasoning_effort")
-    return {
+    stored: dict[str, Any] = {
         "provider": provider,
         "model_id": model_id,
         "reasoning_effort": effort if isinstance(effort, str) and effort else None,
     }
+    # Only a real ``true`` is evidence. A hand-edited ``"fast_mode": "yes"`` must
+    # read as "no claim" rather than as ON: the value ends up gating a wire key
+    # that costs the user money at premium pricing.
+    if choice.get("fast_mode") is True:
+        stored["fast_mode"] = True
+    return stored
 
 
 def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
@@ -601,6 +611,15 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     resolved = resolve_birth_effort(spec, choice["reasoning_effort"], root)
     if resolved != spec.reasoning_effort:
         spec = spec.model_copy(update={"reasoning_effort": resolved})
+    # The FAST dial, clamped by the ROUTE's own answer exactly as the journal
+    # restore is (``Session._restore_selected_model``): a marker can outlive the
+    # model table that wrote it, and putting the speed key on a route that
+    # rejects it is a 400 on the first turn this seed exists to open. Objecting
+    # is not silent either — the pick that wrote a ``true`` here was validated at
+    # the create boundary, so a marker whose tier vanished is an old build's
+    # document, not a client this plane accepted.
+    if choice.get("fast_mode") is True and spec.supports_fast_mode:
+        spec = spec.model_copy(update={"fast_mode": True})
     return spec
 
 
@@ -637,7 +656,14 @@ def write_desktop_marker(
     marker = path / DESKTOP_MARKER_NAME
     payload: dict[str, Any] = {"version": 1, "cwd": str(directory)}
     if model is not None:
-        payload[DRAFT_MODEL_KEY] = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
+        chosen = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
+        # Absence, not ``null``: ``reasoning_effort: null`` IS the choice "this
+        # model, no level", while a dial nobody named is simply not a key. Writing
+        # it as null would change the bytes an older client's create produces,
+        # which is the additivity contract ``DRAFT_MODEL_KEY`` states.
+        if chosen.get("fast_mode") is None:
+            chosen.pop("fast_mode", None)
+        payload[DRAFT_MODEL_KEY] = chosen
     if purpose is not None:
         # ADDITIVE, exactly like the model above: a marker written without it is
         # the document every earlier build wrote, and the marker's readers take
@@ -8180,7 +8206,7 @@ class DesktopSessions:
         cwd: str,
         *,
         target: dict[str, str] | None = None,
-        model: dict[str, str | None] | None = None,
+        model: dict[str, Any] | None = None,
         draft_id: str | None = None,
         purpose: str | None = None,
     ) -> str:
