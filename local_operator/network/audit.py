@@ -732,7 +732,28 @@ STREAM_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
 )
 
 OUTCOMES = ("ok", "refused", "failed", "partial")
-ACTOR_KINDS = ("human", "agent", "relay", "unknown")
+#: Who an event's actor IS, as far as this log can say. A CLOSED set, because an
+#: unlisted value is rewritten to "unknown" on the way in — the field is for reading,
+#: and a free-form one would make every consumer guess.
+#:
+#: ``device`` IS HERE BECAUSE NINE CALL SITES ACROSS SEVEN MODULES PASS IT, and the
+#: list is enumerated rather than counted because a numeral hid an omission once
+#: already: the five credential modules' emitters (``credentials/`` github,
+#: lifecycle, owner, reconcile, sync), the relay's ``credential.placement`` record,
+#: the CLI's ``credential.placement`` audit, ``device_renamed`` and
+#: ``device_rotated``. Before this value existed, every one of those rows silently
+#: rendered ``actor_kind: "unknown"`` — the audit recorded that SOMETHING happened
+#: and lost the fact that a DEVICE did it. The alternative fix (stop passing it, let
+#: those rows say ``human`` or ``unknown``) would erase a distinction every emitter
+#: clearly intends, so the set was widened instead. Do not "clean up" the emitters
+#: back to three values: "device" is a peer acting under its own key, which is
+#: neither a person at this keyboard nor an agent process here.
+#:
+#: NOT every device-shaped row carries it, deliberately: ``epoch_rotated`` names
+#: THIS device in ``actor`` while the action was the local operator's ``member rm``,
+#: so its initiator is a person and the row keeps the default. "Who is named" and
+#: "who acted" are different questions, and this value answers the second.
+ACTOR_KINDS = ("human", "agent", "relay", "device", "unknown")
 
 
 def _resolve(name: str, explicit: Any, default: Any, cast: Any, root: Path | None = None) -> Any:
@@ -775,7 +796,8 @@ class AuditEvent:
     network_name: str = ""
     actor_name: str = ""
     #: A HINT, not an attestation: from ``LOP_ACTOR`` when a harness sets it, else
-    #: ``unknown``. Never presented as proof of who typed a command.
+    #: ``unknown``. Never presented as proof of who typed a command. The closed set is
+    #: :data:`ACTOR_KINDS`; a value outside it is stored as ``unknown``.
     actor_kind: str = "unknown"
     ts: float = field(default_factory=time.time)
 
