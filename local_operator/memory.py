@@ -82,26 +82,37 @@ RECALL_HARD_TOKENS = 2000
 #: which is why `lop memory status` reports both and why the refusal names the
 #: byte cap.
 #:
-#: INTERIM (2026-10-24): this was 64 MiB, and a live fleet store reached that
-#: bound (62.9 MiB of 64 MiB, 16,096 of 16,384 pages, freelist 0), after which
-#: two peers failed sync with ``bad_memory``. The raise restores service; it is
-#: NOT the fix. The underlying defect is that the journal has no
-#: liveness-independent bound: retention is gated on a sync cursor, and the
-#: cursor cannot advance for this device's own ops (46,742 of 50,377, 93%) or be
-#: acked by peers that cannot receive while the store is full. A bound gated on
-#: peer acknowledgement is therefore wedged by the very fullness it should
-#: prevent, which raising the cap only postpones.
+#: INTERIM (2026-10-24): this was 64 MiB, raised to 128 MiB only to restore this
+#: host's ability to write facts. The store had run out of room under the old
+#: bound: 62.9 MiB of 64 MiB (16,096 of 16,384 pages, 98.2%, freelist 0) when
+#: two sync failures were observed, and at its cap later. The raise does NOT
+#: restore peer sync by itself, and neither failure was caused by this cap: peer
+#: ``d_1bb8...`` refuses our pushes because ITS OWN store is full, and
+#: ``d_3836...`` refuses one operation on content grounds (``Sensitive path
+#: refused``, retrying on an 1800 s floor).
 #:
-#: It comes back down when the retention design lands (a bounded journal with a
-#: snapshot/re-baseline path and tombstone retention) AND the store then drains
-#: below the old 64 MiB bound — the code-expressible figure is a compacted
-#: store's ``storage_bytes`` (``page_count * page_size``) from `lop memory
-#: status`, or equivalently ``storage_bytes - storage_free_bytes`` for a store
-#: whose freed pages are still in the freelist. Draining alone does not justify
-#: a lower cap while the journal can still grow without a liveness-independent
-#: bound. Nothing lowers this at runtime: no code path writes a smaller
-#: ``max_page_count``, so removing this raise is a deliberate follow-up change,
-#: not an automatic behaviour. Treat any further raise the same way.
+#: The defect this does NOT fix: ``ops`` is append-only and has no retention
+#: bound of any kind. It is 38.2 MiB / 50,377 rows against 3.28 MiB of live
+#: facts, 93% of it this device's own origin, and no age, cursor or capacity
+#: mechanism removes anything. Raising the cap buys room; it does not bound the
+#: journal.
+#:
+#: It comes back down when the bounded-journal design lands (all-heads +
+#: tombstones retention with a snapshot/re-baseline path) AND the store drains
+#: below 64 MiB, measured as ``storage_bytes`` from `lop memory status` after a
+#: VACUUM. The VACUUM must come first: ``PRAGMA max_page_count`` silently clamps
+#: to the current page count, so lowering it on a store whose file is still
+#: larger — including one with reclaimable pages — does nothing. Nothing lowers
+#: this at runtime: no code path writes a smaller ``max_page_count``, so
+#: removing this raise is a deliberate follow-up change, not an automatic
+#: behaviour. Treat any further raise the same way.
+#:
+#: Accepted side effect: :meth:`MemoryStore._page_cap_refusal` keeps the generic
+#: refusal when the host filesystem reports no more free space than this cap
+#: (``disk_free <= cap_bytes``). Raising the cap to 128 MiB means a host with
+#: 64-128 MiB free now loses the cap diagnosis it previously got; the guard is
+#: deliberate (it avoids advising "forget facts" on a genuinely full disk), so
+#: this is recorded rather than "fixed".
 MAX_DB_BYTES = 128 * 1024 * 1024
 #: Page size the cap is expressed against in :meth:`MemoryStore.connection`.
 #: ``PRAGMA max_page_count`` takes pages, so the enforced byte cap is

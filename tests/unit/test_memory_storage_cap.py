@@ -13,10 +13,11 @@ Status must not call that FULL (`storage_full` is "no free page AND no headroom"
 and the near-cap warning must exist for the 90-99.9% state where refusals land.
 
 The interim raise (64 MiB -> 128 MiB) is pinned at the end of this file. It
-restored peer sync after a live store hit the old cap; the tests there prove an
-existing store gains headroom on the next open with no migration, and that the
-refusal still fires at the raised cap. The growth is modelled at a page scale
-that costs kilobytes, never 128 MiB of real data.
+restored this host's ability to write facts after a live store ran out of room
+under the old cap; it did not by itself restore peer sync. The tests there
+prove an existing store gains headroom on the next open with no migration, and
+that the refusal still fires at the raised cap. The growth is modelled at a
+page scale that costs kilobytes, never 128 MiB of real data.
 """
 
 import json
