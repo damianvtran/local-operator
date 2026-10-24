@@ -46039,6 +46039,10 @@ class OperatorApp(App[None]):
         from local_operator.i18n import text as i18n_text
 
         i18n_text.set_active_locale(locale)
+        # Localized transcript furniture is baked into finalized blocks just as
+        # theme ink is. Reuse that same rebuild sweep so a locale move repaints
+        # mounted rows at their CURRENT width, with no resize or stale cache.
+        self._repaint_themed_widgets()
         if self._welcome is not None:
             self._welcome.refresh()
         if self._status is not None:
