@@ -2619,6 +2619,14 @@ _KIMI_ENTRY: dict[str, Any] = {
         "valid_efforts": ["low", "high", "max"],
         "default_effort": "high",
     },
+    # The row's second statement of the same ladder, with its default nested
+    # under ``effort`` rather than beside it. ``_row_from_openai_entry`` reads
+    # a TOP-LEVEL ``reasoning.default_effort`` (the aggregator shape), so the
+    # test below pins that this nested one is still not carried.
+    "reasoning": {
+        "type": "only",
+        "effort": {"valid": ["low", "high", "max"], "default": "high"},
+    },
     "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
 }
 
@@ -2637,10 +2645,11 @@ def test_the_kimi_listing_states_effort_and_image_capabilities_natively() -> Non
     assert row.supports_images is True
     assert row.reasoning is True
     assert row.reasoning_efforts == ("low", "high", "max")
-    # The listing says ``default_effort: "high"`` and carrying it would be a
-    # guess: the vendor doc says ``max``, and repeated measurements of omission
-    # were inconsistent (one sample at the bottom of the ladder, one between the
-    # rungs, one near ``max``), so no default is asserted here.
+    # The listing states ``default_effort: "high"`` in TWO places
+    # (``think_efforts`` and ``reasoning.effort.default``) and carrying either
+    # would be a guess: the vendor doc says ``max``, and repeated measurements
+    # of omission were inconsistent (one sample at the bottom of the ladder,
+    # one between the rungs, one near ``max``), so neither is asserted here.
     assert row.reasoning_default_effort is None
 
 

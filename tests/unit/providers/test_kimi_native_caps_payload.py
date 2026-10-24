@@ -18,7 +18,7 @@ from __future__ import annotations
 from local_operator.harness.types import ChatRequest, ImageContent, Message, ModelSpec
 from local_operator.model import discovery
 from local_operator.model.configure import build_model_spec, info_from_discovered_model
-from local_operator.model.registry import ModelInfo
+from local_operator.model.registry import unknown_model_info
 from local_operator.providers.clients import OpenAICompatClient
 
 #: One verbatim-trimmed row off ``GET https://api.kimi.com/coding/v1/models``
@@ -40,6 +40,13 @@ _KIMI_LISTING_ENTRY: dict[str, object] = {
         "valid_efforts": ["low", "high", "max"],
         "default_effort": "high",
     },
+    # The same ladder stated a second time, with the default nested under
+    # ``effort``: the real row carries both shapes, and neither is carried as a
+    # default (see ``discovery._row_from_openai_entry``).
+    "reasoning": {
+        "type": "only",
+        "effort": {"valid": ["low", "high", "max"], "default": "high"},
+    },
     "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
 }
 
@@ -49,18 +56,17 @@ _KIMI_BASE = "https://api.kimi.com/coding/v1"
 def _kimi_spec() -> ModelSpec:
     """The spec a session started on ``kimi/k3.1-pro`` actually runs on.
 
-    ``k3.1-pro`` has no registry twin — it is a DYNAMIC row — so a silent
-    listing read leaves the spec with nothing to fall back on, which is exactly
-    the defect: ``reasoning_efforts=()`` and ``supports_images=False``.
+    ``k3.1-pro`` has no registry twin — it is a DYNAMIC row — so the fallback
+    is the same :data:`unknown_model_info` the catalogue path supplies for an
+    unshipped id (``supports_images=False``, no ladder). That matters for the
+    assertion below: with a permissive hand-built fallback the image assertion
+    would pass even on the pre-fix tree, because ``build_model_spec`` defaults
+    an unstated capability to ``True``. With the real fallback, a parse that
+    reads nothing leaves ``supports_images`` at ``False`` — the defect.
     """
     row = discovery._row_from_openai_entry(_KIMI_LISTING_ENTRY, "kimi")
     assert row is not None
-    info = info_from_discovered_model(
-        "kimi",
-        "k3.1-pro",
-        row,
-        ModelInfo(id="k3.1-pro", name="K3.1 Pro", description=""),
-    )
+    info = info_from_discovered_model("kimi", "k3.1-pro", row, unknown_model_info)
     return build_model_spec("kimi", "k3.1-pro", info)
 
 
@@ -110,9 +116,15 @@ def test_the_chosen_level_reaches_the_chat_completions_body() -> None:
 
 
 def test_the_image_part_survives_body_construction() -> None:
-    """The capability read exists so this attachment is not dropped: the body
-    carries a real ``image_url`` data-URI part, and the provider answered one of
-    these with HTTP 200 while the pre-fix spec was stripping the image."""
+    """Body SHAPE only: ``_build_body`` carries the ``image_url`` part whether
+    or not the spec says the model takes images — the strip is the session
+    render gate at ``session.py`` (``if not self._model.supports_images``).
+
+    Kept as a chain assertion for the wire shape the body builder emits
+    (a real ``image_url`` data URI, not a bare text part); the capability GATE
+    is pinned by ``_kimi_spec``'s spec assertion above, which uses the real
+    ``unknown_model_info`` fallback and fails pre-fix.
+    """
     body = _body(_kimi_spec())
 
     content = body["messages"][-1]["content"]  # type: ignore[index]
