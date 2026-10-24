@@ -1467,11 +1467,7 @@ def adopt_members(
         # row NAMES. ``sender_device_id`` is the link's authenticated peer id, so no
         # signature or wire op is needed for a cosmetic label — and a third device,
         # including one relaying somebody else's table, cannot rename a device here.
-        if (
-            sender_device_id
-            and incoming.device_id == sender_device_id
-            and incoming.name
-        ):
+        if sender_device_id and incoming.device_id == sender_device_id and incoming.name:
             accepted = _accepted_name(incoming.name, existing.name, source=sender_device_id)
             if accepted != existing.name:
                 existing.name = accepted
