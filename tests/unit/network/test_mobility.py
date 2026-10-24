@@ -747,8 +747,25 @@ def test_a_mid_turn_second_offload_refuses_instead_of_faking_success(
     _owned_session(server_a)
     target = server_b.identity.device_id
 
-    assert _move(server_a, SESSION, to=target, monkeypatch=monkeypatch)["ok"] is True
-    assert _move(server_a, SESSION, to="local", monkeypatch=monkeypatch)["ok"] is True
+    # Capture once; only closed protocol values may reach diagnostics, never peer text.
+    phases = mobility.MOVE_RESULT_PHASES + mobility.MOVE_QUEUE_PHASES
+    diagnostic_values = {
+        "code": mobility.MOVE_REFUSAL_CODES,
+        "phase": phases,
+        "phase_reached": phases,
+    }
+    first = _move(server_a, SESSION, to=target, monkeypatch=monkeypatch)
+    assert first["ok"] is True, {
+        key: first[key] if isinstance(first[key], str) and first[key] in allowed else "unknown"
+        for key, allowed in diagnostic_values.items()
+        if key in first
+    }
+    back = _move(server_a, SESSION, to="local", monkeypatch=monkeypatch)
+    assert back["ok"] is True, {
+        key: back[key] if isinstance(back[key], str) and back[key] in allowed else "unknown"
+        for key, allowed in diagnostic_values.items()
+        if key in back
+    }
 
     sentence = (
         "this session is working right now, so nothing was moved; try again when the "
