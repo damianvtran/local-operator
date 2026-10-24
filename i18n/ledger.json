@@ -3952,6 +3952,443 @@
       },
       "status": "passed",
       "note": "First catalogue for this namespace. 30 keys (tui.notices) / 84 keys (wire.errors.desktop), key set and placeholder name+kind multiset identical to en. Round 1: auditor FAILED 14 fidelity findings in es/fr wire.errors.desktop (two agents_config_* rows substituted an unrelated sentence; six smaller slips), ru capitalisation note. Round 2 after corrections: AUDIT RESULT: passed, no regressions. Glossary: 'fast' reuses the adjective already shipped in wire.slash.fast; 'standard speed' matches the configure.py wording."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R2 current-byte dual audit clean, 0 B/M; ur24a2/ur24b2 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/cli.exec_remote_help/ur24a2/record.json; peer ur24b2."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.ask",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R2 current-byte dual audit clean, 0 B/M; ur24a2/ur24b2 (5ebbaba9537e/3e0f499dc2ee, same actual model); fit follow-up retained. Earlier failures retained. Record: i18n/audits/evidence/ur/relay.ask/ur24a2/record.json; peer ur24b2."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R2 current-byte dual audit clean, 0 B/M; ur24a2/ur24b2 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/relay.session.tags/ur24a2/record.json; peer ur24b2."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.asks",
+      "source_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-shell); session 52136848d1fc)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R2 current-byte dual audit clean, 0 B/M; ur24a2/ur24b2 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.asks/ur24a2/record.json; peer ur24b2."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.authoring",
+      "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-flows); session 7c4a4229b011)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.authoring/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.palette",
+      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-shell); session 52136848d1fc)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.palette/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-flows); session 7c4a4229b011)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.projects_edit/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.review",
+      "source_sha256": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-flows); session 7c4a4229b011)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R2 current-byte dual audit clean, 0 B/M; ur24a2/ur24b2 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.review/ur24a2/record.json; peer ur24b2."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-flows); session 7c4a4229b011)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.schedule/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.status",
+      "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-shell); session 52136848d1fc)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.status/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-shell); session 52136848d1fc)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R2 current-byte dual audit clean, 0 B/M; ur24a2/ur24b2 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.tags/ur24a2/record.json; peer ur24b2."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-flows); session 7c4a4229b011)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.team_authoring/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-shell); session 52136848d1fc)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.transcript/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.viewer",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-shell); session 52136848d1fc)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R2 current-byte dual audit clean, 0 B/M; ur24a2/ur24b2 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/tui.viewer/ur24a2/record.json; peer ur24b2."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.welcome",
+      "source_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-tui-shell); session 52136848d1fc)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R2 current-byte dual audit clean, 0 B/M; ur24a2/ur24b2 (5ebbaba9537e/3e0f499dc2ee, same actual model); fit follow-up retained. Earlier failures retained. Record: i18n/audits/evidence/ur/tui.welcome/ur24a2/record.json; peer ur24b2."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.errors/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.settings",
+      "source_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R3 current-byte dual audit clean, 0 B/M; ur24a3/ur24b3 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.errors.settings/ur24a3/record.json; peer ur24b3."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.incidents",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.incidents/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.memory",
+      "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.memory/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.notices",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R1 current-byte dual audit clean, 0 B/M; ur23a1/ur23b1 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.notices/ur23a1/record.json; peer ur23b1."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R3 current-byte dual audit clean, 0 B/M; ur24a3/ur24b3 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.remote_compute/ur24a3/record.json; peer ur24b3."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-settings); session ffc94c8cb17d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R3 current-byte dual audit clean, 0 B/M; ur24a3/ur24b3 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.settings/ur24a3/record.json; peer ur24b3."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (translator specialist (ur-wire-relay); session 7a648afb0f8d)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "R3 current-byte dual audit clean, 0 B/M; ur24a3/ur24b3 (5ebbaba9537e/3e0f499dc2ee, same actual model); fit follow-up retained. Earlier failures retained. Record: i18n/audits/evidence/ur/wire.slash/ur24a3/record.json; peer ur24b3."
     }
   ]
 }

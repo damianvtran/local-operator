@@ -1,0 +1,6 @@
+tui.tags.added | Added “{name}”. | “{name}” شامل کیا گیا۔
+tui.tags.cap_applied | 8 tags applied. Remove one before adding another. | 8 ٹیگز لاگو ہیں۔ دوسرا شامل کرنے سے پہلے ایک ہٹائیں۔
+tui.tags.create_help | Creates a shared tag and applies it here. | مشترکہ ٹیگ تیار کر کے یہاں لاگو کیا جاتا ہے۔
+tui.tags.created_applied | Created and applied “{name}”. | “{name}” تیار کر کے لاگو کیا گیا۔
+tui.tags.partial_create | Tag created, but couldn't apply it. Retry applying. | ٹیگ بن گیا، مگر لاگو نہیں ہو سکا۔ دوبارہ لاگو کرنے کی کوشش کریں۔
+tui.tags.removed | Removed “{name}”. | “{name}” ہٹا دیا گیا۔

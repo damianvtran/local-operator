@@ -1,0 +1,3 @@
+cli.exec_remote_help.idempotency_key | Idempotency key to reuse instead of minting a fresh one, so a retry of a submitted run cannot run twice | نئی کلید بنانے کے بجائے موجودہ idempotency key استعمال کریں، تاکہ جمع شدہ رن کی دوبارہ کوشش پر وہ دوبارہ نہ چلے
+cli.exec_remote_help.repo | Git URL the remote run checks out. Required with --remote: local files are never uploaded | Git URL جسے ریموٹ رن checkout کرے گا۔ --remote کے ساتھ درکار: مقامی فائلیں کبھی اپلوڈ نہیں ہوتیں
+cli.exec_remote_help.size | Compute size for the remote run: s, m or l (default: m) | ریموٹ رن کا کمپیوٹ سائز: s، m یا l (ڈیفالٹ: m)

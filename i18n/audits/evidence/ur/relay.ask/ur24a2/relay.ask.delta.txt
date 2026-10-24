@@ -1,0 +1,20 @@
+relay.ask.dismiss.open
+EN dismiss…
+OLD ختم کریں…
+NEW خارج کریں…
+relay.ask.dismiss.receipt
+EN Dismissed — no reply sent
+OLD ختم کر دیا گیا — کوئی جواب نہیں بھیجا
+NEW خارج کیا گیا — کوئی جواب نہیں بھیجا گیا
+relay.ask.dismiss.receipt_answered_in_chat
+EN Dismissed — answered in chat
+OLD ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا
+NEW خارج کیا گیا — گفتگو میں جواب موجود ہے
+relay.ask.dismiss.receipt_moot
+EN Dismissed — no longer needed
+OLD ختم کر دیا گیا — اب ضرورت نہیں
+NEW خارج کیا گیا — اب ضرورت نہیں
+relay.ask.dismiss.title
+EN Dismiss this ask
+OLD یہ سوال ختم کریں
+NEW یہ سوال خارج کریں
