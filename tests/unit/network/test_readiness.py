@@ -455,29 +455,40 @@ def test_ready_reports_an_open_wal_as_unavailable_not_empty_or_stale(tmp_path: P
         auth.close()
 
 
-@pytest.mark.parametrize("store_state", ["corrupt", "open_wal"])
-def test_unknown_store_never_renders_ok_with_placement(tmp_path: Path, store_state: str) -> None:
-    """Placement must not mask an unknown store (review round 1, F-1)."""
+# This is the verdict specification, not a set of examples chosen to fit the code.
+# ``member`` means placement.owner_device == the checked peer's device id.
+_CREDENTIAL_TRUTH_TABLE = {
+    ("self", "healthy"): (True, ""),
+    ("self", "absent"): (False, readiness.CODE_NO_CREDENTIAL),
+    ("self", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("self", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("member", "healthy"): (True, ""),
+    ("member", "absent"): (False, readiness.CODE_UNKNOWN),
+    ("member", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("member", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("viewer", "healthy"): (True, ""),
+    ("viewer", "absent"): (True, ""),
+    ("viewer", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("viewer", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("third", "healthy"): (True, ""),
+    ("third", "absent"): (True, ""),
+    ("third", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("third", "open_wal"): (False, readiness.CODE_UNKNOWN),
+}
+
+
+def _truth_fixture(
+    root: Path, placement_shape: str, store_state: str, *, observation: bool = False
+) -> Any:
+    """Build one real store/placement cell; return the writer the cell keeps open."""
     from local_operator.network import store
     from local_operator.network.credentials import placement as placement_mod
-    from tests.unit.mcp.test_credential_status import NETWORK
-    from tests.unit.mcp.test_credential_status import PEER as OWNER
-    from tests.unit.mcp.test_credential_status import SELF, URL, _place, _record
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.credentials.types import credential_key_for_mcp
+    from tests.unit.mcp.test_credential_status import NETWORK, URL, _record
 
-    root = tmp_path / "cfg"
     root.mkdir()
     store.save(_record(), root)
-    _place(root)
-    with placement_mod.mutate(NETWORK, root, self_device=OWNER) as document:
-        document.declare(
-            "openai",
-            owner_device=OWNER,
-            owner_device_name="macbook",
-            provider="openai",
-            kind="oauth-rotating",
-            by=OWNER,
-        )
-        document.grant("openai", SELF, scope="session", by=OWNER)
     (root / "mcp.json").write_text(
         json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
         encoding="utf-8",
@@ -486,38 +497,127 @@ def test_unknown_store_never_renders_ok_with_placement(tmp_path: Path, store_sta
         'version: "0.0.0"\nvalues:\n  hosting: openai\n  model_name: gpt-5\n',
         encoding="utf-8",
     )
+    mcp_key = credential_key_for_mcp(URL)
+    if placement_shape != "self":
+        owner = {"member": PEER, "viewer": VIEWER, "third": THIRD}[placement_shape]
+        owner_name = {"member": "holder", "viewer": "viewer", "third": "third-box"}[placement_shape]
+        with placement_mod.mutate(NETWORK, root, self_device=owner) as document:
+            for key, provider, kind in (
+                ("openai", "openai", "oauth-rotating"),
+                (mcp_key, URL, "mcp-rotating"),
+            ):
+                document.declare(
+                    key,
+                    owner_device=owner,
+                    owner_device_name=owner_name,
+                    provider=provider,
+                    kind=kind,
+                    by=owner,
+                )
+                # The member-owned cell deliberately includes the owner among
+                # holders: that is the shape whose generic borrow branch used
+                # to hide the owner's own absent store.
+                document.grant(key, PEER, scope="session", by=owner)
+        if observation:
+            observations = PlacementState(NETWORK, root=root)
+            for key in ("openai", mcp_key):
+                observations.observe(
+                    key,
+                    "owner_offline",
+                    reason="no answer",
+                    owner_device=owner,
+                    retry_after_ms=15_000,
+                )
+            observations.save()
+
     auth = None
-    if store_state == "open_wal":
+    if store_state in {"healthy", "open_wal"}:
         auth = _seed_mcp_row(root, URL)
         auth.upsert_credential("openai", {"type": "oauth", "access": "ready-openai-fixture"})
-        assert auth.read_only_sidecar_present()
-    else:
+        if store_state == "healthy":
+            auth.close()
+            auth = None
+        else:
+            assert auth.read_only_sidecar_present()
+    elif store_state == "corrupt":
         (root / "auth.db").write_bytes(b"not a database")
+    else:
+        assert store_state == "absent"
+    return auth
+
+
+def _truth_viewer(placement_shape: str) -> _FakeViewer:
+    placement = {}
+    if placement_shape != "self":
+        owner = {"member": PEER, "viewer": VIEWER, "third": THIRD}[placement_shape]
+        placement = {
+            "owner_device": owner,
+            "owner_device_name": "owner",
+            "holders": [{"device": PEER, "scope": "session"}],
+        }
+    return _FakeViewer(device_id=VIEWER, rows=[], holds_mcp=False, placement=placement)
+
+
+@pytest.mark.parametrize(
+    ("placement_shape", "store_state", "ok", "code"),
+    [
+        (shape, state, expected_ok, expected_code)
+        for (shape, state), (expected_ok, expected_code) in _CREDENTIAL_TRUTH_TABLE.items()
+    ],
+)
+def test_credential_verdict_truth_table(
+    tmp_path: Path, placement_shape: str, store_state: str, ok: bool, code: str
+) -> None:
+    """Every placement/store cell reaches its specified FINAL rendered verdict."""
+    root = tmp_path / "cfg"
+    auth = _truth_fixture(root, placement_shape, store_state)
     try:
         facts = readiness.collect_peer_facts(root)
-        assert facts["has_local"] is None
-        assert facts["mcp"]["servers"][0]["has_row"] is None
-        viewer = _FakeViewer(
-            device_id=OWNER,
-            placement={
-                "owner_device": OWNER,
-                "owner_device_name": "macbook",
-                "holders": [{"device": SELF, "scope": "session"}],
-            },
+        expected_fact = {"healthy": True, "absent": False}.get(store_state)
+        assert facts["has_local"] is expected_fact
+        assert facts["mcp"]["servers"][0]["has_row"] is expected_fact
+        viewer = _truth_viewer(placement_shape)
+        member = _member()
+        rows = (
+            readiness.model_credential_row(member, facts, viewer=viewer, peer_label="holder"),
+            readiness.mcp_credential_rows(member, facts, viewer=viewer, peer_label="holder")[0],
         )
-        member = SimpleNamespace(device_id=SELF, name="holder")
-        model_row = readiness.model_credential_row(
-            member, facts, viewer=viewer, peer_label="holder"
-        )
-        mcp_row = readiness.mcp_credential_rows(member, facts, viewer=viewer, peer_label="holder")[
-            0
-        ]
+        for row in rows:
+            assert row["ok"] is ok, (placement_shape, store_state, row)
+            assert row.get("code", "") == code, (placement_shape, store_state, row)
+            rendered = readiness.render_check_lines([row])
+            assert row["detail"] in rendered[0]
+            assert len(rendered) == 1 + (0 if row["ok"] else len(row["remedies"]))
+    finally:
+        if auth is not None:
+            auth.close()
 
-        assert model_row["ok"] is False and model_row["code"] == readiness.CODE_UNKNOWN
-        assert mcp_row["ok"] is False and mcp_row["code"] == readiness.CODE_UNKNOWN
-        lines = readiness.render_check_lines([model_row, mcp_row])
-        assert len(lines) == 4  # one verdict and one remedy per capability
-        assert sum("could not be read" in line for line in lines) == 2
+
+@pytest.mark.parametrize("placement_shape", ["member", "viewer", "third"])
+@pytest.mark.parametrize("store_state", ["healthy", "absent", "corrupt", "open_wal"])
+def test_observation_failure_precedes_store_uncertainty(
+    tmp_path: Path, placement_shape: str, store_state: str
+) -> None:
+    """A real observation failure outranks uncertainty, never a positive own row."""
+    root = tmp_path / "cfg"
+    auth = _truth_fixture(root, placement_shape, store_state, observation=True)
+    try:
+        facts = readiness.collect_peer_facts(root)
+        row = readiness.model_credential_row(
+            _member(),
+            facts,
+            viewer=_truth_viewer(placement_shape),
+            peer_label="holder",
+        )
+        if store_state == "healthy":
+            assert row["ok"] is True
+            assert row["detail"] == "holder serves openai from its own login"
+        else:
+            assert row["ok"] is False
+            assert row["code"] == readiness.CODE_OBSERVED_FAILURE
+            assert "not reachable" in row["detail"]
+        rendered = readiness.render_check_lines([row])
+        assert row["detail"] in rendered[0]
     finally:
         if auth is not None:
             auth.close()

@@ -1998,26 +1998,12 @@ def model_credential_row(
             detail=f"{peer_label} serves {provider} from its own login",
             source=SOURCE_PEER,
         )
-    # Placement is only a borrow ROUTE, not proof that the peer's store is
-    # readable. An unknown peer fact must reach the verdict before placement's
-    # ok fast-paths; the viewer read stays in its established order below.
-    if held is None:
-        return _capability_row(
-            device_id=member.device_id,
-            device_name=peer_label,
-            capability=CAPABILITY_MODEL_CREDENTIAL,
-            ok=False,
-            code=CODE_UNKNOWN,
-            detail=(
-                "a credential store could not be read (this side or the peer's), so "
-                "whether this provider can be served is not known"
-            ),
-            remedies=[f"check the credential store on {peer_label} and here, then re-check"],
-            source=SOURCE_UNKNOWN,
-        )
     owner = str(placement.get("owner_device") or "")
     peer_is_holder = member.device_id in _holder_names(placement)
     if owner and peer_is_holder:
+        # A real observation failure is more specific than store uncertainty and
+        # must keep its established precedence. A definite local row above still
+        # outranks it: that row is positive proof the peer can serve itself.
         observed_failure = _observation_failure(observation)
         if observed_failure:
             return _capability_row(
@@ -2036,6 +2022,40 @@ def model_credential_row(
                 ],
                 source=SOURCE_PEER,
             )
+    # Placement is only a borrow ROUTE, not proof that the peer's store is
+    # readable. Unknown follows an observed failure but precedes every ok route.
+    if held is None:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "a credential store could not be read (this side or the peer's), so "
+                "whether this provider can be served is not known"
+            ),
+            remedies=[f"check the credential store on {peer_label} and here, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
+    if owner and owner == member.device_id:
+        # The placement says the PEER owns this key, yet no local row was found
+        # on it (``held`` is not True, or this branch was reached first). The
+        # two documents disagree; report the disagreement rather than pick one.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"the placement entry for {provider} names {peer_label} as its owner, but "
+                "no credential row was found there — the two do not agree yet"
+            ),
+            remedies=[f"sign in to {provider} on {peer_label} and re-check"],
+            source=SOURCE_PEER,
+        )
+    if owner and peer_is_holder:
         if owner == viewer.device_id:
             return _capability_row(
                 device_id=member.device_id,
@@ -2057,23 +2077,6 @@ def model_credential_row(
                 f"{peer_label} borrows {provider} from "
                 f"{_owner_label(placement, fallback='another device')} (not verified from here)"
             ),
-            source=SOURCE_PEER,
-        )
-    if owner and owner == member.device_id:
-        # The placement says the PEER owns this key, yet no local row was found
-        # on it (``held`` is not True, or this branch was reached first). The
-        # two documents disagree; report the disagreement rather than pick one.
-        return _capability_row(
-            device_id=member.device_id,
-            device_name=peer_label,
-            capability=CAPABILITY_MODEL_CREDENTIAL,
-            ok=False,
-            code=CODE_UNKNOWN,
-            detail=(
-                f"the placement entry for {provider} names {peer_label} as its owner, but "
-                "no credential row was found there — the two do not agree yet"
-            ),
-            remedies=[f"sign in to {provider} on {peer_label} and re-check"],
             source=SOURCE_PEER,
         )
     if owner and not peer_is_holder:
@@ -2464,6 +2467,24 @@ def _mcp_credential_row(
             ),
             remedies=[f"check the credential store on {peer_label}, then re-check"],
             source=SOURCE_UNKNOWN,
+            observed={"server": name, "url": url},
+        )
+    if owner and owner == member.device_id:
+        # An owner cannot issue its promised grant without the local row. This
+        # must precede the generic holder success when the owner is also listed
+        # as a holder; only a positively read row above proves the self-serve.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"the placement entry for {name} names {peer_label} as its owner, but "
+                "no credential row was found there — the two do not agree yet"
+            ),
+            remedies=[f"sign in to {name} on {peer_label}, then re-check"],
+            source=SOURCE_PEER,
             observed={"server": name, "url": url},
         )
     if owner and peer_is_holder:
