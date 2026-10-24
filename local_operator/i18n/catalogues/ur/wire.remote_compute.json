@@ -11,7 +11,7 @@
   "wire.remote_compute.failed": "ریموٹ کمپیوٹ ناکام: {error}",
   "wire.remote_compute.finished_cancelled": "ریموٹ رن {run_id} مکمل ہوا: منسوخ۔",
   "wire.remote_compute.finished_charged": "وصول شدہ رقم: {amount}",
-  "wire.remote_compute.finished_exit_code": "خروجی کوڈ: {exit_code}",
+  "wire.remote_compute.finished_exit_code": "ایگزٹ کوڈ: {exit_code}",
   "wire.remote_compute.finished_expired": "ریموٹ رن {run_id} مکمل ہوا: میعاد ختم، یعنی مکمل ہونے سے پہلے اس کی مقررہ مہلت ختم ہو گئی۔",
   "wire.remote_compute.finished_failed": "ریموٹ رن {run_id} مکمل ہوا: ناکام۔",
   "wire.remote_compute.finished_succeeded": "ریموٹ رن {run_id} مکمل ہوا: کامیاب۔",
