@@ -145,13 +145,15 @@ class ConversationBodyFrame:
         from .read_context import TENANT_ID_PATTERN
         from .types import CONVERSATION_ID_PATTERN, is_conversation_message_id
 
-        if not isinstance(self.tenant_id, str) or re.fullmatch(
-            TENANT_ID_PATTERN, self.tenant_id
-        ) is None:
+        if (
+            not isinstance(self.tenant_id, str)
+            or re.fullmatch(TENANT_ID_PATTERN, self.tenant_id) is None
+        ):
             raise BodyFrameRefused("source_tenant_id_invalid")
-        if not isinstance(self.conversation_id, str) or re.fullmatch(
-            CONVERSATION_ID_PATTERN, self.conversation_id
-        ) is None:
+        if (
+            not isinstance(self.conversation_id, str)
+            or re.fullmatch(CONVERSATION_ID_PATTERN, self.conversation_id) is None
+        ):
             raise BodyFrameRefused("source_conversation_id_invalid")
         if not is_conversation_message_id(self.message_id):
             raise BodyFrameRefused("source_message_id_invalid")
@@ -161,9 +163,7 @@ class ConversationBodyFrame:
             raise BodyFrameRefused("source_sender_kind_invalid")
         if not isinstance(self.mention, bool):
             raise BodyFrameRefused("source_mention_invalid")
-        if not isinstance(self.conversation_seq, int) or isinstance(
-            self.conversation_seq, bool
-        ):
+        if not isinstance(self.conversation_seq, int) or isinstance(self.conversation_seq, bool):
             raise BodyFrameRefused("source_conversation_seq_invalid")
         if self.conversation_seq < 1:
             # 1-based, matching ``ConversationFeedRef``: a sequence is a
