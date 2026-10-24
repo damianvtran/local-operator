@@ -298,6 +298,44 @@ async def test_a_dismissed_row_that_stays_drops_its_in_flight_mark(enabled):
         assert "dismissed" in row_line, row_line
 
 
+async def test_a_lapsed_dismissal_keeps_its_mark_until_its_row_leaves(enabled):
+    """Review round 2, m4/m5: the lapsed door's mark is NOT swept by a frame.
+
+    A `timed_out` row is settled before its one-key dismissal starts, so a sweep
+    keyed on "no longer answerable" cleared the mark on the very next frame and
+    re-opened the door for a second send — a narrowing of §14's double-tap guard
+    that no other cell covered. The mark survives a frame that still carries the
+    row, the second `x` sends nothing, and the frame that DROPS the row is what
+    ends it.
+    """
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        await _open_list(pilot, app, [_row("t1", status="timed_out")])
+        await pilot.press("x")
+        await _settle(pilot)
+        assert session.dismissed == [("t1", "terminal", None)]
+        assert "t1" in app._ask_dismiss_in_flight
+
+        # An unrelated frame that still carries the row as `timed_out` — the
+        # state the dismissal leaves it in until it leaves every list.
+        app._sync_ask_surface(ask_rows([_row("t1", status="timed_out")]))
+        await _settle(pilot)
+        assert "t1" in app._ask_dismiss_in_flight, "the lapsed door's mark must survive"
+        assert "t1" in app._ask_in_flight
+
+        # A second `x` is the guard's whole purpose: it must not send.
+        await pilot.press("x")
+        await _settle(pilot)
+        assert session.dismissed == [("t1", "terminal", None)]
+
+        # The row leaving is what ends the mark — unchanged from before SA-D8.
+        app._sync_ask_surface(ask_rows([]))
+        await _settle(pilot)
+        assert "t1" not in app._ask_dismiss_in_flight
+
+
 def test_the_offered_reasons_are_the_queue_vocabulary_in_chooser_order():
     """The LABEL is this surface's; the RECORDED WORD is the log's. They are
     paired here once, and this is the cell that keeps the pairing honest."""

@@ -391,6 +391,7 @@ from local_operator.tui.widgets.ask_queue import (
     SCOPE_FLEET,
     SCOPE_SESSION,
     STATUS_OPEN,
+    STATUS_TIMED_OUT,
     AskBar,
     AskQueueList,
     AskRow,
@@ -27649,18 +27650,25 @@ class OperatorApp(App[None]):
         self._ask_rows = list(rows)
         # A session-scope `x` holds its row in flight until the row stops being a
         # thing the gesture can act on: ABSENT from this frame (the old sweep —
-        # the row left the queue), or PRESENT and NO LONGER ANSWERABLE (SA-D8).
+        # the row left the queue), or PRESENT and SETTLED (SA-D8).
         # The second arm is load-bearing now: a dismissal taken before the ask's
         # deadline KEEPS its row as a settled receipt (§17), so waiting for the
         # frame to drop it means the `…` mark never goes away — a busy glyph on
         # a row that is finished, and one id held for the life of the session.
-        # A row that cannot take the gesture has nothing left for the mark to
-        # protect; a repeat tap is the queue's own refusal either way.
+        #
+        # A LAPSED (`timed_out`) ROW IS EXEMPT WHATEVER ITS SETTLEDNESS: it is
+        # already unanswerable when its one-key dismissal starts, so "no longer
+        # answerable" would clear the mark on the very next frame and re-open the
+        # door for a second send (review round 2, m4). Its mark ends the way it
+        # always did — the dismissal hides the row and the next frame drops it.
+        #
         # Only these marks are swept here — never a fleet op's, which
         # `_fleet_ask_worker` ends itself (M1).
         present = {row.ask_id: row for row in self._ask_rows}
         for ask_id in [
-            i for i in self._ask_dismiss_in_flight if i not in present or not present[i].answerable
+            i
+            for i in self._ask_dismiss_in_flight
+            if i not in present or (present[i].settled and present[i].status != STATUS_TIMED_OUT)
         ]:
             self._ask_dismiss_in_flight.discard(ask_id)
             self._mark_ask_in_flight(ask_id, False)

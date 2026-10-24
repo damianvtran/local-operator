@@ -220,6 +220,52 @@ describe("AsksSheet", () => {
 		expect(screen.getAllByTestId("ask-card").length).toBe(2);
 	});
 
+	it("acknowledges the tap while the read that carries the row is still in flight", async () => {
+		/* Review round 2, M2. The read that follows a tap is a round trip; until
+		   it lands the list still carries the ask as `open`. Keying the receipt on
+		   the id's PRESENCE therefore hid the acknowledgement exactly during the
+		   gap it exists to cover — a live-looking card after a successful
+		   dismissal, with nothing saying the tap had landed. The test is the
+		   ROW's status: the receipt stays until the read returns `dismissed`. */
+		const { sendCommand } = await import("./api");
+		let current = [ask({ ask_id: "a1" }), ask({ ask_id: "a2" })];
+		let calls = 0;
+		let release: (() => void) | null = null;
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+			calls += 1;
+			if (calls === 2) {
+				/* The stale read: held open past the tap, carrying the OLD list. */
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
+			}
+			return { asks: current };
+		});
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+			/* The reply lands BEFORE the read does — the real order. */
+			return { ok: true, detail: "dismissed" };
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
+		fireEvent.click(screen.getAllByRole("button", { name: /^dismiss…$/ })[0]);
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+
+		/* THE GAP: two cards, still `open`, and the receipt IS shown. */
+		await waitFor(() => expect(screen.getByTestId("ask-receipt")).toBeTruthy());
+		expect(screen.getByTestId("ask-receipt").textContent).toBe("Dismissed — no longer needed");
+		expect(screen.getAllByTestId("ask-card").length).toBe(2);
+
+		/* The read lands: the row is `dismissed`, and the card takes over. */
+		current = [
+			ask({ ask_id: "a2" }),
+			ask({ ask_id: "a1", status: "dismissed", dismissed_at: Date.now(), dismissed_reason: "moot" }),
+		];
+		await waitFor(() => expect(release).not.toBeNull(), { timeout: 2000 });
+		release!();
+		await waitFor(() => expect(screen.queryByTestId("ask-receipt")).toBeNull());
+		expect(screen.getByText("Dismissed — no longer needed")).toBeTruthy();
+	});
+
 	it("keeps a lapsed dismissal's receipt while its id is still listed", async () => {
 		/* The LAPSED door is the exception: a dismissal at or after the deadline
 		   still removes the row (case 2 of §17), so no row ever arrives and the

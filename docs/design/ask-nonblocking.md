@@ -1850,8 +1850,9 @@ below is an existing key — nothing here adds copy.
   line. The sheet's own session-local receipt (§15) becomes the INSTANT ECHO it was described as: it
   renders only while no listed row carries its `ask_id`, because the row is the statement — the
   LAPSED door excepted, whose row still leaves, so its receipt stays unconditionally. On a dismissed
-  row the settled answer slot is omitted rather than left as a bare `—`: the operator did not answer,
-  they put the question away, and the placeholder reads as a value that failed to load.
+  row the questions are plain lines rather than a description list with no descriptions, and the
+  settled answer slot is omitted rather than left as a bare `—`: the operator did not answer, they
+  put the question away, and the placeholder reads as a value that failed to load.
 - **Desktop**: renders `dismissed_reason` when present and falls back otherwise (local-operator-ui
   #1363), which is why the keys had to land here first.
 - **Fallback with no reason known**: the existing "no reply was sent" sentence. It is deliberately
@@ -1892,6 +1893,10 @@ measured as noise — more than a handful of dismissed rows per operator per wee
 
 **Not in this change.** No new event kind, no fold change, no `PROTOCOL_VERSION` bump, no change to
 the caps or the timeout policy, and no change to what a dismissal tells the model. A settled receipt
-keeps the card's chrome on the phone: giving declared/dismissed/withdrawn rows one receipt shape is a
+keeps the card's chrome on the phone: giving declined/dismissed/withdrawn rows one receipt shape is a
 design decision covering three statuses, and the design round judged the present shape honest rather
-than this PR's to change.
+than this PR's to change. Two instances are on record so that work starts from evidence rather than a
+tidy-up: the LAPSED door's receipt is a lone unattributed sentence with no row to name its ask, and a
+named dismissal whose row is absent can stack its sentence over a settled row that repeats it (design
+round 2, D2) — attribution is the same chrome decision, since a receipt that named its question could
+not stack.
