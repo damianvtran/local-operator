@@ -69,7 +69,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
-from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN
+from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN, is_account_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -91,10 +91,8 @@ _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: rule is a conservative charset rather than a re-implementation of the
 #: server's mint.
 _MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
-#: Mirrors ``read_context.ACCOUNT_ID_PATTERN``. Spelled here rather than imported
-#: because that module rides the httpx boot path this file must not pull at
-#: module scope; ``test_account_grammar_matches_the_reader`` pins the two equal.
-_ACCOUNT_ID = re.compile(r"^acc_[A-Za-z0-9_-]{1,64}$")
+# Account guards share the dependency-light is_account_id predicate with reads.
+# A UUID-shaped real account must never be rejected by a legacy acc_-only guard.
 
 
 class _Strict(BaseModel):
@@ -199,15 +197,11 @@ class TeamBridgeMessageQuery(_Strict):
 
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeMessageQuery":
-        from local_operator.team_bridge.read_context import (
-            ACCOUNT_ID_PATTERN,
-            TENANT_ID_PATTERN,
-        )
+        from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 
-        checks = (
-            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
-            (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
-        )
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        checks = ((self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),)
         for value, pattern, name in checks:
             # ``fullmatch``, not ``match`` (review R-5): these patterns are
             # anchored ``^…$``, and ``$`` also matches BEFORE a trailing newline,
@@ -244,19 +238,22 @@ class TeamBridgeInboxQuery(_Strict):
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeInboxQuery":
         from local_operator.team_bridge.read_context import (
-            ACCOUNT_ID_PATTERN,
             CURSOR_PATTERN,
             DELIVERY_STATES,
             TENANT_ID_PATTERN,
             THREAD_ID_PATTERN,
         )
 
+        for value, name in (
+            (self.expected_account_id, "expected_account_id"),
+            (self.sender_account_id, "sender_account_id"),
+        ):
+            if value is not None and not is_account_id(value):
+                raise ValueError(f"{name} is outside the accepted grammar")
         checks = (
-            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
             (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
             (self.after, CURSOR_PATTERN, "after"),
             (self.thread_id, THREAD_ID_PATTERN, "thread_id"),
-            (self.sender_account_id, ACCOUNT_ID_PATTERN, "sender_account_id"),
         )
         for value, pattern, name in checks:
             # ``fullmatch``, not ``match`` (review R-5): these patterns are
@@ -1214,7 +1211,7 @@ def _require_message_id(message_id: str) -> None:
 def _require_account_id(account_id: str) -> None:
     """Refuse an account id carrying URL syntax. See above."""
 
-    if _ACCOUNT_ID.fullmatch(account_id) is None:
+    if not is_account_id(account_id):
         _raise_read("invalid_request")
 
 

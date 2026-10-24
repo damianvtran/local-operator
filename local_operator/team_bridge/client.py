@@ -86,6 +86,7 @@ from local_operator.providers.radient_credentials import (
 )
 from local_operator.team_bridge import availability
 from local_operator.team_bridge.settings import TeamBridgeSettings
+from local_operator.team_bridge.types import validate_send_recipient
 
 logger = logging.getLogger(__name__)
 
@@ -1579,19 +1580,14 @@ class TeamBridgeClient:
         """
         if type not in SEND_TYPES:
             raise ValueError(f"type must be one of {SEND_TYPES!r}; got {type!r}")
-        if (
-            not isinstance(to, Mapping)
-            or len([key for key in ("endpoint_id", "account_id") if to.get(key)]) != 1
-        ):
-            raise ValueError(
-                "every send names `to` as exactly one of {endpoint_id} or {account_id} "
-                "(§6.2) — thread_id never stands alone"
-            )
+        # Share the tool's pre-outbox guard: direct callers and recovered intents
+        # must not silently lose unknown recipient fields at serialization either.
+        recipient = validate_send_recipient(to)
         ref = _require_client_ref(client_ref)
         normalized = _require_send_text(type, text)
         thread = str(thread_id or "").strip()
         body: dict[str, Any] = {
-            "to": {key: str(to[key]) for key in ("endpoint_id", "account_id") if to.get(key)},
+            "to": recipient,
             "type": type,
             "body": {"text": normalized},
             "client_ref": ref,
