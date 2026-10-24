@@ -718,7 +718,7 @@ def test_denied_body_never_posts_a_card_or_wakes(tmp_path, monkeypatch) -> None:
     assert out["handled"][0]["action"] == "rejected"
     assert out["handled"][0]["code"] == "screening_bounce"
     assert transcripts["sess_a"] == []
-    assert _modes == []
+    assert not any(_modes.values()), "no session may be woken"
     assert [row["verdict"] for row in server.admits] == ["reject"]
 
 
@@ -746,7 +746,7 @@ def test_mutated_body_is_not_screened_admitted_or_rendered(tmp_path, monkeypatch
     assert out["handled"][0]["code"] == "body_hash_mismatch"
     assert screen_calls == [] and server.admits == []
     assert transcripts["sess_a"] == []
-    assert _modes == []
+    assert not any(_modes.values()), "no session may be woken"
 
     # The row SURVIVES: a hash mismatch is a pending, retryable state (the
     # capacity delta's no-silent-loss rule), never a retirement. Only a
@@ -786,7 +786,7 @@ def test_a_confirmed_reject_retires_its_row_on_the_retry_pass(
 
     assert out["outcomes"][0]["action"] == "rejected"
     assert transcripts["sess_a"] == []
-    assert _modes == []
+    assert not any(_modes.values()), "no session may be woken"
     assert Store(config_dir).screening_hold(a, ref.encode()) is None
 
 
