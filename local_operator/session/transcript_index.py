@@ -261,10 +261,12 @@ _FIRST_PAINT_WAIT_S = 0.2
 #:
 #: WHY THIS EXISTS (an UPPER-BOUND measurement, 2026-10-24): a cold open of a
 #: 20k-entry conversation spent 819.8 ms in ``GET .../checkpoints`` on a host at
-#: ~92% swap, answering ``building`` with an empty manifest. In-process on a
-#: quiet host that path is 204.0 ms nominal — 200 ms of it this budget, paid on
-#: an open whose answer could never have been ``ready`` (the same journal scans
-#: in 943.5 ms). The wait is only worth paying when the scan can land inside it.
+#: ~92% swap, answering ``building`` with an empty manifest. In-process, with
+#: the same journal and nothing else running, that path measured 204.0 ms and
+#: 213.8 ms on two runs — 200 ms of it this budget, paid on an open whose answer
+#: could never have been ``ready`` (the same journal scans in 943.5 ms). The
+#: spread is this host, not the code. The wait is only worth paying when the
+#: scan can land inside it.
 _FIRST_PAINT_SCAN_BYTES_PER_S = 8 << 20
 
 
