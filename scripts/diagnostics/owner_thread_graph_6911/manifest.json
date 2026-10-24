@@ -4,12 +4,12 @@
   "schema": "owner_thread_python_resumption_graph_v1",
   "sources": {
     "scripts/diagnostics/owner_thread_graph_6911/collector.py": "080e178d49c6fa4e71c6db4b94c2a4b5cbc5ff5e73edd6786ca81f407022015e",
-    "scripts/diagnostics/owner_thread_graph_6911/producer.py": "e9a5a53c157c68ce0ecd092d6897cb71118ada5047f9e81dcfe26436995acd00",
-    "scripts/diagnostics/owner_thread_graph_6911/controller.py": "ef0f21df4f5cd06abd15bebd71a9af6b57a7aa812355e4e45a7083b2cdd69155",
+    "scripts/diagnostics/owner_thread_graph_6911/producer.py": "a8eca1c6915c680ca793fb705a7c233e738bd69b011808f359c26d26af914539",
+    "scripts/diagnostics/owner_thread_graph_6911/controller.py": "9223012480edeb864ae860aa3cde1327214183ef3cb25f2bf60c7723e91d7023",
     "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
     "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
     "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60"
   },
   "application_authorized": false,
-  "remaining": "SOURCE integration frozen; 4-phase simulated engine/consumer controls pass. Main fake-Popen/R-barrier/FD composition still pending before allocation readiness; independent integration reviews and explicit GO required. No native hooks executed."
+  "remaining": "SOURCE delta frozen; independent CODE/QA and explicit actual GO mandatory. No native hook/API proof."
 }

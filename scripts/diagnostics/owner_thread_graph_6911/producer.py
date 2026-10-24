@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 import threading
 import time
-from types import CodeType
+from types import CodeType, FunctionType
 from scripts.diagnostics.owner_thread_graph_6911.collector import Collector, validate, finalize as graph_final
 
 ROOT=Path(__file__).resolve().parents[3]
@@ -110,8 +110,10 @@ def catalog():
     path=ROOT/REL;compiled=compile(path.read_bytes(),str(path),'exec',flags=0,dont_inherit=True,optimize=0)
     codes={c.co_name:c for c in compiled.co_consts if type(c) is CodeType};pairs=[]
     for name in NAMES:
-        code=globals()[name].__code__
-        if code!=codes[name]:raise ValueError('native code source STOP')
+        function=globals()[name]
+        if type(function) is not FunctionType:raise ValueError('native function STOP')
+        code=function.__code__
+        if type(code) is not CodeType or code.co_filename!=str(path) or code.co_qualname!=codes[name].co_qualname or code!=codes[name]:raise ValueError('native code source STOP')
         pairs.append((code,'PRIMITIVE:'+name.upper()))
     return tuple(pairs)
 
@@ -152,6 +154,17 @@ def phase_pass(row,expected):
     labels=['PRIMITIVE:'+v.upper() for v in NAMES];wanted={k:expected[k] for k in ('python','executable_sha256','producer_sha256','pid','ppid','pgid')}|dict(owner_thread=owner,static_ids=labels)
     if identity!=wanted:raise ValueError('identity STOP')
     validate(row['graph'],wanted)
+    # Immediate Python caller segments only: no async causality/conservation
+    # claim. Validate ALL global entries first, then require authored witnesses.
+    graph=row['graph'];nodes=graph['nodes'];edges=graph['edges']
+    if not edges:raise ValueError('edge evidence STOP')
+    required={
+        'DIRECT':(('ROOT','DIRECT',1),('DIRECT','BURN',1)),
+        'NESTED':(('ROOT','NESTED',1),('NESTED','RECURSE',1),('RECURSE','RECURSE',3),('RECURSE','BURN',1)),
+    }.get(row['phase'],())
+    for parent,child,count in required:
+        matches=[edge for edge in edges if nodes[edge['parent']]['static_id']=='PRIMITIVE:'+parent and nodes[edge['child']]['static_id']=='PRIMITIVE:'+child]
+        if len(matches)!=1 or matches[0]['segments']!=count or matches[0]['inclusive_ns']<=0:raise ValueError('required caller edge STOP')
     state=row['state'];phase=row['phase'];keys={'owner','ready','trailing'}|({'reference_ns'} if phase in ('DIRECT','NESTED') else {'work','wait','unrelated_ns','loop_closed'} if phase=='ASYNC' else {'reference_ns','segments','worker_ns','worker_distinct','worker_hook_none','loop_closed'} if phase=='OFFLOAD' else set())
     if type(state) is not dict or set(state)!=keys or state['owner']!=owner or type(state['owner']) is not int or state['ready'] is not True or state['trailing'] is not True:raise ValueError('state STOP')
     nodes=row['graph']['nodes']

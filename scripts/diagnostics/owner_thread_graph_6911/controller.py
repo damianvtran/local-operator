@@ -28,7 +28,7 @@ def qualify(proof,expected,labels=None):
 
 
 def safe_partial(proof,expected,labels=None):
-    safe=dict(status='UNKNOWN',identity=None,phases=None)
+    safe=dict(status='UNKNOWN',identity=None,phases=None,overhead=None)
     if type(proof) is not dict:return safe
     if proof.get('identity')==expected:safe['identity']=expected
     if proof.get('status') in ('SETUP_FAILURE','OVERHEAD','COMPLETE')+PHASES:safe['status']=proof['status']
@@ -38,11 +38,25 @@ def safe_partial(proof,expected,labels=None):
             if type(row) is not dict or row.get('phase') not in PHASES:continue
             graph=row.get('graph');identity=graph.get('identity') if type(graph) is dict else None
             safe['phases'].append(dict(phase=row['phase'],graph=graph_final(graph,identity)))
+    overhead=proof.get('overhead')
+    if type(overhead) is dict:
+        safe['overhead']={key:(overhead.get(key) if type(overhead.get(key)) is int and abs(overhead[key])<=2**63 else None) for key in ('unprofiled_ns','profiled_ns','difference_ns')}
+    if len(json.dumps(safe,allow_nan=False).encode('utf-8'))>CAPS['output_bytes']//2:
+        safe['phases']=None
     return safe
 
 
+def measurement_projection(proof,expected,labels=None):
+    qualify(proof,expected,labels)
+    # Keep validated measurements, not flags-only success. Reserve envelope
+    # room and reject oversize; never truncate a successful graph into evidence.
+    encoded=json.dumps(dict(measurements=proof,partial=safe_partial(proof,expected,labels)),allow_nan=False)
+    if len(encoded.encode('utf-8'))>CAPS['output_bytes']-16384:raise ValueError('measurement cap STOP')
+    return json.loads(json.dumps(proof,allow_nan=False))
+
+
 def finalize(work,result,expected,labels,settled=True,reader=None,deleter=None):
-    result.update(full_proof_qualified=False,proof_stage='UNKNOWN',root_deletion='NOT_ATTEMPTED')
+    result.update(full_proof_qualified=False,proof_stage='UNKNOWN',root_deletion='NOT_ATTEMPTED',measurements=None)
     if not settled:result['proof_stage']='UNSETTLED';return
     try:
         try:
@@ -52,7 +66,8 @@ def finalize(work,result,expected,labels,settled=True,reader=None,deleter=None):
                 proof=json.loads(path.read_bytes())
             else:proof=reader()
             result['partial']=safe_partial(proof,expected,labels);result['proof_stage']='QUALIFICATION'
-            result['verdict']=qualify(proof,expected,labels);result['full_proof_qualified']=True;result['proof_stage']='QUALIFIED'
+            verdict=qualify(proof,expected,labels);measurements=measurement_projection(proof,expected,labels)
+            result.update(verdict=verdict,measurements=measurements,full_proof_qualified=True,proof_stage='QUALIFIED')
         except (ValueError,TypeError,KeyError,IndexError,OSError):pass
     finally:
         result['root_deletion']='FAILED';(deleter or (lambda:shutil.rmtree(work)))();result['root_deletion']='REMOVED'
