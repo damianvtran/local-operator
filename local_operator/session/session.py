@@ -3638,11 +3638,13 @@ class Session:
         #: read by ``_build_tool_context`` on every turn, which is what makes
         #: it reach both the createIf checks and the executors.
         self._confinement_root = confinement_root
-        #: Settled model-owned jobs whose auto-delivery was declined because a
-        #: turn was streaming (see ``_on_job_completed``), in settle order. The
-        #: turn's ``finally`` hands them over once it is idle again; see
-        #: ``_deliver_deferred_job_results``. Holds the JOB OBJECT and its
-        #: settled text, not just the id: the manager sweeps a settled row
+        #: Settled model-owned jobs whose results are durably journaled but have
+        #: not yet committed into this turn's model context, in settle order.
+        #: Safe aside boundaries offer the SAME canonical rows to the running
+        #: loop; the turn's ``finally`` handles only leftovers after its last
+        #: safe boundary (see ``_deliver_deferred_job_results``). Holds the JOB
+        #: OBJECT and its settled text, not just the id: the manager sweeps a
+        #: settled row
         #: ``retention_ms`` (5 min) after it settles, on any read, so a turn
         #: that outlives that window would find nothing to re-look-up (review
         #: round 1, R1-1). Holding the object keeps ``consumed`` observable
@@ -20292,10 +20294,11 @@ class Session:
         """Auto-deliver one settled model-owned job back into the conversation.
 
         WHOSE DELIVERY IS BEING DECIDED, because the two halves now differ.
-        The MODEL's hand-over is idle-only: a running turn already owns the
-        conversation (its model either waited or can 'jobs'), and
-        steering-injecting a result nobody asked for mid-turn is noise. The
-        HUMAN's copy is not: the row is journaled durably the moment the job
+        The MODEL's hand-over waits for a noninterrupting aside/tool or yield
+        boundary: a running tool keeps its pairings and floor, but the next
+        eligible request can incorporate the result instead of publishing a
+        stale final. The HUMAN's copy does not wait: the row is journaled
+        durably the moment the job
         settles even while a turn streams, because a turn can run for many
         hours and holding the row to its end bunched a marathon turn's every
         completion at its tail (2026-09-26 incident; see the streaming branch).
@@ -20313,7 +20316,7 @@ class Session:
         if self._job_id is not None:
             return
         # ``video`` rides this gate as of the video phase (media wave-2): a
-        # settled video job opens the review turn exactly like a child does,
+        # settled video job delivers its review result exactly like a child,
         # and its cancellations never reach here (the manager's task-cancel
         # arm returns before delivery, as for every type).
         if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video"):
@@ -20330,13 +20333,13 @@ class Session:
             await self._deliver_job_results([(job_id, text, job)])
             return
         if self._is_streaming:
-            # DEFERRED for the MODEL, DURABLE for the HUMAN. The batch below
-            # still hands the model one result row per job at the turn's end --
-            # the semantics this path was built for (dropping these, the
-            # pre-deferral behaviour, left a parent idle forever with finished
-            # children: "session wedged waiting on its subagents", reproduced
-            # with two children settling during the parent's own tool call).
-            # What changes here is WHO waits for that end: only the model.
+            # PENDING for the MODEL, DURABLE for the HUMAN. The next safe
+            # aside/tool or yield boundary offers the model this canonical row;
+            # the turn-end batch is only the fallback when no boundary can take
+            # it. Dropping the pending entry would revive the pre-deferral
+            # behaviour that left a parent idle forever with finished children
+            # ("session wedged waiting on its subagents", reproduced with two
+            # children settling during the parent's own tool call).
             #
             # WHY (2026-09-26 incident). One real turn ran 23.5 h (opened
             # 09-25 09:29, ended 09-26 09:06:51). Every completion inside that
@@ -20347,13 +20350,13 @@ class Session:
             # bunched at the end of the conversation; the notices are supposed
             # to appear as the jobs complete.
             #
-            # The batch re-sends THIS message object rather than minting a
-            # twin (see ``_deferred_job_results``), and every write path dedups
-            # by message id, so the early row and the model's batch are one
+            # Both the safe-boundary carrier and the fallback re-send THIS
+            # message object rather than minting a twin, and every write path
+            # dedups by message id, so the early row and model delivery are one
             # row. Deliberately NOT parked in ``_pending_context_journal``:
-            # the batch hands the message to the loop as an INITIAL, and the
-            # loop extends the live context with initials -- parking it here
-            # too would put the same row into the context twice.
+            # aside injection commits into the live context itself, while the
+            # fallback hands the message to the loop as an INITIAL -- parking
+            # it here too would put the same row into the context twice.
             #
             # Best-effort: a failed early write must not fail the settle path
             # or the deferral, which is still the delivery of record.
@@ -20842,12 +20845,14 @@ class Session:
         )
 
     async def _deliver_deferred_job_results(self) -> None:
-        """Hand over job results that settled while a turn was streaming.
+        """Hand over job results no safe boundary committed.
 
         Called from the turn pipeline's ``finally`` AFTER ``_is_streaming`` is
-        cleared, so it runs exactly when ``_on_job_completed`` would have
-        accepted the delivery in the first place. Everything deferred during
-        the turn goes out as ONE ``_prompt_messages`` turn (see
+        cleared. Ordinary boundaries acknowledge and remove their entries on
+        the loop's ``on_commit`` hook, so everything still pending here is a
+        genuine leftover: it arrived after the last boundary, lost a race with
+        abort/budget exhaustion, or the turn had no eligible boundary. The
+        leftovers go out as ONE ``_prompt_messages`` turn (see
         ``_deliver_job_results``), in settle order -- unless the runtime has
         committed to leaving, in which case the batch is HELD durably and opens
         no turn at all (the no-turn arm in ``_deliver_job_results``).
@@ -20888,6 +20893,11 @@ class Session:
         results: list[tuple[str, str, Any]] = []
         messages: list[CustomMessage] = []
         for job_id, (job, text, message) in pending:
+            # The fallback now owns the canonical object. Hooks from an
+            # uncommitted aside attempt must not acknowledge a later delivery
+            # turn (whose INITIAL never passes through the aside commit path).
+            message.on_commit = None
+            message.on_discard = None
             try:
                 if getattr(job, "consumed", False):
                     continue
@@ -21036,12 +21046,18 @@ class Session:
         return self._steering_queue.qsize() > self._courtesy_wake_count
 
     async def _drain_asides(self) -> list[Aside]:
-        """Materialize and durably publish live asides before loop injection.
+        """Materialize durable asides and pending job results for safe injection.
 
         Historically the synchronous thunk scheduled a fire-and-forget append.
         Offloading that write made a child act on context missing from its
         durable transcript. This async boundary now acknowledges the batch
         first; the loop still owns commit/discard hooks and ordered injection.
+
+        A settled job's transcript row is durable, NOT model-acknowledged. Offer
+        that same object here so the next eligible request sees it before a
+        stale final. Its pending entry remains until ``on_commit``: a discarded
+        or aborted carrier therefore leaves the finally fallback responsible
+        for the result, while ``wait`` can still win consumption at any point.
         """
         thunks = self._aside_thunks
         self._aside_thunks = []
@@ -21051,6 +21067,89 @@ class Session:
         await self._transcript.append_messages(
             [message for message in messages if not self._transcript.has_entry(message.id)]
         )
+
+        # Materialize AFTER the awaited writes above: a wait that returned while
+        # durability was in flight has now marked the retained job consumed and
+        # must suppress this carrier. Departure/abort likewise wins over
+        # opening another continuation; finally will hold the pending row.
+        for job_id, (job, _text, message) in list(self._deferred_job_results.items()):
+            if self._leaving_deliveries or self._abort_requested:
+                break
+            current = self._deferred_job_results.get(job_id)
+            if current is None or current[0] is not job or current[2] is not message:
+                continue
+            if getattr(job, "consumed", False):
+                self._deferred_job_results.pop(job_id, None)
+                continue
+            if any(existing.id == message.id for existing in self._context.messages):
+                # A rebuilt context or an already-admitted INITIAL already owns
+                # this exact row. Re-adding it would duplicate one canonical
+                # event; its presence in live context is the commit we needed.
+                job.consumed = True
+                self._deferred_job_results.pop(job_id, None)
+                continue
+
+            def commit(
+                job_id: str = job_id,
+                job: Any = job,
+                message: CustomMessage = message,
+            ) -> None:
+                if self._leaving_deliveries or self._abort_requested:
+                    # Departure/abort can win AFTER materialization but before
+                    # the loop's synchronous append+commit. The append is not
+                    # delivery in that state: remove this carrier and leave the
+                    # pending entry for the same finally/durable hold as any
+                    # other pre-commit discard.
+                    if self._context.messages and self._context.messages[-1] is message:
+                        self._context.messages.pop()
+                    if message.on_commit is commit:
+                        message.on_commit = None
+                    if message.on_discard is discard:
+                        message.on_discard = None
+                    return
+                current = self._deferred_job_results.get(job_id)
+                owned = current is not None and current[0] is job and current[2] is message
+                consumed_elsewhere = getattr(job, "consumed", False)
+                if owned:
+                    self._deferred_job_results.pop(job_id, None)
+                    if not consumed_elsewhere:
+                        job.consumed = True
+                if not owned or consumed_elsewhere:
+                    # The loop appends before firing on_commit. If wait (or an
+                    # already-committed identical carrier) won during an awaited
+                    # boundary, remove THIS just-appended object before the next
+                    # provider request instead of acknowledging a duplicate.
+                    if self._context.messages and self._context.messages[-1] is message:
+                        self._context.messages.pop()
+                if message.on_commit is commit:
+                    message.on_commit = None
+                if message.on_discard is discard:
+                    message.on_discard = None
+
+            def discard(
+                job_id: str = job_id,
+                job: Any = job,
+                message: CustomMessage = message,
+            ) -> None:
+                # Do NOT consume: budget exhaustion, staleness and abort all
+                # arrive here before context commit. Keeping the entry is the
+                # requeue; the existing finally/hold path retains ownership.
+                current = self._deferred_job_results.get(job_id)
+                if (
+                    current is not None
+                    and current[0] is job
+                    and current[2] is message
+                    and getattr(job, "consumed", False)
+                ):
+                    self._deferred_job_results.pop(job_id, None)
+                if message.on_commit is commit:
+                    message.on_commit = None
+                if message.on_discard is discard:
+                    message.on_discard = None
+
+            message.on_commit = commit
+            message.on_discard = discard
+            messages.append(message)
         return list(messages)
 
     def queue_aside(self, thunk: Callable[[], AsideResult]) -> None:
