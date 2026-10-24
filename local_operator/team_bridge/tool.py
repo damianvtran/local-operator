@@ -68,7 +68,13 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
-from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    Content,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
@@ -432,10 +438,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         except Exception as failure:
             return _error(f"the send did not confirm: {failure}", code="send_unconfirmed")
         message = (result or {}).get("message") or {}
-        # Compatibility: "sent" confirms server acceptance into the pair inbox,
-        # NOT conversation history or recipient agent execution. Even a later
-        # server read ACK precedes the recipient's local wake handoff.
-        return {"ok": True, "message_id": str(message.get("id") or ""), "state": "sent"}
+        # Keep the legacy fields/wire semantics, but make their limited meaning
+        # machine-readable in the actual result (including an idempotent reply).
+        # Acceptance is only into the peer inbox, never conversation history or
+        # proof of execution: even a read ACK precedes the local wake handoff.
+        # These are result-only constants, not request/body fields or a new
+        # outbox schema. Errors above must never acquire this success receipt.
+        return {
+            "ok": True,
+            "message_id": str(message.get("id") or ""),
+            "state": "sent",
+            "destination_type": "peer_inbox",
+            "receipt_stage": "server_accepted",
+            "conversation_history": False,
+            "execution_confirmed": False,
+        }
 
     if params.op == "channels":
         if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
@@ -596,7 +613,14 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
     ) -> ToolResult:
         outcome = await execute_bridge(runtime, args)
         if outcome.get("ok"):
-            if outcome.get("content") is not None:
+            peer_receipt = args.get("op") in ("send", "reply")
+            if peer_receipt:
+                # Providers receive TextContent, not necessarily details. Keep
+                # the same receipt in both so "sent" cannot hide the inbox-only
+                # acceptance boundary from a model. The executor's receipt is
+                # closed metadata; never serialize the request or server body.
+                content = json.dumps(outcome, ensure_ascii=False)
+            elif outcome.get("content") is not None:
                 # Read-shaped channel results carry their own model-facing
                 # rendering (JSON page, or the untrusted-wrapped history).
                 content = str(outcome["content"])
@@ -620,12 +644,20 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                     note = str(getter() or "")
                 except Exception:  # noqa: BLE001 — advice only, never a failure
                     note = ""
+            blocks: list[Content] = [TextContent(text=content)]
             if note:
-                content = f"{content}\n\n[bridge guidance — advisory]\n{note}"
+                if peer_receipt:
+                    # Preserve existing advice without appending prose to the
+                    # receipt's JSON block, which must parse on its own.
+                    blocks.append(TextContent(text=f"[bridge guidance — advisory]\n{note}"))
+                else:
+                    blocks = [
+                        TextContent(text=f"{content}\n\n[bridge guidance — advisory]\n{note}")
+                    ]
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="bridge",
-                content=[TextContent(text=content)],
+                content=blocks,
                 details=outcome,
             )
         return ToolResult(
