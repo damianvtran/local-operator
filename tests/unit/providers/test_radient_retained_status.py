@@ -60,7 +60,9 @@ def test_real_cli_status_prints_retention_and_recovery_without_writes(
     output = capsys.readouterr().out
     assert f"stored row {retained_id}" in output
     assert "Account could not be verified" in output
-    assert "To restore a retained record, sign in again to that account." in output
+    # The CLI is the host whose reader can act on a shell command (D5); the
+    # neutral default belongs to the shared formatter, asserted above.
+    assert "To restore a retained record, run: local-operator login radient" in output
     assert _stored(store, retained_id).disabled_cause == "identity_unattributed"
 
 

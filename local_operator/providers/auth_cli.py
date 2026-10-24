@@ -800,7 +800,12 @@ def format_retained_radient_logins(
     ]
 
 
-def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> list[str]:
+def format_logins(
+    auth_store: "AuthStore",
+    config_dir: "Path | None" = None,
+    *,
+    action: str | None = None,
+) -> list[str]:
     """Active credentials and separate retained-state notices, plus key names.
 
     Returned rather than printed so the CLI (``list_logins``, stdout) and the
@@ -809,12 +814,21 @@ def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> 
     full-screen app, and a second copy of the listing is how two surfaces come
     to disagree about who is signed in. Secrets never appear: identities and
     env-var NAMES only.
+
+    ``action`` is the HOST's own recovery gesture, passed straight to the
+    retained block (design round 2, D5). ``list_logins`` supplies the terminal
+    command because its reader is in a shell; the TUI and the desktop pass
+    nothing and get the neutral restore sentence. Defaulting to neutral here is
+    deliberate: a slash command printed to a desktop user is not an instruction
+    they can follow, and the shared formatter cannot know which host called it.
     """
     from local_operator.providers.auth_store import credential_identity
 
     lines: list[str] = []
     rows = auth_store.list_credentials()
-    retained = format_retained_radient_logins(auth_store.retained_radient_login_ids())
+    retained = format_retained_radient_logins(
+        auth_store.retained_radient_login_ids(), action=action
+    )
     if rows:
         lines.append("Stored credentials:")
         now_ms = int(time.time() * 1000)
@@ -860,7 +874,17 @@ def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> 
 
 
 def list_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> int:
-    """Print the status listing (:func:`format_logins`), one line per row."""
-    for line in format_logins(auth_store, config_dir):
+    """Print the status listing (:func:`format_logins`), one line per row.
+
+    This host's reader is at a terminal, so it names the command that restores a
+    retained record; the shared formatter stays neutral for the TUI and desktop
+    (design round 2, D5). Dropping it here is what made ``login-status`` lose
+    its only actionable line.
+    """
+    for line in format_logins(
+        auth_store,
+        config_dir,
+        action="To restore a retained record, run: local-operator login radient",
+    ):
         print(line)
     return 0
