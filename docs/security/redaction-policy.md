@@ -133,12 +133,15 @@ is **not** a redaction toggle:
   audit-record requirements below apply identically in both.
 * The UI roots are keyed to **checkout identity, not path shape**: a
   `src/i18n/...` path is served only when the workspace root is the checkout
-  root and the checkout's `origin` remote names `damianvtran/local-operator-ui`
-  (`git remote get-url origin`). Any repository can contain a `src/i18n/` tree
-  — a contributor's project, or one the agent creates in a single command — so
-  a matching spelling alone must not lift redaction. A checkout with no origin,
-  a lookalike repository, or a non-UI origin is refused with a sentence naming
-  the expected identity.
+  root and the **last two path components** of `git remote get-url origin`,
+  compared case-insensitively, are `damianvtran/local-operator-ui`. The host is
+  not compared, so an SSH alias or mirror URL with that repository path
+  qualifies; a different `owner/repo` does not. Any repository can contain a
+  `src/i18n/` tree — a contributor's project, or one the agent creates in a
+  single command — so a matching spelling alone must not lift redaction. A
+  checkout with no origin, a different `owner/repo`, or an unusable origin is
+  refused with a sentence naming the expected identity (never the raw URL,
+  which can embed a credential).
 * It serves **the committed blob only**: the file must be tracked and its
   working tree clean against `HEAD` (`git ls-files --error-unmatch` plus
   `git diff --quiet HEAD --`). A working-tree difference or an untracked file is
@@ -158,12 +161,15 @@ is **not** a redaction toggle:
 * Every successful read appends a JSON line to
   `<config dir>/audit/public-copy-reads.jsonl` **before** the content is
   returned: timestamp, session, path, key, character count, SHA-256 and this
-  document. If the record cannot be written, the read is refused. The log is
-  opened without following links (`O_NOFOLLOW`, relative to a directory opened
-  the same way), must be a regular file, lives in a `0700` directory and is
+  document. If the record cannot be written, the read is refused. On POSIX the
+  log is opened without following links (`O_NOFOLLOW`, relative to a directory
+  opened the same way, and `O_NONBLOCK` so a FIFO fails the open instead of
+  blocking it), must be a regular file, lives in a `0700` directory and is
   kept at mode `0600`; a symlinked log or audit directory refuses the read, and
   an existing permissive file is tightened on the pinned descriptor or the
-  read is refused.
+  read is refused. Windows has none of those flags: it refuses the two link
+  cases by `lstat`, checks that the opened handle is a regular file, and relies
+  on ACLs rather than mode bits.
 * Nothing else is exempt. `bash`, `read`, `grep` and every other tool still go
   through the normal redaction pass; a genuine secret read with any of them is
   masked exactly as before.
