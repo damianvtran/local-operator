@@ -111,13 +111,19 @@ async def test_in_workspace_symlink_is_allowed(edit_case):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("workspace", [None, "", " ", "relative", "missing", "file"])
-async def test_unavailable_workspace_fails_closed(edit_case, workspace):
+async def test_unavailable_workspace_fails_closed(edit_case, workspace, monkeypatch):
     case = edit_case
     if workspace == "missing":
         workspace = str(case.workspace / "missing")
     elif workspace == "file":
         workspace = str(case.target)
-    # Include an absent setting without relying on model coercion/defaults.
+    # These deliberately malformed in-memory values bypass model defaults. The
+    # shared registry fixture refreshes from disk after one second; without this
+    # test-local freeze a slow request can reload the valid workspace saved by
+    # edit_case and test a different input (200 instead of the intended 403).
+    # Keep the real HTTP route and workspace guard; only unrelated disk refresh
+    # is disabled while asserting each invalid workspace.
+    monkeypatch.setattr(case.registry, "_refresh_if_needed", lambda: None)
     case.registry._agents[case.agent.id].current_working_directory = workspace
     response = await _post(case, case.target)
     assert response.status_code == 403
