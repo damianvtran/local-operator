@@ -1760,9 +1760,28 @@ class _Sweeper:
         #: The loop has nothing to return any more, so the count lives here
         #: for tests and for `--once`.
         self.started = 0
+        self._failure: BaseException | None = None
+
+    def _record_failure(self, failure: BaseException) -> None:
+        if self._failure is None:
+            self._failure = failure
+        elif self._failure is not failure:
+            self._failure = BaseExceptionGroup("spool bookkeeping failures", [self._failure, failure])
+
+    def raise_if_failed(self) -> None:
+        """Failure is separate from running ownership and forbids new dispatch."""
+        if self._failure is not None:
+            raise self._failure
+
+    def _observe(self, task: asyncio.Task[bool]) -> None:
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None and failure is not self._failure:
+                self._record_failure(failure)
 
     def engage(self, config_dir: Path, session_id: str, cwd: str, due_ms: int, moment: int) -> bool:
         """Start one engagement in the background. False when already running."""
+        self.raise_if_failed()
         key = (session_id, due_ms)
         if key in self._in_flight:
             return False
@@ -1836,6 +1855,7 @@ class _Sweeper:
                 # Popped in the task itself rather than in a done-callback so
                 # the key is gone the moment the work is, with no window where
                 # a finished engagement still blocks its own retry.
+                pending_error = sys.exception()
                 try:
                     # Persist backoff before releasing retry ownership, even on
                     # cancellation. Failed bookkeeping latches this engagement
@@ -1843,15 +1863,22 @@ class _Sweeper:
                     for reason in outcomes:
                         await await_spool_write(_note_spooled_attempt, config_dir,
                                                 session_id, reason=reason)
-                except Exception:
-                    raise
-                else:
+                except BaseException as persistence_error:
+                    # sys.exception here is the caught persistence error; the
+                    # pending body/cancellation is captured before the await.
+                    failure = (BaseExceptionGroup("engagement and backoff failed",
+                               [pending_error, persistence_error])
+                               if pending_error is not None else persistence_error)
+                    self._record_failure(failure)
+                    raise failure
+                finally:
                     self._in_flight.pop(key, None)
             if started:
                 self.started += 1
             return started
 
         self._in_flight[key] = asyncio.create_task(_run())
+        self._in_flight[key].add_done_callback(self._observe)
         return True
 
     @property
@@ -1864,7 +1891,11 @@ class _Sweeper:
     async def drain(self) -> int:
         """Await every in-flight engagement. For ``--once`` and for shutdown."""
         while self._in_flight:
-            await asyncio.gather(*list(self._in_flight.values()), return_exceptions=True)
+            if self._failure is not None:
+                await self.shutdown()
+                break
+            await asyncio.wait(list(self._in_flight.values()), return_when=asyncio.FIRST_COMPLETED)
+        self.raise_if_failed()
         return self.started
 
     async def shutdown(self) -> None:
@@ -1895,6 +1926,7 @@ class _Sweeper:
         triggers: Mapping[str, dict[str, Any]] | None = None,
     ) -> int:
         """Start an engagement for every due session. Returns how many started."""
+        self.raise_if_failed()
         launched = 0
         for session_id, cwd, due_ms in _due_sessions(
             index,
@@ -2032,15 +2064,18 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
         _load_and_reconcile_state, config_dir
     )
     sweeper = _Sweeper()
-    sweeper.sweep(
-        config_dir,
-        index,
-        moment,
-        deliveries=deliveries,
-        spooled=spooled,
-        triggers=pending_triggers,
-    )
-    return await sweeper.drain()
+    try:
+        sweeper.sweep(
+            config_dir,
+            index,
+            moment,
+            deliveries=deliveries,
+            spooled=spooled,
+            triggers=pending_triggers,
+        )
+        return await sweeper.drain()
+    finally:
+        await sweeper.shutdown()
 
 
 def _has_fireable_wakes(
@@ -2355,8 +2390,10 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     residency = _ResidencySweep(config_dir)
     memory_sweep = _MachineMemorySweep(config_dir)
     rescue_seat = _RescueSweep(config_dir)
+    primary_error: BaseException | None = None
     try:
         while True:
+            sweeper.raise_if_failed()
             if once:
                 await triggers_seat.run_once()
             else:
@@ -2381,12 +2418,13 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                     logger.info(
                         "nothing fireable in this store (%s)", _retirement_reason(config_dir)
                     )
+                    sweeper.raise_if_failed()
                     return 0
                 # In-flight work outlives a momentarily-empty index: retiring
                 # under a running engagement would kill the runtime it is
                 # constructing. Slice instead and re-decide next pass.
                 if sweeper.in_flight or rescue_seat.in_flight:
-                    await _sleep_in_slices(config_dir, SLICE_S, None)
+                    await _sleep_in_slices(config_dir, SLICE_S, None, failure_check=sweeper.raise_if_failed)
                     continue
                 if await _should_retire(config_dir):
                     # LOGGED WITH THE REASON, because this is the transition
@@ -2405,6 +2443,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                         SLICE_S,
                         _retirement_reason(config_dir),
                     )
+                    sweeper.raise_if_failed()
                     return 0
                 logger.info("a wake was armed during the retirement grace; staying up")
                 continue
@@ -2419,6 +2458,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             )
             if once:
                 await sweeper.drain()
+                sweeper.raise_if_failed()
                 return 0
 
             # Recomputed from the index AFTER the sweep started, so a schedule
@@ -2503,21 +2543,27 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 ),
             )
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)
-            await _sleep_in_slices(config_dir, delay, upcoming)
+            await _sleep_in_slices(config_dir, delay, upcoming, failure_check=sweeper.raise_if_failed)
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        # A cancelled or retiring supervisor must not leave engage tasks
-        # pending: they hold a semaphore slot and an event loop reference, and
-        # an un-awaited task destroyed at loop close logs a spurious error. The
-        # residency, machine-memory and trigger passes are the same shape of
-        # background work and are dropped the same way.
-        await residency.shutdown()
-        await memory_sweep.shutdown()
-        await rescue_seat.shutdown()
-        await triggers_seat.shutdown()
-        await sweeper.shutdown()
+        cleanup_errors: list[BaseException] = []
+        # Every seat is joined even when a sibling cleanup fails. Keep both the
+        # actual primary and cleanup errors; never convert fail-stop to success.
+        for seat in (residency, memory_sweep, rescue_seat, triggers_seat, sweeper):
+            try:
+                await seat.shutdown()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        if cleanup_errors:
+            if primary_error is not None:
+                cleanup_errors.insert(0, primary_error)
+            raise BaseExceptionGroup("supervisor cleanup failures", cleanup_errors)
 
 
-async def _sleep_in_slices(config_dir: Path, delay: float, upcoming: int | None) -> None:
+async def _sleep_in_slices(config_dir: Path, delay: float, upcoming: int | None, *,
+                           failure_check: Callable[[], None] | None = None) -> None:
     """Sleep up to ``delay`` seconds, returning early if the index changes.
 
     Re-reads the index once per :data:`SLICE_S` and returns as soon as a wake
@@ -2531,6 +2577,8 @@ async def _sleep_in_slices(config_dir: Path, delay: float, upcoming: int | None)
     remaining = delay
     while remaining > 0:
         await asyncio.sleep(min(SLICE_S, remaining))
+        if failure_check is not None:
+            failure_check()
         remaining -= SLICE_S
         if remaining <= 0:
             return

@@ -219,18 +219,34 @@ async def await_spool_write(function: Callable[P, T], *args: P.args, **kwargs: P
     Repeated cancellation is remembered, never allowed to orphan a submitted write.
     """
     task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    cancelled = False
+    cancellation: asyncio.CancelledError | None = None
+    failure: BaseException | None = None
     while True:
         try:
-            result = await asyncio.shield(task)
+            await asyncio.wait((task,))
+            result = task.result()
             break
-        except asyncio.CancelledError:
-            cancelled = True
-            if task.done():
-                result = task.result()
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                failure = exc
                 break
-    if cancelled:
-        raise asyncio.CancelledError
+            if cancellation is None:
+                cancellation = exc
+            if task.done():
+                try:
+                    result = task.result()
+                except BaseException as joined_error:
+                    failure = joined_error
+                break
+        except BaseException as exc:
+            failure = exc
+            break
+    if failure is not None:
+        if cancellation is not None:
+            raise BaseExceptionGroup("cancelled spool write also failed", [cancellation, failure])
+        raise failure
+    if cancellation is not None:
+        raise cancellation
     return result
 
 

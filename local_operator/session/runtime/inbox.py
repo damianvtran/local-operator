@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.procstate import O_BINARY
+from local_operator.wakes.lock import WakeWriteLock, WakeLockBusy, WakeLockUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +405,48 @@ class _NonBlockingLock:
             pass
 
 
+def _journal_lock(session_dir: Path) -> WakeWriteLock:
+    # Unlike the opportunistic inode flock, this persistent mutex serializes
+    # EVERY cooperating append/recall/drain/purge, including rollback on Windows.
+    # Updated writers must activate together; older unlocked binaries are outside
+    # this contract. No inode replacement or unknown-file repair is attempted.
+    return WakeWriteLock(session_dir, name=".inbox-write.lock")
+
+
+def _append_payload(fd: int, payload: bytes) -> None:
+    """Roll back only this serialized writer's tail; refuse an existing torn tail.
+
+    A failed rollback leaves a non-newline tail, which the NEXT append refuses.
+    Full-row fsync failure is uncertain delivery, not exactly-once success.
+    """
+    end = os.lseek(fd, 0, os.SEEK_END)
+    if end:
+        os.lseek(fd, -1, os.SEEK_END)
+        if os.read(fd, 1) != b"\n":
+            raise OSError("inbox has an incomplete tail")
+    try:
+        count = os.write(fd, payload)
+        if count != len(payload):
+            raise OSError("short inbox append")
+        os.fsync(fd)
+    except OSError:
+        # All mutations share _journal_lock. Never roll back after unlocking or
+        # truncate another cooperating writer's acknowledged bytes.
+        os.ftruncate(fd, end)
+        os.fsync(fd)
+        raise
+
+
 def append_inbox(session_dir: Path, line: InboxLine) -> bool:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with _journal_lock(session_dir):
+            return _append_inbox_locked(session_dir, line)
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return False
+
+
+def _append_inbox_locked(session_dir: Path, line: InboxLine) -> bool:
     """Spool one message for a session that is not running. True if written.
 
     ``O_APPEND`` so concurrent writers interleave whole lines rather than
@@ -415,7 +457,7 @@ def append_inbox(session_dir: Path, line: InboxLine) -> bool:
     path = inbox_path(session_dir)
     payload = json.dumps(line.to_json(), separators=(",", ":")).encode() + b"\n"
     try:
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | O_BINARY, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND | O_BINARY, 0o600)
     except OSError:
         logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
         return False
@@ -431,10 +473,7 @@ def append_inbox(session_dir: Path, line: InboxLine) -> bool:
                     MAX_INBOX_ROWS,
                 )
                 return False
-            written_bytes = os.write(fd, payload)
-            if written_bytes != len(payload):
-                raise OSError("short inbox append; delivery uncertain")
-            os.fsync(fd)
+            _append_payload(fd, payload)
         return True
     except OSError:
         logger.warning("inbox append failed for %s", session_dir.name, exc_info=True)
@@ -677,6 +716,16 @@ def _holds_owner_row(raw: bytes, command_id: str) -> bool:
 
 
 def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
+    if not session_dir.is_dir():
+        return False
+    try:
+        with _journal_lock(session_dir):
+            return _withdraw_inbox_locked(session_dir, command_id)
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return False
+
+
+def _withdraw_inbox_locked(session_dir: Path, command_id: str) -> bool:
     """Record that the owner took a spooled message back. True if recorded.
 
     APPEND-ONLY, and that is a measured decision rather than a style one. The
@@ -758,10 +807,7 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
                 return False
             marker = InboxLine(text="", sender={}, source=SOURCE_RECALL, command_id=command_id)
             payload = json.dumps(marker.to_json(), separators=(",", ":")).encode() + b"\n"
-            written_bytes = os.write(fd, payload)
-            if written_bytes != len(payload):
-                raise OSError("short inbox append; delivery uncertain")
-            os.fsync(fd)
+            _append_payload(fd, payload)
             if not _holds_owner_row(_read_all(fd), command_id):
                 logger.info(
                     "inbox recall for %s lost the race with a drain; the message will run",
@@ -777,6 +823,16 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
 
 
 def remove_wake_rows(session_dir: Path, wake_id: str) -> int:
+    if not session_dir.is_dir():
+        return 0
+    try:
+        with _journal_lock(session_dir):
+            return _remove_wake_rows_locked(session_dir, wake_id)
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return 0
+
+
+def _remove_wake_rows_locked(session_dir: Path, wake_id: str) -> int:
     """Drop every pending spooled fire of ONE wake. Returns how many went.
 
     **The defect half this closes.** Spooled rows outlive the schedule that wrote
@@ -922,6 +978,16 @@ def _replace_remainder(path: Path, consumed: bytes) -> None:
 
 
 def drain_inbox(session_dir: Path) -> list[InboxLine]:
+    if not session_dir.is_dir():
+        return []
+    try:
+        with _journal_lock(session_dir):
+            return _drain_inbox_locked(session_dir)
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return []
+
+
+def _drain_inbox_locked(session_dir: Path) -> list[InboxLine]:
     """Consume every spooled message, in write order. Called once, at open.
 
     Read and removal happen under one non-blocking lock so a concurrent

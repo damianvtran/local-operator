@@ -4422,6 +4422,8 @@ async def _drain_inbox_into(handle: object) -> int:
     Best-effort per message: one malformed or rejected row must not stop the
     rest, and none of it may prevent the runtime from starting.
     """
+    from local_operator.wakes.spooled import await_spool_write
+
     session = getattr(handle, "_session", None)
     directory = getattr(getattr(session, "transcript", None), "directory", None)
     if directory is None:
@@ -4468,7 +4470,7 @@ async def _drain_inbox_into(handle: object) -> int:
 
     requires_engagement = not durable_conversation_path(directory / TRANSCRIPT_FILENAME)
     try:
-        lines = await asyncio.to_thread(drain_inbox, directory)
+        lines = await await_spool_write(drain_inbox, directory)
     except Exception:  # noqa: BLE001 — a bad spool must not block the runtime
         logger.warning("inbox drain failed", exc_info=True)
         return 0
@@ -4487,6 +4489,8 @@ async def _drain_inbox_into(handle: object) -> int:
     # delivered normally), matching the rule that unknown is not permission to
     # change behaviour. Read BEFORE the deferral split so the deferral writes
     # back only what it will not deliver.
+    from local_operator.wakes.spooled import await_spool_write
+
     consumed = _resume_consumed_ids(directory)
     if consumed:
         lines = [line for line in lines if (getattr(line, "message_id", "") or "") not in consumed]
@@ -4496,7 +4500,7 @@ async def _drain_inbox_into(handle: object) -> int:
         for line in keep:
             # Best-effort and order-preserving among themselves; a row that cannot
             # be re-spooled is logged rather than lost silently.
-            if not append_inbox(directory, line):
+            if not await await_spool_write(append_inbox, directory, line):
                 logger.warning(
                     "could not re-spool a deferred inbox row for %s", directory.name, exc_info=True
                 )
@@ -4514,7 +4518,7 @@ async def _drain_inbox_into(handle: object) -> int:
             # turn. The rows stay in the spool (touch nothing else here) and that
             # turn still drains them, which is the deferral the sender's receipt
             # describes.
-            drop_owed_turn(directory)
+            await await_spool_write(drop_owed_turn, directory)
             return 0
     probed = getattr(handle, "receive_peer_message", None)
     if not lines:
@@ -4612,7 +4616,7 @@ async def _drain_inbox_into(handle: object) -> int:
             # written by an older build have no id and still deliver at-least-once,
             # which remains the deliberate direction (a duplicated note is visible
             # and harmless, a dropped one is neither).
-            if not append_inbox(directory, line):
+            if not await await_spool_write(append_inbox, directory, line):
                 logger.error(
                     "could not re-spool an undelivered inbox row (command_id=%s); it is lost",
                     getattr(line, "command_id", "") or "<none>",

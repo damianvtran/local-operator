@@ -9894,15 +9894,25 @@ class Session:
         reason its sibling in ``process`` does: the body returns early on several
         paths, and every one of them is a state the settle has to be asked about.
         """
+        body_error: BaseException | None = None
         try:
             await self._drain_spooled_peer_inbox_rows()
-        finally:
+        except BaseException as exc:
+            body_error = exc
+        try:
             directory = getattr(self._transcript, "directory", None)
             if directory is not None:
                 from local_operator.wakes.spooled import await_spool_write
                 from local_operator.session.runtime.inbox import settle_owed_turn
 
                 await await_spool_write(settle_owed_turn, directory)
+        except BaseException as settlement_error:
+            if body_error is not None:
+                raise BaseExceptionGroup("inbox delivery and settlement failed",
+                                         [body_error, settlement_error])
+            raise
+        if body_error is not None:
+            raise body_error
 
     async def _drain_spooled_peer_inbox_rows(self) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
@@ -9930,6 +9940,7 @@ class Session:
         # Imported in-function: the runtime inbox lives behind the mobile
         # package's config-path machinery, and this module does not carry a
         # module-level dependency on it for a once-per-session path.
+        from local_operator.wakes.spooled import await_spool_write
         from local_operator.session.runtime.inbox import (
             SOURCE_USER,
             coalesce_wake_rows,
@@ -9940,7 +9951,7 @@ class Session:
         if directory is None:
             return
         try:
-            lines = await asyncio.to_thread(drain_inbox, directory)
+            lines = await await_spool_write(drain_inbox, directory)
         except Exception:  # noqa: BLE001 — a bad spool must not fail the turn
             logger.warning("peer inbox drain failed", exc_info=True)
             return
