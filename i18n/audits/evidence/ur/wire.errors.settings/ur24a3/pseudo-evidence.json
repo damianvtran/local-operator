@@ -1,0 +1,7 @@
+{
+  "method": "Audit-local in-memory 40% Arabic-script stretch with U+0640; no source writes. Synthetic parser evidence only, not rendered/native RTL evidence.",
+  "keys_checked": 19,
+  "argument_parity_errors": [],
+  "plural_render_samples": [],
+  "plural_render_errors": []
+}

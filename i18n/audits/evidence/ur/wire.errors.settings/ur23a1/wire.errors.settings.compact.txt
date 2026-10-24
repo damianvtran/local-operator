@@ -1,0 +1,12 @@
+wire.errors.settings.config_retrieve_failed | Error retrieving configuration: {error} | کنفیگریشن حاصل کرنے میں خرابی: {error}
+wire.errors.settings.config_unreadable | The configuration file cannot be read. Repair it before saving. | کنفیگریشن فائل پڑھی نہیں جا سکتی۔ محفوظ کرنے سے پہلے اسے درست کریں۔
+wire.errors.settings.config_update_failed | Error updating configuration: {error} | کنفیگریشن اپڈیٹ کرنے میں خرابی: {error}
+wire.errors.settings.credential_key_empty | Credential key cannot be empty | کریڈینشل key خالی نہیں ہو سکتی
+wire.errors.settings.credential_retrieve_failed | Error retrieving credentials: {error} | کریڈینشلز حاصل کرنے میں خرابی: {error}
+wire.errors.settings.credential_update_failed | Error updating credential: {error} | کریڈینشل اپڈیٹ کرنے میں خرابی: {error}
+wire.errors.settings.inline_credentials | Use an endpoint without inline credentials or query parameters. | ایسا [redacted] استعمال کریں جس میں inline credentials یا query parameters نہ ہوں۔
+wire.errors.settings.invalid_value | {error} | {error}
+wire.errors.settings.no_update_fields | No valid update fields provided | اپڈیٹ کے لیے کوئی درست field نہیں دی گئی
+wire.errors.settings.not_registered | This setting is not registered. | یہ ترتیب رجسٹر نہیں ہے۔
+wire.errors.settings.system_prompt_retrieve_failed | Error retrieving system prompt: {error} | سسٹم پرامپٹ حاصل کرنے میں خرابی: {error}
+wire.errors.settings.system_prompt_update_failed | Error updating system prompt: {error} | سسٹم پرامپٹ اپڈیٹ کرنے میں خرابی: {error}

@@ -1,0 +1,92 @@
+wire.slash.agent
+EN List agents, switch an agent's class, or speak to this session as one
+OLD ایجنٹس دیکھیں، class بدلیں، یا ایجنٹ بن کر بات کریں
+NEW ایجنٹس دیکھیں، کسی ایجنٹ کی قسم بدلیں، یا اس سیشن سے بطور ایجنٹ بات کریں
+wire.slash.approvals
+EN Show or set tool approval mode for this session
+OLD اس سیشن کے لیے ٹول منظوری کا mode دیکھیں یا مقرر کریں
+NEW اس سیشن کے لیے ٹول منظوری کا موڈ دیکھیں یا مقرر کریں
+wire.slash.copy
+EN Copy an agent message or code block
+OLD ایجنٹ کا پیغام یا code block نقل کریں
+NEW ایجنٹ کا پیغام یا کوڈ بلاک نقل کریں
+wire.slash.credential
+EN Type or paste a secret after a space; masked
+OLD space کے بعد secret لکھیں/paste کریں؛ حروف چھپے رہیں گے
+NEW اسپیس کے بعد خفیہ متن لکھیں/چسپاں کریں؛ متن چھپا رہے گا
+wire.slash.failovers
+EN Show the model failover cascade and what is serving
+OLD ماڈل failover کی ترتیب اور فعال ماڈل دکھائیں
+NEW ماڈل فیل اوور کی ترتیب اور فعال ماڈل دکھائیں
+wire.slash.fast
+EN Toggle faster output at premium pricing
+OLD زیادہ قیمت پر تیز output کو آن/آف کریں
+NEW زیادہ قیمت پر تیز آؤٹ پٹ چالو/بند کریں
+wire.slash.fork
+EN Branch this chat; --switch here, --window elsewhere; <message> starts work
+OLD شاخ؛ --switch یہیں، --window باہر؛ <message> آغاز کرے
+NEW اس گفتگو کی شاخ بنائیں؛ --switch یہیں، --window کہیں اور؛ <message> سے کام شروع کریں
+wire.slash.highlights
+EN Cancel, retry or steer the highlights under an answer
+OLD جواب کے نمایاں حصے منسوخ، دوبارہ آزمائیں یا رخ بدلیں
+NEW جواب کے نمایاں حصے منسوخ کریں، دوبارہ کوشش کریں یا رخ بدلیں
+wire.slash.hub
+EN Open Hub links — per-link subscribe and auto-push policy
+OLD Hub links کھولیں — فی link رکنیت اور auto-push پالیسی
+NEW Hub روابط کھولیں — فی ربط رکنیت اور خودکار push پالیسی
+wire.slash.links
+EN Open a link from this conversation in a browser
+OLD اس گفتگو کا link browser میں کھولیں
+NEW اس گفتگو کا ربط براؤزر میں کھولیں
+wire.slash.login
+EN Authenticate a provider
+OLD provider میں لاگ اِن کریں
+NEW پرووائیڈر میں لاگ اِن کریں
+wire.slash.logout
+EN Remove stored provider credentials
+OLD محفوظ provider کریڈینشلز ہٹائیں
+NEW محفوظ پرووائیڈر کریڈینشلز ہٹائیں
+wire.slash.loop
+EN Loop toward a goal: /loop <goal>, <n>; --stop cancels
+OLD ہدف تک loop: /loop <goal>, <n>؛ --stop سے منسوخ
+NEW ہدف تک لوپ: /loop <goal>, <n>؛ --stop سے منسوخ
+wire.slash.mcp
+EN List MCP servers; add/remove one, or manage an OAuth grant
+OLD MCP servers دیکھیں/add/remove؛ OAuth grant منظم کریں
+NEW MCP سرورز دیکھیں/شامل/ہٹائیں؛ OAuth اجازت منظم کریں
+wire.slash.move
+EN Change this session's working directory
+OLD اس سیشن کی working directory بدلیں
+NEW اس سیشن کی ورکنگ ڈائریکٹری بدلیں
+wire.slash.network
+EN Networks, peers, and this device's mesh state
+OLD نیٹ ورکس، peers اور اس ڈیوائس کی mesh حالت
+NEW نیٹ ورکس، پیئرز اور اس ڈیوائس کی میش حالت
+wire.slash.provider
+EN List providers and their login/usage state
+OLD providers اور ان کی لاگ اِن/استعمال کی حالت کی فہرست
+NEW پرووائیڈرز اور ان کے لاگ اِن/استعمال کی حالت کی فہرست
+wire.slash.reload
+EN Relaunch this conversation on the current install
+OLD موجودہ install سے یہ گفتگو دوبارہ چلائیں
+NEW موجودہ انسٹال پر یہ گفتگو دوبارہ چلائیں
+wire.slash.search
+EN Configure web search providers and load balancing
+OLD ویب تلاش کے providers اور load balancing ترتیب دیں
+NEW ویب تلاش کے پرووائیڈرز اور لوڈ بیلنسنگ ترتیب دیں
+wire.slash.team
+EN List teams, chart a team's org, or send a request to a team's manager
+OLD ٹیمیں اور تنظیمی خاکہ دیکھیں؛ manager کو درخواست بھیجیں
+NEW ٹیمیں اور تنظیمی خاکہ دیکھیں؛ مینیجر کو درخواست بھیجیں
+wire.slash.theme
+EN Switch color theme; arrows preview live
+OLD رنگی تھیم بدلیں؛ arrow keys سے براہِ راست پیش منظر
+NEW رنگی تھیم بدلیں؛ ایرو کیز سے براہِ راست پیش منظر
+wire.slash.update
+EN Install the latest version from PyPI and relaunch
+OLD PyPI سے تازہ ورژن install کر کے دوبارہ شروع کریں
+NEW PyPI سے تازہ ورژن انسٹال کر کے دوبارہ شروع کریں
+wire.slash.usage
+EN Show provider usage quota
+OLD provider کا usage quota دکھائیں
+NEW پرووائیڈر کا استعمالی کوٹہ دکھائیں

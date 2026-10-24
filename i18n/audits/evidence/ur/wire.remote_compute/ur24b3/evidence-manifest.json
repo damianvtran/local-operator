@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "UR-R3-AUDIT-001",
+  "receipt": "ur-core-round3-audit.receipt.json",
+  "report": "ur-core-round3-audit.md",
+  "delta": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a..5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "file_count": 15,
+  "files": [
+    {
+      "path": "dispositions.json",
+      "bytes": 5328,
+      "sha256": "8692a1b3515e0dcf6bea7f988ad367f6d7fa1f05404e05ea0d595bc2d2b14138"
+    },
+    {
+      "path": "hash-checks.json",
+      "bytes": 168,
+      "sha256": "9f194715865c8264801b20b5cb2b0aa4a09897e66cf0e74c656b6f770ff812bd"
+    },
+    {
+      "path": "repository-checks.log",
+      "bytes": 162,
+      "sha256": "865cfe07ad9111b79bdf7ec0098030946d6b2b5b8fb8519710e231e7aa2715da"
+    },
+    {
+      "path": "scope.json",
+      "bytes": 4253,
+      "sha256": "ea8d035e9fc3bfd68c0cb2652b5bdddca8e562c9835d376b545fa3ce0d751efd"
+    },
+    {
+      "path": "scripts/audit_ur_round3.py",
+      "bytes": 6316,
+      "sha256": "6a3832197167ffe3fb60e5901166b7a747412f6d07d8036b9f70c5ee9af61522"
+    },
+    {
+      "path": "scripts/build_ur_round3_receipt.py",
+      "bytes": 8355,
+      "sha256": "f49f3dfe82cbbd10cd3b025dee2618352da746aafc2908fed81a0d944f04b88a"
+    },
+    {
+      "path": "ur-core-round3-audit.md",
+      "bytes": 3193,
+      "sha256": "08b17ff705d6c846ab450516c435539e198b066837a2232d5af4b2c7c398ea2c"
+    },
+    {
+      "path": "ur-core-round3-audit.receipt.json",
+      "bytes": 8201,
+      "sha256": "6e9cbc0257f67beeea7d47830b678288b2b339bc266b11d4f4aa03b17da8b60e"
+    },
+    {
+      "path": "validation.json",
+      "bytes": 809,
+      "sha256": "e013935060fc64d0cc9380230bc1a1b5825083e972848bd519fbb6e4e0e3dc99"
+    },
+    {
+      "path": "verification-summary.json",
+      "bytes": 2318,
+      "sha256": "0496c59f1957524d5a16336c6cf526920c4d1a907c64ca39192647ac0498ee95"
+    },
+    {
+      "path": "verification.json",
+      "bytes": 16870,
+      "sha256": "f6c92f164c1b8897cd439a0148f493896bfac6c995e120d2cf5bb105f4f49694"
+    },
+    {
+      "path": "wire.errors.settings.pairs",
+      "bytes": 771,
+      "sha256": "a589e29c854590ca5269e94aef2345f2d2fd5fd5d99a224d392b6aa4af677c8a"
+    },
+    {
+      "path": "wire.remote_compute.pairs",
+      "bytes": 153,
+      "sha256": "d7a464760d4bf3f985c876be2c3aa5e33766f31229356d26307b4e14adc04a45"
+    },
+    {
+      "path": "wire.settings.pairs",
+      "bytes": 8806,
+      "sha256": "e74baae5ed125cd618706aa4cbf71fab0ff912dae6bd7b12e95f3bdaa7656bcd"
+    },
+    {
+      "path": "wire.slash.pairs",
+      "bytes": 295,
+      "sha256": "191460e33190a3ffb71c9fb6561eaa6b0593c75dee72a5e3f5c66551fa170a1b"
+    }
+  ]
+}

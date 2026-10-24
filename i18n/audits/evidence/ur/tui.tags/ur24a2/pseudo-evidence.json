@@ -1,0 +1,136 @@
+{
+  "method": "Audit-local in-memory 40% Arabic-script stretch with U+0640; no source writes. Synthetic parser/fit evidence only, not rendered/native RTL evidence.",
+  "keys_checked": 676,
+  "argument_parity_errors": [],
+  "plural_render_samples": [
+    {
+      "namespace": "relay.session.tags",
+      "key": "relay.session.tags.more",
+      "count": 0,
+      "text": "0 مزیدــ ٹیگزــ",
+      "error": null
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key": "relay.session.tags.more",
+      "count": 1,
+      "text": "1 مزیدــ ٹیگــ",
+      "error": null
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key": "relay.session.tags.more",
+      "count": 2,
+      "text": "2 مزیدــ ٹیگزــ",
+      "error": null
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key": "relay.session.tags.more",
+      "count": 21,
+      "text": "21 مزیدــ ٹیگزــ",
+      "error": null
+    }
+  ],
+  "plural_render_errors": [],
+  "width": [
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.receipt",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 55,
+      "fits": false
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 53,
+      "fits": false
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.receipt_moot",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 39,
+      "fits": true
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.open",
+      "mode": "static",
+      "maxCells": 12,
+      "cells": 14,
+      "fits": false
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.title",
+      "mode": "static",
+      "maxCells": 24,
+      "cells": 24,
+      "fits": true
+    },
+    {
+      "namespace": "tui.asks",
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "mode": "static",
+      "maxCells": 34,
+      "cells": 30,
+      "fits": true
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.hotkeys",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 49,
+      "fits": true
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.fork_placement",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 69,
+      "fits": false
+    }
+  ],
+  "static_or_reserved_over_budget": [
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.receipt",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 55,
+      "fits": false
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "mode": "static",
+      "maxCells": 44,
+      "cells": 53,
+      "fits": false
+    },
+    {
+      "namespace": "relay.ask",
+      "key": "relay.ask.dismiss.open",
+      "mode": "static",
+      "maxCells": 12,
+      "cells": 14,
+      "fits": false
+    },
+    {
+      "namespace": "tui.welcome",
+      "key": "tui.welcome.tip.fork_placement",
+      "mode": "static",
+      "maxCells": 57,
+      "cells": 69,
+      "fits": false
+    }
+  ]
+}

@@ -5,7 +5,7 @@
   "scope": "core namespace set carried by shipped ru at base revision; excludes desktop catalogues",
   "base_revision": "b8f47dd34745d9bfecafcdca884d79016c3004c5",
   "date": "2026-10-23",
-  "status": "round_2_remediation_complete_pending_independent_round_3_audits",
+  "status": "independent_round_3_audits_complete_native_rtl_and_client_gates_pending",
   "source_set": {
     "reference_locale": "ru",
     "namespace_count": 23,
@@ -737,5 +737,61 @@
       "Native rendered RTL/bidi/shaping, fallback, long-text/design and approximate /help fit remain separate gates.",
       "No ledger, shipped eligibility or hold changed; no row marked passed."
     ]
+  },
+  "audit_provenance": {
+    "assembly_revision": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+    "evidence_root": "i18n/audits/evidence/ur/<namespace>/<audit-id>/",
+    "current_byte_rounds": {
+      "round_1": [
+        "tui.authoring",
+        "tui.palette",
+        "tui.projects_edit",
+        "tui.schedule",
+        "tui.status",
+        "tui.team_authoring",
+        "tui.transcript",
+        "wire.errors",
+        "wire.incidents",
+        "wire.memory",
+        "wire.notices"
+      ],
+      "round_2": [
+        "cli.exec_remote_help",
+        "relay.ask",
+        "relay.session.tags",
+        "tui.asks",
+        "tui.review",
+        "tui.tags",
+        "tui.viewer",
+        "tui.welcome"
+      ],
+      "round_3": [
+        "wire.errors.settings",
+        "wire.remote_compute",
+        "wire.settings",
+        "wire.slash"
+      ]
+    },
+    "auditors": [
+      {
+        "session": "5ebbaba9537e",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "audit_ids": [
+          "ur23a1",
+          "ur24a2",
+          "ur24a3"
+        ]
+      },
+      {
+        "session": "3e0f499dc2ee",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "audit_ids": [
+          "ur23b1",
+          "ur24b2",
+          "ur24b3"
+        ]
+      }
+    ],
+    "native_rtl_or_release_eligibility_claimed": false
   }
 }

@@ -1,0 +1,234 @@
+{
+  "schema": 1,
+  "record_kind": "semantic_audit_summary",
+  "revision": "2189b61739e08b5f219d317ead68b4a5f4cf709f",
+  "round": 1,
+  "keys_read": 1355,
+  "namespace_count": 23,
+  "verdict": "failed",
+  "auditor_findings": 5,
+  "namespaces": [
+    {
+      "namespace": "cli.exec_remote_help",
+      "keys_read": 11,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "relay.ask",
+      "keys_read": 11,
+      "semantic_verdict": "failed",
+      "finding_ids": [
+        "UR-R1-001"
+      ],
+      "unresolved_blocker_major": 1,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "relay.session.tags",
+      "keys_read": 19,
+      "semantic_verdict": "clean_with_followups",
+      "finding_ids": [
+        "UR-R1-008"
+      ],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 1,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.asks",
+      "keys_read": 11,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.authoring",
+      "keys_read": 49,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.palette",
+      "keys_read": 7,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.projects_edit",
+      "keys_read": 35,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.review",
+      "keys_read": 73,
+      "semantic_verdict": "clean_with_followups",
+      "finding_ids": [
+        "UR-R1-009"
+      ],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 1,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.schedule",
+      "keys_read": 61,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.status",
+      "keys_read": 7,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.tags",
+      "keys_read": 27,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.team_authoring",
+      "keys_read": 36,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.transcript",
+      "keys_read": 17,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.viewer",
+      "keys_read": 19,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.welcome",
+      "keys_read": 30,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.errors",
+      "keys_read": 0,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.errors.settings",
+      "keys_read": 12,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.incidents",
+      "keys_read": 0,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.memory",
+      "keys_read": 17,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.notices",
+      "keys_read": 0,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "keys_read": 43,
+      "semantic_verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.settings",
+      "keys_read": 818,
+      "semantic_verdict": "failed",
+      "finding_ids": [
+        "UR-R1-002",
+        "UR-R1-003",
+        "UR-R1-004",
+        "UR-R1-007",
+        "UR-R1-010"
+      ],
+      "unresolved_blocker_major": 3,
+      "unresolved_minor": 2,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.slash",
+      "keys_read": 52,
+      "semantic_verdict": "failed",
+      "finding_ids": [
+        "UR-R1-005",
+        "UR-R1-006"
+      ],
+      "unresolved_blocker_major": 1,
+      "unresolved_minor": 1,
+      "unresolved_nit": 0
+    }
+  ]
+}
