@@ -134,7 +134,6 @@ from local_operator.tui.widgets.transcript import NOTICE_GLYPHS, wrap_cells
 #: RTL paragraph re-orders the command into gibberish (QA round 2, Q-6).
 _WELCOME_COMMANDS = (
     "/update",
-    "/login",
     "/approvals <ask|auto>",
     "/network new <name>",
     "/model <provider>/<id>",
@@ -149,10 +148,12 @@ _WELCOME_COMMANDS = (
 
 _t = display_tr(
     "tui.welcome",
-    # `provider` is a command argument (the `/login` row); `version` the update
-    # release. Both are technical values, not prose.
-    technical_params=("version", "provider"),
+    # `version` is the update release. The login remedy is a COMMAND TEMPLATE:
+    # `/login {provider}` must be one island, never two neighbours (RTL prose
+    # orders neighbouring LTR runs right-to-left, rendering `radient /login`).
+    technical_params=("version",),
     technical_literals=_WELCOME_COMMANDS,
+    technical_commands=("/login {provider}",),
 )
 #: Raw counterpart for rows that WRAP: an isolate must not straddle a fold,
 #: so the sentence is wrapped first and each final line is projected once.
