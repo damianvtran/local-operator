@@ -471,24 +471,42 @@ class FakeClient:
         FakeClient.behavior["last_conversation_id"] = conversation_id
         return self._answer("conversation")
 
-    async def create_conversation(self, body: Any, *, access: Any = None):
+    async def create_conversation(self, body: Any, *, access: Any = None, expected_account_id=None):
         FakeClient.behavior["last_create_body"] = dict(body)
         return self._answer("create_conversation")
 
     async def conversation_lifecycle(
-        self, conversation_id: str, action: str, *, access: Any = None
+        self,
+        conversation_id: str,
+        action: str,
+        *,
+        tenant_id=None,
+        access: Any = None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
         return self._answer("conversation_lifecycle")
 
     async def conversation_members(
-        self, conversation_id: str, members: Any, *, tenant_id=None, access=None
+        self,
+        conversation_id: str,
+        members: Any,
+        *,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_members"] = list(members)
         return self._answer("conversation_members")
 
     async def conversation_remove_member(
-        self, conversation_id: str, account_id: str, *, access=None
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_removed"] = (conversation_id, account_id)
         return self._answer("conversation_remove_member")
@@ -502,6 +520,7 @@ class FakeClient:
         consent_version: str,
         tenant_id=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_consent"] = (
             conversation_id,
@@ -511,11 +530,15 @@ class FakeClient:
         )
         return self._answer("conversation_consent")
 
-    async def conversation_join(self, conversation_id: str, *, tenant_id=None, access=None):
+    async def conversation_join(
+        self, conversation_id: str, *, tenant_id=None, access=None, expected_account_id=None
+    ):
         FakeClient.behavior["last_join"] = (conversation_id, tenant_id)
         return self._answer("conversation_join")
 
-    async def conversation_leave(self, conversation_id: str, *, access=None):
+    async def conversation_leave(
+        self, conversation_id: str, *, tenant_id=None, access=None, expected_account_id=None
+    ):
         FakeClient.behavior["last_leave"] = conversation_id
         return self._answer("conversation_leave")
 
@@ -548,7 +571,9 @@ class FakeClient:
         text: str,
         tenant_id=None,
         agent_label=None,
+        thread_root_id=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_send"] = {
             "conversation_id": conversation_id,
@@ -557,7 +582,29 @@ class FakeClient:
             "tenant_id": tenant_id,
             "agent_label": agent_label,
         }
+        FakeClient.behavior["last_send_thread_root_id"] = thread_root_id
         return self._answer("conversation_send")
+
+    async def conversation_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id=None,
+        limit=None,
+        after_seq=None,
+        endpoint_id=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_replies_kwargs"] = {
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "after_seq": after_seq,
+            "endpoint_id": endpoint_id,
+        }
+        return self._answer("conversation_replies")
 
     async def conversation_body(
         self,
@@ -580,6 +627,7 @@ class FakeClient:
         tenant_id=None,
         endpoint_id=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_admit"] = (
             conversation_id,
@@ -603,6 +651,7 @@ class FakeClient:
         notify=None,
         tenant_id=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_read"] = (conversation_id, seq, muted, notify, tenant_id)
         return self._answer("conversation_read")
@@ -1488,7 +1537,7 @@ def _plant_proof(
                     )
 
 
-def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
+def _enroll(root: Path, *, enabled: bool = True, account_id: str = "acc_1") -> OwnerSnapshot:
     """Commit the owner + consent receipt H4 commits, and set the local switch.
 
     The switch is the DOCUMENT the running daemon reads (`values.team_bridge.
@@ -1496,7 +1545,7 @@ def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
     the file from disk, never a long-lived manager, so a fixture that set an
     in-memory value would test nothing.
     """
-    owner = _owner()
+    owner = replace(_owner(), account_id=account_id)
     Store(root).commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
     (root / "config.yml").write_text(
         yaml.safe_dump({"values": {"team_bridge": {"enabled": enabled}}})
@@ -1630,6 +1679,77 @@ def _seed_allow_receipt(root: Path, message_id: str) -> None:
                 0.0,
             ),
         )
+
+
+# Synthetic canonical UUIDs exercise the production identity SHAPE, not a real account.
+UUID_ACCOUNT = "12345678-1234-4234-8234-123456789abc"
+UUID_SENDER = "87654321-4321-4321-8321-cba987654321"
+
+
+@pytest.mark.parametrize("account_id", ["acc_1", UUID_ACCOUNT])
+@pytest.mark.parametrize("sender_id", ["acc_9", UUID_SENDER])
+async def test_uuid_account_inbox_preserves_metadata_and_authority(api, account_id, sender_id):
+    client, root, _discipline = api
+    _enroll(root, account_id=account_id)
+    FakeClient.behavior["access"] = _access(account_id)
+    FakeClient.behavior["inbox"] = _page(_item(recipient_account=account_id))
+    before = _digest(root)
+    response = await client.get(
+        INBOX, params=_query(expected_account_id=account_id, sender_account_id=sender_id)
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_inbox_kwargs"]["sender_account_id"] == sender_id
+    assert _digest(root) == before
+
+
+@pytest.mark.parametrize("account_id", ["acc_1", UUID_ACCOUNT])
+async def test_uuid_account_all_read_query_and_path_guards_accept(account_id):
+    desktop_team_bridge.TeamBridgeMessageQuery(expected_account_id=account_id, tenant_id="tnt_1")
+    desktop_team_bridge.TeamBridgeInboxQuery(
+        expected_account_id=account_id, tenant_id="tnt_1", sender_account_id=account_id
+    )
+    desktop_team_bridge._require_account_id(account_id)
+
+
+@pytest.mark.parametrize(
+    "account_id",
+    [
+        "",
+        "../acc_1",
+        "acc_1\n",
+        UUID_ACCOUNT + "\n",
+        " " + UUID_ACCOUNT,
+        UUID_ACCOUNT.replace("-", ""),
+        "{" + UUID_ACCOUNT + "}",
+        "urn:uuid:" + UUID_ACCOUNT,
+        UUID_ACCOUNT + "?tenant_id=tnt_other",
+    ],
+)
+async def test_account_identity_negative_guards_remain_closed(account_id):
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        desktop_team_bridge.TeamBridgeMessageQuery(
+            expected_account_id=account_id, tenant_id="tnt_1"
+        )
+    for field in ("expected_account_id", "sender_account_id"):
+        with pytest.raises(ValidationError):
+            desktop_team_bridge.TeamBridgeInboxQuery(**_query(**{field: account_id}))
+    with pytest.raises(HTTPException):
+        desktop_team_bridge._require_account_id(account_id)
+
+
+async def test_uuid_account_read_still_refuses_wrong_authority(api):
+    client, root, _discipline = api
+    _enroll(root, account_id=UUID_ACCOUNT)
+    FakeClient.behavior["access"] = _access(UUID_SENDER)
+    before = _digest(root)
+    response = await client.get(INBOX, params=_query(expected_account_id=UUID_ACCOUNT))
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "account_mismatch"
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+    assert _digest(root) == before
 
 
 async def test_the_inbox_read_needs_the_desktop_bearer(api):
@@ -2828,10 +2948,13 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
 
 
 def test_account_grammar_matches_the_reader():
-    from local_operator.server.routes.desktop_team_bridge import _ACCOUNT_ID
-    from local_operator.team_bridge.read_context import ACCOUNT_ID_PATTERN
+    from local_operator.server.routes.desktop_team_bridge import (
+        is_account_id as route_guard,
+    )
+    from local_operator.team_bridge.read_context import is_account_id as read_guard
+    from local_operator.team_bridge.types import is_account_id
 
-    assert _ACCOUNT_ID.pattern == ACCOUNT_ID_PATTERN
+    assert route_guard is read_guard is is_account_id
 
 
 async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
@@ -2899,6 +3022,81 @@ async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_i
     response = await client.delete(path + quote("👍") + "?actor_endpoint_id=bep_other")
     assert response.status_code == 422
     assert FakeClient.instances == []
+
+
+# -- threads (agent-server feat/bridge-threads) --------------------------------
+
+
+async def test_conversation_send_forwards_a_thread_root(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_2", "seq": 2}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-2", "body": "on it", "thread_root_id": "bcmsg_root0001"},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send_thread_root_id"] == "bcmsg_root0001"
+
+
+async def test_conversation_send_without_a_thread_root_forwards_none(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_3", "seq": 3}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-3", "body": "hello"},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send_thread_root_id"] is None
+
+
+async def test_conversation_send_refuses_a_malformed_thread_root_before_io(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-4", "body": "x", "thread_root_id": "../../status"},
+    )
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls_before
+
+
+async def test_conversation_replies_forwards_parsed_hints(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_replies"] = {
+        "root": {"id": "bcmsg_root0001", "seq": 1, "reply_count": 2},
+        "replies": [{"id": "bcmsg_rep00001", "seq": 2}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_root0001/replies"
+        "?tenant_id=tnt_1&limit=20&after_seq=2"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["root"]["reply_count"] == 2
+    assert FakeClient.behavior["last_replies_kwargs"] == {
+        "conversation_id": "bcv_abc12345",
+        "message_id": "bcmsg_root0001",
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "after_seq": 2,
+        "endpoint_id": None,
+    }
+
+
+async def test_conversation_replies_refuses_bad_input_before_io(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    base = "/v1/desktop/team-bridge/conversations"
+    for path in (
+        f"{base}/nope/messages/bcmsg_root0001/replies",
+        f"{base}/bcv_abc12345/messages/nope/replies",
+        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?after_seq=x",
+        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?after_seq=-1",
+        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?before_seq=3",
+    ):
+        response = await client.get(path)
+        assert response.status_code == 422, (path, response.text)
+    assert FakeClient.calls == calls_before
 
 
 # -- the chief-of-staff identity: pass-throughs a future whitelist must not drop

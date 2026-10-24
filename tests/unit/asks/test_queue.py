@@ -253,21 +253,29 @@ def test_an_expired_ask_says_so_rather_than_being_silently_dropped(tmp_path: Pat
     assert "expired" in outcome["error"]
 
 
-def test_an_open_ask_on_a_running_session_cannot_be_dismissed(tmp_path: Path):
-    """D6 (design §15): the live door refuses an OPEN ask unless the session is
-    stopped, and writes nothing. FakeSession has no ``ask_agent_running``, which
-    the queue reads as running (fail closed)."""
-    queue = _queue(tmp_path, FakeSession())
+def test_an_open_ask_on_a_running_session_is_dismissed(tmp_path: Path):
+    """SA-D4, replacing D6: an OPEN ask is dismissed while agent work runs.
+
+    The queue used to read the session's runtime state and refuse (fail closed),
+    which declined the dismissal exactly while the operator was chatting. There is
+    no probe left: ``FakeSession`` has no ``ask_agent_running``, so this cell would
+    refuse if the queue still asked.
+    """
+    session = FakeSession()
+    assert not hasattr(session, "ask_agent_running"), "the double must not carry the retired probe"
+    queue = _queue(tmp_path, session)
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
-    outcome = queue.dismiss(ask_id)
-    assert outcome == {"ok": False, "error": render.DISMISS_AGENT_RUNNING}
-    assert "reply in chat" in outcome["error"]
-    assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
+    assert queue.dismiss(ask_id, by="phone", reason="moot") == {"ok": True}
+    events = store.read_events(queue.session_dir)
+    assert [e["kind"] for e in events] == [store.EVENT_QUEUED, store.EVENT_DISMISSED]
+    assert events[-1]["by"] == {"surface": "phone"}
+    # The agent is still owed the row, mid-turn or not.
+    assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
+    assert session.batches[0][0].details["status"] == "dismissed"
 
 
 def test_an_open_ask_on_a_stopped_session_is_dismissed_and_owes_a_response(tmp_path: Path):
     session = FakeSession()
-    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
     queue = _queue(tmp_path, session)
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
     assert queue.dismiss(ask_id, by="phone", reason="answered_in_chat")["ok"] is True
@@ -294,9 +302,7 @@ def test_a_timed_out_ask_is_dismissible_on_a_running_session(tmp_path: Path):
 
 
 def test_an_unknown_dismiss_reason_is_refused_and_writes_nothing(tmp_path: Path):
-    session = FakeSession()
-    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
-    queue = _queue(tmp_path, session)
+    queue = _queue(tmp_path, FakeSession())
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
     assert queue.dismiss(ask_id, reason="because") == {
         "ok": False,
@@ -305,14 +311,13 @@ def test_an_unknown_dismiss_reason_is_refused_and_writes_nothing(tmp_path: Path)
     assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
 
 
-def test_a_bridge_request_stays_timed_out_only_even_when_stopped(tmp_path: Path):
-    session = FakeSession()
-    session.ask_agent_running = lambda: False  # type: ignore[attr-defined]
-    queue = _queue(tmp_path, session)
+def test_a_bridge_request_stays_timed_out_only(tmp_path: Path):
+    queue = _queue(tmp_path, FakeSession())
     questions = _questions()
     questions[0]["question_id"] = "q-bridge-1"
     ask_id = queue.enqueue(questions, None)["details"]["ask_id"]
     assert queue.dismiss(ask_id) == {"ok": False, "error": render.DISMISS_BRIDGE_OPEN}
+    assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
 
 
 def test_a_repeat_dismissal_says_the_ask_is_already_dismissed(tmp_path: Path):
@@ -567,6 +572,154 @@ def test_answering_a_withdrawn_ask_in_words_is_refused_not_dropped(tmp_path: Pat
         outcome["error"]
         == "the agent withdrew this question — if you have an answer, send it as a chat message."
     )
+
+
+def test_classifying_a_wrong_key_as_unknown_is_not_the_partial_sentence(tmp_path: Path):
+    """The field case behind §16/SA-D1: ``bill-merge-permission`` sent for the one
+    question ``merge-permission`` was refused as a PARTIAL map, which told the
+    model to send an empty list for a question it had just answered. The refusal
+    names the key it did not recognise and the ids the ask holds, and nothing is
+    written."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue([{**_questions()[0], "id": "merge-permission"}], None)["details"][
+        "ask_id"
+    ]
+    outcome = queue.respond(ask_id, {"bill-merge-permission": ["yes"]})
+    assert outcome["ok"] is False
+    assert "'bill-merge-permission' is not a question on this ask" in outcome["error"]
+    assert "'merge-permission'" in outcome["error"]
+    assert "has no entry" not in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED]
+
+
+def test_withdraw_with_a_wrong_id_names_it_and_writes_nothing(tmp_path: Path):
+    """Acceptance 2 of the slice: the ASKER's own settle shares ``_whole_ask_cells``,
+    so a typo is answered with the same sentence rather than the partial one — and
+    no ``answered`` row is appended for the retry to race."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(
+        ask_id, reason="answered_in_chat", answers={"q0": ["yes"], "qq1": ["no"]}
+    )
+    assert outcome["ok"] is False
+    assert "'qq1' is not a question on this ask" in outcome["error"]
+    assert "has no entry" not in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED]
+
+
+def test_an_unknown_key_beside_every_real_one_is_refused_not_stored(tmp_path: Path):
+    """Acceptance 3 of the slice: a map carrying every real id plus a stray key
+    used to settle the ask and write the stray cell into the log, where nothing
+    can attribute it. It is now refused as a whole, on every door that shares
+    ``_whole_ask_cells`` — ``respond`` here, ``revise`` below — while an empty
+    answer list is still how a deliberate skip is said."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.respond(ask_id, {"q0": ["yes"], "q1": ["no"], "q9": ["stray"]})
+    assert outcome["ok"] is False
+    assert "'q9' is not a question on this ask" in outcome["error"]
+    assert "'q0'" in outcome["error"] and "'q1'" in outcome["error"]
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_OPEN
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert store.EVENT_ANSWERED not in kinds
+
+    assert queue.respond(ask_id, {"q0": ["yes"], "q1": []})["ok"] is True
+    revised = queue.revise(ask_id, {"q0": ["yes"], "q1": [""], "q9": ["stray"]})
+    assert revised["ok"] is False
+    assert "'q9' is not a question on this ask" in revised["error"]
+
+
+def test_the_unknown_key_echo_is_bounded(tmp_path: Path):
+    """Review round 1 NIT 3: the unknown keys come from the CALLER, so the
+    refusal quotes at most 5 of them, each at most 40 characters, and says how
+    many it did not name. The ids the ask holds are echoed whole — the model
+    chose them."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(1), None)["details"]["ask_id"]
+    long_key = "x" * 200
+    unknown = {long_key: ["v"], **{f"k{index}": ["v"] for index in range(6)}}
+    outcome = queue.respond(ask_id, unknown)
+    assert outcome["ok"] is False
+    assert long_key not in outcome["error"]
+    assert f"'{'x' * 40}…'" in outcome["error"]
+    assert "(and 2 more)" in outcome["error"]
+    assert outcome["error"].count("'k") == 4
+
+
+def test_partial_chat_answer_names_the_questions_it_closed_unanswered(tmp_path: Path):
+    """Acceptance 1 of the slice: a 3-question ask settled with the user's words
+    in one cell and empty lists in two folds ``answered`` — the empty cell is how
+    the map says "this message does not cover that question" — the receipt names
+    the 2 questions that closed with it, the response row renders them as
+    ``(not answered)``, and the ask leaves the open set."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(3), None)["details"]["ask_id"]
+    outcome = queue.withdraw(
+        ask_id,
+        reason="answered_in_chat",
+        answers={"q0": ["the audit-log one"], "q1": [], "q2": []},
+    )
+    assert outcome["ok"] is True
+    assert "2 questions closed unanswered; re-ask any you still need." in outcome["text"]
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_ANSWERED
+    assert record["answers"] == {"q0": ["the audit-log one"], "q1": [], "q2": []}
+    text = render.response_text(record)
+    assert "the audit-log one" in text
+    assert text.count("(not answered)") == 2
+    assert ask_id not in [row["ask_id"] for row in queue.open_records()]
+
+
+def test_a_single_closed_question_is_counted_in_the_singular(tmp_path: Path):
+    """The receipt reads as one sentence, not a template: 1 question, not
+    "1 questions" — the count is the fact the model acts on."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(ask_id, reason="answered_in_chat", answers={"q0": ["yes"], "q1": []})
+    assert outcome["ok"] is True
+    assert "1 question closed unanswered" in outcome["text"]
+    assert "questions closed" not in outcome["text"]
+
+
+def test_a_blank_cell_counts_as_closed_unanswered(tmp_path: Path):
+    """Review round 1 m1 / QA Q-1: the count follows the ROW's rule, not the
+    list's length. ``_ask_report`` drops blank text, so ``[" "]`` renders
+    ``(not answered)`` — counting only ``[]`` would tell the model nothing was
+    left behind while the response turn says a question was."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(
+        ask_id, reason="answered_in_chat", answers={"q0": ["large"], "q1": ["  "]}
+    )
+    assert outcome["ok"] is True
+    assert "1 question closed unanswered" in outcome["text"]
+    record = queue.find(ask_id)
+    assert record is not None
+    assert render.response_text(record).count("(not answered)") == 1
+
+
+def test_an_all_empty_chat_map_is_refused_and_points_at_moot(tmp_path: Path):
+    """Review round 1 m2: every cell empty — or blank — is a model asking to
+    record words nobody said, and the empty-list recipe this release teaches
+    every session makes it reachable. Refused rather than rerouted to ``moot``:
+    a moot writes ``withdrawn``, a different fact about who acted, and this
+    model must hear that it recorded nothing. Nothing is appended either way."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    for cells in ({"q0": [], "q1": []}, {"q0": [""], "q1": [" "]}):
+        outcome = queue.withdraw(ask_id, reason="answered_in_chat", answers=cells)
+        assert outcome["ok"] is False
+        assert "reason='moot'" in outcome["error"]
+        assert "nothing was recorded" in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED]
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_OPEN
 
 
 # ---------------------------------------------------------------------------
@@ -1552,6 +1705,36 @@ def test_the_projection_puts_open_asks_first_and_drops_expired(tmp_path: Path):
     assert [row["ask_id"] for row in rows] == [second, first]
     assert rows[0]["status"] == store.STATUS_OPEN
     assert rows[1]["status"] == store.STATUS_ANSWERED
+
+
+def test_the_projection_carries_the_card_context_pair_when_the_session_can_count(
+    tmp_path: Path,
+):
+    """SA-D7: the pair rides the ROW, because the desktop and the phone hold rows.
+
+    A session that cannot answer (``FakeSession``, i.e. every reduced host and
+    every older writer) sends no key at all — absence, never a zero.
+    """
+    plain = _queue(tmp_path / "plain", FakeSession())
+    plain.enqueue(_questions(), None)
+    row = plain.projection()[0]
+    assert "user_messages_since" not in row
+    assert "last_user_message_at" not in row
+
+    session = FakeSession()
+    session.ask_context_line = lambda asked_at: (4, asked_at + 1)  # type: ignore[attr-defined]
+    # A root of its own: the queue refuses a duplicate question in one session,
+    # which would make the second enqueue a refusal rather than a row.
+    queue = _queue(tmp_path / "counted", session)
+    queue.enqueue(_questions(), None)
+    row = queue.projection()[0]
+    assert row["user_messages_since"] == 4
+    assert row["last_user_message_at"] == row["created_at"] + 1
+    # The derived index carries the same row, so the cross-session view agrees.
+    entry = store.read_entry(tmp_path / "counted", "s1")
+    assert entry is not None
+    indexed = next(r for r in entry["asks"] if r["ask_id"] == row["ask_id"])
+    assert indexed["user_messages_since"] == 4
 
 
 def test_the_index_is_written_and_read_back(tmp_path: Path):

@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import sync
+from local_operator.session import compression
 
 
 def _ask(root: Path) -> Any:
@@ -281,6 +282,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
+    from local_operator.session.compression import ARCHIVE_FILENAMES
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.retention import DESKTOP_MARKER_NAME
     from local_operator.session.runtime.inbox import INBOX_NAME
@@ -294,6 +296,13 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
 
     assert set(sync.COPY_SET_NAMES) == {
         "transcript.jsonl",
+        # THE TRANSCRIPT'S OTHER SPELLINGS: a compressed session's body is one of
+        # these names INSTEAD OF ``transcript.jsonl``, and both have to be accounted
+        # for because ``assert_complete`` asks before anything restores it (M-1/Q-3:
+        # unlisted, the archive refused the move of every session past
+        # ``after_days``). They never travel under these names — the prepare
+        # restores the plain journal first — so this pin is about accounting.
+        *ARCHIVE_FILENAMES,
         TITLE_SIDECAR_NAME,
         ATTACHMENT_SIDECAR_NAME,
         ORIGIN_NAME,
@@ -376,7 +385,9 @@ def test_a_copy_transfers_the_whole_set_byte_for_byte_and_verifies_it(tmp_path: 
     transcript = (directory / "transcript.jsonl").read_bytes()
     assert (dest / "transcript.jsonl").read_bytes() == transcript
     for name in sync.COPY_SET_NAMES:
-        if name == "transcript.jsonl":
+        # The transcript travels under ONE of its names: this fixture is plain, so the
+        # archive forms are the spellings it does not have.
+        if name == "transcript.jsonl" or name in compression.ARCHIVE_FILENAMES:
             continue
         assert (dest / name).is_file(), name
     # THE SCRATCHPAD TREE TRAVELS, per file, byte for byte — including a nested

@@ -52,10 +52,29 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping, ParamSpec, TypeVar
+
+if TYPE_CHECKING:  # the lock is imported on use: see `_lock_errors`
+    from local_operator.wakes.lock import WakeWriteLock
 
 logger = logging.getLogger(__name__)
+
+
+def _lock_errors() -> tuple[type[BaseException], ...]:
+    """The lock refusals, imported WHEN A WRITE HAPPENS rather than at import.
+
+    This store is imported by the wake supervisor at startup, and
+    ``test_import_graph`` pins that resident set to the store family alone; a
+    module-scope lock import would drag ``wakes.lock`` and ``procstate`` in.
+    The lock is still the one real dependency of a spool write — deferring it
+    costs one import on the first write, never on the supervisor's start.
+    """
+    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
+
+    return WakeLockBusy, WakeLockUnavailable
+
 
 #: Subdirectory of the wakes dir holding one ``<session_id>.json`` per session
 #: that owes a turn. A SUBdirectory for the reason ``deliveries`` gives: an index
@@ -129,6 +148,7 @@ def spooled_path(config_dir: Path, session_id: str) -> Path:
     """Where ``session_id``'s obligation lives. The id is never sanitised: it is
     a session directory name the caller read off disk, exactly as ``store`` and
     ``deliveries`` treat theirs."""
+    _validate_session_id(session_id)
     return spooled_dir(config_dir) / f"{session_id}.json"
 
 
@@ -136,45 +156,132 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def read_spooled(config_dir: Path) -> dict[str, dict[str, Any]]:
-    """Every readable obligation, keyed by session id. Never raises.
+def _validate_session_id(session_id: str) -> None:
+    if not session_id or session_id in (".", "..") or Path(session_id).name != session_id:
+        raise ValueError("invalid spool session id")
 
-    One entry may be unreadable (a torn write, a hand-edited file, a half-written
-    temp file): that costs one session's turn, never the whole sweep, so a bad
-    record is skipped and the caller carries on with the rest.
-    """
-    out: dict[str, dict[str, Any]] = {}
+
+class SpoolWriteError(OSError):
+    """The obligation was not durably settled; never receipt it as held success."""
+
+
+def _session_lock(config_dir: Path, session_id: str, *, read: bool = False) -> WakeWriteLock:
+    from local_operator.wakes.lock import WakeWriteLock
+
+    # Persistent session-specific inodes survive record deletion/recreation (ABA).
+    # Mixed older, unlocked writers are outside this cooperative protocol.
+    _validate_session_id(session_id)
     directory = spooled_dir(config_dir)
-    try:
-        candidates = sorted(directory.glob("*.json"))
-    except OSError:
-        return out
-    for path in candidates:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict) or data.get("schema") != SPOOLED_SCHEMA:
-            continue
-        session_id = data.get("session_id") or path.stem
-        if not isinstance(session_id, str) or not session_id:
-            continue
-        out[session_id] = data
-    return out
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if read:
+        return WakeWriteLock(directory, name=f".{session_id}.lock", timeout_s=0.0)
+    return WakeWriteLock(directory, name=f".{session_id}.lock")
 
 
-def read_spooled_turn(config_dir: Path, session_id: str) -> dict[str, Any] | None:
-    """One session's obligation, or ``None``."""
+def _raw_read(config_dir: Path, session_id: str) -> dict[str, Any] | None:
     try:
         data = json.loads(spooled_path(config_dir, session_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or data.get("schema") != SPOOLED_SCHEMA:
-        return None
-    return data
+    return data if isinstance(data, dict) and data.get("schema") == SPOOLED_SCHEMA else None
 
 
-def note_spooled_turn(
+def _generation(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 32 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def read_spooled_turn(config_dir: Path, session_id: str) -> dict[str, Any] | None:
+    """Publish a CAS token only from a fresh read under the transaction mutex.
+
+    A busy/migration-failed record remains readable, but cannot authorize deletion.
+    In particular a marker written before an inbox append must not publish a token.
+    """
+    try:
+        with _session_lock(config_dir, session_id, read=True):
+            record = _raw_read(config_dir, session_id)
+            if record is not None and not _generation(record.get("generation")):
+                record["generation"] = uuid.uuid4().hex
+                if not _write(config_dir, session_id, record):
+                    record["generation"] = None
+            return record
+    except (*_lock_errors(), OSError):
+        record = _raw_read(config_dir, session_id)
+        if record is not None:
+            record["generation"] = None
+        return record
+
+
+def read_spooled(config_dir: Path) -> dict[str, dict[str, Any]]:
+    """Retain readable busy records, withholding only their deletion authority."""
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        paths = sorted(spooled_dir(config_dir).glob("*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            # Name the one failure this loop tolerates, so a genuine ValueError
+            # raised later inside the read is not skipped as a stray file.
+            _validate_session_id(path.stem)
+        except ValueError:
+            continue
+        record = read_spooled_turn(config_dir, path.stem)
+        if record is not None:
+            out[path.stem] = record
+    return out
+
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+async def await_spool_write(function: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    """Join submitted storage even on cancellation before relinquishing ownership.
+
+    Shield alone is insufficient: a cancelled await does not stop its OS thread.
+    Repeated cancellation is remembered, never allowed to orphan a submitted write.
+    """
+    # Imported HERE rather than at module scope: this store is on the
+    # supervisor's startup path and `test_import_graph` pins its import closure
+    # asyncio-free. The helper is only called from an already-running loop.
+    import asyncio
+
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    cancellation: asyncio.CancelledError | None = None
+    failure: BaseException | None = None
+    while True:
+        try:
+            await asyncio.wait((task,))
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                failure = exc
+                break
+            if cancellation is None:
+                cancellation = exc
+            if not task.done():
+                continue
+        except BaseException as exc:
+            failure = exc
+            break
+        try:
+            result = task.result()
+        except BaseException as exc:
+            failure = exc
+            break
+        if cancellation is not None:
+            raise cancellation
+        return result
+    # Every break above records why; a successful join returned in the loop.
+    if failure is None:  # pragma: no cover - defensive, not a reachable state
+        raise RuntimeError("spool write settled without a result or failure")
+    if cancellation is not None:
+        raise BaseExceptionGroup("cancelled spool write also failed", [cancellation, failure])
+    raise failure
+
+
+def _note_locked(
     config_dir: Path,
     session_id: str,
     *,
@@ -208,9 +315,10 @@ def note_spooled_turn(
         # rather than written, which leaves the spool row exactly as deliverable
         # as it was (an ordinary engage still reads it).
         return False
-    existing = read_spooled_turn(config_dir, session_id) or {}
+    existing = _raw_read(config_dir, session_id) or {}
     record: dict[str, Any] = {
         "schema": SPOOLED_SCHEMA,
+        "generation": uuid.uuid4().hex,
         "session_id": session_id,
         "cwd": cwd or str(existing.get("cwd") or ""),
         "noted_at_ms": existing.get("noted_at_ms") or moment,
@@ -229,93 +337,125 @@ def note_spooled_turn(
     if existing.get("last_error"):
         record["last_error"] = existing["last_error"]
     if not _write(config_dir, session_id, record):
-        return False
-    # AND RAISE THE ONE PROCESS THAT CAN ACT ON IT (review round 5 R5-1, moved
-    # here in round 6 R6-2). The wake supervisor is normally DOWN — it exits 0
-    # when nothing is fireable and the LaunchAgent's
-    # ``KeepAlive{SuccessfulExit:false}`` leaves it that way until a schedule
-    # PERSIST revives it — and every pre-existing caller of
-    # ``ensure_supervisor_installed`` is on that persist path, which nothing on the
-    # spool path touches. THE CALL BELONGS HERE rather than at the session writer,
-    # because every writer of an obligation has to raise the reader and there are
-    # TWO: ``serving._spool_for_successor`` (a row that asks for a turn) and
-    # ``inbox.settle_owed_turn``'s re-arm (a row that is still waiting after a
-    # supervisor cleared its record in the window between a read and an unlink —
-    # the case round 6 probed and found raising nobody).
-    #
-    # ON THE CALLER'S LOOP, deliberately (review round 6, R6-1 asked for
-    # ``to_thread`` by analogy with ``wakes/arm.py``): that precedent is a PERSIST
-    # with a turn possibly in flight, where tens of milliseconds of ``launchctl``
-    # matter; here the write has already landed, the check is idempotent, and the
-    # alternative is an awaitable store API that these call sites — the drain's
-    # settle, and a draining runtime's own spool write — cannot use. The cost is
-    # bounded by ONE install check per obligation.
+        raise SpoolWriteError("could not persist spool obligation")
+    return True
+
+
+def _raise_reader(config_dir: Path, session_id: str) -> None:
+    """Activation is deliberately outside the per-session transaction mutex."""
     try:
         from local_operator.wakes.install import ensure_supervisor_installed
 
         ensure_supervisor_installed(Path(config_dir))
     except Exception:  # noqa: BLE001 — the raiser is best-effort, the record is not
         logger.debug("could not raise the wake supervisor for %s", session_id, exc_info=True)
-    return True
+
+
+def note_spooled_turn(
+    config_dir: Path, session_id: str, *, cwd: str = "", rows: int = 1, now_ms: int | None = None
+) -> bool:
+    """Persist a fresh opaque revision off-loop at awaited async call sites."""
+    try:
+        with _session_lock(config_dir, session_id):
+            noted = _note_locked(config_dir, session_id, cwd=cwd, rows=rows, now_ms=now_ms)
+    except _lock_errors() as exc:
+        raise SpoolWriteError("spool obligation lock unavailable") from exc
+    if noted:
+        _raise_reader(config_dir, session_id)
+    return noted
+
+
+_OMITTED = object()
 
 
 def clear_spooled_turn(
-    config_dir: Path, session_id: str, *, expected_updated_at_ms: int | None = None
+    config_dir: Path,
+    session_id: str,
+    *,
+    expected_generation: object = _OMITTED,
+    expected_updated_at_ms: object = _OMITTED,
 ) -> bool:
-    """Drop the obligation. Returns whether a record was removed.
+    """Explicit omission is unconditional; old timestamp-only CAS fails closed."""
+    if expected_updated_at_ms is not _OMITTED and expected_generation is _OMITTED:
+        return False
+    return _clear_guarded(config_dir, session_id, expected_generation=expected_generation)
 
-    Called by whoever DISCHARGES it: the successor's own spool drain (the rows
-    are delivered, so nothing is owed) and the supervisor's reconciliation (the
-    spool no longer holds a row that asks for a turn). Best-effort, and never a
-    reason to fail a delivery — a stale record costs one wasted engage, and the
-    reconciliation on the next pass removes it.
 
-    ``expected_updated_at_ms`` IS THE COMPARE-AND-DELETE GUARD (review round 1,
-    R1-4). Both callers judge the record stale from a read that happened
-    elsewhere — one in another PROCESS (the writer is the draining runtime, the
-    clearer is its successor) — so an unconditional unlink can delete a record
-    that a row landing in that window has just re-armed, which is defect (B)
-    returning silently. A caller that holds the value it judged passes it, and a
-    record whose ``updated_at_ms`` has moved since (a re-note, a failed attempt)
-    is left alone. The window between this read and the unlink is a few
-    microseconds rather than the caller's own read-to-unlink gap; the residual is
-    stated in :func:`local_operator.wakes.supervisor._reconcile_spooled`, and it
-    fails towards keeping a record that a later pass will drop rather than
-    dropping one that is still owed.
-    """
-    if expected_updated_at_ms is not None:
-        current = read_spooled_turn(config_dir, session_id)
-        if current is None:
-            return False
-        if current.get("updated_at_ms") != expected_updated_at_ms:
-            return False
+def _clear_guarded(
+    config_dir: Path,
+    session_id: str,
+    *,
+    expected_generation: object,
+    session_dir: Path | None = None,
+    owner_only: bool = False,
+) -> bool:
+    # Predicate and generation share the admission mutex: an earlier no-row
+    # decision must not authorize deletion of a later, fully committed admission.
     try:
-        spooled_path(config_dir, session_id).unlink()
-        return True
-    except FileNotFoundError:
+        with _session_lock(config_dir, session_id, read=True):
+            current = _raw_read(config_dir, session_id)
+            if current is None:
+                return False
+            if expected_generation is not _OMITTED:
+                if (
+                    not _generation(expected_generation)
+                    or current.get("generation") != expected_generation
+                ):
+                    return False
+            if session_dir is not None:
+                owed = (
+                    spool_has_owner_row(session_dir) if owner_only else spool_owes_turn(session_dir)
+                )
+                if owed:
+                    return False
+            spooled_path(config_dir, session_id).unlink()
+            return True
+    except (*_lock_errors(), OSError):
         return False
-    except OSError:
-        logger.warning("could not clear the owed turn for %s", session_id, exc_info=True)
-        return False
+
+
+def clear_if_no_owed_turn(
+    config_dir: Path, session_id: str, session_dir: Path, *, expected_generation: object
+) -> bool:
+    """Normal settlement and supervisor reconciliation use the owed-row authority."""
+    return _clear_guarded(
+        config_dir, session_id, expected_generation=expected_generation, session_dir=session_dir
+    )
+
+
+def clear_if_no_owner_row(
+    config_dir: Path, session_id: str, session_dir: Path, *, expected_generation: object
+) -> bool:
+    """Peer deferral deliberately preserves the stronger owner-row distinction."""
+    return _clear_guarded(
+        config_dir,
+        session_id,
+        expected_generation=expected_generation,
+        session_dir=session_dir,
+        owner_only=True,
+    )
 
 
 def note_attempt(config_dir: Path, session_id: str, *, error: str = "") -> None:
-    """Record a failed attempt to raise this session, with its backoff.
-
-    The supervisor's own bookkeeping, and the same shape ``deliveries`` uses for
-    a fire it could not deliver: the record is a claim that the turn is still
-    owed, so a failure must not erase it — it must make the next attempt later.
-    """
-    record = read_spooled_turn(config_dir, session_id)
-    if record is None:
-        return
-    attempts = _attempts_of(record) + 1
-    record["attempts"] = attempts
-    record["last_attempt_ms"] = _now_ms()
-    record["next_attempt_ms"] = _now_ms() + int(backoff_s(attempts) * 1000)
-    if error:
-        record["last_error"] = str(error)[:400]
-    _write(config_dir, session_id, record)
+    """Backoff persistence completes before the engagement owner releases its key."""
+    try:
+        with _session_lock(config_dir, session_id):
+            record = _raw_read(config_dir, session_id)
+            if record is None:
+                return
+            attempts = _attempts_of(record) + 1
+            record.update(
+                generation=uuid.uuid4().hex,
+                attempts=attempts,
+                last_attempt_ms=_now_ms(),
+                next_attempt_ms=_now_ms() + int(backoff_s(attempts) * 1000),
+            )
+            if error:
+                record["last_error"] = str(error)[:400]
+            if not _write(config_dir, session_id, record):
+                raise SpoolWriteError("could not persist spool backoff")
+    except _lock_errors() as exc:
+        raise SpoolWriteError("spool attempt lock unavailable") from exc
 
 
 def _attempts_of(record: Mapping[str, Any]) -> int:

@@ -40,10 +40,13 @@ def write_manifest(session_dir: Path, payload: dict[str, Any]) -> None:
 
 def prefix_sha256(session_dir: Path) -> str | None:
     """Hash the target transcript exactly as it stands, or ``None`` if absent."""
-    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+    from local_operator.session import compression
 
-    path = Path(session_dir) / TRANSCRIPT_FILENAME
-    if not path.exists():
+    # The DECOMPRESSED bytes, so the hash is an identity for the conversation
+    # rather than for whichever codec happens to hold it: an import that
+    # compares a pre-compression hash must still match after a compression pass.
+    path = compression.transcript_for_read(Path(session_dir))
+    if path is None:
         return None
     return store.sha256_file(path)
 

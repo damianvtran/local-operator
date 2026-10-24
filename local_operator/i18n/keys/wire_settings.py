@@ -2308,6 +2308,38 @@ def session_cleanup_remove_empty_label() -> Msg:
     return Msg("wire.settings.session_cleanup_remove_empty.label", {})
 
 
+def session_compression_description() -> Msg:
+    return Msg("wire.settings.session_compression.description", {})
+
+
+def session_compression_title() -> Msg:
+    return Msg("wire.settings.session_compression.title", {})
+
+
+def session_compression_after_days_help() -> Msg:
+    return Msg("wire.settings.session_compression_after_days.help", {})
+
+
+def session_compression_after_days_label() -> Msg:
+    return Msg("wire.settings.session_compression_after_days.label", {})
+
+
+def session_compression_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.session_compression_enabled.choice.false.description", {})
+
+
+def session_compression_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.session_compression_enabled.choice.true.description", {})
+
+
+def session_compression_enabled_help() -> Msg:
+    return Msg("wire.settings.session_compression_enabled.help", {})
+
+
+def session_compression_enabled_label() -> Msg:
+    return Msg("wire.settings.session_compression_enabled.label", {})
+
+
 def session_delegated_description() -> Msg:
     return Msg("wire.settings.session_delegated.description", {})
 

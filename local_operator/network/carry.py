@@ -145,7 +145,15 @@ def latest_custom_details(session_dir: Path, custom_type: str) -> dict[str, Any]
     would raise, and a row that no longer parses is skipped like any other
     malformed line.
     """
-    path = Path(session_dir) / TRANSCRIPT_FILENAME
+    from local_operator.session import compression
+
+    # Resolved through the codec: the carried payload must be the DECOMPRESSED
+    # bytes. Opening the plain name here read ``None`` for every compressed
+    # session, and opening an archive raw would decode compressed bytes as JSONL
+    # and silently carry nothing.
+    path = compression.transcript_for_read(Path(session_dir))
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
