@@ -682,13 +682,15 @@ HAPPY_OUTPUTS = [
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("approved_name", ["Research node; $(not-a-command) 'one'", "--automated"])
 def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
-    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, approved_name: str
 ) -> None:
     _install_fakes(monkeypatch)
     token = tmp_path / "invite.token"
     token.write_text("token-bytes", encoding="utf-8")
     record = _record()
+    record["device"]["name"] = approved_name
     fake = FakeApprovals(record)
     monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
     transport = FakeTransport(outputs=HAPPY_OUTPUTS)
@@ -733,6 +735,21 @@ def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
     join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
     assert len(join_calls) == 1
     assert "--automated" in " ".join(join_calls[0][1])
+    # Metacharacters must remain one signed name, never shell syntax or a
+    # silent fallback to the node's hostname.
+    join_argv = shlex.split(join_calls[0][1][-1])
+    assert next(arg for arg in join_argv if arg.startswith("--name=")) == f"--name={approved_name}"
+    # Shell quoting alone does not protect an option-shaped value from argparse.
+    # Feed the actual receiving parser, not a duplicate list-splitting oracle.
+    import argparse
+
+    from local_operator.network import cli as network_cli
+
+    parser = argparse.ArgumentParser()
+    network_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+    received = parser.parse_args(join_argv[join_argv.index("network"):])
+    assert received.name == approved_name
+    assert received.automated is True
 
 
 def _drill_run_local(token: Path, ready_payload: dict[str, Any]):
