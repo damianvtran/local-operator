@@ -476,6 +476,61 @@ def test_amounts_print_the_unit_label_not_the_raw_key() -> None:
     assert "usd" not in joined and "percent" not in joined, lines
 
 
+def test_a_percent_row_keeps_a_sub_one_percent_reading_visible() -> None:
+    """Kimi's monthly pool reads 0.06% used on a real account. Rounding that to
+    ``0%`` says nothing has been consumed on a window that has started; the
+    reading stays honest without spending cells on a whole percentage."""
+    assert format_amount(UsageAmount(used=0.06, limit=100.0, unit="percent")) == "<1%"
+    assert format_amount(UsageAmount(used=0.95, limit=100.0, unit="percent")) == "<1%"
+    assert format_amount(UsageAmount(used=1.0, limit=100.0, unit="percent")) == "1%"
+    assert format_amount(UsageAmount(used=0.0, limit=100.0, unit="percent")) == "0%"
+    assert format_amount(UsageAmount(used_fraction=0.0006, unit="percent")) == "<1% used"
+
+
+def test_the_live_kimi_rows_render_beside_each_other_with_countdowns() -> None:
+    """The two rows the live body produces: the absolute 5h window and the
+    percent-only monthly pool. Both are legible, both count down, and a new
+    plan shows no weekly row."""
+    now_ms = 1_792_880_000_000
+    lines = _lines(
+        [
+            _report(
+                UsageLimit(
+                    id="kimi:0",
+                    label="5h limit",
+                    amount=UsageAmount(used=1.0, limit=100.0, remaining=99.0, unit="unknown"),
+                    window="5h limit",
+                    resets_at_ms=1_792_883_373_000,
+                    shared=True,
+                ),
+                UsageLimit(
+                    id="kimi:monthly-total",
+                    label="Monthly total",
+                    amount=UsageAmount(
+                        used=0.06,
+                        remaining=99.94,
+                        used_fraction=0.0006,
+                        unit="percent",
+                    ),
+                    window="monthly",
+                    resets_at_ms=1_795_564_800_000,
+                    shared=True,
+                ),
+                provider="kimi",
+            )
+        ],
+        now=now_ms,
+    )
+    joined = "\n".join(lines)
+    assert "5h limit" in joined and "1 / 100" in joined, lines
+    assert "Monthly total" in joined and "<1%" in joined, lines
+    assert "weekly" not in joined.lower(), lines
+    # The header names a countdown too; only the two ROWS must each have one.
+    assert (
+        sum(1 for line in lines if line.startswith(MARK_KNOWN) and "resets in" in line) == 2
+    ), lines
+
+
 def test_a_fraction_only_window_still_states_its_percentage() -> None:
     """A bar shows the proportion and cannot be read off precisely, so the
     number is stated too."""
