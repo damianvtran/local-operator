@@ -736,23 +736,27 @@ OUTCOMES = ("ok", "refused", "failed", "partial")
 #: unlisted value is rewritten to "unknown" on the way in — the field is for reading,
 #: and a free-form one would make every consumer guess.
 #:
-#: ``device`` IS HERE BECAUSE NINE CALL SITES ACROSS SEVEN MODULES PASS IT, and the
+#: ``device`` IS HERE BECAUSE TEN CALL SITES ACROSS SEVEN MODULES PASS IT, and the
 #: list is enumerated rather than counted because a numeral hid an omission once
 #: already: the five credential modules' emitters (``credentials/`` github,
 #: lifecycle, owner, reconcile, sync), the relay's ``credential.placement`` record,
-#: the CLI's ``credential.placement`` audit, ``device_renamed`` and
-#: ``device_rotated``. Before this value existed, every one of those rows silently
-#: rendered ``actor_kind: "unknown"`` — the audit recorded that SOMETHING happened
-#: and lost the fact that a DEVICE did it. The alternative fix (stop passing it, let
-#: those rows say ``human`` or ``unknown``) would erase a distinction every emitter
-#: clearly intends, so the set was widened instead. Do not "clean up" the emitters
-#: back to three values: "device" is a peer acting under its own key, which is
-#: neither a person at this keyboard nor an agent process here.
+#: the CLI's ``credential.placement`` audit, ``device_renamed``, ``device_rotated``
+#: and the PEER-APPLIED ``epoch_rotated`` (``relay.py``, the emitter whose
+#: ``actor=link.device_id``). Before this value existed, every one of those rows
+#: silently rendered ``actor_kind: "unknown"`` — the audit recorded that SOMETHING
+#: happened and lost the fact that a DEVICE did it. The alternative fix (stop passing
+#: it, let those rows say ``human`` or ``unknown``) would erase a distinction every
+#: emitter clearly intends, so the set was widened instead. Do not "clean up" the
+#: emitters back to three values: "device" is a peer acting under its own key, which
+#: is neither a person at this keyboard nor an agent process here.
 #:
-#: NOT every device-shaped row carries it, deliberately: ``epoch_rotated`` names
-#: THIS device in ``actor`` while the action was the local operator's ``member rm``,
-#: so its initiator is a person and the row keeps the default. "Who is named" and
-#: "who acted" are different questions, and this value answers the second.
+#: NOT every device-shaped row carries it, deliberately, and this names WHICH ones
+#: rather than implying one exception: the LOCAL ``epoch_rotated`` refusal after
+#: ``member rm`` (its ``actor`` is this device, but the initiator is the operator —
+#: "who is named" and "who acted" are different questions, and this value answers
+#: the second), and the three emitters deferred because what they audit is THIS
+#: device's own act described from a peer's row — ``membership_learned``,
+#: ``member_admitted`` and ``panic_received``.
 ACTOR_KINDS = ("human", "agent", "relay", "device", "unknown")
 
 

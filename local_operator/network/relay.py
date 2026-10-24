@@ -7692,6 +7692,13 @@ class RelayServer:
                         subject=record.network_id,
                         network_id=record.network_id,
                         epoch=record.epoch,
+                        # THE PEER APPLIED THIS ROTATION, under its own key: that is
+                        # ``device`` in the sense ACTOR_KINDS documents. The OTHER
+                        # ``epoch_rotated`` emitter (the local refusal after
+                        # ``member rm``) deliberately keeps the default, because
+                        # there the actor id is this device but the initiator is the
+                        # operator — same event name, different question answered.
+                        actor_kind="device",
                         detail={
                             "epoch_before": state.previous_epoch,
                             "epoch_after": record.epoch,
