@@ -50,6 +50,7 @@ from local_operator.network import dial as session_dial
 from local_operator.network import projection, relay, store
 from local_operator.session.cleanup import mark_store
 from tests.unit.network import conftest as net_fixtures
+from tests.unit.network.test_model_choice_frontdoor import _hold_api_key
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _init_network,
     _pair,
@@ -4956,6 +4957,7 @@ def test_a_promptless_team_create_carries_its_team_and_level_across_the_link(
             )
         )
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    _hold_api_key(server_b.root, "deepseek")
     host_b, port_b = _listen(server_b)
     served = _serve(monkeypatch, server_b.root)
     try:
