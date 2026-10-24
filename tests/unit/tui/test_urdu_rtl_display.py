@@ -321,8 +321,8 @@ async def test_real_wakeblock_copy_excludes_projection_controls(urdu_app_corpus)
         assert not any(control in copied[0] for control in (RLI, LRI, PDI))
         # The CONTENT, not just the absence of controls: the copied text is the
         # raw catalogue sentence (with the folded wake ids), byte for byte.
-        from local_operator.tui.widgets.transcript import _raw_t
         from local_operator.i18n.keys import tui_transcript
+        from local_operator.tui.widgets.transcript import _raw_t
 
         label = _raw_t(tui_transcript.catchup_missed(count=2))
         expected = _raw_t(tui_transcript.catchup_headline(label=label)) + " (w1, w2)"
@@ -712,9 +712,9 @@ async def test_urdu_disclosure_wraps_whole_and_uses_a_passing_ink(
             assert caveat_line.strip() == view._rows[index].text
 
         # The ink is the passing token, measured — not a remembered claim.
-        from local_operator.tui import theme as theme_mod
-
         from rich.color import Color
+
+        from local_operator.tui import theme as theme_mod
 
         row_text = view._row_text(view._rows[notes[0]], notes[0], width)
         muted = Color.parse(theme_mod.semantic_color("muted"))

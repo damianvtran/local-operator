@@ -94,7 +94,11 @@ from local_operator.i18n.text import register_refresh, tr_record
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
-from local_operator.tui.i18n_status import display_tr, localized_display, technical_display
+from local_operator.tui.i18n_status import (
+    display_tr,
+    localized_display,
+    technical_display,
+)
 from local_operator.tui.link_targets import _URL_START_RE, _body_end, _trim
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.status_line import format_model_label
