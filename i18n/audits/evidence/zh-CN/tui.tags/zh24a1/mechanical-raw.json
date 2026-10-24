@@ -2,8 +2,8 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "tui.tags",
-  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
-  "generated_utc": "2026-10-24T23:21:22Z",
+  "revision": "f7a884b7b73e0b92d2b44ea2020c46b9b0d4843f",
+  "generated_utc": "2026-10-24T23:28:40Z",
   "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
   "inputs": {
     "en": {

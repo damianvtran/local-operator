@@ -55,19 +55,19 @@
   "artifacts": [
     {
       "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/audit.log",
-      "sha256": "1916fde31e246acc333faeb58d12c1c86ee68f2e2650452e84c26cba046958da"
+      "sha256": "f6171314467754e0c2741cf358c7c9e180268d886403d7b71e28e5681feb3fcf"
     },
     {
       "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/mechanical-raw.json",
-      "sha256": "356e0d54cee0e2aeeb1f02495a7220b1334e48ad8d04ba11cd71a1d456e7da23"
+      "sha256": "1f2c166ab30ee4658495f43b90b8da3cee456a37ad20eb4793589ad8656c9659"
     },
     {
       "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/runtime-mechanical.json",
-      "sha256": "4ea4f3c8ccad2d16f1e3096fe6001bf072dd6c11d6ed0a015ede99e2d32021ee"
+      "sha256": "672849ef4b7467bccf8b79ac487b39a22061a49c71331663165c3d717b567c3f"
     },
     {
       "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/pseudo-evidence.json",
-      "sha256": "ba905d12032b7b6112c1cb75a9adaad5a497f20ec0db96d180da9c1a0327cec5"
+      "sha256": "89892756580d862eb0b88838071f0c67ce5249f7f71dbcab9565fd3f433cd4e3"
     },
     {
       "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/report.md",
@@ -83,7 +83,7 @@
     },
     {
       "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/audit.py.txt",
-      "sha256": "5282b48a93e70222416f7c5fc6a11e7fd22b11e4d0321b8c14614f897a3d34cd"
+      "sha256": "afb9612c98953ebad359a24b10d7a8cdd93ccea95add1ee6c5d2cd3e2c1e3e43"
     }
   ],
   "current_report_verdict": {
