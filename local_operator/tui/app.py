@@ -54610,6 +54610,7 @@ class OperatorApp(App[None]):
         # module is what every interactive session imports.
         from local_operator.harness.types import AbortSignal
         from local_operator.providers.oauth.callback_server import LoginCancelledError
+        from local_operator.providers.oauth.radient import RadientLoginDisabled
 
         assert self._providers is not None
         if self._login_lock is None:
@@ -54758,6 +54759,19 @@ class OperatorApp(App[None]):
                     f"login cancelled. {stopped}retry with /login {provider}",
                     "info",
                 )
+        except RadientLoginDisabled:
+            # A preserved disablement is an OUTCOME: the sign-in WAS verified, so
+            # the catch-all's red "login failed" contradicted the sentence it
+            # printed and invited the user to retry a login that had just worked
+            # (design round 2, D1). ``warning`` is the transcript's
+            # "attention, not failure" rung; the copy is cause-agnostic because
+            # the typed outcome also covers automatic causes, and it closes the
+            # sentence with what did NOT change.
+            await notice(
+                "Sign-in verified. This Radient sign-in stays disabled; "
+                "its saved state was preserved. Nothing else changed.",
+                "warning",
+            )
         except Exception as error:
             local = getattr(self._providers.provider(provider), "local_setup", False)
             await notice(f"{'setup' if local else 'login'} failed: {error}", "error")
