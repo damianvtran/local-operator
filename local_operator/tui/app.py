@@ -45949,12 +45949,10 @@ class OperatorApp(App[None]):
         resolved = resolve_language()
         options = dict(language_options())
         if not wanted:
-            # Within the picker's receipt budget; the space is the browse
-            # (`_language_choices`), and the /settings row has the same list.
-            # The value space is NOT enumerated here: shipped locales grow, and
-            # a one-line receipt holds 70 cells at 80 columns (design D2). The
-            # space key opens the picker, which lists every accepted value, and
-            # the refusal below still names them for a typed mistake.
+            # Within the notice row's 70-cell budget at 80 columns (design D2).
+            # The value space is NOT enumerated: shipped locales grow, and the
+            # space key opens `_language_choices`, which lists every accepted
+            # value. The refusal names that same affordance.
             self._system_notice(
                 f"language: {resolved} ({language_name(resolved)}) — "
                 "/language <value>; space browses"
@@ -45966,8 +45964,11 @@ class OperatorApp(App[None]):
             else normalise_locale(wanted) or wanted
         )
         if key not in options:
+            # Bound the echoed token so the refusal cannot outgrow the notice
+            # row, then name the affordance this client actually has.
+            echo = wanted if len(wanted) <= 20 else wanted[:20] + "…"
             self._system_notice(
-                f"unknown language {wanted!r} — /language lists the values", "warning"
+                f"unknown language {echo!r} — press space to list values", "warning"
             )
             return
         if key == self._language_current():

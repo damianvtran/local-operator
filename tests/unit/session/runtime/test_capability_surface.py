@@ -656,12 +656,12 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     # Bare: the report, word for word with the terminal's.
     bare = await handle._slash_result("language", "", SlashResult)
     assert bare.style == "info"
-    assert bare.text == "language: en (English) — /language <value>; space browses"
+    assert bare.text == "language: en (English) — auto, en, fr, es, ru, vi, ur, hi"
 
     # Unknown: the option-list refusal, and nothing written.
     refused = await handle._slash_result("language", "xx", SlashResult)
     assert refused.style == "warning"
-    assert refused.text == "unknown language 'xx' — /language lists the values"
+    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es, ru, vi, ur, hi"
     assert stored() is None
 
     # The ALIAS routes to the same branch, and the switch writes the key.
@@ -679,16 +679,16 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     switched = await handle._slash_result("language", "vi", SlashResult)
     assert switched.text == "language: vi saved — active vi (Vietnamese)"
     wide = await handle._slash_result("language", "", SlashResult)
-    assert wide.text == "language: vi (Vietnamese) — /language <value>; space browses"
+    assert wide.text == "language: vi (Vietnamese) — auto, en, fr, es, ru, vi, ur, hi"
     assert cell_len(wide.text) <= 70
 
     # Hindi grows every bare receipt's option list. Exercise every accepted
     # value through the real shared write funnel, not a formatter-only budget.
-    for value in ("auto", "en", "fr", "es", "ru", "vi", "hi"):
+    for value in ("auto", "en", "fr", "es", "ru", "vi", "ur", "hi"):
         switched = await handle._slash_result("language", value, SlashResult)
         assert switched.style == "info"
         assert stored() == value
         report = await handle._slash_result("language", "", SlashResult)
-        assert "/language <value>; space browses" in report.text
+        assert "auto, en, fr, es, ru, vi, ur, hi" in report.text
         assert cell_len(switched.text) <= 70, switched.text
         assert cell_len(report.text) <= 70, report.text
