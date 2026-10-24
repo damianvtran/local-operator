@@ -314,12 +314,14 @@ ASK_UNAVAILABLE_NOTICE = (
 _AskGateFn = Callable[[list[Any]], Coroutine[Any, Any, dict[str, list[str]] | None]]
 
 
-def _echo_within_cells(text: str, budget: int = 20) -> str:
-    """Bound the echoed unknown language by display cells, not characters.
+def _quoted_echo_within_cells(text: str, budget: int = 20) -> str:
+    """Bound the echoed unknown language by rendered display cells.
 
-    Mirrors the terminal's helper. This module deliberately does not import
-    ``rich`` (the runtime has no console), so width comes from the East Asian
-    Width property: wide and fullwidth characters cost two cells.
+    Mirrors the terminal's helper, including the ``repr`` detail: the row shows
+    the ESCAPED payload, so twenty backslashes cost forty cells. This module
+    deliberately does not import ``rich`` (the runtime has no console), so
+    width comes from the East Asian Width property: wide and fullwidth
+    characters cost two cells.
     """
 
     def width(value: str) -> int:
@@ -328,14 +330,15 @@ def _echo_within_cells(text: str, budget: int = 20) -> str:
             total += 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
         return total
 
-    if width(text) <= budget:
-        return text
+    shown = repr(text)[1:-1]
+    if width(shown) <= budget:
+        return f"'{shown}'"
     out = ""
-    for char in text:
+    for char in shown:
         if width(out + char) > budget - 1:
             break
         out += char
-    return out + "…"
+    return f"'{out}…'"
 
 
 class AskUnavailableError(RuntimeError):
@@ -9860,7 +9863,7 @@ class ServingSessionHandle(SessionHandle):
             return SlashResult(
                 kind="notice",
                 text=(
-                    f"unknown language {_echo_within_cells(wanted)!r} — "
+                    f"unknown language {_quoted_echo_within_cells(wanted)} — "
                     f"available: {', '.join(options)}"
                 ),
                 style="warning",

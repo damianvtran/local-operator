@@ -4701,22 +4701,23 @@ def _offload_target_refusal(
     )
 
 
-def _echo_within_cells(text: str, budget: int = 20) -> str:
-    """The unknown value echoed in a refusal, bounded by DISPLAY CELLS.
+def _quoted_echo_within_cells(text: str, budget: int = 20) -> str:
+    """The unknown value, quoted, bounded by DISPLAY CELLS as RENDERED.
 
-    A character cap is not a width cap: twelve CJK characters are 72 cells and
-    twenty backslashes are 88, either of which would push the refusal past the
-    70-cell notice row. Return the longest prefix that leaves room for the
-    ellipsis, or the text unchanged when it already fits.
+    A character cap is not a width cap, and the row renders ``repr``: twenty
+    backslashes are twenty raw cells but FORTY rendered ones (repr doubles
+    them), while twelve CJK characters are 72. Bound the escaped payload the
+    row actually shows, then re-quote it.
     """
-    if cell_len(text) <= budget:
-        return text
+    shown = repr(text)[1:-1]
+    if cell_len(shown) <= budget:
+        return f"'{shown}'"
     out = ""
-    for char in text:
+    for char in shown:
         if cell_len(out + char) > budget - 1:
             break
         out += char
-    return out + "…"
+    return f"'{out}…'"
 
 
 class OperatorApp(App[None]):
@@ -46014,7 +46015,8 @@ class OperatorApp(App[None]):
             # Bound the echoed token so the refusal cannot outgrow the notice
             # row, then name the affordance this client actually has.
             self._system_notice(
-                f"unknown language {_echo_within_cells(wanted)!r} — " "press space to list values",
+                f"unknown language {_quoted_echo_within_cells(wanted)} — "
+                "press space to list values",
                 "warning",
             )
             return
