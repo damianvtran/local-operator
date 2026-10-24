@@ -1072,3 +1072,50 @@ def test_a_row_write_that_fails_is_reported_as_a_partial_rename(
         row for row in store.list_networks(root) if row.network_id == second.network_id
     )
     assert reread.member(me.device_id).name == "ip-172-31-18-0"
+
+
+def test_a_rotation_frame_cannot_install_an_invalid_name(root: Path) -> None:
+    """Convergence round, F1 residual: the epoch install is a SECOND DOOR.
+
+    ``apply_epoch`` replaces the member table wholesale rather than merging row by
+    row, so the first receive-time guard did not cover it. A frame that could plant a
+    never-held row NAMED after a tombstoned id would make ``_resolve_device`` answer
+    that row for the burned id — ``member rm <stale-id>`` would remove the bystander
+    and ``credential share --with <stale-id>`` would hand it a credential.
+    """
+    record, state = _record()
+    peer = _admit_peer(record)
+    peer.name = ""  # a held row with NO local name: the frame's value would survive
+    tombstoned = "d_" + "c" * 32
+    record.removed_ids.append(tombstoned)
+    stranger = "d_" + "f" * 32
+    record.members.append(
+        types.MemberRecord(
+            device_id=stranger,
+            public_key=wire.b64u(b"f" * 32),
+            name="",
+            role="read",
+            capabilities=sorted(types.capabilities_for_role("read")),
+        )
+    )
+    incoming = relay.epoch_frame(record, state, reason="member_removed", target_device_id=SELF)
+    incoming["epoch"] = 2
+    incoming["rotation_id"] = PEER
+    incoming["secret"] = wire.b64u(b"n" * 32)
+    # NAMES ARE NOT IN THE DIGEST, so a hostile frame can carry any label it likes and
+    # still pass the digest check — which is exactly why the install must sanitise.
+    for row in incoming["members"]:
+        if row["device_id"] == stranger:
+            row["name"] = tombstoned  # (a) never-held row named after a tombstone
+        if row["device_id"] == PEER:
+            row["name"] = "d_" + "b" * 32  # (b) held row, empty local name
+    outcome = relay.apply_epoch(record, state, incoming, sender_device_id=PEER, root=root)
+    assert outcome.applied is True
+    # The ROWS SURVIVE — a cosmetic label never costs a member or refuses a frame.
+    assert record.member(stranger) is not None
+    assert record.member(PEER) is not None
+    # Neither invalid label is stored.
+    assert record.member(stranger).name == ""
+    assert record.member(PEER).name == ""
+    stored = store.load(NETWORK, root)
+    assert stored.member(stranger) is not None and stored.member(stranger).name == ""
