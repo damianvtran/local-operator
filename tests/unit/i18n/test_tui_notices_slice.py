@@ -8,8 +8,12 @@ What this file pins, and why each pin exists:
 2. **The additive event contract (RFC §2.6).** A notice now carries
    `code`/`params` beside `text`; older clients read `text` verbatim, and a
    locale-aware viewer can re-render without parsing prose.
-3. **Per-namespace fallback.** The namespace is new and en-only: a shipped
-   locale that does not carry it (`fr`) still reads the English text.
+3. **Per-namespace fallback.** The namespace started en-only, and a shipped
+   locale that does not carry it still reads the English text. Every shipped
+   locale now carries it (the fast-mode fix translated all five), so the
+   fallback is pinned against `ur`, which is inactive and has no directory:
+   the point is that a missing namespace degrades to English and never to the
+   raw message code.
 """
 
 from __future__ import annotations
@@ -120,6 +124,15 @@ REPLACED_LITERALS = {
         "adopts it here"
     ),
     "effort_default_changed_headline": "Effort default changed",
+    # Not an argparse-era literal: this notice is NEW copy the fast-mode fix
+    # added, so its "replaced literal" is the sentence it states rather than the
+    # one it removed. It belongs in this map anyway, because the map is the
+    # slice's complete census of the namespace — an unregistered key is how
+    # ``fast_mode_refused`` shipped without the byte-fidelity and context pins
+    # ever looking at it.
+    "fast_mode_refused": (
+        "fast mode: refused by {selector} — {reason}; switched off, serving at standard speed"
+    ),
 }
 
 
@@ -167,6 +180,7 @@ _SAMPLE_PARAMS = {
     "model_info_incomplete": {"model": "gpt-x"},
     "model_default_changed": {"model": "gpt-x"},
     "effort_default_changed": {"effort": "high"},
+    "fast_mode_refused": {"selector": "anthropic/claude-opus-5", "reason": "no fast tier"},
 }
 
 
@@ -183,8 +197,13 @@ def test_four_digit_counts_keep_plain_digits() -> None:
 
 
 def test_an_uncarried_locale_falls_back_to_english() -> None:
+    # `ur` rather than `fr`: fr now carries this namespace (fast-mode fix), so
+    # pinning fr here would assert translation-identity and silently rot into a
+    # duplicate of the catalogue when the copy is next reviewed. An inactive
+    # locale with no directory exercises the fallback path itself.
+    assert not (catalogues.catalogue_root() / "ur" / f"{NAMESPACE}.json").exists()
     for key in REPLACED_LITERALS:
         message = getattr(keys, key)(**_SAMPLE_PARAMS.get(key, {}))
         en = messages.render(message.code, message.params, locale="en")
-        assert messages.render(message.code, message.params, locale="fr") == en
+        assert messages.render(message.code, message.params, locale="ur") == en
         assert _notice(message).text == en

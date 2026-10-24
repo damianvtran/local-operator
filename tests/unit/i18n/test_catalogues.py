@@ -173,7 +173,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # (round 1 raised 12 findings, round 2 passed all seven locales), one fresh
     # ledger row each against the current en bytes. P5 adds `tui.palette` on
     # the same terms: a 7-key namespace whose fresh, independently audited
-    # ledger row is what lets the locale carry it.
+    # ledger row is what lets the locale carry it. The fast-mode fix adds
+    # `tui.notices` and `wire.errors.desktop`: Hindi had no file for either
+    # namespace, so the refusal notices fell back to English; now each carries
+    # a 30-key / 84-key catalogue with its own audited ledger row (see
+    # i18n/ledger.json), which is the same condition every namespace above was
+    # admitted on.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
@@ -181,6 +186,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "relay.session.tags",
         "tui.asks",
         "tui.authoring",
+        "tui.notices",
         "tui.palette",
         "tui.projects_edit",
         "tui.review",
@@ -192,6 +198,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "tui.viewer",
         "tui.welcome",
         "wire.errors",
+        "wire.errors.desktop",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
