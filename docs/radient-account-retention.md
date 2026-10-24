@@ -67,11 +67,14 @@ canonical-hub authority or permit sending a bearer to an arbitrary URL.
 Usable credential inventories remain filtered. A separate read-only query returns
 only retained Radient row IDs, never bearer payloads or inferred identity labels.
 The shared CLI/TUI `login status` formatter distinguishes retained-but-unavailable
-records from absence and gives `/login radient` / `local-operator login radient`
-as recovery actions. It explicitly says older records have not been deleted or
-assigned to the account being signed into. CLI/controller completion receipts
-use the same notice. An existing explicit disabled state remains unavailable
-rather than being reported as enabled or described as automatic quarantine.
+records from absence. Its restore line is **host-neutral by default**; the CLI
+(`local-operator login-status`) adds the terminal command because its reader is
+in a shell, while the TUI and the desktop receive the neutral sentence rather
+than a slash or shell instruction they cannot follow. It explicitly says older
+records have not been deleted or assigned to the account being signed into.
+CLI/controller completion receipts use the same notice. An existing explicit
+disabled state is reported as **stays disabled** — an outcome of a verified
+sign-in, not a failure — and is never described as automatic quarantine.
 
 This is a semantic implementation, **not visual approval**. Actual CLI output,
 real styled TUI frames and affected desktop rendering still require the granted
