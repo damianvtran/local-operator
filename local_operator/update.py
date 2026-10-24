@@ -2835,6 +2835,10 @@ def _promotion_transaction(
             raise UpdateError(
                 "published candidate artifact changed while building; retry lop update"
             )
+        # The gate above re-read the index, which marks ``publish``; from here
+        # the run is promoting (the pointer flip and marker writes happen inside
+        # the yield), so a failure there must not be reported as a stale index.
+        _reach("promote")
         with install_transaction.transaction(stable_root(), operation="promote candidate") as held:
             if evidence is not None and time.monotonic() >= evidence.fresh_until:
                 continue
