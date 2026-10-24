@@ -228,11 +228,12 @@ async def test_unknown_and_unshipped_values_are_refused_with_the_affordance(
             assert cell_len(text) <= 70, text
         # The echoed token is bounded by CELLS, not characters: a wide token
         # would otherwise push the refusal past the row.
-        app._run_slash_command("/language " + "語" * 30)
-        await pilot.pause()
-        long_notice = _language_notices(app)[-1]
-        assert "…" in long_notice, long_notice
-        assert cell_len(long_notice) <= 70, long_notice
+        for token in ("語" * 30, "\\" * 20):
+            app._run_slash_command("/language " + token)
+            await pilot.pause()
+            long_notice = _language_notices(app)[-1]
+            assert "…" in long_notice, long_notice
+            assert cell_len(long_notice) <= 70, long_notice
 
 
 @pytest.mark.asyncio
