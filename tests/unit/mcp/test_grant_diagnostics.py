@@ -130,6 +130,7 @@ async def test_sdk_callback_attributes_native_and_rotation_preserves_event(
         assert metadata["native_event_at"] == auth._chain_stamp_of(row.data)
         snapshot = auth.mcp_grant_diagnostics(URL, store)
         assert snapshot["provenance"] == "native"
+        assert snapshot["grant_chain_at"] == metadata["native_event_at"]
         assert snapshot["scopes_known"] is scope
         assert snapshot["identity_verified"] is False
         assert snapshot["sharing_mode"] == "finite_only"
@@ -265,6 +266,7 @@ async def test_snapshot_is_one_lookup_material_free_and_readiness_offers_are_tru
             "sharing_mode",
             "refresh_presence",
             "expiry_known",
+            "grant_chain_at",
             "scopes_known",
             "access_state",
         }
