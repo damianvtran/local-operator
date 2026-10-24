@@ -27,14 +27,15 @@ Check the registry (`team list`) before authoring one: if a registered team
 already covers the work, use it. An existing team is almost always the right
 home, and a parallel one costs a roster to own and maintain for one job.
 
-- **Prefer a conversation-scoped team for a one-time grouping; a task-scoped
-  team is the ad-hoc exception.** The domain's existing team covers a one-off
-  investigation, review, migration or release: `lopdev` for anything in the
-  local-operator/harness code, the product team for a service, and so on.
-- **New account teams are for materially new functions or product domains**
-  with no good existing coverage — a genuinely new product, organisation, or
-  standing responsibility. That is the user's decision. Unsure whether the bar
-  is cleared? It is not; default to the existing team.
+- **Prefer a conversation-scoped team for a one-time grouping; do not author an
+  account team for a single task.** For an investigation, review, migration or
+  release, use the domain's existing team — `lopdev` for anything in the
+  local-operator/harness code, the product team for a service. That is reuse,
+  not a new team.
+- **An account team is for a materially new function or product domain** with no
+  good existing coverage — a genuinely new product, organisation, or standing
+  responsibility. It is the user's decision. Unsure whether that bar is
+  cleared? It is not; default to the existing team.
 - **To parallelize a one-off, spawn a session, not a team.** Use the `sessions`
   tool with the existing team attached (`team=<name>`) and hand it the brief;
   it runs to completion without the initiator owning a new roster or managing

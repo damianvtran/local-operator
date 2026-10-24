@@ -490,10 +490,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S4): 1030 -> 1109, the same promotion delta; the team
     # doc also states that a replace may cover a member, which the agent twin
     # does not need.
-    # RE-MEASURED (LOH-9 S5): 1109 -> 1379 — the promote row, the promote and
+    # RE-MEASURED (LOH-9 S5): 1109 -> 1400 — the promote row, the promote and
     # member-copy step, the corrected refusal copy and the collision clause;
     # the same printed table.
-    "team": 1379,
+    "team": 1400,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -935,6 +935,21 @@ def test_cut_wire_prose_moved_into_the_tool_doc(
             f"{name}: phrase still on the always-loaded wire — the move saved "
             f"nothing, so either cut it or drop it from MOVED_WIRE_DETAIL: {phrase!r}"
         )
+
+
+@pytest.mark.parametrize("name", ["agent", "team"])
+def test_the_promote_op_and_step_are_reachable_in_the_rendered_doc(
+    default_surface: list[AgentTool], name: str
+) -> None:
+    """The ledger pins SIZE, not content: a same-length edit could drop the row.
+
+    The design's guidance-reachability metric is an assertion, not eyeballing, so
+    both halves the model reads are pinned by phrase: the authored Ops-table row
+    and the narrative PROMOTE step.
+    """
+    doc = render_tool_doc(next(tool for tool in default_surface if tool.name == name))
+    assert "\n- promote: " in doc, f"tool://{name} lost its promote row"
+    assert "\n- PROMOTE: " in doc, f"tool://{name} lost the promote step in its notes"
 
 
 def test_authored_notes_and_renderers_name_real_tools(

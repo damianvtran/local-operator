@@ -262,8 +262,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "``/team promote <name>`` verb, which the user must run themselves; "
             "there is no retry through this tool. A promotion collision is "
             "refused with its own next step: a team member or alias collision "
-            "names the ``/team edit`` or ``/team promote <team> replace`` call "
-            "that resolves it (``as_name`` renames the team, not its members)."
+            "names the remedy by kind: a member collision names ``/team promote "
+            "<team> replace``; an alias collision names ``/team edit <owner>`` "
+            "(``replace`` does not resolve an alias, and ``as_name`` renames the "
+            "team, not its members)."
         ),
     ),
     # -- ask ----------------------------------------------------------------
