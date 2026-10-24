@@ -35,7 +35,7 @@ class Collector:
         if len(catalog)>CAPS['codes'] or len({id(code) for code,_ in catalog})!=len(catalog) or len({label for _,label in catalog})!=len(catalog) or not any(code is root for code,_ in catalog):raise ValueError('catalog STOP')
         if identity['static_ids']!=[label for _,label in catalog]:raise ValueError('catalog binding STOP')
         self.root=root;self.catalog=catalog;self.identity=dict(identity);self.clock=clock;self.thread_id=thread_id;self.get_hook=get_hook;self.set_hook=set_hook
-        self.callback=self._event;self.codes=[];self.nodes=[];self.edges=[];self.stack=[];self.last=None;self.events=0;self.c_events=0;self.ready=False;self.trailing=False;self.failure=None;self.signed_value=None;self.argument_used=None;self.hook_seen_at_export=None;self.hook_after_cleanup=None
+        self.callback=self._event;self.codes=[];self.nodes=[];self.edges=[];self.stack=[];self.last=None;self.events=0;self.c_events=0;self.ready=False;self.trailing=False;self.failure=None;self.signed_value=None;self.first_limit=None;self.argument_used=None;self.hook_seen_at_export=None;self.hook_after_cleanup=None
         # Freeze the entry observation; cleanup must never rewrite it.
         self.hook_entry_none=get_hook() is None
         if not self.hook_entry_none:self.fail('HOOK_CONFLICT')
@@ -44,10 +44,21 @@ class Collector:
         if self.failure is None:
             self.failure=reason;self.signed_value=value if type(value) is int else None
 
+    def _fail_limit(self,kind,reason):
+        # Additive v1 failure-only metadata: preserve the first rejected guard
+        # and its actual counters, not a reconstruction from expected limits.
+        if self.failure is None and self.first_limit is None:
+            self.first_limit=dict(kind=kind,
+                counts=dict(codes=len(self.codes),edges=len(self.edges),
+                            active_stack=len(self.stack),events=self.events),
+                limits=dict(codes=CAPS['codes'],edges=CAPS['edges'],
+                            active_stack=CAPS['stack'],events=CAPS['events']))
+        self.fail(reason)
+
     def node(self,code):
         for index,known in enumerate(self.codes):
             if known is code:return index
-        if len(self.codes)>=CAPS['codes']:self.fail('CAP');return None
+        if len(self.codes)>=CAPS['codes']:self._fail_limit('CODES','CAP');return None
         self.codes.append(code);label=next((label for known,label in self.catalog if known is code),None)
         self.nodes.append(dict(static_id=label,segments=0,own_ns=0,inclusive_ns=0));return len(self.codes)-1
 
@@ -57,7 +68,7 @@ class Collector:
         if self.failure is not None:return
         try:
             if type(event) is not str or event not in ('call','return','c_call','c_return','c_exception'):self.fail('EVENT');return
-            if self.events>=CAPS['events']:self.fail('CAP');return
+            if self.events>=CAPS['events']:self._fail_limit('EVENTS','CAP');return
             self.events+=1
             if event.startswith('c_'):self.c_events+=1;return
             if type(frame) is not FrameType or type(frame.f_code) is not CodeType:self.fail('FRAME');return
@@ -81,14 +92,17 @@ class Collector:
                     if edge is not None:self.edges[edge]['own_ns']+=delta
             self.last=now
             if event=='call':
-                if len(self.stack)>=CAPS['stack'] or any(old==token for old,_,_ in self.stack):self.fail('STACK');return
+                if len(self.stack)>=CAPS['stack'] or any(old==token for old,_,_ in self.stack):
+                    if len(self.stack)>=CAPS['stack']:self._fail_limit('STACK_DEPTH','STACK')
+                    else:self.fail('STACK')
+                    return
                 index=self.node(code)
                 if index is None:return
                 edge=None
                 if self.stack:
                     parent=self.stack[-1][1];edge=next((i for i,row in enumerate(self.edges) if row['parent']==parent and row['child']==index),None)
                     if edge is None:
-                        if len(self.edges)>=CAPS['edges']:self.fail('CAP');return
+                        if len(self.edges)>=CAPS['edges']:self._fail_limit('EDGES','CAP');return
                         edge=len(self.edges);self.edges.append(dict(parent=parent,child=index,segments=0,own_ns=0,inclusive_ns=0))
                     self.edges[edge]['segments']+=1
                 self.nodes[index]['segments']+=1;self.stack.append((token,index,edge))
@@ -115,7 +129,7 @@ class Collector:
         # recursion is suppressed. Export observes NONE, not historical ownership.
         self.hook_seen_at_export=self.get_hook() is None
         if not self.ready or not self.trailing or self.stack:self.fail('UNFINISHED')
-        record=dict(schema=SCHEMA,identity=dict(self.identity),unit='instrumented_owner_thread_cpu_ns',caps=dict(CAPS),ready=self.ready,trailing=self.trailing,balanced=not self.stack,hook_entry_none=self.hook_entry_none,hook_argument_used=self.argument_used,hook_seen_at_export=self.hook_seen_at_export,hook_after_cleanup=self.hook_after_cleanup,events=self.events,c_events=self.c_events,failure=self.failure,signed_value=self.signed_value,nodes=[dict(row) for row in self.nodes],edges=[dict(row) for row in self.edges],completed=False)
+        record=dict(schema=SCHEMA,identity=dict(self.identity),unit='instrumented_owner_thread_cpu_ns',caps=dict(CAPS),ready=self.ready,trailing=self.trailing,balanced=not self.stack,hook_entry_none=self.hook_entry_none,hook_argument_used=self.argument_used,hook_seen_at_export=self.hook_seen_at_export,hook_after_cleanup=self.hook_after_cleanup,events=self.events,c_events=self.c_events,failure=self.failure,signed_value=self.signed_value,first_limit=(None if self.first_limit is None else dict(kind=self.first_limit['kind'],counts=dict(self.first_limit['counts']),limits=dict(self.first_limit['limits']))),nodes=[dict(row) for row in self.nodes],edges=[dict(row) for row in self.edges],completed=False)
         try:
             validate(record,self.identity,require_complete=False)
             # Serialization success is observed, not assumed by a default flag.
@@ -126,11 +140,27 @@ class Collector:
         return record
 
 
-KEYS={'schema','identity','unit','caps','ready','trailing','balanced','hook_entry_none','hook_argument_used','hook_seen_at_export','hook_after_cleanup','events','c_events','failure','signed_value','nodes','edges','completed'}
+KEYS={'schema','identity','unit','caps','ready','trailing','balanced','hook_entry_none','hook_argument_used','hook_seen_at_export','hook_after_cleanup','events','c_events','failure','signed_value','first_limit','nodes','edges','completed'}
+
+
+def validate_limit(value):
+    if value is None:return True
+    if type(value) is not dict or set(value)!={'kind','counts','limits'} or type(value['kind']) is not str or value['kind'] not in ('CODES','EVENTS','EDGES','STACK_DEPTH'):raise ValueError('limit schema STOP')
+    limits=dict(codes=CAPS['codes'],edges=CAPS['edges'],active_stack=CAPS['stack'],events=CAPS['events'])
+    for field in ('counts','limits'):
+        values=value[field]
+        if type(values) is not dict or set(values)!=set(limits):raise ValueError('limit fields STOP')
+        for key,maximum in limits.items():
+            n=values[key]
+            if field=='counts' and n is None:continue
+            if type(n) is not int or n<0 or n>maximum or field=='limits' and n!=maximum:raise ValueError('limit count STOP')
+    return True
 
 
 def validate(record,expected,require_complete=True):
     if type(record) is not dict or set(record)!=KEYS or record['schema']!=SCHEMA or record['unit']!='instrumented_owner_thread_cpu_ns' or record['caps']!=CAPS or not header_valid(record['identity'],expected):raise ValueError('schema STOP')
+    validate_limit(record['first_limit'])
+    if record['first_limit'] is not None and record['failure'] not in ('CAP','STACK'):raise ValueError('limit reason STOP')
     for key in ('ready','trailing','balanced','hook_entry_none','hook_seen_at_export','completed'):
         if type(record[key]) is not bool:raise ValueError('bool STOP')
     for key in ('hook_argument_used','hook_after_cleanup'):
@@ -157,11 +187,17 @@ def validate(record,expected,require_complete=True):
 
 def finalize(record,expected):
     """No arbitrary-record echo. Signed diagnostics are not measurement rows."""
-    safe=dict(schema=SCHEMA,qualified=False,failure=None,signed_value=None,completed=None)
+    safe=dict(schema=SCHEMA,qualified=False,failure=None,signed_value=None,completed=None,first_limit=None)
     if type(record) is dict:
         if type(record.get('failure')) is str and record['failure'] in REASONS:safe['failure']=record['failure']
         if type(record.get('signed_value')) is int:safe['signed_value']=record['signed_value']
         if type(record.get('completed')) is bool:safe['completed']=record['completed']
+    if type(record) is dict:
+        try:
+            value=record.get('first_limit');validate_limit(value)
+            if value is not None:
+                safe['first_limit']=dict(kind=value['kind'],counts=dict(value['counts']),limits=dict(value['limits']))
+        except (ValueError,TypeError,KeyError):pass
     try:validate(record,expected);safe['qualified']=True
     except (ValueError,TypeError,KeyError,IndexError):pass
     return safe
