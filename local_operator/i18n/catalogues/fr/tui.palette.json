@@ -1,0 +1,9 @@
+{
+  "tui.palette.kind_agent": "agent",
+  "tui.palette.kind_command": "commande",
+  "tui.palette.kind_session": "session",
+  "tui.palette.kind_setting": "paramètre",
+  "tui.palette.kind_team": "équipe",
+  "tui.palette.no_matches": "Aucun résultat",
+  "tui.palette.placeholder": "Trouver commandes, paramètres, sessions, agents…"
+}
