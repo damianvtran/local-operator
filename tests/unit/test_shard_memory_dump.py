@@ -164,9 +164,8 @@ def test_the_dump_records_every_field_the_next_measurement_needs(
         assert re.search(rf"^\s*{pid}\s", text, re.MULTILINE), f"pid {pid} is absent"
     assert "262000" in text  # the worker's RSS, in kB
     assert "Local Operator" in text
-    assert "sleep 30" in text
     # A process outside the shard must not be dragged in by "all of /proc".
-    assert "/usr/bin/other --daemon" not in text
+    assert "unrelated" not in text
 
     # The failure itself, including the errno as a name.
     assert "failing test: tests/unit/secrets/test_cli.py::test_keyring_write" in text
@@ -176,6 +175,52 @@ def test_the_dump_records_every_field_the_next_measurement_needs(
 
     # cgroup v2 absent is stated, not silently blank.
     assert "no cgroup v2 memory.max/memory.current/memory.peak" in text
+
+
+def test_no_command_line_or_argv_text_reaches_the_dump(
+    fake_proc: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Credential-bearing command lines must never be carried into the artifact.
+
+    A command line can contain a token passed as an argument, and this artifact
+    is uploaded for anyone to read; redacting it would mean anticipating every
+    spelling of every secret. The dump therefore carries only pid, ppid, RSS,
+    name and a boolean derived from the command line. This builds the marker
+    into every per-process ``cmdline`` file (the real source), and into both
+    argv surfaces a naive implementation might reach for, then asserts neither
+    marker appears anywhere in the rendered dump.
+    """
+    line_marker = "LEAKMARKER-ARGV-31337"
+    argv_marker = "LEAKMARKER-AUX-90210"
+    for entry in fake_proc.iterdir():
+        if entry.is_dir() and (entry / "cmdline").exists():
+            (entry / "cmdline").write_bytes(
+                f"--label {line_marker} pytest".replace(" ", "\x00").encode() + b"\x00"
+            )
+    monkeypatch.setattr(memory.sys, "argv", ["pytest", "--label", argv_marker])
+    config = _Config(
+        {
+            "workerid": "gw3",
+            "workercount": 3,
+            "mainargv": ["pytest", "--label", argv_marker],
+        }
+    )
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        config=config,
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "no-cgroup",
+        pid=101,
+    )
+
+    assert line_marker not in text
+    assert argv_marker not in text
+    # Removing the text did not remove the reading: the tree still roots at the
+    # process whose command line named pytest.
+    assert "tree root pid: 100" in text
 
 
 def test_cgroup_v2_peak_is_included_when_the_files_exist(tmp_path: Path) -> None:
@@ -212,16 +257,14 @@ def test_the_process_list_is_capped_and_reports_the_omitted_count(tmp_path: Path
     is worst exactly when it matters. The controller and the reporting worker are
     pinned above the RSS cut because they are the two rows the question is about.
     """
-    table = [
-        memory.ProcInfo(pid=1000, ppid=1, name="python", rss_kb=500_000, cmdline="python -m pytest")
-    ]
+    table = [memory.ProcInfo(pid=1000, ppid=1, name="python", rss_kb=500_000, is_pytest=True)]
     table.extend(
         memory.ProcInfo(
             pid=1001 + index,
             ppid=1000,
             name="python",
             rss_kb=1_000 + index,
-            cmdline=f"worker-{index}",
+            is_pytest=False,
         )
         for index in range(99)
     )
@@ -284,8 +327,8 @@ def test_a_worker_missing_from_the_table_still_reports_the_rows_it_has(
 ) -> None:
     """A race that drops the worker is not a reason to return an empty table."""
     table = [
-        memory.ProcInfo(pid=200, ppid=1, name="python", rss_kb=10, cmdline="pytest"),
-        memory.ProcInfo(pid=201, ppid=200, name="python", rss_kb=20, cmdline="worker"),
+        memory.ProcInfo(pid=200, ppid=1, name="python", rss_kb=10, is_pytest=True),
+        memory.ProcInfo(pid=201, ppid=200, name="python", rss_kb=20, is_pytest=False),
     ]
     text = memory.build_report(
         nodeid="n",

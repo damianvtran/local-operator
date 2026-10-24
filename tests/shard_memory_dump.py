@@ -2,10 +2,10 @@
 
 WHY THIS EXISTS
 ---------------
-On 2026-10-24 ``test (3.13, 3)`` failed with six unrelated subprocess-spawning
+On 2026-10-24 ``test (3.13, 3)`` failed with eight unrelated subprocess-spawning
 cells raising ``OSError: [Errno 12] Cannot allocate memory`` inside the same
 second (``tests/unit/providers/test_login_cancel_cli.py::test_ctrl_c_really_exits_the_command``
-for both providers, plus five in ``tests/unit/secrets/test_cli.py``). The same
+for both providers, plus six in ``tests/unit/secrets/test_cli.py``). The same
 shape had already hit ``test (3.13, 3)``, ``test (3.13, 1)`` and
 ``test (3.12, 1)`` on earlier main runs.
 
@@ -90,10 +90,10 @@ ENV_RUN_DIR = "LOCAL_OPERATOR_SHARD_MEMORY_DIR"
 #: count is always reported even when rows are omitted.
 MAX_PROCESSES = 40
 
-#: Bound on the exception text and on one command line. The failure message is
-#: useful detail; an unbounded one is a denial-of-evidence in reverse.
+#: Bound on the exception text. The failure message is useful detail; an
+#: unbounded one is a denial-of-evidence in reverse.
 MAX_MESSAGE_CHARS = 500
-MAX_CMDLINE_CHARS = 160
+
 
 #: Where the kernel and cgroup expose their state. Parameters on the builder so
 #: the unit tests can hand it a fake tree instead of depending on the host.
@@ -113,7 +113,10 @@ class ProcInfo(NamedTuple):
     ppid: int
     name: str
     rss_kb: int | None
-    cmdline: str
+    #: Whether this process's command line names pytest. Read and discarded at
+    #: scan time so the tree can be rooted without ever putting the text in the
+    #: record -- or in the dump, where an uploaded artifact would expose it.
+    is_pytest: bool
 
 
 def run_dir() -> Path:
@@ -302,34 +305,13 @@ def _error_lines(nodeid: str, error: BaseException) -> list[str]:
 
 def _identity_lines(config: Any, pid: int) -> list[str]:
     worker, count, source = _worker_identity(config)
-    argv = _pytest_argv(config)
     return [
         "",
         "-- pytest identity --",
         f"xdist worker: {worker}",
         f"configured worker count: {count} (source: {source})",
         f"pytest pid: {pid}",
-        f"pytest argv: {_one_line(argv, MAX_CMDLINE_CHARS * 2)}",
     ]
-
-
-def _pytest_argv(config: Any) -> str:
-    """The controller's pytest command line, as xdist passes it to workers.
-
-    A worker's own ``sys.argv`` is execnet's ``-c`` bootstrap, which says
-    nothing about the shard; ``workerinput["mainargv"]`` carries the controller's
-    real argv (including the ``-n`` spelling that :func:`_worker_identity`
-    resolved). Falls back to this process's argv when the config has neither.
-    """
-    workerinput = getattr(config, "workerinput", None)
-    if isinstance(workerinput, dict):
-        mainargv = workerinput.get("mainargv")
-        if isinstance(mainargv, (list, tuple)):
-            return " ".join(str(part) for part in mainargv)
-    try:
-        return " ".join(sys.argv)
-    except Exception:
-        return "<unavailable>"
 
 
 def _meminfo_lines(proc_root: Path) -> list[str]:
@@ -401,13 +383,10 @@ def _process_lines(proc_root: Path, pid: int, processes: list[ProcInfo] | None) 
     else:
         shown = ordered
         lines.append(f"showing: {len(shown)} of {len(ordered)} (cap {MAX_PROCESSES})")
-    lines.append(f"{'pid':>7} {'ppid':>7} {'rss_kb':>10} {'name':<20} cmdline")
+    lines.append(f"{'pid':>7} {'ppid':>7} {'rss_kb':>10} name")
     for proc in shown:
         rss = "-" if proc.rss_kb is None else str(proc.rss_kb)
-        lines.append(
-            f"{proc.pid:>7} {proc.ppid:>7} {rss:>10} {proc.name[:20]:<20} "
-            f"{_one_line(proc.cmdline, MAX_CMDLINE_CHARS)}"
-        )
+        lines.append(f"{proc.pid:>7} {proc.ppid:>7} {rss:>10} {proc.name[:40]}")
     return lines
 
 
@@ -488,19 +467,23 @@ def _read_process(entry: Path, pid: int) -> ProcInfo | None:
                     except ValueError:
                         rss_kb = None
 
+    # The command line is READ ONLY to answer one boolean question -- does this
+    # process name pytest? -- and the bytes are discarded. It can contain
+    # credentials (a token passed as an argument), and this dump is uploaded as
+    # a public artifact; a redaction filter would have to anticipate every way
+    # a secret can be spelled, while not carrying the text cannot be wrong.
     cmdline_bytes, _ = _read_bytes(entry / "cmdline")
-    if cmdline_bytes is None:
-        cmdline = ""
-    else:
-        cmdline = cmdline_bytes.replace(b"\x00", b" ").strip().decode("utf-8", "replace")
-    return ProcInfo(pid=pid, ppid=ppid, name=name, rss_kb=rss_kb, cmdline=cmdline)
+    is_pytest = cmdline_bytes is not None and b"pytest" in cmdline_bytes.lower()
+    return ProcInfo(pid=pid, ppid=ppid, name=name, rss_kb=rss_kb, is_pytest=is_pytest)
 
 
 def _process_tree(table: list[ProcInfo], pid: int) -> tuple[list[ProcInfo], int]:
     """Return the shard's tree and the pid it was rooted at.
 
-    The root is the highest ancestor whose argv names pytest (the controller),
-    reached from this worker. Descendants of that root are the whole shard:
+    The root is the highest ancestor whose command line named pytest (the
+    controller), reached from this worker. The text itself is never stored;
+    only the boolean survives into :class:`ProcInfo`. Descendants of that root
+    are the whole shard:
     every xdist worker, the controller and whatever children a test spawned.
     Climbing stops at the first ancestor that does not name pytest, so a suite
     started from an agent shell does not drag that shell's siblings in.
@@ -512,7 +495,7 @@ def _process_tree(table: list[ProcInfo], pid: int) -> tuple[list[ProcInfo], int]
         if current is None:
             break
         parent = by_pid.get(current.ppid)
-        if parent is None or "pytest" not in parent.cmdline.lower():
+        if parent is None or not parent.is_pytest:
             break
         root = parent.pid
 
