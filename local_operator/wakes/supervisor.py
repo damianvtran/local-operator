@@ -1766,7 +1766,9 @@ class _Sweeper:
         if self._failure is None:
             self._failure = failure
         elif self._failure is not failure:
-            self._failure = BaseExceptionGroup("spool bookkeeping failures", [self._failure, failure])
+            self._failure = BaseExceptionGroup(
+                "spool bookkeeping failures", [self._failure, failure]
+            )
 
     def raise_if_failed(self) -> None:
         """Failure is separate from running ownership and forbids new dispatch."""
@@ -1861,14 +1863,19 @@ class _Sweeper:
                     # cancellation. Failed bookkeeping latches this engagement
                     # against a hot retry; task error stays observable to owner.
                     for reason in outcomes:
-                        await await_spool_write(_note_spooled_attempt, config_dir,
-                                                session_id, reason=reason)
+                        await await_spool_write(
+                            _note_spooled_attempt, config_dir, session_id, reason=reason
+                        )
                 except BaseException as persistence_error:
                     # sys.exception here is the caught persistence error; the
                     # pending body/cancellation is captured before the await.
-                    failure = (BaseExceptionGroup("engagement and backoff failed",
-                               [pending_error, persistence_error])
-                               if pending_error is not None else persistence_error)
+                    failure = (
+                        BaseExceptionGroup(
+                            "engagement and backoff failed", [pending_error, persistence_error]
+                        )
+                        if pending_error is not None
+                        else persistence_error
+                    )
                     self._record_failure(failure)
                     raise failure
                 finally:
@@ -2076,7 +2083,16 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
         )
         return await sweeper.drain()
     finally:
-        await sweeper.shutdown()
+        # A cancellation already travelling outranks the latched failure:
+        # serve()'s cleanup still calls every seat's shutdown, so the failure is
+        # raised there and grouping keeps it; replacing the CancelledError here
+        # would instead lose the caller's own reason for leaving.
+        in_flight = sys.exc_info()[1]
+        try:
+            await sweeper.shutdown()
+        except BaseException:
+            if in_flight is None:
+                raise
 
 
 def _has_fireable_wakes(
@@ -2425,7 +2441,9 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 # under a running engagement would kill the runtime it is
                 # constructing. Slice instead and re-decide next pass.
                 if sweeper.in_flight or rescue_seat.in_flight:
-                    await _sleep_in_slices(config_dir, SLICE_S, None, failure_check=sweeper.raise_if_failed)
+                    await _sleep_in_slices(
+                        config_dir, SLICE_S, None, failure_check=sweeper.raise_if_failed
+                    )
                     continue
                 if await _should_retire(config_dir):
                     # LOGGED WITH THE REASON, because this is the transition
@@ -2544,7 +2562,9 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 ),
             )
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)
-            await _sleep_in_slices(config_dir, delay, upcoming, failure_check=sweeper.raise_if_failed)
+            await _sleep_in_slices(
+                config_dir, delay, upcoming, failure_check=sweeper.raise_if_failed
+            )
     except BaseException as exc:
         primary_error = exc
         raise
@@ -2556,7 +2576,9 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             try:
                 await seat.shutdown()
             except BaseException as cleanup_error:
-                if cleanup_error is not primary_error and not any(cleanup_error is old for old in cleanup_errors):
+                if cleanup_error is not primary_error and not any(
+                    cleanup_error is old for old in cleanup_errors
+                ):
                     cleanup_errors.append(cleanup_error)
         if cleanup_errors:
             if primary_error is not None:
@@ -2564,8 +2586,13 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             raise BaseExceptionGroup("supervisor cleanup failures", cleanup_errors)
 
 
-async def _sleep_in_slices(config_dir: Path, delay: float, upcoming: int | None, *,
-                           failure_check: Callable[[], None] | None = None) -> None:
+async def _sleep_in_slices(
+    config_dir: Path,
+    delay: float,
+    upcoming: int | None,
+    *,
+    failure_check: Callable[[], None] | None = None,
+) -> None:
     """Sleep up to ``delay`` seconds, returning early if the index changes.
 
     Re-reads the index once per :data:`SLICE_S` and returns as soon as a wake

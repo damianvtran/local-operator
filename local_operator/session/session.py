@@ -9895,9 +9895,11 @@ class Session:
         paths, and every one of them is a state the settle has to be asked about.
         """
         from local_operator.session.runtime.inbox import (
-            try_enter_read_batch, claim_read_batch_or_defer, settle_read_batch,
+            claim_read_batch_or_defer,
+            settle_read_batch,
+            try_enter_read_batch,
         )
-        from local_operator.wakes.spooled import await_spool_write
+
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
             return
@@ -9939,13 +9941,7 @@ class Session:
         # Imported in-function: the runtime inbox lives behind the mobile
         # package's config-path machinery, and this module does not carry a
         # module-level dependency on it for a once-per-session path.
-        from local_operator.wakes.spooled import await_spool_write
-        from local_operator.session.runtime.inbox import (
-            SOURCE_USER,
-            admit_batch_row,
-            coalesce_wake_rows,
-            drain_inbox,
-        )
+        from local_operator.session.runtime.inbox import SOURCE_USER, admit_batch_row
 
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
@@ -9989,29 +9985,33 @@ class Session:
                     self._run_spooled_owner_prompt(line, seen=seen_owner_ids)
                     batch.handled.update(ordinals[id(line)])
                 else:
-                    await admit_batch_row(batch, ordinals[id(line)], self.receive_peer_message(
-                        line.text,
-                        mode="mailbox",
-                        wake=bool(getattr(line, "wake", False)),
-                        sender=line.sender,
-                        # The SENDER's own id, so a row that reached the spool
-                        # twice (a crash between the write and the ack, or a
-                        # successor that drained it once already) is answered as
-                        # a duplicate instead of delivered twice. Absent on rows
-                        # an older build wrote, which read as ``""`` and deliver
-                        # exactly as before.
-                        message_id=getattr(line, "message_id", "") or None,
-                        # The row's OWN provenance kind and bridge locator, as the
-                        # live/wake delivery carries them. Dropping them here
-                        # delivered a spooled team-bridge request as a plain peer
-                        # message: the bridge receive hook keys on
-                        # ``TEAM_BRIDGE_MESSAGE_TYPE`` (see ``_maybe_raise_bridge_ask``),
-                        # so the human ask was never raised. Empty/absent (rows an
-                        # older build wrote) read as ``None`` and deliver exactly
-                        # as before.
-                        custom_type=getattr(line, "custom_type", "") or None,
-                        bridge_meta=getattr(line, "bridge_meta", None) or None,
-                    ))
+                    await admit_batch_row(
+                        batch,
+                        ordinals[id(line)],
+                        self.receive_peer_message(
+                            line.text,
+                            mode="mailbox",
+                            wake=bool(getattr(line, "wake", False)),
+                            sender=line.sender,
+                            # The SENDER's own id, so a row that reached the spool
+                            # twice (a crash between the write and the ack, or a
+                            # successor that drained it once already) is answered as
+                            # a duplicate instead of delivered twice. Absent on rows
+                            # an older build wrote, which read as ``""`` and deliver
+                            # exactly as before.
+                            message_id=getattr(line, "message_id", "") or None,
+                            # The row's OWN provenance kind and bridge locator, as the
+                            # live/wake delivery carries them. Dropping them here
+                            # delivered a spooled team-bridge request as a plain peer
+                            # message: the bridge receive hook keys on
+                            # ``TEAM_BRIDGE_MESSAGE_TYPE`` (see ``_maybe_raise_bridge_ask``),
+                            # so the human ask was never raised. Empty/absent (rows an
+                            # older build wrote) read as ``None`` and deliver exactly
+                            # as before.
+                            custom_type=getattr(line, "custom_type", "") or None,
+                            bridge_meta=getattr(line, "bridge_meta", None) or None,
+                        ),
+                    )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
 

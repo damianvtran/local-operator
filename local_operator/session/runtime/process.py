@@ -4390,10 +4390,14 @@ def _resume_consumed_ids(directory: Path) -> set[str]:
 
 async def _drain_inbox_into(handle: object) -> int:
     from local_operator.session.runtime.inbox import (
-        try_enter_read_batch, claim_read_batch_or_defer, settle_read_batch,
+        claim_read_batch_or_defer,
+        settle_read_batch,
+        try_enter_read_batch,
     )
-    from local_operator.wakes.spooled import await_spool_write
-    directory = getattr(getattr(getattr(handle, "_session", None), "transcript", None), "directory", None)
+
+    directory = getattr(
+        getattr(getattr(handle, "_session", None), "transcript", None), "directory", None
+    )
     if directory is None:
         return 0
     batch = try_enter_read_batch(directory)
@@ -4444,7 +4448,6 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
     Best-effort per message: one malformed or rejected row must not stop the
     rest, and none of it may prevent the runtime from starting.
     """
-    from local_operator.wakes.spooled import await_spool_write
 
     session = getattr(handle, "_session", None)
     directory = getattr(getattr(session, "transcript", None), "directory", None)
@@ -4482,26 +4485,14 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
         TRANSCRIPT_FILENAME,
         durable_conversation_path,
     )
-    from local_operator.session.runtime.inbox import (
-        SOURCE_USER,
-        admit_batch_row,
-        append_inbox,
-        coalesce_wake_rows,
-        drain_inbox,
-        drop_owed_turn,
-    )
+    from local_operator.session.runtime.inbox import SOURCE_USER, admit_batch_row
 
     requires_engagement = not durable_conversation_path(directory / TRANSCRIPT_FILENAME)
     entries = batch.delivery_rows()
     ordinals = {id(line): indices for indices, line in entries}
     lines = [line for _, line in entries]
-    # BEFORE the deferral split below, which re-spools what it will not deliver:
-    # a draining runtime spools one row per fired occurrence, so a schedule that
-    # repeats across a long handover arrives here as dozens of identical wake rows
-    # and each would be delivered as its own turn. Coalescing first means the
-    # deferral writes back ONE row per wake (carrying its fire count), which is
-    # also what keeps a later drain's merge from double-counting.
-    # Already structurally coalesced by batch.delivery_rows with ordinal mapping.
+    # Coalescing is structural and already done by batch.delivery_rows, which
+    # keeps the raw ordinals each delivered row covers.
     # SUCCESSOR RESUME (ready-successor handoff). A checkpointed move may have
     # already delivered some spooled rows on the predecessor; the record's
     # ``inbox_consumed_ids`` is the durable "delivered once" set. Dropping those
@@ -4510,8 +4501,6 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
     # delivered normally), matching the rule that unknown is not permission to
     # change behaviour. Read BEFORE the deferral split so the deferral writes
     # back only what it will not deliver.
-    from local_operator.wakes.spooled import await_spool_write
-
     consumed = _resume_consumed_ids(directory)
     if consumed:
         for line in lines:
@@ -4563,7 +4552,9 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
         owner_row = getattr(line, "source", "") == SOURCE_USER
         try:
             if owner_row:
-                await admit_batch_row(batch, ordinals[id(line)], _run_owner_prompt(handle, line, seen=seen_owner_ids))
+                await admit_batch_row(
+                    batch, ordinals[id(line)], _run_owner_prompt(handle, line, seen=seen_owner_ids)
+                )
             elif callable(probed):
                 fields: dict[str, Any] = {
                     "mode": "mailbox",

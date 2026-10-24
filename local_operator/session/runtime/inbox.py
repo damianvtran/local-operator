@@ -33,21 +33,21 @@ not seen is exactly the thing that must survive a sweep.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import secrets
 import tempfile
-import time
-import asyncio
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from local_operator.procstate import O_BINARY
-from local_operator.wakes.lock import WakeWriteLock, WakeLockBusy, WakeLockUnavailable
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +415,7 @@ _ACTIVE_READS_LOCK = threading.Lock()
 
 class InboxReadBatch:
     """Preallocated, nondestructive snapshot with raw ordinal delivery ownership."""
+
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
         self.key = str(self.directory.resolve())
@@ -437,8 +438,9 @@ class InboxReadBatch:
             # The existing coalescer merges exactly one structural wake group;
             # mapping its known inputs back to ordinals never matches raw text.
             if line.wake and line.wake_id:
-                ordinals = tuple(i for i, old in self.rows
-                                 if old.wake and old.wake_id == line.wake_id)
+                ordinals = tuple(
+                    i for i, old in self.rows if old.wake and old.wake_id == line.wake_id
+                )
             else:
                 ordinals = tuple(i for i, old in self.rows if old is line)
             if not ordinals:
@@ -516,11 +518,15 @@ def commit_inbox_batch(batch: InboxReadBatch) -> None:
             raise OSError("inbox snapshot prefix changed")
         if any(type(i) is not int or i < 0 or i >= len(batch.chunks) for i in batch.handled):
             raise OSError("invalid handled inbox ordinal")
-        payload = b"".join(chunk for i, chunk in enumerate(batch.chunks)
-                           if i not in batch.handled) + current[len(batch.raw):]
+        payload = (
+            b"".join(chunk for i, chunk in enumerate(batch.chunks) if i not in batch.handled)
+            + current[len(batch.raw) :]
+        )
         temporary: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".inbox-commit-", delete=False) as handle:
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent, prefix=".inbox-commit-", delete=False
+            ) as handle:
                 temporary = handle.name
                 count = handle.write(payload)
                 if count != len(payload):
@@ -561,6 +567,7 @@ async def claim_read_batch_or_defer(batch: InboxReadBatch) -> bool:
     it, and ``settle_read_batch`` releases the lease if the claim got that far.
     """
     from local_operator.wakes.spooled import await_spool_write
+
     try:
         await await_spool_write(claim_inbox_batch, batch)
     except asyncio.CancelledError:
@@ -580,6 +587,7 @@ def release_inbox_batch(batch: InboxReadBatch) -> None:
 async def finish_read_batch(batch: InboxReadBatch) -> None:
     """Commit/release complete before marker settlement or cancellation escapes."""
     from local_operator.wakes.spooled import await_spool_write
+
     if not batch.acquired:
         # A deferred claim holds no lease and has no snapshot: release the seat
         # and leave the live owner's journal and marker alone.
@@ -628,9 +636,12 @@ async def admit_batch_row(batch: InboxReadBatch, ordinals: tuple[int, ...], admi
     return result
 
 
-async def settle_read_batch(batch: InboxReadBatch, body_error: BaseException | None = None, *, cwd: str = "") -> None:
+async def settle_read_batch(
+    batch: InboxReadBatch, body_error: BaseException | None = None, *, cwd: str = ""
+) -> None:
     """One owner joins commit/release before marker bookkeeping, retaining faults."""
     from local_operator.wakes.spooled import await_spool_write
+
     owned = batch.acquired
     errors: list[BaseException] = [] if body_error is None else [body_error]
     try:
@@ -642,8 +653,11 @@ async def settle_read_batch(batch: InboxReadBatch, body_error: BaseException | N
             # Deferred to the runtime that owns the lease; its settle retires the
             # marker. Settling here would clear an obligation we never served.
             if errors:
-                raise errors[0] if len(errors) == 1 else BaseExceptionGroup(
-                    "inbox delivery failed before a deferred claim", errors)
+                raise (
+                    errors[0]
+                    if len(errors) == 1
+                    else BaseExceptionGroup("inbox delivery failed before a deferred claim", errors)
+                )
             return
         try:
             if batch.drop_after_release:
@@ -764,7 +778,10 @@ def append_for_successor(root: Path, session_dir: Path, line: InboxLine, *, cwd:
     refusal, never exactly-once delivery; existing message IDs remain authority.
     """
     from local_operator.wakes.spooled import (
-        SpoolWriteError, _note_locked, _raise_reader, _session_lock,
+        SpoolWriteError,
+        _note_locked,
+        _raise_reader,
+        _session_lock,
     )
 
     owes = line.source == SOURCE_USER or line.wake
@@ -786,8 +803,13 @@ def settle_owed_turn(session_dir: Path, *, cwd: str = "") -> None:
     """
     from local_operator.paths import config_dir
     from local_operator.wakes.spooled import (
-        SpoolWriteError, _note_locked, _raise_reader, _session_lock,
-        clear_if_no_owed_turn, read_spooled_turn, spool_owes_turn,
+        SpoolWriteError,
+        _note_locked,
+        _raise_reader,
+        _session_lock,
+        clear_if_no_owed_turn,
+        read_spooled_turn,
+        spool_owes_turn,
     )
 
     root = config_dir()
@@ -805,8 +827,9 @@ def settle_owed_turn(session_dir: Path, *, cwd: str = "") -> None:
         return
     record = read_spooled_turn(root, session_id)
     if record is not None:
-        clear_if_no_owed_turn(root, session_id, session_dir,
-                             expected_generation=record.get("generation"))
+        clear_if_no_owed_turn(
+            root, session_id, session_dir, expected_generation=record.get("generation")
+        )
 
 
 def drop_owed_turn(session_dir: Path) -> None:
@@ -821,8 +844,9 @@ def drop_owed_turn(session_dir: Path) -> None:
     root = config_dir()
     record = read_spooled_turn(root, session_dir.name)
     if record is not None:
-        clear_if_no_owner_row(root, session_dir.name, session_dir,
-                             expected_generation=record.get("generation"))
+        clear_if_no_owner_row(
+            root, session_dir.name, session_dir, expected_generation=record.get("generation")
+        )
 
 
 def peek_inbox(session_dir: Path) -> list[InboxLine]:

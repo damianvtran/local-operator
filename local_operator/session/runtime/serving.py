@@ -2843,7 +2843,6 @@ class ServingSessionHandle(SessionHandle):
             SPOOL_RECEIPT_PROMPT,
             SPOOL_RECEIPT_WAKE,
             InboxLine,
-            append_inbox,
         )
 
         session = getattr(self, "_session", None)

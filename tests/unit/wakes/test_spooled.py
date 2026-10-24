@@ -734,7 +734,9 @@ def test_clear_rechecks_inbox_authority(tmp_path: Path) -> None:
     spooled.note_spooled_turn(tmp_path, "cas")
     record = spooled.read_spooled_turn(tmp_path, "cas")
     assert record is not None
-    assert not spooled.clear_if_no_owed_turn(tmp_path, "cas", directory,
-                                           expected_generation=record["generation"])
-    assert not spooled.clear_if_no_owner_row(tmp_path, "cas", directory,
-                                           expected_generation=record["generation"])
+    assert not spooled.clear_if_no_owed_turn(
+        tmp_path, "cas", directory, expected_generation=record["generation"]
+    )
+    assert not spooled.clear_if_no_owner_row(
+        tmp_path, "cas", directory, expected_generation=record["generation"]
+    )

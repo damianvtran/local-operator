@@ -1,7 +1,7 @@
 """Deterministic storage/cancellation regressions; no running App required."""
+
 import ast
 import asyncio
-import json
 import os
 import threading
 import unittest
@@ -12,20 +12,30 @@ from unittest.mock import patch
 from local_operator.session.runtime import inbox
 from local_operator.wakes import spooled, supervisor
 
+# The caller contract under test lives in the e2e module, which imports the
+# Textual App and cannot be imported here; read the committed source the way a
+# reviewer would instead of handing the test globals from a private harness.
+E2E_STOP_PATH = Path(__file__).resolve().parents[3] / "tests/e2e/test_fork_cold_e2e.py"
+E2E_STOP_SOURCE = E2E_STOP_PATH.read_text(encoding="utf-8")
+
 
 class JournalTests(unittest.TestCase):
     def test_short_append_and_failed_rollback_never_ack_poisoned_next_row(self):
         with TemporaryDirectory() as raw:
             root = Path(raw)
-            line = lambda text: inbox.InboxLine(text=text, sender={}, mode="mailbox", written_at=1)
+
+            def line(text):
+                return inbox.InboxLine(text=text, sender={}, mode="mailbox", written_at=1)
+
             self.assertTrue(inbox.append_inbox(root, line("prior")))
             write = os.write
             with patch.object(os, "write", lambda fd, data: write(fd, data[:7])):
                 self.assertFalse(inbox.append_inbox(root, line("short")))
             self.assertTrue(inbox.append_inbox(root, line("next")))
             self.assertEqual([r.text for r in inbox.peek_inbox(root)], ["prior", "next"])
-            with patch.object(os, "write", lambda fd, data: write(fd, data[:7])), patch.object(
-                os, "ftruncate", side_effect=OSError("controlled rollback failure")
+            with (
+                patch.object(os, "write", lambda fd, data: write(fd, data[:7])),
+                patch.object(os, "ftruncate", side_effect=OSError("controlled rollback failure")),
             ):
                 self.assertFalse(inbox.append_inbox(root, line("poison")))
             self.assertFalse(inbox.append_inbox(root, line("must not ack")))
@@ -33,8 +43,14 @@ class JournalTests(unittest.TestCase):
     def test_short_recall_rolls_back_without_losing_the_owner_row(self):
         with TemporaryDirectory() as raw:
             root = Path(raw)
-            row = inbox.InboxLine(text="owner", sender={}, mode="mailbox", written_at=1,
-                                  source=inbox.SOURCE_USER, command_id="synthetic-command")
+            row = inbox.InboxLine(
+                text="owner",
+                sender={},
+                mode="mailbox",
+                written_at=1,
+                source=inbox.SOURCE_USER,
+                command_id="synthetic-command",
+            )
             self.assertTrue(inbox.append_inbox(root, row))
             write = os.write
             with patch.object(os, "write", lambda fd, data: write(fd, data[:7])):
@@ -54,6 +70,7 @@ class OwnedWriteTests(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         loop_errors = []
         loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
         def operation():
             entered.set()
             loop.call_soon_threadsafe(ready.set)
@@ -62,6 +79,7 @@ class OwnedWriteTests(unittest.IsolatedAsyncioTestCase):
                 raise failure
             finally:
                 finished.set()
+
         task = asyncio.create_task(spooled.await_spool_write(operation))
         try:
             await asyncio.wait_for(ready.wait(), 2)
@@ -98,15 +116,22 @@ class OwnedWriteTests(unittest.IsolatedAsyncioTestCase):
             entered = asyncio.Event()
             loop = asyncio.get_running_loop()
             append = inbox.append_inbox
+
             def held_append(*args):
                 loop.call_soon_threadsafe(entered.set)
                 release.wait(5)
                 return append(*args)
-            row = inbox.InboxLine(text="synthetic", sender={}, mode="mailbox", written_at=1,
-                                  source=inbox.SOURCE_USER)
-            with patch.object(inbox, "append_inbox", held_append), patch.object(spooled, "_raise_reader"):
-                task = asyncio.create_task(spooled.await_spool_write(
-                    inbox.append_for_successor, root, directory, row))
+
+            row = inbox.InboxLine(
+                text="synthetic", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER
+            )
+            with (
+                patch.object(inbox, "append_inbox", held_append),
+                patch.object(spooled, "_raise_reader"),
+            ):
+                task = asyncio.create_task(
+                    spooled.await_spool_write(inbox.append_for_successor, root, directory, row)
+                )
                 try:
                     await asyncio.wait_for(entered.wait(), 2)
                     snapshot = spooled.read_spooled_turn(root, directory.name)
@@ -117,9 +142,14 @@ class OwnedWriteTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(await task)
                     snapshot = spooled.read_spooled_turn(root, directory.name)
                     self.assertIsNotNone(snapshot["generation"])
-                    self.assertFalse(spooled.clear_if_no_owed_turn(
-                        root, directory.name, directory,
-                        expected_generation=snapshot["generation"]))
+                    self.assertFalse(
+                        spooled.clear_if_no_owed_turn(
+                            root,
+                            directory.name,
+                            directory,
+                            expected_generation=snapshot["generation"],
+                        )
+                    )
                 finally:
                     release.set()
                     if not task.done():
@@ -130,23 +160,27 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_after_claim_keeps_owed_row_and_releases_shared_seat(self):
         with TemporaryDirectory() as raw:
             directory = Path(raw)
-            row = inbox.InboxLine(text="owed", sender={}, mode="mailbox", written_at=1,
-                                  source=inbox.SOURCE_USER)
+            row = inbox.InboxLine(
+                text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER
+            )
             self.assertTrue(inbox.append_inbox(directory, row))
             batch = inbox.try_enter_read_batch(directory)
             self.assertIsNotNone(batch)
             ready = asyncio.Event()
             release = threading.Event()
             loop = asyncio.get_running_loop()
+
             def claim():
                 inbox.claim_inbox_batch(batch)
                 loop.call_soon_threadsafe(ready.set)
                 release.wait(5)
+
             async def owner():
                 try:
                     await spooled.await_spool_write(claim)
                 finally:
                     await inbox.finish_read_batch(batch)
+
             task = asyncio.create_task(owner())
             try:
                 await asyncio.wait_for(ready.wait(), 2)
@@ -172,18 +206,25 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_ordinals_preserve_duplicate_idless_rows_and_concurrent_tail(self):
         with TemporaryDirectory() as raw:
             directory = Path(raw)
-            line = lambda text: inbox.InboxLine(text=text, sender={}, mode="mailbox", written_at=1)
+
+            def line(text):
+                return inbox.InboxLine(text=text, sender={}, mode="mailbox", written_at=1)
+
             for text in ("same", "same", "later"):
                 self.assertTrue(inbox.append_inbox(directory, line(text)))
             batch = inbox.try_enter_read_batch(directory)
             try:
                 await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
-                self.assertTrue(await spooled.await_spool_write(inbox.append_inbox, directory, line("tail")))
+                self.assertTrue(
+                    await spooled.await_spool_write(inbox.append_inbox, directory, line("tail"))
+                )
                 rows = batch.delivery_rows()
                 batch.handled.update(rows[0][0])
                 await inbox.finish_read_batch(batch)
                 self.assertTrue(batch.published and batch.durable)
-                self.assertEqual([r.text for r in inbox.peek_inbox(directory)], ["same", "later", "tail"])
+                self.assertEqual(
+                    [r.text for r in inbox.peek_inbox(directory)], ["same", "later", "tail"]
+                )
             finally:
                 if batch.acquired:
                     await spooled.await_spool_write(inbox.release_inbox_batch, batch)
@@ -192,18 +233,24 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_admission_accepted_just_before_cancel_is_committed_once(self):
         with TemporaryDirectory() as raw:
             directory = Path(raw)
-            inbox.append_inbox(directory, inbox.InboxLine(text="one", sender={}, mode="mailbox", written_at=1))
+            inbox.append_inbox(
+                directory, inbox.InboxLine(text="one", sender={}, mode="mailbox", written_at=1)
+            )
             batch = inbox.try_enter_read_batch(directory)
             await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
             entered = asyncio.Event()
             release = asyncio.Event()
             accepted = []
+
             async def admission():
                 entered.set()
                 await release.wait()
                 accepted.append(1)
                 return "accepted"
-            task = asyncio.create_task(inbox.admit_batch_row(batch, batch.delivery_rows()[0][0], admission()))
+
+            task = asyncio.create_task(
+                inbox.admit_batch_row(batch, batch.delivery_rows()[0][0], admission())
+            )
             try:
                 await entered.wait()
                 task.cancel()
@@ -224,7 +271,9 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_prefix_conflict_never_overwrites_or_deletes_current_bytes(self):
         with TemporaryDirectory() as raw:
             directory = Path(raw)
-            inbox.append_inbox(directory, inbox.InboxLine(text="one", sender={}, mode="mailbox", written_at=1))
+            inbox.append_inbox(
+                directory, inbox.InboxLine(text="one", sender={}, mode="mailbox", written_at=1)
+            )
             batch = inbox.try_enter_read_batch(directory)
             await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
             batch.handled.add(0)
@@ -244,16 +293,23 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
         """
         with TemporaryDirectory() as raw:
             directory = Path(raw)
-            inbox.append_inbox(directory, inbox.InboxLine(
-                text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER))
+            inbox.append_inbox(
+                directory,
+                inbox.InboxLine(
+                    text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER
+                ),
+            )
             batch = inbox.try_enter_read_batch(directory)
 
             class Busy:
                 released = False
+
                 def acquire(self):
                     raise inbox.WakeLockBusy("held by the outgoing runtime")
+
                 def release(self):
                     self.released = True
+
             batch.reader = Busy()
             self.assertFalse(await inbox.claim_read_batch_or_defer(batch))
             await inbox.settle_read_batch(batch)  # must not raise, must not settle
@@ -265,8 +321,12 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_claim_failing_after_the_lease_is_taken_releases_it(self):
         with TemporaryDirectory() as raw:
             directory = Path(raw)
-            inbox.append_inbox(directory, inbox.InboxLine(
-                text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER))
+            inbox.append_inbox(
+                directory,
+                inbox.InboxLine(
+                    text="owed", sender={}, mode="mailbox", written_at=1, source=inbox.SOURCE_USER
+                ),
+            )
             path = inbox.inbox_path(directory)
             target = directory / "elsewhere.jsonl"
             target.write_bytes(path.read_bytes())
@@ -280,7 +340,7 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(batch.acquired)
             self.assertEqual(target.read_bytes(), path.read_bytes())
             lock = inbox.WakeWriteLock(directory, name=".inbox-reader.lock")
-            lock.acquire()   # a leaked lease would block here
+            lock.acquire()  # a leaked lease would block here
             lock.release()
             self.assertIsNotNone(inbox.try_enter_read_batch(directory))
 
@@ -296,8 +356,9 @@ class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(batch.pending_after_commit, False)
             finally:
                 inbox.leave_read_batch(batch)
-            inbox.append_inbox(directory, inbox.InboxLine(
-                text="owed", sender={}, mode="mailbox", written_at=1))
+            inbox.append_inbox(
+                directory, inbox.InboxLine(text="owed", sender={}, mode="mailbox", written_at=1)
+            )
             batch = inbox.try_enter_read_batch(directory)
             try:
                 await spooled.await_spool_write(inbox.claim_inbox_batch, batch)

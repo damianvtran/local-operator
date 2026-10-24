@@ -49,15 +49,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 import logging
 import os
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, ParamSpec, TypeVar
 
-from local_operator.wakes.lock import WakeWriteLock, WakeLockBusy, WakeLockUnavailable
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,9 @@ def _raw_read(config_dir: Path, session_id: str) -> dict[str, Any] | None:
 
 
 def _generation(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 32 and all(c in "0123456789abcdef" for c in value)
+    return (
+        isinstance(value, str) and len(value) == 32 and all(c in "0123456789abcdef" for c in value)
+    )
 
 
 def read_spooled_turn(config_dir: Path, session_id: str) -> dict[str, Any] | None:
@@ -202,7 +204,13 @@ def read_spooled(config_dir: Path) -> dict[str, dict[str, Any]]:
     except OSError:
         return out
     for path in paths:
-        record = read_spooled_turn(config_dir, path.stem)
+        try:
+            record = read_spooled_turn(config_dir, path.stem)
+        except ValueError:
+            # A stem that cannot name a session (``.``/``..``) is one stray
+            # file: skip it, as the reader has always done for unreadable
+            # entries, rather than aborting the whole reconciliation.
+            continue
         if record is not None:
             out[path.stem] = record
     return out
@@ -224,30 +232,31 @@ async def await_spool_write(function: Callable[P, T], *args: P.args, **kwargs: P
     while True:
         try:
             await asyncio.wait((task,))
-            result = task.result()
-            break
         except asyncio.CancelledError as exc:
             if task.cancelled():
                 failure = exc
                 break
             if cancellation is None:
                 cancellation = exc
-            if task.done():
-                try:
-                    result = task.result()
-                except BaseException as joined_error:
-                    failure = joined_error
-                break
+            if not task.done():
+                continue
         except BaseException as exc:
             failure = exc
             break
-    if failure is not None:
+        try:
+            result = task.result()
+        except BaseException as exc:
+            failure = exc
+            break
         if cancellation is not None:
-            raise BaseExceptionGroup("cancelled spool write also failed", [cancellation, failure])
-        raise failure
+            raise cancellation
+        return result
+    # Every break above records why; a successful join returned in the loop.
+    if failure is None:  # pragma: no cover - defensive, not a reachable state
+        raise RuntimeError("spool write settled without a result or failure")
     if cancellation is not None:
-        raise cancellation
-    return result
+        raise BaseExceptionGroup("cancelled spool write also failed", [cancellation, failure])
+    raise failure
 
 
 def _note_locked(
@@ -320,8 +329,9 @@ def _raise_reader(config_dir: Path, session_id: str) -> None:
         logger.debug("could not raise the wake supervisor for %s", session_id, exc_info=True)
 
 
-def note_spooled_turn(config_dir: Path, session_id: str, *, cwd: str = "", rows: int = 1,
-                      now_ms: int | None = None) -> bool:
+def note_spooled_turn(
+    config_dir: Path, session_id: str, *, cwd: str = "", rows: int = 1, now_ms: int | None = None
+) -> bool:
     """Persist a fresh opaque revision off-loop at awaited async call sites."""
     try:
         with _session_lock(config_dir, session_id):
@@ -336,17 +346,27 @@ def note_spooled_turn(config_dir: Path, session_id: str, *, cwd: str = "", rows:
 _OMITTED = object()
 
 
-def clear_spooled_turn(config_dir: Path, session_id: str, *,
-                       expected_generation: object = _OMITTED,
-                       expected_updated_at_ms: object = _OMITTED) -> bool:
+def clear_spooled_turn(
+    config_dir: Path,
+    session_id: str,
+    *,
+    expected_generation: object = _OMITTED,
+    expected_updated_at_ms: object = _OMITTED,
+) -> bool:
     """Explicit omission is unconditional; old timestamp-only CAS fails closed."""
     if expected_updated_at_ms is not _OMITTED and expected_generation is _OMITTED:
         return False
     return _clear_guarded(config_dir, session_id, expected_generation=expected_generation)
 
 
-def _clear_guarded(config_dir: Path, session_id: str, *, expected_generation: object,
-                   session_dir: Path | None = None, owner_only: bool = False) -> bool:
+def _clear_guarded(
+    config_dir: Path,
+    session_id: str,
+    *,
+    expected_generation: object,
+    session_dir: Path | None = None,
+    owner_only: bool = False,
+) -> bool:
     # Predicate and generation share the admission mutex: an earlier no-row
     # decision must not authorize deletion of a later, fully committed admission.
     try:
@@ -355,10 +375,15 @@ def _clear_guarded(config_dir: Path, session_id: str, *, expected_generation: ob
             if current is None:
                 return False
             if expected_generation is not _OMITTED:
-                if not _generation(expected_generation) or current.get("generation") != expected_generation:
+                if (
+                    not _generation(expected_generation)
+                    or current.get("generation") != expected_generation
+                ):
                     return False
             if session_dir is not None:
-                owed = spool_has_owner_row(session_dir) if owner_only else spool_owes_turn(session_dir)
+                owed = (
+                    spool_has_owner_row(session_dir) if owner_only else spool_owes_turn(session_dir)
+                )
                 if owed:
                     return False
             spooled_path(config_dir, session_id).unlink()
@@ -367,18 +392,26 @@ def _clear_guarded(config_dir: Path, session_id: str, *, expected_generation: ob
         return False
 
 
-def clear_if_no_owed_turn(config_dir: Path, session_id: str, session_dir: Path, *,
-                         expected_generation: object) -> bool:
+def clear_if_no_owed_turn(
+    config_dir: Path, session_id: str, session_dir: Path, *, expected_generation: object
+) -> bool:
     """Normal settlement and supervisor reconciliation use the owed-row authority."""
-    return _clear_guarded(config_dir, session_id, expected_generation=expected_generation,
-                          session_dir=session_dir)
+    return _clear_guarded(
+        config_dir, session_id, expected_generation=expected_generation, session_dir=session_dir
+    )
 
 
-def clear_if_no_owner_row(config_dir: Path, session_id: str, session_dir: Path, *,
-                         expected_generation: object) -> bool:
+def clear_if_no_owner_row(
+    config_dir: Path, session_id: str, session_dir: Path, *, expected_generation: object
+) -> bool:
     """Peer deferral deliberately preserves the stronger owner-row distinction."""
-    return _clear_guarded(config_dir, session_id, expected_generation=expected_generation,
-                          session_dir=session_dir, owner_only=True)
+    return _clear_guarded(
+        config_dir,
+        session_id,
+        expected_generation=expected_generation,
+        session_dir=session_dir,
+        owner_only=True,
+    )
 
 
 def note_attempt(config_dir: Path, session_id: str, *, error: str = "") -> None:
@@ -389,9 +422,12 @@ def note_attempt(config_dir: Path, session_id: str, *, error: str = "") -> None:
             if record is None:
                 return
             attempts = _attempts_of(record) + 1
-            record.update(generation=uuid.uuid4().hex, attempts=attempts,
-                          last_attempt_ms=_now_ms(),
-                          next_attempt_ms=_now_ms() + int(backoff_s(attempts) * 1000))
+            record.update(
+                generation=uuid.uuid4().hex,
+                attempts=attempts,
+                last_attempt_ms=_now_ms(),
+                next_attempt_ms=_now_ms() + int(backoff_s(attempts) * 1000),
+            )
             if error:
                 record["last_error"] = str(error)[:400]
             if not _write(config_dir, session_id, record):

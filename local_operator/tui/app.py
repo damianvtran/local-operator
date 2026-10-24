@@ -26880,7 +26880,12 @@ class OperatorApp(App[None]):
         # and the answer lands (UX round 4). ``"declined"`` and ``""`` still fall
         # through: nothing was said about a run, the composer is the obstacle, and
         # Esc keeps the meaning it has everywhere else in this method.
-        if await self._withdraw_queued_prompt(self._interaction) in ("withdrawn", "missed", "pending", "error"):
+        if await self._withdraw_queued_prompt(self._interaction) in (
+            "withdrawn",
+            "missed",
+            "pending",
+            "error",
+        ):
             return
         if not children:
             self._recall_queued_steers()
@@ -60551,7 +60556,6 @@ class OperatorApp(App[None]):
         if directory is None:
             return ""
         from local_operator.session.runtime.inbox import withdraw_inbox
-
         from local_operator.wakes.spooled import await_spool_write
 
         owner = asyncio.current_task()
@@ -60567,8 +60571,12 @@ class OperatorApp(App[None]):
                 self._queued_withdrawal_task = None
         if source.turn.queued_prompts.get(message_id) is not queued:
             return "withdrawn" if withdrawn else "missed"
-        if withdrawn and (not self._is_current(source) or self._editor() is not editor
-                          or editor.text != original_text or self._aside_is_open()):
+        if withdrawn and (
+            not self._is_current(source)
+            or self._editor() is not editor
+            or editor.text != original_text
+            or self._aside_is_open()
+        ):
             del source.turn.queued_prompts[message_id]
             self._restore_unsent_for(source, queued.text, None)
             return "withdrawn"
