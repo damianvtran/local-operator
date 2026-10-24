@@ -1,4 +1,4 @@
-"""Recognition and negotiation do not activate the held Chinese/Urdu waves."""
+"""Recognition and negotiation admit audited Urdu while Chinese remains held."""
 
 from __future__ import annotations
 
@@ -12,25 +12,27 @@ from local_operator.server.routes import capabilities, i18n
 
 
 @pytest.mark.parametrize(
-    "tag, canonical, direction",
+    "tag, canonical, direction, expected",
     [
-        ("zh_CN.UTF-8", "zh-CN", "ltr"),
-        ("zh-Hans", "zh-CN", "ltr"),
-        ("zh-cn", "zh-CN", "ltr"),
-        ("ur_PK.UTF-8", "ur", "rtl"),
-        ("ur_IN", "ur", "rtl"),
-        ("zh-Hant", None, "ltr"),
-        ("unknown", None, "ltr"),
-        (None, None, "ltr"),
+        ("zh_CN.UTF-8", "zh-CN", "ltr", "en"),
+        ("zh-Hans", "zh-CN", "ltr", "en"),
+        ("zh-cn", "zh-CN", "ltr", "en"),
+        ("ur_PK.UTF-8", "ur", "rtl", "ur"),
+        ("ur_IN", "ur", "rtl", "ur"),
+        ("zh-Hant", None, "ltr", "en"),
+        ("unknown", None, "ltr", "en"),
+        (None, None, "ltr", "en"),
     ],
 )
-def test_recognition_direction_and_closed_activation(tag, canonical, direction) -> None:
+def test_recognition_direction_and_shipped_filter(tag, canonical, direction, expected) -> None:
     assert resolve.normalise_locale(tag) == canonical
     assert locale_direction(tag) == direction
-    assert resolve.resolve_language(tag, environ={}, system="Linux") == "en"
+    assert resolve.resolve_language(tag, environ={}, system="Linux") == expected
     assert "zh-CN" not in resolve.shipped_locales()
-    assert "ur" not in resolve.shipped_locales()
-    assert {value for value, _ in resolve.language_options()}.isdisjoint({"zh-CN", "ur"})
+    assert "ur" in resolve.shipped_locales()
+    options = {value for value, _ in resolve.language_options()}
+    assert "zh-CN" not in options
+    assert "ur" in options
 
 
 @pytest.mark.parametrize("count", [0, 1, 2, 11, 101, 1.5])
@@ -49,8 +51,13 @@ def test_existing_formats_use_rfc_latin_digits(tag) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tag, expected", [("ur_PK", "en"), ("zh-Hans", "en"), ("fr", "fr")])
-async def test_mounted_capabilities_metadata_and_catalogue_gate(monkeypatch, tag, expected) -> None:
+@pytest.mark.parametrize(
+    "tag, expected, direction",
+    [("ur_PK", "ur", "rtl"), ("zh-Hans", "en", "ltr"), ("fr", "fr", "ltr")],
+)
+async def test_mounted_capabilities_metadata_and_catalogue_gate(
+    monkeypatch, tag, expected, direction
+) -> None:
     monkeypatch.setattr(resolve, "config_value", lambda: tag)
     app = FastAPI()
     app.include_router(capabilities.router)
@@ -62,23 +69,26 @@ async def test_mounted_capabilities_metadata_and_catalogue_gate(monkeypatch, tag
         assert response.status_code == 200
         result = response.json()["result"]
         assert result["language"] == expected
-        assert result["language_direction"] == "ltr"
-        for held in ("zh-CN", "ur"):
+        assert result["language_direction"] == direction
+        for blocked_path in ("zh-CN/wire.errors", "ur/wire.exec"):
             blocked = await client.get(
-                f"/v1/i18n/catalogues/{held}/wire.exec", headers={"If-None-Match": "*"}
+                f"/v1/i18n/catalogues/{blocked_path}", headers={"If-None-Match": "*"}
             )
+            # Chinese is held; Urdu does not carry wire.exec. The raw route
+            # serves committed namespaces only, not synthetic fallback files.
             assert blocked.status_code == 404
-        control = await client.get(
-            "/v1/i18n/catalogues/en/wire.exec", headers={"If-None-Match": "*"}
-        )
-        assert control.status_code == 304
+        for shipped in ("ur", "en"):
+            control = await client.get(
+                f"/v1/i18n/catalogues/{shipped}/wire.errors", headers={"If-None-Match": "*"}
+            )
+            assert control.status_code == 304
 
 
 @pytest.mark.asyncio
 async def test_capabilities_resolves_once_for_consistent_direction(monkeypatch) -> None:
-    # Synthetic future eligibility is not an activation change: the production
-    # held-locale path above must still return en/ltr. This exposes a double-read
-    # race and proves that metadata can represent RTL without changing a picker.
+    # The production Urdu path above returns ur/rtl and held Chinese returns
+    # en/ltr. This synthetic sequence isolates the double-read race: capabilities
+    # must derive language and direction from one resolution snapshot.
     calls = []
 
     def changing_language():
@@ -94,8 +104,17 @@ async def test_capabilities_resolves_once_for_consistent_direction(monkeypatch) 
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("tag", ["zh-cn", "zh-Hans", "zh_CN.UTF-8", "ur_PK", "ur_IN"])
-def test_os_alias_cannot_activate_an_unshipped_locale(tag) -> None:
+@pytest.mark.parametrize(
+    "tag, canonical, expected",
+    [
+        ("zh-cn", "zh-CN", "en"),
+        ("zh-Hans", "zh-CN", "en"),
+        ("zh_CN.UTF-8", "zh-CN", "en"),
+        ("ur_PK", "ur", "ur"),
+        ("ur_IN", "ur", "ur"),
+    ],
+)
+def test_os_alias_resolves_through_shipped_filter(tag, canonical, expected) -> None:
     environ = {"LANG": tag}
-    assert resolve.os_language(system="Linux", environ=environ) in {"zh-CN", "ur"}
-    assert resolve.resolve_language("auto", system="Linux", environ=environ) == "en"
+    assert resolve.os_language(system="Linux", environ=environ) == canonical
+    assert resolve.resolve_language("auto", system="Linux", environ=environ) == expected
