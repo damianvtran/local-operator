@@ -272,7 +272,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``confirm_replace`` (the second is the overwrite AND the user's answer, so
     # its wording is the safety-critical part). Trimmed once already; the same
     # printed table measured it.
-    "agent": 1119,
+    # RE-MEASURED (LOH-9 S5): 1119 -> 1365. The delta is the completed guidance:
+    # a ``promote`` row in the authored ops table and the promote step in the
+    # notes, the corrected refusal remedy (the TUI form and the create/install
+    # retry, with update/reset/sync naming no retry), the collision clause and
+    # the host-dependent default. The same printed table measured it; the
+    # 8 KiB soft cap still holds.
+    "agent": 1365,
     "ask": 1079,
     "ask_withdraw": 452,
     "bash": 295,
@@ -484,7 +490,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S4): 1030 -> 1109, the same promotion delta; the team
     # doc also states that a replace may cover a member, which the agent twin
     # does not need.
-    "team": 1109,
+    # RE-MEASURED (LOH-9 S5): 1109 -> 1400 — the promote row, the promote and
+    # member-copy step, the corrected refusal copy and the collision clause;
+    # the same printed table.
+    "team": 1400,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -518,7 +527,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: the canonical arm; `task` stays 764.
 #: RE-MEASURED (LOH-9 S4): agent 1085 -> 1148; ``task`` is unmoved because the
 #: promotion fields are on ``agent``/``team``, not on the launch tool.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1148, "task": 764}
+#: RE-MEASURED (LOH-9 S5): agent 1148 -> 1394, the same +246 the canonical arm
+#: takes because both arms render the completed notes; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1394, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -924,6 +935,21 @@ def test_cut_wire_prose_moved_into_the_tool_doc(
             f"{name}: phrase still on the always-loaded wire — the move saved "
             f"nothing, so either cut it or drop it from MOVED_WIRE_DETAIL: {phrase!r}"
         )
+
+
+@pytest.mark.parametrize("name", ["agent", "team"])
+def test_the_promote_op_and_step_are_reachable_in_the_rendered_doc(
+    default_surface: list[AgentTool], name: str
+) -> None:
+    """The ledger pins SIZE, not content: a same-length edit could drop the row.
+
+    The design's guidance-reachability metric is an assertion, not eyeballing, so
+    both halves the model reads are pinned by phrase: the authored Ops-table row
+    and the narrative PROMOTE step.
+    """
+    doc = render_tool_doc(next(tool for tool in default_surface if tool.name == name))
+    assert "\n- promote: " in doc, f"tool://{name} lost its promote row"
+    assert "\n- PROMOTE: " in doc, f"tool://{name} lost the promote step in its notes"
 
 
 def test_authored_notes_and_renderers_name_real_tools(
