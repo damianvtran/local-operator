@@ -311,7 +311,6 @@ def test_alias_round_trip_hashes_exact_utf8_full_key_and_new_refs_stay_unchanged
         "legacy_alias=" + "A" * 64,
         "legacy_alias=" + "g" * 64,
         "legacy_alias=" + "a" * 64 + "\n",
-        "alias=" + "a" * 64,
         "legacy_alias=" + "a" * 64 + "/extra",
         "legacy_alias=" + "a" * 64 + "/human",
     ],
@@ -357,3 +356,100 @@ def test_unencodable_legacy_key_is_refused_without_guessing_a_digest():
 
     raw = LEGACY.replace("PRIVATE-SENDER", "invalid-\ud800")
     assert parse_conversation_ref_value(raw.split("=", 1)[1]) is None
+
+
+def test_a_thread_root_rides_as_a_tag_beside_the_existing_parts() -> None:
+    """The reply's root is a TAGGED slot, so no existing part changes meaning.
+
+    A 5-form ref and a 5-form ref plus ``/thread_root=`` differ by exactly one
+    named tag; neither the 6-part alias form nor the old 7-part name layout is
+    touched, which is what makes the addition backwards-compatible.
+    """
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    root = "bcmsg_root0001"
+    base = "bcv_abcdefgh/bcmsg_abcdef01/1/1/human"
+
+    plain = parse_conversation_ref_value(base)
+    assert plain is not None and plain.thread_root_id is None
+    assert plain.encode().endswith(base)
+
+    reply = parse_conversation_ref_value(base + f"/thread_root={root}")
+    assert reply is not None
+    assert reply.thread_root_id == root
+    assert reply.sender_kind == "human"
+    assert reply.encode().endswith(base + f"/thread_root={root}")
+
+
+def test_an_unknown_tag_parses_and_is_ignored() -> None:
+    """Extensibility is the point: a tag this release does not know decodes.
+
+    Dropping the ref would drop a durable queue row just because a later
+    writer added a field. The tag is never read as a positional slot, and it is
+    not preserved on re-encode (it is the writer's field, not ours).
+    """
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    base = "bcv_abcdefgh/bcmsg_abcdef01/1/1/human"
+    parsed = parse_conversation_ref_value(base + "/future_tag=whatever")
+
+    assert parsed is not None
+    assert parsed.sender_kind == "human"
+    assert parsed.encode().endswith(base)
+
+
+def test_a_thread_root_never_rides_with_a_migration_alias() -> None:
+    """The grammar stays narrow: no tag combination is legal just because it
+    parses. A reply has no migration alias, and an alias predates threads, so
+    a ref carrying both is refused rather than half-understood."""
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    base = "bcv_abcdefgh/bcmsg_abcdef01/1/1/human"
+    alias = "a" * 64
+    assert (
+        parse_conversation_ref_value(base + f"/legacy_alias={alias}/thread_root=bcmsg_root0001")
+        is None
+    )
+    assert parse_conversation_ref_value(base + "/thread_root=bcmsg_root0001") is not None
+
+
+def test_a_thread_root_requires_the_sender_kind_slot() -> None:
+    """4-form + ``/thread_root=`` is refused: "only on the 5-form" enforced.
+
+    ``validated()`` checks the root's shape but not the presence of the kind
+    (kind is optional on every other ref), so the grammar states it here. A ref
+    that says "reply from nobody" is a writer bug, not a shape to honour.
+    """
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    four = "bcv_abcdefgh/bcmsg_abcdef01/1/1"
+    assert parse_conversation_ref_value(four + "/thread_root=bcmsg_root0001") is None
+    assert parse_conversation_ref_value(four + "/human/thread_root=bcmsg_root0001") is not None
+
+
+def test_an_empty_known_tag_is_a_refusal_not_an_absence() -> None:
+    """``thread_root=`` with no value must not read as "no thread root".
+
+    The same rule already applied to ``legacy_alias=``; an empty known tag is a
+    malformed writer, and silently treating it as absent would let a broken
+    ref pass as a valid one.
+    """
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    base = "bcv_abcdefgh/bcmsg_abcdef01/1/1/human"
+    assert parse_conversation_ref_value(base + "/thread_root=") is None
+    assert parse_conversation_ref_value(base + "/legacy_alias=") is None
+
+
+def test_a_positional_after_a_tag_is_still_malformed() -> None:
+    """The one shape tags must not open up: order-dependent meaning."""
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    base = "bcv_abcdefgh/bcmsg_abcdef01/1/1"
+    assert parse_conversation_ref_value(base + "/thread_root=bcmsg_root0001/human") is None

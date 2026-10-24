@@ -302,10 +302,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # structural floor for a capability the model must be able to call. The
     # paired start-context raise is stated in scripts/bench_context_budget.py.
     # 729 -> 747 (PR #2828): the closed recipient schema now exposes its allowed
-    # endpoint/account properties in the opt-in reference. Canonical CI renderer
-    # run39986222406/job120529704999 measured this; the other 47 entries match.
+    # endpoint/account properties in the opt-in reference. Then 747 -> 773 with
+    # #2757: the channel_thread op and the thread_root_id parameter add 26
+    # tokens. Neither number was right alone — the merged tree was re-measured
+    # here with both changes present, which is the only measurement that counts.
     # Neither the document soft cap nor the start-context budget changes.
-    "bridge": 747,
+    "bridge": 773,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds

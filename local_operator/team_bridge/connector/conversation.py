@@ -69,6 +69,9 @@ class ConversationCardMetadata:
     mention: bool
     message_id: str
     conversation_seq: int
+    #: The root this message answers, when it is a thread reply. Carried from
+    #: the durable ref's tagged slot; `None` for a channel-level message.
+    thread_root_id: str | None = None
 
 
 def build_conversation_card(metadata: ConversationCardMetadata) -> str:
@@ -84,8 +87,9 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     mention_line = "mention: yes" if metadata.mention else "mention: no"
     label = _one_line(metadata.conversation_label) or metadata.conversation_id
     sender = _one_line(metadata.sender_label) or "unknown"
+    kind = "Thread reply" if metadata.thread_root_id else "Channel message"
     lines = [
-        f"Channel message · {label} · " f"from {sender} ({metadata.sender_kind}, same tenant)",
+        f"{kind} · {label} · " f"from {sender} ({metadata.sender_kind}, same tenant)",
         # ONE home for the untrusted clause: the shipped constant, verbatim.
         BRIDGE_UNTRUSTED_CLAUSE,
         "",
@@ -94,8 +98,16 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         f"conversation_id: {metadata.conversation_id}",
         f"message_id: {metadata.message_id}",
         f"conversation_seq: {metadata.conversation_seq}",
-        f"guidance: {GUIDANCE_VERSION}",
     ]
+    if metadata.thread_root_id:
+        # Thread context: where the reply lives and how to answer IN it, so an
+        # agent coordinating in a thread does not answer at channel level.
+        lines += [
+            f"thread_root_id: {metadata.thread_root_id}",
+            "reply in thread: bridge channel_post with this thread_root_id; "
+            "read the thread with channel_thread",
+        ]
+    lines.append(f"guidance: {GUIDANCE_VERSION}")
     return "\n".join(lines)
 
 
@@ -211,6 +223,7 @@ def _card_metadata(
         mention=ref.mention,
         message_id=ref.message_id,
         conversation_seq=ref.conversation_seq,
+        thread_root_id=ref.thread_root_id,
     )
 
 
