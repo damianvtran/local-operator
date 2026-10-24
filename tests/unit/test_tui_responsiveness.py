@@ -85,14 +85,20 @@ NOISE_K = 3.0
 NOISE_CPU_CAP_MS = 1500.0
 NOISE_WALL_CAP_MS = 4000.0
 
-#: The S2 cell's bar on the CPU the turn ADDS over its control leg. It is the
-#: calibrated loaded ceiling itself, not a new constant: the control leg
-#: cancels the layout work that forced the 500 ms calibration in the first
-#: place (413 ms of legitimate layout CPU on CI), and a runner's wake noise
-#: shows up in wall time, not in the CPU a thread actually executes. The
-#: noise-scaled formula is kept for the WALL backstop and for callers that
-#: still assert an absolute CPU bound via ``assert_no_stall_loaded``.
-TURN_DELTA_CPU_CEILING_MS = 500.0
+#: The S2 cell's fixed CPU ceiling, applied in two places: to the DELTA the
+#: turn adds over its control legs, and to the one-time empty -> conversation
+#: composition leg, which the delta cannot cover because it happens before
+#: both compared legs (review R1). It is the calibrated loaded ceiling itself,
+#: not a new constant: the control legs cancel the layout work that forced the
+#: 500 ms calibration (413 ms of legitimate layout CPU on CI), and a runner's
+#: wake noise shows up mostly in wall time. CPU samples are interval sums over
+#: the probe's wall window (see the S2 docstring and review R3), so they can
+#: carry some wall-driven inflation; that is recorded and deliberately NOT
+#: rescaled, because a single turn-leg interval above this fixed bar is the
+#: remaining red path. The noise-scaled formula is kept for the WALL backstop
+#: and for callers that still assert an absolute CPU bound via
+#: ``assert_no_stall_loaded``.
+S2_FIXED_CPU_CEILING_MS = 500.0
 
 
 @dataclass(frozen=True)
@@ -435,11 +441,55 @@ class StallRecorder:
             )
         return bound_cpu, bound_wall, context
 
+    def assert_leg_ceiling(
+        self,
+        peak: LegPeak,
+        *,
+        label: str,
+        cpu_ceiling_ms: float = S2_FIXED_CPU_CEILING_MS,
+        wall_ceiling_ms: float = 2000.0,
+        noise_floor_ms: float | None = None,
+    ) -> None:
+        """Bound ONE measured leg by the fixed CPU ceiling and the wall backstop.
+
+        The S2 cell uses this for the one-time empty -> conversation
+        composition: that transition happens before the compared control/turn
+        legs, so the delta cannot cover it, and leaving it unmeasured let a
+        first-send regression of 600-1900 ms pass the delta shape (review R1).
+        It is boot-adjacent layout work, not send-path work, so it is bounded
+        as an absolute window rather than by a difference. The CPU bar is the
+        fixed calibrated 500 ms; the wall side uses the same noise-scaled bound
+        as :meth:`assert_no_stall_loaded`, because a blocking sleep must still
+        red.
+        """
+        _, bound_wall, _ = self.loaded_bounds(
+            cpu_ceiling_ms=cpu_ceiling_ms,
+            wall_ceiling_ms=wall_ceiling_ms,
+            noise_floor_ms=noise_floor_ms,
+        )
+        suffix = ""
+        if self._callbacks is not None and (
+            peak.cpu_ms >= cpu_ceiling_ms or peak.wall_ms >= bound_wall
+        ):
+            suffix = "\ncallback attribution: " + json.dumps(self._callbacks.summary())
+        assert peak.cpu_ms < cpu_ceiling_ms, (
+            f"{label} consumed {peak.cpu_ms:.1f} ms of loop-thread CPU "
+            f"(fixed ceiling {cpu_ceiling_ms:.0f} ms); "
+            f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
+            f"{suffix}"
+        )
+        assert peak.wall_ms < bound_wall, (
+            f"{label} probe wake gap was {peak.wall_ms:.0f} ms of wall time "
+            f"(ceiling {bound_wall:.0f} ms); "
+            f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
+            f"{suffix}"
+        )
+
     def assert_turn_delta_loaded(
         self,
         control: LegPeak,
         turn: LegPeak,
-        cpu_ceiling_ms: float = TURN_DELTA_CPU_CEILING_MS,
+        cpu_ceiling_ms: float = S2_FIXED_CPU_CEILING_MS,
         wall_ceiling_ms: float = 2000.0,
         noise_floor_ms: float | None = None,
     ) -> None:
@@ -455,8 +505,12 @@ class StallRecorder:
         cadence WITHOUT the agent-turn transition events, so layout cost
         cancels in ``turn.cpu_ms - control.cpu_ms``; what remains is the
         synchronous work the turn itself adds, which is the quantity a freeze
-        regression moves. ``control`` is measured before the turn in the same
-        run with the same :class:`StallRecorder` and the same app.
+        regression moves. ``control`` is the LOW-WATERMARK of repeated control
+        legs measured before the turn in the same run with the same
+        :class:`StallRecorder` and the same app (the S2 cell takes the minimum
+        of two warm samples): a single control leg inflated by host noise
+        would make the delta more negative and silently mask a turn
+        regression, so one sample is not a safe baseline.
 
         The CPU bar keeps the calibrated 500 ms constant and does NOT ride
         the run's wake-stretch floor or descheduling ratio: those estimators
@@ -470,6 +524,16 @@ class StallRecorder:
         noise-scaled formula: a blocking sleep on the loop is invisible to
         ``thread_time``, so it cannot show up in a CPU delta and must still
         red as a wall gap.
+
+        Known residual, recorded rather than rescaled (review R3): CPU samples
+        are interval sums over the probe's wall window — ``thread_time`` deltas
+        include whatever loop-thread work ran between two wakes, and on a
+        loaded runner a delayed wake can attribute CPU from work around the
+        interval (the review measured 100.6 ms of CPU inside a 123.8 ms wall
+        window). A leg peak is therefore an upper bound on one uninterrupted
+        callback, not a per-callback measurement. A single turn-leg interval
+        above the fixed 500 ms remains the red path, and the failure message
+        carries callback attribution to explain it.
         """
         bound_cpu = cpu_ceiling_ms
         _, bound_wall, _ = self.loaded_bounds(
@@ -1435,7 +1499,7 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
     record_property: Callable[[str, object], None],
 ) -> None:
     """S2: a streamed reply with tool batches, from submit to ``agent_end``,
-    adds no loop stall above the bar over a comparable control leg — the
+    adds no loop stall above the bar over a same-run control baseline — the
     reported 'sending a message freezes the UI until processed'. The pricing
     leg is made hostile the same way the unit test makes it: discovery stubbed
     slow, memo cold.
@@ -1445,29 +1509,52 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
     CPU was recorded on CI against the fixed 500 ms ceiling, with a second
     legitimate sample at 557.8 ms (run 38165502284). An absolute bar therefore
     mostly measures the app's rendering and the runner hosting it, and a
-    machine-noise sample can cross it while the send path is healthy. So the
-    cell first measures a CONTROL leg in the same run, on the same app and the
-    same ``StallRecorder``: the same assistant block and tool card mounted
-    through the same append path, the same band update and the same pump
-    cadence, but with NONE of the agent-turn transition events
-    (``AgentStartEvent``/``Message*``/``ToolExecution*``/``AgentEndEvent``).
-    Both legs draw the same widget shapes through the same layout engine, so
-    layout cost cancels in ``turn - control`` and the remainder is the
-    synchronous work the turn itself adds — the quantity a freeze regression
-    actually moves. A deliberate 650 ms block injected into a turn-only handler
-    fails this assertion in the local negative control, while the control leg
-    is untouched.
+    machine-noise sample can cross it while the send path is healthy. The cell
+    measures three windows on the same app and ``StallRecorder``:
+
+    * The one-time empty → conversation COMPOSITION, which retires the splash
+      and composes the first conversation. It happens before either compared
+      leg, so it cannot be differenced; it is bounded on its own by the fixed
+      calibrated 500 ms CPU bar and the noise-scaled absolute wall backstop.
+      Without this leg a first-send regression of 600-1900 ms passed the delta
+      shape (review R1).
+    * Two measured CONTROL legs plus one discarded warm-up leg of the same
+      widget pair: the same assistant block and tool card mounted through the
+      same append path, the same band update and the same pump cadence, with
+      NONE of the agent-turn transition events
+      (``AgentStartEvent``/``Message*``/``ToolExecution*``/``AgentEndEvent``).
+      The warm-up leg runs the same mount/settle path first, so neither control
+      nor turn is the first to touch Textual's style/layout caches; the control
+      baseline is the MINIMUM of the two measured samples, because one control
+      leg inflated by host noise would make the delta more negative and mask a
+      regression. Each later leg mounts into a tree at least as large as the
+      one before, so the turn cannot benefit from a smaller tree than its
+      baseline (review R2/R2b).
+    * The TURN leg itself.
+
+    Layout cost then cancels in ``turn - control`` and the remainder is the
+    synchronous work the turn adds — the quantity a freeze regression moves.
+    A deliberate 650 ms block injected into a turn-only handler fails this
+    assertion, including when the first control leg is artificially inflated,
+    because the baseline is the low-watermark of two samples.
 
     The CPU bar is the calibrated 500 ms applied to the DELTA, not to the raw
-    interval: the control leg cancels the layout cost, so the absolute CPU
-    reading's need for runner-noise scaling goes with it. The wall side stays
-    an ABSOLUTE backstop over the collected stall list, still scaled by the
-    run's measured wake floor, because a blocking sleep is invisible to
-    ``thread_time`` and cannot appear in a CPU delta. The one-time empty →
-    conversation composition is retired before either leg, so boot layout sits
-    in neither (the S1 cell owns boot composition). Callback diagnostics and
-    the JUnit measurement summary ride along as before, now with both legs'
-    numbers."""
+    interval: the control legs cancel the layout cost, so the absolute CPU
+    reading's need for runner-noise scaling goes with it. CPU samples are
+    interval sums over the probe's wall window, so they can carry some
+    wall-driven inflation (100.6 ms CPU inside a 123.8 ms wall window was
+    measured in review); that residual is recorded, not rescaled, and a single
+    turn-leg interval above the fixed 500 ms remains the red path (review R3).
+    The wall side stays an ABSOLUTE backstop over the collected stall list,
+    still scaled by the run's measured wake floor, because a blocking sleep is
+    invisible to ``thread_time`` and cannot appear in a CPU delta. Callback
+    diagnostics and the JUnit measurement summary ride along, now with every
+    leg's numbers and explicit nulls when a leg was not measured (review R4).
+
+    KNOWN LIMIT: a synchronous regression in code shared by both the control
+    and the turn (the widget/layout path) cancels in the delta; that class is
+    covered only by the absolute wall backstop and the S1/S3 cells.
+    """
     from local_operator.harness.types import (
         AgentEndEvent,
         AgentStartEvent,
@@ -1494,8 +1581,16 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
     configure.invalidate_model_info_cache()
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
-    control_peak = LegPeak(cpu_ms=0.0, wall_ms=0.0)
-    turn_peak = LegPeak(cpu_ms=0.0, wall_ms=0.0)
+    composition_peak: LegPeak | None = None
+    control_peaks: list[LegPeak] = []
+    turn_peak: LegPeak | None = None
+
+    def _peak_ms(peak: LegPeak | None, *, wall: bool = False) -> float | None:
+        """Round one leg field, or ``None`` when that leg never ran (review R4)."""
+        if peak is None:
+            return None
+        return round(peak.wall_ms if wall else peak.cpu_ms, 1)
+
     try:
         with CallbackSpans(asyncio.get_running_loop()) as callbacks:
             async with app.run_test(size=(100, 30)) as pilot:
@@ -1504,52 +1599,86 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
                 # CPU calibration BEFORE start(): the probe must not record its own
                 # burn, and the ratio must describe this thread before the turn.
                 recorder.calibrate_cpu()
+
+                async def _drive_layout_leg(
+                    *, label: str, measure: bool, retire: bool
+                ) -> LegPeak | None:
+                    """Drive one leg of the layout work the turn's handlers reach.
+
+                    The warm-up leg runs this path first so neither measured
+                    control nor the turn is the first to touch Textual's
+                    style/layout caches (review R2). ``retire`` removes the
+                    warm-up pair again so the first measured leg starts from
+                    the same tree the warm-up did. Measured control pairs stay
+                    mounted, so every later leg lays out a tree at least as
+                    large as the previous one — the direction cannot favour the
+                    turn, and the baseline is the later minimum of two samples
+                    (review R2b).
+                    """
+                    if measure:
+                        recorder.begin_leg()
+                    block = AssistantBlock()
+                    block.update_text("streaming answer")
+                    app._append_block(block)
+                    app._refresh_working_activity()
+                    block.update_text(f"streaming answer, {label} flush")
+                    card = ToolCard(f"{label}-t1", "bash", {"command": "ls"})
+                    app._append_block(card)
+                    app._refresh_working_activity()
+                    block.finalize_text()
+                    card.mark_done("", None)
+                    app._status.update(context_tokens=10_200, context_is_estimate=False)
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                    peak = recorder.end_leg() if measure else None
+                    if retire:
+                        app._transcript_view().remove_block(block)
+                        app._transcript_view().remove_block(card)
+                        for _ in range(2):
+                            await pilot.pause(0.05)
+                    return peak
+
                 try:
                     await recorder.start()
-                    # The run's own noise floor, measured before the turn: pump the idle
-                    # app for a spell — timers, paints, the same pump the turn will use —
-                    # with none of the turn's legs on it. The worst wake stretch observed
-                    # here scales the WALL backstop only; the CPU delta is asserted against
-                    # the fixed calibrated ceiling because noise of this kind is wall time,
-                    # not loop-thread CPU. The constants and the CI dataset behind them sit
-                    # beside NOISE_K.
+                    # The run's own noise floor, measured before any work leg: pump the
+                    # idle app for a spell — timers, paints, the same pump the turn will
+                    # use — with none of the turn's legs on it. The worst wake stretch
+                    # observed here scales the WALL backstop only; the CPU bars are the
+                    # fixed calibrated ceiling because noise of this kind is wall time,
+                    # not loop-thread CPU. The constants and the CI dataset behind them
+                    # sit beside NOISE_K.
                     recorder.begin_noise_window()
                     for _ in range(12):
                         await pilot.pause(0.05)
                     recorder.end_noise_window()
-                    # Retire the one-time empty → conversation composition OUTSIDE
-                    # both legs. That transition is boot layout (the S1 cell owns
-                    # boot composition), and whichever leg drew first would price
-                    # it as its own work; excluding it from both is what makes the
-                    # legs comparable. The warm-up notice is deliberately inert.
-                    app._append_block(NoticeBlock("control warm-up"))
-                    # --- Control leg: comparable layout churn, no turn events ---
-                    # Mount the same assistant text and the same tool card through
-                    # the same appends the turn's handlers use, settle them the same
-                    # way, make the same band update, and pump the same cadence. The
-                    # control's second flush is longer than the turn's single delta on
-                    # purpose: it can only make the control cost MORE, so the delta
-                    # stays conservative. Why this is comparable work: every operation
-                    # below is what the turn's event handlers reach after dispatch (see
-                    # the docstring), and Textual layout cost is a function of the widget
-                    # tree and frames drawn, not of the session event that requested
-                    # them. What is absent is exactly the turn's transition events, so
-                    # the difference the assertion takes is the turn's own addition.
+                    # --- Composition leg (R1): the one-time empty → conversation draw ---
+                    # It retires the splash and composes the first conversation, and it
+                    # happens before either compared leg, so the delta cannot bound it.
+                    # It is boot-adjacent layout, not send-path work, so it gets the
+                    # fixed absolute CPU bar: measurably cheaper than the 600-1900 ms
+                    # first-send regression this leg exists to catch.
                     recorder.begin_leg()
-                    control_block = AssistantBlock()
-                    control_block.update_text("streaming answer")
-                    app._append_block(control_block)
-                    app._refresh_working_activity()
-                    control_block.update_text("streaming answer, second flush")
-                    control_card = ToolCard("control-t1", "bash", {"command": "ls"})
-                    app._append_block(control_card)
-                    app._refresh_working_activity()
-                    control_block.finalize_text()
-                    control_card.mark_done("", None)
-                    app._status.update(context_tokens=10_200, context_is_estimate=False)
-                    for _ in range(20):
+                    app._append_block(NoticeBlock("composition probe"))
+                    for _ in range(10):
                         await pilot.pause(0.05)
-                    control_peak = recorder.end_leg()
+                    composition_peak = recorder.end_leg()
+                    recorder.assert_leg_ceiling(
+                        composition_peak,
+                        label="empty -> conversation composition",
+                        noise_floor_ms=recorder.noise_floor_ms,
+                    )
+                    # --- Discarded warm-up leg (R2): the same widget pair, unmeasured ---
+                    await _drive_layout_leg(label="warmup", measure=False, retire=True)
+                    # --- Two measured control legs; baseline is the low-watermark (R2b) ---
+                    # A single control sample inflated by host noise would make the
+                    # delta more negative and silently mask a turn regression; the
+                    # minimum of two same-shaped warm samples keeps that headroom.
+                    for index in range(2):
+                        control = await _drive_layout_leg(
+                            label=f"control-{index}", measure=True, retire=False
+                        )
+                        assert control is not None, "a control leg was not measured"
+                        control_peaks.append(control)
                     # --- Turn leg: the same churn plus the transition events ---
                     recorder.begin_leg()
                     # A turn with message text, a tool batch, per-call usage reports, and
@@ -1584,32 +1713,59 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
                     await recorder.stop()
                     # JUnit retains this on PASS and FAIL; future CI evidence
                     # must not require another profiling run to read the clocks.
-                    # The control/turn legs and the derived bound are here so a
-                    # passing run records the delta the assertion actually read.
+                    # Every measured leg and both bounds are recorded, with
+                    # explicit nulls when a leg did not run (review R4), so a
+                    # failing run cannot be misread as a zero-cost measurement.
                     _, bound_wall, _ = recorder.loaded_bounds(
                         noise_floor_ms=recorder.noise_floor_ms
+                    )
+                    control_low = (
+                        min(control_peaks, key=lambda peak: peak.cpu_ms)
+                        if control_peaks
+                        else None
                     )
                     record_property(
                         "s2_loop_liveness",
                         json.dumps(
                             {
                                 **recorder.measurement_summary(),
-                                "control_worst_cpu_ms": round(control_peak.cpu_ms, 1),
-                                "control_worst_wall_ms": round(control_peak.wall_ms, 1),
-                                "turn_worst_cpu_ms": round(turn_peak.cpu_ms, 1),
-                                "turn_worst_wall_ms": round(turn_peak.wall_ms, 1),
-                                "turn_delta_cpu_ms": round(
-                                    turn_peak.cpu_ms - control_peak.cpu_ms, 1
+                                "legs_measured": {
+                                    "composition": composition_peak is not None,
+                                    "control_samples": len(control_peaks),
+                                    "turn": turn_peak is not None,
+                                },
+                                "composition_worst_cpu_ms": _peak_ms(composition_peak),
+                                "composition_worst_wall_ms": _peak_ms(
+                                    composition_peak, wall=True
                                 ),
-                                "delta_cpu_bound_ms": TURN_DELTA_CPU_CEILING_MS,
+                                "control_samples_worst_cpu_ms": [
+                                    round(peak.cpu_ms, 1) for peak in control_peaks
+                                ],
+                                "control_samples_worst_wall_ms": [
+                                    round(peak.wall_ms, 1) for peak in control_peaks
+                                ],
+                                "control_worst_cpu_ms": _peak_ms(control_low),
+                                "control_worst_wall_ms": _peak_ms(control_low, wall=True),
+                                "turn_worst_cpu_ms": _peak_ms(turn_peak),
+                                "turn_worst_wall_ms": _peak_ms(turn_peak, wall=True),
+                                "turn_delta_cpu_ms": (
+                                    None
+                                    if control_low is None or turn_peak is None
+                                    else round(turn_peak.cpu_ms - control_low.cpu_ms, 1)
+                                ),
+                                "delta_cpu_bound_ms": S2_FIXED_CPU_CEILING_MS,
+                                "composition_cpu_bound_ms": S2_FIXED_CPU_CEILING_MS,
                                 "wall_bound_ms": round(bound_wall, 1),
                             }
                         ),
                     )
-                # Loaded bar on the DELTA over the control leg; the absolute wall
-                # backstop and the collected stall lists stay. See the docstring and
-                # assert_turn_delta_loaded for why the delta, not the raw interval,
-                # is the honest quantity here.
+                # The composition leg is already bounded above; the turn's DELTA
+                # over the low-watermark control and the absolute wall backstop are
+                # the remaining assertions. See the docstring and
+                # assert_turn_delta_loaded for why the delta is the honest quantity.
+                assert control_peaks, "no control leg was measured"
+                assert turn_peak is not None, "the turn leg was not measured"
+                control_peak = min(control_peaks, key=lambda peak: peak.cpu_ms)
                 recorder.assert_turn_delta_loaded(
                     control=control_peak,
                     turn=turn_peak,
