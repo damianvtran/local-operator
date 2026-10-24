@@ -47,9 +47,12 @@ class RadientLoginDisabled(LoginError):
     """Known local preserved-disable outcome; hosts must not expose raw errors."""
 
     def __init__(self) -> None:
+        # Round 2, D2: "unavailable" belongs to retained/unverified rows. This
+        # row is disabled, and the message is the only text a generic host can
+        # print, so it names the real outcome and says nothing else moved.
         super().__init__(
-            "Sign-in verified; the existing credential remains unavailable. "
-            "Its saved disabled state was preserved."
+            "Sign-in verified. This Radient sign-in stays disabled; "
+            "its saved state was preserved."
         )
 
 

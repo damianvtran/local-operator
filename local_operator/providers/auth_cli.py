@@ -485,9 +485,19 @@ def run_login(
         print(f"Login failed: {exc}")
         return 1
     if storage_provider == "radient" and row.disabled_cause is not None:
-        print("Sign-in verified; the existing credential remains unavailable.")
-        print("Its saved disabled state was preserved.")
-        for line in format_retained_radient_logins(auth_store.retained_radient_login_ids()):
+        # Design round 2, D2: "unavailable" is reserved for the unverified
+        # retained block; a preserved disablement says exactly that. The CLI is
+        # a surface the reader can act from, so it is the one host that names
+        # the terminal command in the shared retained block (D5).
+        print(
+            "Sign-in verified. This Radient sign-in stays disabled; "
+            "its saved state was preserved."
+        )
+        print("Nothing else changed.")
+        for line in format_retained_radient_logins(
+            auth_store.retained_radient_login_ids(),
+            action="To restore a retained record, run: local-operator login radient",
+        ):
             print(line)
         # Verification is not activation: do not change provider/model defaults
         # or operator profile while the requested credential remains disabled.
@@ -504,7 +514,12 @@ def run_login(
     suffix = f" ({identity})" if identity else ""
     print(f"Logged in to '{storage_provider}'{suffix}.")
     if storage_provider == "radient":
-        for line in format_retained_radient_logins(auth_store.retained_radient_login_ids()):
+        # The CLI's reader is in a terminal, so this host names the command;
+        # every other host gets the shared block's neutral restore line (D5).
+        for line in format_retained_radient_logins(
+            auth_store.retained_radient_login_ids(),
+            action="To restore a retained record, run: local-operator login radient",
+        ):
             print(line)
     if result.get("grant_note"):
         print(f"Note: {result['grant_note']}")
@@ -756,15 +771,31 @@ def stored_login_key_names(config_dir: "Path | None") -> list[str]:
         return []
 
 
-def format_retained_radient_logins(row_ids: tuple[int, ...]) -> list[str]:
-    """One recovery explanation for CLI/status and controller login receipts."""
+def format_retained_radient_logins(
+    row_ids: tuple[int, ...], *, action: str | None = None
+) -> list[str]:
+    """One recovery explanation for CLI/status and controller login receipts.
+
+    THE RESTORE LINE IS SCOPED TO THE RETAINED RECORD and host-neutral unless a
+    host supplies its own gesture (design round 2, D3 and D5). The same block is
+    published to the desktop, where neither a slash command nor a shell command
+    is an instruction that reader can follow; only the CLI, whose reader is
+    already in a terminal, passes its own command.
+
+    Row ids print as stored row numbers rather than bare brackets (D4): a usable
+    row [2] above retained row [1] otherwise reads as an inverted list, even
+    though usable-first is the correct precedence.
+    """
     if not row_ids:
         return []
+    restore = action or "To restore a retained record, sign in again to that account."
     return [
         "Retained Radient sign-ins (unavailable):",
-        *(f"  [{row_id}] Account could not be verified; record retained." for row_id in row_ids),
-        "  Sign in to the account you want to use:",
-        "  /login radient in the app; local-operator login radient in a terminal.",
+        *(
+            f"  Account could not be verified; record retained (stored row {row_id})."
+            for row_id in row_ids
+        ),
+        f"  {restore}",
         "  Older records have not been deleted or assigned to that account.",
     ]
 

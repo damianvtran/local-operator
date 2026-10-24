@@ -533,10 +533,15 @@ class DesktopAuth:
                 op.retained_notice = "\n".join(retained) if retained else None
             settle("succeeded", "Sign-in complete.")
         except RadientLoginDisabled:
+            # The sign-in verified; only the preserved local disable remains.
+            # Reporting that as "failed" contradicted the sentence beside it and
+            # invited a retry of a flow that had just worked (design round 2,
+            # D1). The state is non-failure, and the message carries the nuance
+            # plus the fact that nothing else moved.
             settle(
-                "failed",
-                "Sign-in verified; the existing credential remains unavailable. "
-                "Its saved disabled state was preserved.",
+                "succeeded",
+                "Sign-in verified. This Radient sign-in stays disabled; "
+                "its saved state was preserved. Nothing else changed.",
             )
         except asyncio.CancelledError:
             settle("cancelled", "Sign-in cancelled.")
