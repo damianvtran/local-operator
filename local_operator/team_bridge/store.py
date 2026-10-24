@@ -1100,19 +1100,29 @@ BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
 #: could reach a durable row that is supposed to be contentless (B2). A reason
 #: outside this set is refused, never truncated.
 BODY_HOLD_REASONS = (
+    # Every code the seam design defines for a non-terminal hold, and nothing
+    # else: ``screening_unverified`` was invented here and is gone; a
+    # withdrawal path that the design requires had no code, so it was
+    # unreachable (M3).
     "body_not_fitted",
     "admission_drift",
     "consent_unverified",
+    "consent_withdrawn",
     "claim_lost",
     "never_appended",
     "binding_drift",
-    "screening_unverified",
 )
 
 #: The shapes the contentless columns must satisfy. These are the package's own
 #: grammars, not a second spelling: ``conversation_id``/``message_id`` come from
 #: ``types``, and a digest here is lowercase hex only.
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+#: Claim/turn tokens are caller-supplied capability handles (the connector names
+#: its claim ``connector:<uuid>``), so they are validated rather than trusted —
+#: an open column in this table is how arbitrary text would reach a durable row.
+_CLAIM_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+#: A transcript entry id (``TranscriptEntry.id``).
+_ENTRY_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _SESSION_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _CONSENT_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
@@ -1211,8 +1221,10 @@ class Store:
             # them. HONEST LIMIT: `_ensure_body_reservations` runs
             # ``executescript``, which COMMITS the open transaction before its
             # own DDL, so a later stamp failure does not roll the table back.
-            # What is guaranteed: a failed stamp leaves v7, and the next open
-            # revalidates the already-created table and completes the stamp.
+            # What is guaranteed: a failed stamp leaves the store at the version
+            # this open started from (v6 on the rekey path; v7 when a v7 store
+            # crashed during the additive step), and the next open revalidates
+            # the table and completes the stamp.
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
             version = conn.execute(
@@ -1286,6 +1298,42 @@ class Store:
                     )
 
     @staticmethod
+    def _validate_body_reservations(conn: sqlite3.Connection) -> None:
+        """Refuse a table whose SHAPE cannot serve the claim protocol.
+
+        Column NAMES are not enough: the CAS and the idempotent insert both
+        depend on the composite PRIMARY KEY, so a column-complete table with
+        the wrong key shape opened and stamped v8 happily, then failed at
+        write time with a raw ``ON CONFLICT clause does not match any PRIMARY
+        KEY or UNIQUE constraint`` (M1). Both the primary-key flags and a
+        stray single-column UNIQUE are checked here.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if not _BODY_RESERVATION_COLUMNS <= columns:
+            raise StoreRefused(
+                "schema_damaged",
+                f"body_reservations lacks {sorted(_BODY_RESERVATION_COLUMNS - columns)}",
+            )
+        pk_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(body_reservations)") if row[5]
+        }
+        if pk_columns != {"owner_key", "conversation_id", "message_id"}:
+            raise StoreRefused(
+                "schema_damaged",
+                f"body_reservations primary key is {sorted(pk_columns)}",
+            )
+        for index in conn.execute("PRAGMA index_list(body_reservations)"):
+            if not index[3]:
+                continue
+            parts = tuple(part[2] for part in conn.execute(f"PRAGMA index_info({index[1]})"))
+            if parts in (("owner_key",), ("conversation_id",), ("message_id",)):
+                raise StoreRefused(
+                    "schema_damaged",
+                    "body_reservations carries a single-column UNIQUE",
+                )
+
+    @staticmethod
     def _ensure_body_reservations(conn: sqlite3.Connection) -> None:
         """Create the reservation table additively, or validate a carrying one.
 
@@ -1301,11 +1349,7 @@ class Store:
             # inside the script names `state`, so running it first raised a raw
             # sqlite3.OperationalError from a partial table instead of a typed
             # refusal (M1). A partial table is damage, never an upgrade.
-            if not _BODY_RESERVATION_COLUMNS <= existing:
-                raise StoreRefused(
-                    "schema_damaged",
-                    f"body_reservations lacks " f"{sorted(_BODY_RESERVATION_COLUMNS - existing)}",
-                )
+            Store._validate_body_reservations(conn)
             return
         try:
             conn.executescript(_BODY_RESERVATIONS_SCHEMA)
@@ -1534,10 +1578,7 @@ class Store:
                     "schema_damaged",
                     f"stamped-{version} store missing body_reservations",
                 )
-            body_columns = {r[1] for r in conn.execute("PRAGMA table_info(body_reservations)")}
-            if not _BODY_RESERVATION_COLUMNS <= body_columns:
-                missing = sorted(_BODY_RESERVATION_COLUMNS - body_columns)
-                raise StoreRefused("schema_damaged", f"body_reservations lacks {missing}")
+            self._validate_body_reservations(conn)
             return
 
         raise StoreRefused(
@@ -2109,6 +2150,9 @@ class Store:
         and this turn must inject nothing.
         """
 
+        self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
+        self._reservation_field("turn_token", turn_token, _CLAIM_TOKEN)
+
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
@@ -2146,12 +2190,15 @@ class Store:
     ) -> bool:
         """Extend THIS turn's claim. False means the claim was lost."""
 
+        self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
+        self._reservation_field("turn_token", turn_token, _SESSION_TOKEN)
+
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
             cursor = conn.execute(
-                "UPDATE body_reservations SET claim_expires_at = ?, updated_at = ? "
+                "UPDATE body_reservations SET claim_expires_at = ?, updated_at = ?"
                 "WHERE owner_key = ? AND conversation_id = ? AND message_id = ? "
                 "AND state = 'claimed' AND claim_token = ? AND turn_token = ?",
                 (
@@ -2187,6 +2234,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
             if reason not in BODY_HOLD_REASONS:
                 # Refuse, never truncate: a truncated free-form reason is still
                 # third-party text in a durable row (B2).
@@ -2225,15 +2273,21 @@ class Store:
         claim must not write ``completed`` over a row another turn is serving.
         """
 
+        self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
+        self._reservation_field("entry_id", entry_id, _ENTRY_ID)
+
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            # A completed row must not retain a live claim capability: the
+            # tokens are cleared here, not left for a later reader to ignore.
             cursor = conn.execute(
-                "UPDATE body_reservations SET state = 'completed', completed_entry_id = ?, "
-                "terminal_code = NULL, last_error = NULL, updated_at = ? "
-                "WHERE owner_key = ? AND conversation_id = ? AND message_id = ? "
-                "AND state = 'claimed' AND claim_token = ?",
+                "UPDATE body_reservations SET state = 'completed', "
+                "completed_entry_id = ?, terminal_code = NULL, last_error = NULL, "
+                "claim_token = NULL, turn_token = NULL, claim_expires_at = NULL, "
+                "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
+                "AND message_id = ? AND state = 'claimed' AND claim_token = ?",
                 (
                     entry_id,
                     float(now),

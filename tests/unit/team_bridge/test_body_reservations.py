@@ -230,6 +230,110 @@ def test_release_refuses_a_reason_outside_the_closed_vocabulary(tmp_path) -> Non
     assert row["state"] == "claimed" and row["last_error"] is None
 
 
+def _token_probe(tmp_path) -> Store:
+    store = _store(tmp_path)
+    assert _reserve(store)
+    return store
+
+
+def test_claim_and_completion_refuse_a_body_string_in_their_slots(tmp_path) -> None:
+    """B2 (round 2): the capability columns are caller-supplied too."""
+
+    store = _token_probe(tmp_path)
+    now = time.time()
+
+    with pytest.raises(StoreRefused) as bad_claim:
+        store.claim_body_reservation(
+            _owner(),
+            conversation_id=CONVERSATION_ID,
+            message_id=MESSAGE_ID,
+            claim_token="tok SECRET body",
+            turn_token="turn-a",
+            now=now,
+            ttl=300,
+        )
+    assert bad_claim.value.code == "invalid_body_reservation"
+
+    with pytest.raises(StoreRefused):
+        store.claim_body_reservation(
+            _owner(),
+            conversation_id=CONVERSATION_ID,
+            message_id=MESSAGE_ID,
+            claim_token="tok-a",
+            turn_token="turn\nSECRET",
+            now=now,
+            ttl=300,
+        )
+
+    store.claim_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="tok-a",
+        turn_token="turn-a",
+        now=now,
+        ttl=300,
+    )
+    with pytest.raises(StoreRefused) as bad_entry:
+        store.complete_body_reservation(
+            _owner(),
+            conversation_id=CONVERSATION_ID,
+            message_id=MESSAGE_ID,
+            claim_token="tok-a",
+            entry_id="entry SECRET body",
+            now=now + 1,
+        )
+    assert bad_entry.value.code == "invalid_body_reservation"
+
+
+def test_completion_clears_the_claim_capability(tmp_path) -> None:
+    store = _token_probe(tmp_path)
+    now = time.time()
+    store.claim_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="tok-a",
+        turn_token="turn-a",
+        now=now,
+        ttl=300,
+    )
+    assert store.complete_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="tok-a",
+        entry_id="entry-1",
+        now=now + 1,
+    )
+    row: dict[str, Any] = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
+    assert row["state"] == "completed"
+    assert row["claim_token"] is None and row["turn_token"] is None
+    assert row["claim_expires_at"] is None
+
+
+@pytest.mark.parametrize("shape", ["no_key", "single_unique"])
+def test_a_column_complete_table_with_the_wrong_key_shape_refuses(tmp_path, shape) -> None:
+    """M1 (round 2): names alone are not the contract."""
+
+    store = _store(tmp_path)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(body_reservations)")]
+        conn.execute("DROP TABLE body_reservations")
+        body = ", ".join(f"{name} TEXT" for name in columns)
+        extra = {
+            "no_key": "",
+            "single_unique": ", UNIQUE (owner_key)",
+        }[shape]
+        conn.execute(f"CREATE TABLE body_reservations ({body}{extra})")
+        conn.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+        conn.commit()
+
+    with pytest.raises(StoreRefused) as refused:
+        _open(store)
+    assert refused.value.code == "schema_damaged"
+
+
 def test_two_consumers_cannot_both_claim(tmp_path) -> None:
     store = _store(tmp_path)
     assert _reserve(store)
