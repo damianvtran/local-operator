@@ -252,22 +252,31 @@ _FIRST_PAINT_WAIT_S = 0.2
 
 #: What that budget is allowed to spend itself on: a journal scan rate the wait
 #: is planned against, so a build that cannot POSSIBLY finish inside the budget
-#: does not block the caller at all. Measured on this host with
+#: does not block a COLD open at all. Measured on this host with
 #: ``refresh_index`` over a 20,014-entry / 24,902,439-byte journal: 943.5 ms, so
-#: ~26 MB/s while the fleet was loaded — the constant is a third of that so a
-#: host three times slower than the measurement still fits. The 200 ms budget
-#: therefore covers ~1.6 MB; anything larger answers ``building`` at once, which
-#: is the answer the wait would have produced anyway, minus the wait.
+#: ~26 MB/s while the fleet was loaded — the constant is that measurement, not a
+#: fraction of it, and the 200 ms budget therefore covers ~4.8 MB.
+#:
+#: WHY NOT A CONSERVATIVE FRACTION (agent review round 1, MAJOR-1). The two
+#: ways this constant can be wrong are not symmetric. Set too high, the wait is
+#: spent on a build that misses the budget: the caller pays 200 ms and gets the
+#: same ``building`` it would have got without waiting — which is exactly the
+#: pre-0.89 behaviour, so nothing regresses. Set too low, a build that WOULD
+#: have settled inside the budget is refused, and a ``building`` answer is not
+#: re-read by the current consumer (the rail's poll is armed only while naming
+#: ids are pending), so the rail keeps the previous tick set for the whole
+#: visit. A first revision used 8 MB/s — a third of the measurement — and QA
+#: caught that regression on a 1.9 MB append (round 1, Q1).
 #:
 #: WHY THIS EXISTS (an UPPER-BOUND measurement, 2026-10-24): a cold open of a
 #: 20k-entry conversation spent 819.8 ms in ``GET .../checkpoints`` on a host at
 #: ~92% swap, answering ``building`` with an empty manifest. In-process, with
 #: the same journal and nothing else running, that path measured 204.0 ms and
-#: 213.8 ms on two runs — 200 ms of it this budget, paid on an open whose answer
-#: could never have been ``ready`` (the same journal scans in 943.5 ms). The
-#: spread is this host, not the code. The wait is only worth paying when the
+#: 213.8 ms on two runs — ~200 ms of it this budget, paid on an open whose
+#: answer could never have been ``ready`` (the same journal scans in 943.5 ms).
+#: The spread is this host, not the code. The wait is only worth paying when the
 #: scan can land inside it.
-_FIRST_PAINT_SCAN_BYTES_PER_S = 8 << 20
+_FIRST_PAINT_SCAN_BYTES_PER_S = 24 << 20
 
 
 # ---------------------------------------------------------------------------
@@ -3038,16 +3047,27 @@ async def checkpoints_view(
         return _manifest_state(session_id, "error", probe.index, probe.built_at)
     task, started = start_refresh(config_dir, session_id)
     if started:
+        # Retrieve a failed build's exception on every path that does not await
+        # the task to completion. Both `building` answers do exactly that (the
+        # unpayable budget below, and a wager that timed out), and an unobserved
+        # failure would surface as a second, misleading traceback at GC. Same
+        # shape as `desktop_sessions`' no-wait refresh.
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         # FIRST PAINT: only the call that STARTS the build owes this wait — the
         # rail's loading state must be able to appear within the budget (design
-        # D3) even while the build runs on. The wait is a wager that the scan
-        # lands inside the budget and this answer can be `ready`; when the
-        # journal is too large for that wager to be plausible, staking the
-        # caller's latency on it buys nothing. Answer `building` at once and let
-        # the build continue in its worker thread (measured: a 24.9 MB journal
-        # scans in 943.5 ms, so the 200 ms budget could not see it settle, and
-        # the answer it produced was `building` anyway — 204.0 ms later).
-        payable = (
+        # D3) even while the build runs on. The wait is a wager that the refresh
+        # lands inside the budget and this answer can be `ready`.
+        #
+        # A USABLE PREVIOUS INDEX MAKES THAT WAGER NEARLY FREE (agent review
+        # round 1, MAJOR-1): with one, `refresh_index` takes the incremental
+        # path for a journal that grew on the same inode (measured: 2.1-2.4 ms
+        # for a one-row append), so `asyncio.wait` returns at the build's own
+        # time rather than at the budget. Gating that on TOTAL bytes refused a
+        # wait that always pays, and answered `building` where the old answer was
+        # `ready` — which the consumer does not re-read. So the size gate is for
+        # the COLD case only, where the build is a full scan and the wait really
+        # does cost the whole budget.
+        payable = probe.index is not None or (
             probe.journal_bytes is not None
             and probe.journal_bytes <= _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
         )
