@@ -24,10 +24,14 @@ these numbers, and ``memory.peak`` is the one that outlives the moment.
 WHAT IT DELIBERATELY DOES NOT DO
 --------------------------------
 It does not retry, reduce a worker count, change a timeout or touch a test.
+It never reads a command line: this dump is uploaded as a public artifact, an
+argument can be a credential, and the process tree only needs pids, ppids, RSS
+and names (the root comes from the worker's parent pid).
+
 Nothing is written on a healthy run: the hook is one ``isinstance`` check per
 test report and the directory is created only when an ENOMEM failure actually
-occurs. It never fails a run either -- every read is bounded and wrapped, and an
-unusable dump directory disables the instrument instead of raising inside a
+occurs. It never fails a run either -- every read is bounded and wrapped, and
+an unusable dump directory disables the instrument instead of raising inside a
 pytest hook. That is the same rule ``tests/shard_stall_watchdog.py`` follows,
 and for the same reason: a diagnostic that can turn a green run red is switched
 off the first time it is wrong.
@@ -113,10 +117,6 @@ class ProcInfo(NamedTuple):
     ppid: int
     name: str
     rss_kb: int | None
-    #: Whether this process's command line names pytest. Read and discarded at
-    #: scan time so the tree can be rooted without ever putting the text in the
-    #: record -- or in the dump, where an uploaded artifact would expose it.
-    is_pytest: bool
 
 
 def run_dir() -> Path:
@@ -170,10 +170,12 @@ def note_failure(item: object, call: object) -> None:
         error = getattr(excinfo, "value", None)
         if not isinstance(error, OSError) or error.errno != ENOMEM:
             return
+        config = getattr(item, "config", None)
         write_dump(
             nodeid=str(getattr(item, "nodeid", "<unknown nodeid>")),
             error=error,
-            config=getattr(item, "config", None),
+            config=config,
+            root_pid=_controller_pid_hint(config),
         )
     except Exception:  # the hook must never raise
         return
@@ -190,13 +192,14 @@ def write_dump(
     cgroup_root: Path = CGROUP_ROOT,
     pid: int | None = None,
     processes: list[ProcInfo] | None = None,
+    root_pid: int | None = None,
 ) -> Path | None:
     """Write one dump and return its path, or ``None`` if it could not be written.
 
-    ``processes`` exists for the unit tests: the cap and the tree walk are
-    exercised with a synthetic table instead of a hundred fake ``/proc``
-    entries. Production callers leave it unset and :func:`read_processes`
-    reads the kernel.
+    ``processes`` and ``root_pid`` exist for the unit tests: the cap and the
+    tree walk are exercised with a synthetic table instead of a hundred fake
+    ``/proc`` entries. Production callers leave them unset; the hook supplies
+    the controller hint and :func:`read_processes` reads the kernel.
     """
     try:
         current_pid = os.getpid() if pid is None else pid
@@ -210,6 +213,7 @@ def write_dump(
             cgroup_root=cgroup_root,
             pid=current_pid,
             processes=processes,
+            root_pid=root_pid,
         )
         target = (run_dir() if dump_dir is None else Path(dump_dir)) / _dump_name(
             config, current_pid, moment
@@ -225,6 +229,24 @@ def write_dump(
             pass
         return target
     except Exception:  # an unwritable directory disables the instrument
+        return None
+
+
+def _controller_pid_hint(config: Any) -> int | None:
+    """The xdist controller's pid when this process is one of its workers.
+
+    xdist starts each worker with a direct ``Popen`` from the controller, so
+    the worker's parent IS the controller. Only a worker gets the hint: in a
+    plain ``-n0`` run the parent is a shell, and rooting there would pull that
+    shell's siblings into the tree. The pid-1 guard covers a reparented worker
+    whose real controller is gone -- rooting at init would report the machine.
+    """
+    try:
+        if not isinstance(getattr(config, "workerinput", None), dict):
+            return None
+        parent = os.getppid()
+        return parent if parent > 1 else None
+    except Exception:
         return None
 
 
@@ -273,6 +295,7 @@ def build_report(
     cgroup_root: Path = CGROUP_ROOT,
     pid: int | None = None,
     processes: list[ProcInfo] | None = None,
+    root_pid: int | None = None,
 ) -> str:
     """Render the whole dump as text. Pure enough to unit-test with fake trees."""
     moment = now or datetime.now(timezone.utc)
@@ -284,7 +307,7 @@ def build_report(
     lines.extend(_identity_lines(config, current_pid))
     lines.extend(_meminfo_lines(proc_root))
     lines.extend(_loadavg_lines(proc_root))
-    lines.extend(_process_lines(proc_root, current_pid, processes))
+    lines.extend(_process_lines(proc_root, current_pid, processes, root_pid))
     lines.extend(_cgroup_lines(cgroup_root))
     return "\n".join(lines) + "\n"
 
@@ -357,7 +380,12 @@ def _loadavg_lines(proc_root: Path) -> list[str]:
     return lines
 
 
-def _process_lines(proc_root: Path, pid: int, processes: list[ProcInfo] | None) -> list[str]:
+def _process_lines(
+    proc_root: Path,
+    pid: int,
+    processes: list[ProcInfo] | None,
+    root_pid: int | None,
+) -> list[str]:
     if processes is None:
         table, read_error = read_processes(proc_root)
     else:
@@ -366,7 +394,7 @@ def _process_lines(proc_root: Path, pid: int, processes: list[ProcInfo] | None) 
     if read_error is not None:
         lines.append(f"process table unavailable: {read_error}")
         return lines
-    tree, root = _process_tree(table, pid)
+    tree, root = _process_tree(table, pid, root_pid)
     lines.append(f"tree root pid: {root}")
     lines.append(f"processes in tree: {len(tree)}")
     ordered = sorted(tree, key=lambda proc: ((proc.rss_kb or 0), proc.pid), reverse=True)
@@ -467,37 +495,35 @@ def _read_process(entry: Path, pid: int) -> ProcInfo | None:
                     except ValueError:
                         rss_kb = None
 
-    # The command line is READ ONLY to answer one boolean question -- does this
-    # process name pytest? -- and the bytes are discarded. It can contain
-    # credentials (a token passed as an argument), and this dump is uploaded as
-    # a public artifact; a redaction filter would have to anticipate every way
-    # a secret can be spelled, while not carrying the text cannot be wrong.
-    cmdline_bytes, _ = _read_bytes(entry / "cmdline")
-    is_pytest = cmdline_bytes is not None and b"pytest" in cmdline_bytes.lower()
-    return ProcInfo(pid=pid, ppid=ppid, name=name, rss_kb=rss_kb, is_pytest=is_pytest)
+    # Command lines are never read: this dump is a public artifact, and an
+    # argument can be a credential. The tree root comes from the parent pid
+    # xdist gives the worker, not from matching text in another process.
+    return ProcInfo(pid=pid, ppid=ppid, name=name, rss_kb=rss_kb)
 
 
-def _process_tree(table: list[ProcInfo], pid: int) -> tuple[list[ProcInfo], int]:
+def _process_tree(
+    table: list[ProcInfo], pid: int, root_pid: int | None
+) -> tuple[list[ProcInfo], int]:
     """Return the shard's tree and the pid it was rooted at.
 
-    The root is the highest ancestor whose command line named pytest (the
-    controller), reached from this worker. The text itself is never stored;
-    only the boolean survives into :class:`ProcInfo`. Descendants of that root
-    are the whole shard:
-    every xdist worker, the controller and whatever children a test spawned.
-    Climbing stops at the first ancestor that does not name pytest, so a suite
-    started from an agent shell does not drag that shell's siblings in.
+    The root is the worker's parent -- the xdist controller, which starts each
+    worker directly -- when that relationship is visible in the table. Nothing
+    about a command line is consulted, so no argument text can influence or
+    enter the report. Descendants of that root are the whole shard: every xdist
+    worker, the controller and whatever children a test spawned. A missing or
+    inconsistent hint falls back to this process, never to the whole table's
+    parent chain.
     """
-    by_pid = {proc.pid: proc for proc in table}
+    by_pid = {process.pid: process for process in table}
     root = pid
-    for _ in range(16):  # bounded: an insane parent chain must not hang the dump
-        current = by_pid.get(root)
-        if current is None:
-            break
-        parent = by_pid.get(current.ppid)
-        if parent is None or not parent.is_pytest:
-            break
-        root = parent.pid
+    current = by_pid.get(pid)
+    if (
+        root_pid is not None
+        and root_pid in by_pid
+        and current is not None
+        and current.ppid == root_pid
+    ):
+        root = root_pid
 
     if root not in by_pid:
         # The worker itself vanished from the table (a fake table keyed
@@ -506,8 +532,8 @@ def _process_tree(table: list[ProcInfo], pid: int) -> tuple[list[ProcInfo], int]
         return sorted(table, key=lambda proc: proc.pid), root
 
     children: dict[int, list[ProcInfo]] = {}
-    for proc in table:
-        children.setdefault(proc.ppid, []).append(proc)
+    for process in table:
+        children.setdefault(process.ppid, []).append(process)
     tree: list[ProcInfo] = []
     stack = [root]
     seen: set[int] = set()
@@ -516,10 +542,10 @@ def _process_tree(table: list[ProcInfo], pid: int) -> tuple[list[ProcInfo], int]
         if current_pid in seen:
             continue
         seen.add(current_pid)
-        proc = by_pid.get(current_pid)
-        if proc is None:
+        process = by_pid.get(current_pid)
+        if process is None:
             continue
-        tree.append(proc)
+        tree.append(process)
         stack.extend(child.pid for child in children.get(current_pid, []))
     return tree, root
 
@@ -527,13 +553,6 @@ def _process_tree(table: list[ProcInfo], pid: int) -> tuple[list[ProcInfo], int]
 def _read_text(path: Path) -> tuple[str | None, str | None]:
     try:
         return path.read_text(encoding="utf-8", errors="replace"), None
-    except Exception as exc:
-        return None, f"{type(exc).__name__}: {exc}"
-
-
-def _read_bytes(path: Path) -> tuple[bytes | None, str | None]:
-    try:
-        return path.read_bytes(), None
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"
 

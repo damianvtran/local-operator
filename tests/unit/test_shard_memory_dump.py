@@ -134,6 +134,7 @@ def test_the_dump_records_every_field_the_next_measurement_needs(
         proc_root=fake_proc,
         cgroup_root=tmp_path / "no-cgroup",
         pid=101,
+        root_pid=100,
     )
 
     # Timestamp: the reading is only evidence with the instant attached.
@@ -184,11 +185,11 @@ def test_no_command_line_or_argv_text_reaches_the_dump(
 
     A command line can contain a token passed as an argument, and this artifact
     is uploaded for anyone to read; redacting it would mean anticipating every
-    spelling of every secret. The dump therefore carries only pid, ppid, RSS,
-    name and a boolean derived from the command line. This builds the marker
-    into every per-process ``cmdline`` file (the real source), and into both
-    argv surfaces a naive implementation might reach for, then asserts neither
-    marker appears anywhere in the rendered dump.
+    spelling of every secret. The dump therefore carries only pid, ppid, RSS
+    and name, and never opens ``/proc/<pid>/cmdline`` at all. This writes the
+    marker into every per-process cmdline file and into both argv surfaces a
+    naive implementation might reach for, then asserts neither marker appears
+    anywhere in the rendered dump.
     """
     line_marker = "LEAKMARKER-ARGV-31337"
     argv_marker = "LEAKMARKER-AUX-90210"
@@ -214,12 +215,13 @@ def test_no_command_line_or_argv_text_reaches_the_dump(
         proc_root=fake_proc,
         cgroup_root=tmp_path / "no-cgroup",
         pid=101,
+        root_pid=100,
     )
 
     assert line_marker not in text
     assert argv_marker not in text
     # Removing the text did not remove the reading: the tree still roots at the
-    # process whose command line named pytest.
+    # controller from the worker's parent pid.
     assert "tree root pid: 100" in text
 
 
@@ -257,14 +259,13 @@ def test_the_process_list_is_capped_and_reports_the_omitted_count(tmp_path: Path
     is worst exactly when it matters. The controller and the reporting worker are
     pinned above the RSS cut because they are the two rows the question is about.
     """
-    table = [memory.ProcInfo(pid=1000, ppid=1, name="python", rss_kb=500_000, is_pytest=True)]
+    table = [memory.ProcInfo(pid=1000, ppid=1, name="python", rss_kb=500_000)]
     table.extend(
         memory.ProcInfo(
             pid=1001 + index,
             ppid=1000,
             name="python",
             rss_kb=1_000 + index,
-            is_pytest=False,
         )
         for index in range(99)
     )
@@ -277,6 +278,7 @@ def test_the_process_list_is_capped_and_reports_the_omitted_count(tmp_path: Path
         cgroup_root=tmp_path / "no-cgroup",
         pid=1001,
         processes=table,
+        root_pid=1000,
     )
 
     assert "processes in tree: 100" in text
@@ -327,8 +329,8 @@ def test_a_worker_missing_from_the_table_still_reports_the_rows_it_has(
 ) -> None:
     """A race that drops the worker is not a reason to return an empty table."""
     table = [
-        memory.ProcInfo(pid=200, ppid=1, name="python", rss_kb=10, is_pytest=True),
-        memory.ProcInfo(pid=201, ppid=200, name="python", rss_kb=20, is_pytest=False),
+        memory.ProcInfo(pid=200, ppid=1, name="python", rss_kb=10),
+        memory.ProcInfo(pid=201, ppid=200, name="python", rss_kb=20),
     ]
     text = memory.build_report(
         nodeid="n",
@@ -427,6 +429,23 @@ def test_write_dump_names_the_worker_and_lands_outside_the_repo(
     written = path.read_text()
     assert "failing test: tests/unit/secrets/test_cli.py::test_keyring_write" in written
     assert "MemAvailable: 2345678 kB" in written
+
+
+def test_the_controller_hint_is_taken_only_from_an_xdist_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain ``-n0`` run's parent is a shell; rooting there reports siblings.
+
+    Mutation that must fail this: use ``os.getppid()`` without checking
+    ``workerinput`` -- a serialised local run would dump the shell's whole
+    child tree, which is not this shard. A reparented worker (parent pid 1)
+    must also fall back rather than root at init.
+    """
+    monkeypatch.setattr(memory.os, "getppid", lambda: 4242)
+    assert memory._controller_pid_hint(_Config({"workerid": "gw3"})) == 4242
+    assert memory._controller_pid_hint(_Config(None)) is None
+    monkeypatch.setattr(memory.os, "getppid", lambda: 1)
+    assert memory._controller_pid_hint(_Config({"workerid": "gw3"})) is None
 
 
 def test_install_exports_one_directory_and_creates_nothing(
