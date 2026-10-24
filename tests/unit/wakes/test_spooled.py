@@ -538,11 +538,12 @@ async def test_an_unanticipated_raise_from_the_engage_is_still_an_attempt(
 def test_dropping_a_deferral_still_judges_the_record_it_clears(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R2-Q2: the third unlink passes the same compare-and-delete as its siblings.
+    """R2-Q2 / R7: the third unlink asks for the generation it actually read.
 
     Checked at the call rather than through a race the isolated rig cannot build
     (the deferral runs pre-socket): the drop reads the record, then asks for the
-    value it read to still be there.
+    value it read to still be there. A record replaced between those two steps
+    must refuse the unlink and survive — the generation CAS is the teeth.
     """
     from local_operator.session.runtime import inbox
     from local_operator.wakes import spooled as store
@@ -554,21 +555,32 @@ def test_dropping_a_deferral_still_judges_the_record_it_clears(
     assert judged is not None, "the fixture must have written a record"
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
 
-    seen: dict[str, int | None] = {}
-    real_clear = store.clear_spooled_turn
+    seen: dict[str, object] = {}
+    real_clear = store.clear_if_no_owner_row
 
-    def _spy(root: Path, session_id: str, *, expected_updated_at_ms: int | None = None) -> bool:
-        seen["expected_updated_at_ms"] = expected_updated_at_ms
-        return real_clear(root, session_id, expected_updated_at_ms=expected_updated_at_ms)
+    def _spy(
+        root: Path, session_id: str, session_dir: Path, *, expected_generation: object
+    ) -> bool:
+        seen["expected_generation"] = expected_generation
+        # Replace the record after the drop's read: the judgement it carries is
+        # now stale, so the real compare-and-delete must refuse to unlink it.
+        store.note_spooled_turn(root, session_id)
+        refused = real_clear(root, session_id, session_dir, expected_generation=expected_generation)
+        seen["refused"] = refused
+        return refused
 
     # ``drop_owed_turn`` imports the name function-locally, so patching the module
     # attribute is what the production call resolves.
-    monkeypatch.setattr(store, "clear_spooled_turn", _spy)
+    monkeypatch.setattr(store, "clear_if_no_owner_row", _spy)
     inbox.drop_owed_turn(directory)
 
     assert (
-        seen.get("expected_updated_at_ms") == judged["updated_at_ms"]
+        seen.get("expected_generation") == judged["generation"]
     ), "the drop must not unlink a record on a judgement it cannot still see"
+    assert seen.get("refused") is False, "a stale generation must refuse the unlink"
+    survived = store.read_spooled_turn(config_dir, "sess-cas")
+    assert survived is not None, "the record replaced under the drop must survive"
+    assert survived["generation"] != judged["generation"]
 
 
 def test_dropping_a_deferral_spares_the_owners_own_prompt(

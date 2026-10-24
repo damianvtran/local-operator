@@ -2083,16 +2083,20 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
         )
         return await sweeper.drain()
     finally:
-        # A cancellation already travelling outranks the latched failure:
-        # serve()'s cleanup still calls every seat's shutdown, so the failure is
-        # raised there and grouping keeps it; replacing the CancelledError here
-        # would instead lose the caller's own reason for leaving.
+        # This function owns its own sweeper, so nothing downstream re-raises a
+        # failure latched by this shutdown. Cancellation still outranks it (the
+        # caller's own reason for leaving); any other in-flight failure is
+        # grouped with the cleanup's rather than replaced or discarded.
         in_flight = sys.exc_info()[1]
         try:
             await sweeper.shutdown()
-        except BaseException:
+        except BaseException as cleanup:
             if in_flight is None:
                 raise
+            if cleanup is not in_flight and not isinstance(in_flight, asyncio.CancelledError):
+                raise BaseExceptionGroup(
+                    "wake firing and shutdown both failed", [in_flight, cleanup]
+                ) from None
 
 
 def _has_fireable_wakes(

@@ -205,12 +205,12 @@ def read_spooled(config_dir: Path) -> dict[str, dict[str, Any]]:
         return out
     for path in paths:
         try:
-            record = read_spooled_turn(config_dir, path.stem)
+            # Name the one failure this loop tolerates, so a genuine ValueError
+            # raised later inside the read is not skipped as a stray file.
+            _validate_session_id(path.stem)
         except ValueError:
-            # A stem that cannot name a session (``.``/``..``) is one stray
-            # file: skip it, as the reader has always done for unreadable
-            # entries, rather than aborting the whole reconciliation.
             continue
+        record = read_spooled_turn(config_dir, path.stem)
         if record is not None:
             out[path.stem] = record
     return out
