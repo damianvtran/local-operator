@@ -20,6 +20,11 @@ HERE=Path(__file__).resolve().parent
 FILES=('tests/worker_code_identity.py','tests/unit/test_worker_code_identity.py')
 INITS=('tests/__init__.py','tests/unit/__init__.py')
 CAP=262144
+# Node24 documents old-space separately from three semi-spaces in young-gen.
+# Explicit semi16 bounds that term to48MiB without changing512MiB PG/320MiB
+# measured-total guards. This is not a diagnosis of the earlier unknown failure.
+NODE_FLAGS=('--max-old-space-size=256','--max-semi-space-size=16')
+HEAP_QUERY="process.stdout.write(JSON.stringify({heap_size_limit_bytes:require('v8').getHeapStatistics().heap_size_limit,execArgv:process.execArgv}))"
 
 
 def validate_report(report,rc,root,kind):
@@ -82,7 +87,7 @@ def capped_file():resource.setrlimit(resource.RLIMIT_FSIZE,(CAP,CAP))
 
 
 def main():
-    out=Path(sys.argv[1]);out.mkdir(parents=True,exist_ok=True);receipt=dict(qualified=False,status='SETUP',cases=[],root_removed=False)
+    out=Path(sys.argv[1]);out.mkdir(parents=True,exist_ok=True);receipt=dict(qualified=False,status='SETUP',setup_stage='SOURCE_BOOTSTRAP',cases=[],root_removed=False)
     work=Path(tempfile.mkdtemp(prefix='core2852-type-',dir=os.environ['RUNNER_TEMP']))
     try:
         m=json.loads((HERE/'manifest.json').read_bytes())
@@ -92,14 +97,41 @@ def main():
         node=shutil.which('node');tool=Path(os.environ['TYPE_PREFLIGHT_TOOL'])
         package=json.loads((tool/'package.json').read_bytes())
         if package.get('version')!='1.1.414' or not (tool/'index.js').is_file():raise ValueError('tool STOP')
-        receipt['node_version']=subprocess.check_output([node,'--version'],text=True,timeout=5).strip()
-        # Direct CLI old-space flag wins over bounded runner's NODE_OPTIONS floor.
-        heap=subprocess.check_output([node,'--max-old-space-size=256','-e',"process.stdout.write(String(require('v8').getHeapStatistics().heap_size_limit))"],text=True,timeout=5)
-        if not heap.isdecimal() or not 256*1048576<=int(heap)<=320*1048576:raise ValueError('heap STOP')
-        receipt['v8_heap_limit_bytes']=int(heap)
-        version=subprocess.check_output([node,'--max-old-space-size=256',str(tool/'index.js'),'--version'],text=True,timeout=5).strip()
-        help_text=subprocess.check_output([node,'--max-old-space-size=256',str(tool/'index.js'),'--help'],text=True,timeout=5)
+        receipt['setup_stage']='NODE_VERSION'
+        receipt['node_version']=subprocess.check_output([node,*NODE_FLAGS,'--version'],text=True,timeout=5).strip()
+        receipt['node_heap_query_rc']=None;receipt['v8_heap_limit_bytes']=None;receipt['node_exec_flags']=None
+        heap_out=work/'heap.json';heap_err=work/'heap.stderr'
+        receipt['setup_stage']='NODE_HEAP_QUERY'
+        with heap_out.open('wb') as stdout,heap_err.open('wb') as stderr:
+            try:
+                query=subprocess.run([node,*NODE_FLAGS,'-e',HEAP_QUERY],stdout=stdout,stderr=stderr,timeout=5,preexec_fn=capped_file)
+            except subprocess.TimeoutExpired:
+                receipt['setup_stage']='NODE_HEAP_QUERY_TIMEOUT'
+                raise
+        receipt['node_heap_query_rc']=query.returncode if type(query.returncode) is int else None
+        receipt['setup_stage']='NODE_HEAP_OUTPUT_CAP'
+        if heap_out.stat().st_size>4096 or heap_err.stat().st_size>CAP:raise ValueError('heap cap STOP')
+        receipt['setup_stage']='NODE_HEAP_JSON'
+        observed=json.loads(heap_out.read_bytes())
+        if type(observed) is dict:
+            value=observed.get('heap_size_limit_bytes')
+            receipt['v8_heap_limit_bytes']=value if type(value) is int and abs(value)<=2**53 else None
+            argv=observed.get('execArgv')
+            if argv==[*NODE_FLAGS,'-e',HEAP_QUERY]:receipt['node_exec_flags']=list(NODE_FLAGS)
+        # Record public observations BEFORE each discriminator, including a
+        # nonzero query that still produced a readable heap observation.
+        receipt['setup_stage']='NODE_HEAP_QUERY_RC'
+        if type(query.returncode) is not int or query.returncode!=0:raise ValueError('heap query STOP')
+        receipt['setup_stage']='NODE_HEAP_FLAGS'
+        if receipt['node_exec_flags'] is None:raise ValueError('heap flags STOP')
+        receipt['setup_stage']='NODE_HEAP_RANGE'
+        heap=receipt['v8_heap_limit_bytes']
+        if type(heap) is not int or not 256*1048576<=heap<=320*1048576:raise ValueError('heap STOP')
+        receipt['setup_stage']='ANALYZER_VERSION_HELP'
+        version=subprocess.check_output([node,*NODE_FLAGS,str(tool/'index.js'),'--version'],text=True,timeout=5).strip()
+        help_text=subprocess.check_output([node,*NODE_FLAGS,str(tool/'index.js'),'--help'],text=True,timeout=5)
         if version!='pyright 1.1.414' or '--outputjson' not in help_text or '--project' not in help_text:raise ValueError('CLI STOP')
+        receipt['setup_stage']='COMPLETE'
         configs=[]
         for kind,ref in (('BASELINE',m['baseline']),('FIXED',m['fixed'])):
             receipt['status']=kind;root=work/kind;root.mkdir();case=available_case(kind,m['snapshots'][kind]);receipt['cases'].append(case)
@@ -116,7 +148,7 @@ def main():
             config=root/'pyrightconfig.json';config.write_text(json.dumps(cfg));configs.append(cfg|dict(extraPaths=settings.get('extraPaths',[])))
             target=work/(kind+'.json');errors=work/(kind+'.stderr')
             with target.open('wb') as stdout,errors.open('wb') as stderr:
-                command=[sys.executable,'-B',str(ROOT/'scripts/run_bounded.py'),'--timeout','60','--grace','5','--memory-mb','512','--',node,'--max-old-space-size=256',str(tool/'index.js'),'--outputjson','--project',str(config),*FILES]
+                command=[sys.executable,'-B',str(ROOT/'scripts/run_bounded.py'),'--timeout','60','--grace','5','--memory-mb','512','--',node,*NODE_FLAGS,str(tool/'index.js'),'--outputjson','--project',str(config),*FILES]
                 proc=subprocess.run(command,cwd=root,stdout=stdout,stderr=stderr,preexec_fn=capped_file)
             case['rc']=proc.returncode if type(proc.returncode) is int else None;case['stage']='OUTPUT_CAP'
             if target.stat().st_size>CAP or errors.stat().st_size>CAP:raise ValueError('cap STOP')
@@ -129,7 +161,7 @@ def main():
         if receipt['cases']:
             case=receipt['cases'][-1]
             if case['qualified'] is not True:case['failure_reason']=case['stage'] if case['stage'] in ('EXECUTION','OUTPUT_CAP','JSON_PARSE','VALIDATE_REPORT') else 'UNKNOWN'
-        receipt['failure_reason']='CASE_FAILED' if receipt['cases'] else 'SETUP_FAILED'
+        receipt['failure_reason']='CASE_FAILED' if receipt['cases'] else receipt['setup_stage']
     finally:
         shutil.rmtree(work);receipt['root_removed']=True;(out/'typing.json').write_text(json.dumps(receipt,allow_nan=False)+'\n')
     raise SystemExit(0 if receipt['qualified'] else 1)

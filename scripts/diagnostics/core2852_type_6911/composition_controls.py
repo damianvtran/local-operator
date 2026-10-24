@@ -32,10 +32,20 @@ def run(mode):
   if cmd[0]=='git':
    if cmd[1]=='cat-file':return b''
    return gitbytes[cmd[2]]
-  if cmd[-1]=='--version':return 'v24.0.0\n' if len(cmd)==2 else 'pyright 1.1.414\n'
+  if cmd[-1]=='--version':return 'v24.0.0\n' if str(cmd[-2])=='--max-semi-space-size=16' else 'pyright 1.1.414\n'
   if cmd[-1]=='--help':return '--outputjson --project'
   return str(280*1048576)
  def run_tool(cmd,**kw):
+  if '-e' in cmd:
+   assert cmd[1:3]==['--max-old-space-size=256','--max-semi-space-size=16']
+   value=400*1048576 if mode=='heap_range' else 304*1048576
+   data={'heap_size_limit_bytes':value,'execArgv':cmd[1:]}
+   if mode=='heap_type':data['heap_size_limit_bytes']=True
+   if mode=='heap_flags':data['execArgv']=['PRIVATE']
+   if mode=='heap_nonfinite':data['heap_size_limit_bytes']=float('nan')
+   if mode=='heap_timeout':raise TimeoutError('synthetic timeout')
+   kw['stdout'].write(b'{INVALID' if mode=='heap_json' else json.dumps(data).encode())
+   return types.SimpleNamespace(returncode=3 if mode=='heap_rc' else True if mode=='heap_bool' else None if mode=='heap_none' else 0)
   root=kw['cwd'];kind=root.p.rsplit('/',1)[-1];calls.append(kind);assert cmd[-2:]==['tests/worker_code_identity.py','tests/unit/test_worker_code_identity.py'] and '--max-old-space-size=256' in cmd
   count=2 if kind=='BASELINE' else 0
   if mode=='three_errors':count=3
@@ -45,14 +55,21 @@ def run(mode):
   if mode=='none':rc=None
   if mode=='bool':rc=True
   kw['stdout'].write(b'{INVALID' if mode=='parse' else json.dumps(report).encode());return types.SimpleNamespace(returncode=rc)
- ns=dict(Path=P,ROOT=P('REPO'),HERE=P('REPO/scripts/diagnostics/core2852_type_6911'),FILES=tuple(m['snapshots']['BASELINE'])[:2],INITS=('tests/__init__.py','tests/unit/__init__.py'),CAP=262144,json=json,hashlib=hashlib,tomllib=tomllib,os=types.SimpleNamespace(environ={'RUNNER_TEMP':'/owned','TYPE_PREFLIGHT_TOOL':'TOOL'}),sys=types.SimpleNamespace(argv=['runner','/out'],executable='python'),shutil=types.SimpleNamespace(which=lambda n:'node',rmtree=lambda p:removed.append(str(p))),tempfile=types.SimpleNamespace(mkdtemp=lambda **kw:'/owned/check'),resource=None,subprocess=types.SimpleNamespace(check_output=output,run=run_tool))
+ ns=dict(Path=P,ROOT=P('REPO'),HERE=P('REPO/scripts/diagnostics/core2852_type_6911'),FILES=tuple(m['snapshots']['BASELINE'])[:2],INITS=('tests/__init__.py','tests/unit/__init__.py'),CAP=262144,NODE_FLAGS=('--max-old-space-size=256','--max-semi-space-size=16'),HEAP_QUERY=next(n.value.value for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='HEAP_QUERY' for t in n.targets)),json=json,hashlib=hashlib,tomllib=tomllib,os=types.SimpleNamespace(environ={'RUNNER_TEMP':'/owned','TYPE_PREFLIGHT_TOOL':'TOOL'}),sys=types.SimpleNamespace(argv=['runner','/out'],executable='python'),shutil=types.SimpleNamespace(which=lambda n:'node',rmtree=lambda p:removed.append(str(p))),tempfile=types.SimpleNamespace(mkdtemp=lambda **kw:'/owned/check'),resource=None,subprocess=types.SimpleNamespace(check_output=output,run=run_tool,TimeoutExpired=TimeoutError))
  # Use EXACT fixed target ordering, not manifest JSON sorting assumptions.
  ns['FILES']=('tests/worker_code_identity.py','tests/unit/test_worker_code_identity.py')
  exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef)],type_ignores=[]),'<actual-runner-main-fake-tools>','exec'),ns)
  try:ns['main']()
  except SystemExit as e:rc=e.code
  result=json.loads(fs['/out/typing.json']);assert removed==['/owned/check'] and result['root_removed'] and 'INVALID' not in json.dumps(result)
- if mode=='healthy':assert rc==0 and result['qualified'] and calls==['BASELINE','FIXED']
+ if mode.startswith('heap_'):
+  assert rc==1 and not result['qualified'] and calls==[] and result['cases']==[]
+  assert 'PRIVATE' not in json.dumps(result) and 'INVALID' not in json.dumps(result)
+  if mode=='heap_range':assert result['v8_heap_limit_bytes']==400*1048576 and result['failure_reason']=='NODE_HEAP_RANGE'
+  if mode=='heap_rc':assert result['node_heap_query_rc']==3 and result['v8_heap_limit_bytes']==304*1048576 and result['failure_reason']=='NODE_HEAP_QUERY_RC'
+  if mode in ('heap_bool','heap_none'):assert result['node_heap_query_rc'] is None
+  if mode in ('heap_type','heap_nonfinite'):assert result['v8_heap_limit_bytes'] is None
+ elif mode=='healthy':assert rc==0 and result['qualified'] and calls==['BASELINE','FIXED']
  else:
   assert rc==1 and not result['qualified'] and calls==['BASELINE'] and len(result['cases'])==1
   case=result['cases'][0];assert case['source_sha256']==m['snapshots']['BASELINE'] and case['qualified'] is False and case['failure_reason'] in ('VALIDATE_REPORT','OUTPUT_CAP','JSON_PARSE')
@@ -60,5 +77,5 @@ def run(mode):
   if mode=='nonzero':assert case['rc']==2
   if mode in ('none','bool'):assert case['rc'] is None
  results.append(dict(mode=mode,exit=rc,cases=len(result['cases']),failed_observation_retained=mode!='healthy',root_removed=True))
-for mode in ('healthy','three_errors','nonzero','cap','none','bool','parse'):run(mode)
-(b/'composition-results.json').write_text(json.dumps(dict(cases=results,observations='SIMULATED tool/FS/OS; ACTUAL verify_sources/main/run->projection->validator->finally',actual_analyzer=False),indent=2)+'\n');print('ACTUAL_MAIN_7_CASES_OBSERVATIONS_RETAINED_CLEANUP_SIMULATED_NO_ANALYZER')
+for mode in ('healthy','three_errors','nonzero','cap','none','bool','parse','heap_range','heap_rc','heap_json','heap_flags','heap_type','heap_nonfinite','heap_timeout','heap_bool','heap_none'):run(mode)
+(b/'heap-composition-results.json').write_text(json.dumps(dict(cases=results,observations='SIMULATED tool/FS/OS; ACTUAL verify_sources/main/run->projection->validator->finally',actual_analyzer=False),indent=2)+'\n');print('ACTUAL_MAIN_16_CASES_SIMULATED_HEAP_OBSERVATIONS_NO_NODE')

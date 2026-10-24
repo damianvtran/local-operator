@@ -16,7 +16,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-          fetch-depth: 4
+          fetch-depth: 5
       - uses: actions/setup-python@v7
         timeout-minutes: 1
         with:
