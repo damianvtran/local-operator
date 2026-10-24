@@ -165,7 +165,7 @@ class BridgeRuntime:
 
 
 class ChannelMemberParams(BaseModel):
-    """One invited member: an agent names its endpoint, a human must not."""
+    """One invited member. An agent names its endpoint; a human must not."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -772,10 +772,9 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         name="bridge",
         label="Team Bridge",
         description=(
-            "Team Bridge: take_up/ack delivered messages, send/reply, and channel ops "
-            "(channels, channel_create, channel_post [thread_root_id replies in a "
-            "thread], channel_history, channel_thread, react) as this session's "
-            "agent. This tool cannot approve or deny — that is the human's ask queue."
+            "Team Bridge as this session's agent: take_up/ack, send/reply, and "
+            "channel ops (channels, channel_create, channel_post, channel_history, "
+            "channel_thread, react). Cannot approve or deny."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",

@@ -307,8 +307,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # tokens. Then 773 -> 798 with #2760: the react op plus its emoji parameter
     # and the reaction reference prose add 25. Each number was measured on the
     # MERGED tree with the preceding changes present — never carried across.
+    # 798 -> 777 after trimming the tool's prose for the context budget: the
+    # repeated op roster left the description and the thread-reply clause moved
+    # to thread_root_id's own field note. Every op is still discoverable.
     # Neither the document soft cap nor the start-context budget changes.
-    "bridge": 798,
+    "bridge": 777,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
