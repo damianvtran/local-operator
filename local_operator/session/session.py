@@ -17342,8 +17342,13 @@ class Session:
             return
         error, stop_reason, aborted = self._pending_body_verdict or (None, None, False)
         entry_id = None
+        # The witness is the turn's last durable ASSISTANT entry. A plain
+        # ``Message`` carries ``role`` (attribution lives on the custom-message
+        # side), so reading only the custom field found nothing and settlement
+        # released every real turn as ``never_appended``.
         for message in reversed(list(self._context.messages)):
-            if getattr(message, "attribution", "") == "assistant" and getattr(message, "id", ""):
+            role = getattr(message, "role", None) or getattr(message, "attribution", "")
+            if role == "assistant" and getattr(message, "id", ""):
                 entry_id = str(message.id)
                 break
         try:
