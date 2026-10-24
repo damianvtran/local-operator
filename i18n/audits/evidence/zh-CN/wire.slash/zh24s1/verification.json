@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "record_kind": "audit_evidence_validation",
+  "all_passed": true,
+  "checks": {
+    "key_parity_52": true,
+    "key_order_parity": true,
+    "icu_argument_parity": true,
+    "plural_structure": true,
+    "hard_token_parity": true,
+    "width_measured": true,
+    "punctuation_reviewed": true,
+    "register_no_nin": true,
+    "encoding_clean": true,
+    "render_all_52": true,
+    "route_read_recorded": true,
+    "route_digest_matches_keyed_body": true,
+    "current_bytes_match_audited_hashes": true,
+    "independent_of_translator": true,
+    "catalogue_ledger_untouched": true,
+    "findings_recorded": true
+  }
+}

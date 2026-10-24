@@ -1,0 +1,51 @@
+Independent zh-CN audit (translation-auditor, lopdev team), 2026-10-24.
+Audit id zh24s1; namespace wire.slash; locale zh-CN.
+Read-only over the worktree; no catalogue, ledger, allowance, shipped or eligibility file was edited.
+Worktree: /Users/damian/local-operator/.worktrees/zh-cn-core
+Session: 4ecbbf4d3281; model: deepseek/deepseek-flash; fallback: none.
+
+$ date -u +%Y-%m-%dT%H:%M:%SZ
+2026-10-24T23:39:06Z
+
+$ git rev-parse HEAD
+f286318c89053e5e00cbb7823f6f29cd6a06d205
+
+$ git rev-parse HEAD:local_operator/i18n/catalogues/zh-CN/wire.slash.json
+96198518bd7ec811904760f7e83770f230b275ce
+
+$ git hash-object local_operator/i18n/catalogues/zh-CN/wire.slash.json
+96198518bd7ec811904760f7e83770f230b275ce
+
+$ git diff --quiet HEAD -- local_operator/i18n/catalogues/zh-CN/wire.slash.json; echo exit=$?
+exit=0
+
+$ shasum -a 256 local_operator/i18n/catalogues/en/wire.slash.json local_operator/i18n/catalogues/en/wire.slash.context.json local_operator/i18n/catalogues/zh-CN/wire.slash.json i18n/glossary.md i18n/style-guides/zh-CN.md
+b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202  local_operator/i18n/catalogues/en/wire.slash.json
+32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215  local_operator/i18n/catalogues/en/wire.slash.context.json
+a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11  local_operator/i18n/catalogues/zh-CN/wire.slash.json
+ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd  i18n/glossary.md
+8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c  i18n/style-guides/zh-CN.md
+
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+
+$ LOCAL_OPERATOR_CONFIG_DIR=/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config /Users/damian/.local/share/lop/current/tools/local-operator/bin/python /Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/route_read_details.py /Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/session
+route_read is_error=False
+route_read details={"audit_log": "/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config/audit/public-copy-reads.jsonl", "key": "wire.slash.credential", "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.json", "policy": "docs/security/redaction-policy.md", "public_copy": true, "sha256": "0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd"}
+route_read key=wire.slash.credential
+route_read chars=16
+route_read value=空格后输入或粘贴密钥；显示为掩码
+exit=0
+
+$ cat /Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config/audit/public-copy-reads.jsonl
+{"chars": 48, "key": "wire.slash.credential", "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.json", "policy": "docs/security/redaction-policy.md", "session": "session", "sha256": "0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd", "tool": "read_public_copy", "ts": "2026-10-24T23:29:57Z"}
+{"chars": 48, "key": "wire.slash.credential", "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.json", "policy": "docs/security/redaction-policy.md", "session": "session", "sha256": "0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd", "tool": "read_public_copy", "ts": "2026-10-24T23:30:05Z"}
+{"chars": 48, "key": "wire.slash.credential", "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.json", "policy": "docs/security/redaction-policy.md", "session": "session", "sha256": "0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd", "tool": "read_public_copy", "ts": "2026-10-24T23:39:18Z"}
+
+$ shasum -a 256 /Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config/audit/public-copy-reads.jsonl
+97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980  /Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config/audit/public-copy-reads.jsonl
+
+Installed reader: /Users/damian/.local/share/lop/current/tools/local-operator/bin/python
+local-operator 0.89.0
+Current generation: /Users/damian/.local/share/lop/generations/20261024T204324Z-0.89.0
