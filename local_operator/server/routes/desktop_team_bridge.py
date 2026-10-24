@@ -92,6 +92,11 @@ _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: rule is a conservative charset rather than a re-implementation of the
 #: server's mint.
 _MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
+
+#: The wire grammar for a thread root. ONE spelling shared by the immediate
+#: send and the scheduled create: two literals would be two grammars, and the
+#: hub would learn about the disagreement from a 400.
+CONVERSATION_REPLY_ROOT_PATTERN = r"^bcmsg_[0-9a-z]{8,64}$"
 # Account guards share the dependency-light is_account_id predicate with reads.
 # A UUID-shaped real account must never be rejected by a legacy acc_-only guard.
 
@@ -1121,6 +1126,12 @@ class ScheduledCreateIn(_Strict):
     body: str = Field(min_length=1)
     send_at: str
     mentions: list[ScheduledMentionIn] = Field(default_factory=list)
+    #: Reply in this root message's thread once the schedule fires. SAME
+    #: spelling and SAME canonical grammar as ``ConversationSendIn`` — the hub
+    #: receives one wire field name, so a scheduled message and an immediate
+    #: one cannot drift apart. Without it a scheduled thread reply was simply
+    #: impossible: ``_Strict`` rejected the field, so callers could not ask.
+    thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
 
     @model_validator(mode="after")
     def _date(self) -> "ScheduledCreateIn":
@@ -1271,7 +1282,7 @@ class ConversationSendIn(ConversationOwnerIn):
     #: Reply in this root message's thread (agent-server threads). Held to the
     #: minted message-id grammar here so a malformed id never reaches the hub;
     #: the hub owns the real rule (same conversation, root not a reply).
-    thread_root_id: str | None = Field(default=None, pattern=r"^bcmsg_[0-9a-z]{8,64}$")
+    thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
 
 
 class ConversationJoinIn(ConversationOwnerIn):
