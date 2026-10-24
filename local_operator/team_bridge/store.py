@@ -2143,6 +2143,57 @@ class Store:
                 ).fetchone()
             )
 
+    def pending_body_reservation_for(
+        self, owner: OwnerSnapshot, designated_session: str, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """The OLDEST pending reservation this session is designated to serve.
+
+        WHY read-only and never creating: this is the eligibility check the
+        Session runs before it attaches a request transform. A check that
+        could create or migrate the store would turn "is there anything to
+        claim" into a write, and an absent store must mean no frame rather
+        than a new file (the fail-closed law ``_connect_readonly`` enforces).
+
+        THE BINDING IS THE ROW'S OWN, not merely the owner key's: a same-account
+        re-login keeps the key and changes ``credential_id`` /
+        ``enrollment_generation``, and ``active_owner`` treats that as a
+        DIFFERENT owner. Matching only the key would serve the OLD generation's
+        reservation under the new credential — claim, fetch and inject included
+        (design S-3b).
+
+        Oldest-first is FIFO: a message admitted earlier must not starve
+        behind a newer one. A ``pending`` row qualifies, and so does a claim
+        whose lease EXPIRED — otherwise a turn that died mid-flight would strand
+        its message forever, and the CAS's reclaim arm could never be reached
+        through this reader. A live claim belongs to another turn and is
+        excluded; a completed or retired row owes nothing.
+        """
+
+        moment = time.time() if now is None else float(now)
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            return self._reservation(
+                conn.execute(
+                    "SELECT * FROM body_reservations WHERE owner_key = ? "
+                    "AND credential_id = ? AND enrollment_generation = ? "
+                    "AND designated_session = ? AND (state = 'pending' OR "
+                    "(state = 'claimed' AND claim_expires_at IS NOT NULL "
+                    "AND claim_expires_at < ?)) "
+                    "ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                    (
+                        _owner_key(owner),
+                        owner.credential_id,
+                        owner.enrollment_generation,
+                        designated_session,
+                        moment,
+                    ),
+                ).fetchone()
+            )
+
     def claim_body_reservation(
         self,
         owner: OwnerSnapshot,
@@ -2605,6 +2656,26 @@ class Store:
                 ),
             )
             conn.execute("INSERT OR IGNORE INTO sync (owner_key) VALUES (?)", (_owner_key(owner),))
+            # A generation bump makes every reservation bound to an older
+            # credential/generation permanently unclaimable: ``owner_key`` is
+            # unchanged across a same-account re-login, so nothing else will
+            # ever match those rows. Retiring them HERE — at the one moment the
+            # new generation becomes live, inside the same transaction — is what
+            # stops them sitting ``pending`` with no live owner (S-3b).
+            conn.execute(
+                "UPDATE body_reservations SET state = 'retired', "
+                "terminal_code = 'binding_mismatch', last_error = NULL, "
+                "claim_token = NULL, turn_token = NULL, claim_expires_at = NULL, "
+                "updated_at = ? WHERE owner_key = ? "
+                "AND (credential_id != ? OR enrollment_generation != ?) "
+                "AND state IN ('pending', 'claimed')",
+                (
+                    time.time(),
+                    _owner_key(owner),
+                    owner.credential_id,
+                    owner.enrollment_generation,
+                ),
+            )
 
     def invalidate(self, owner: OwnerSnapshot) -> int:
         """Fence pending results/claims and bump the generation. Returns it.
