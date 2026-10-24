@@ -418,7 +418,12 @@ def run_login(
             # tidy about the teardown.
             pass
         try:
-            return await _login_or_cancel(login, callbacks, aborted)
+            result = await _login_or_cancel(login, callbacks, aborted)
+            # Profile verification adds an await after exchange. A completion
+            # that arrived after abandonment must not reach persistence.
+            if aborted.aborted:
+                raise LoginCancelledError(aborted.reason or "Login cancelled")
+            return result
         finally:
             # The handler outlives the flow otherwise, and a later Ctrl+C would
             # abort a signal nobody is watching instead of interrupting.
@@ -467,7 +472,26 @@ def run_login(
 
     # OAuth credentials dict; stamp authorized_at if missing.
     result.setdefault("authorized_at", int(time.time() * 1000))
-    row = auth_store.upsert_credential(storage_provider, result)
+    try:
+        row = (
+            auth_store.complete_radient_login(result)
+            if storage_provider == "radient"
+            else auth_store.upsert_credential(storage_provider, result)
+        )
+    except LoginError as exc:
+        if isinstance(exc, LoginCancelledError):
+            print(_cancelled_message(definition))
+            return 130
+        print(f"Login failed: {exc}")
+        return 1
+    if storage_provider == "radient" and row.disabled_cause is not None:
+        print("Sign-in verified; the existing credential remains unavailable.")
+        print("Its saved disabled state was preserved.")
+        for line in format_retained_radient_logins(auth_store.retained_radient_login_ids()):
+            print(line)
+        # Verification is not activation: do not change provider/model defaults
+        # or operator profile while the requested credential remains disabled.
+        return 1
     _invalidate_cached_listing(storage_provider)
     _invalidate_cached_usage(storage_provider, auth_store)
     # The ONE identity derivation (``credential_identity``): the login receipt
@@ -479,6 +503,9 @@ def run_login(
     identity = credential_identity(result) or ""
     suffix = f" ({identity})" if identity else ""
     print(f"Logged in to '{storage_provider}'{suffix}.")
+    if storage_provider == "radient":
+        for line in format_retained_radient_logins(auth_store.retained_radient_login_ids()):
+            print(line)
     if result.get("grant_note"):
         print(f"Note: {result['grant_note']}")
     if storage_provider == "radient":
@@ -729,8 +756,21 @@ def stored_login_key_names(config_dir: "Path | None") -> list[str]:
         return []
 
 
+def format_retained_radient_logins(row_ids: tuple[int, ...]) -> list[str]:
+    """One recovery explanation for CLI/status and controller login receipts."""
+    if not row_ids:
+        return []
+    return [
+        "Retained Radient sign-ins (unavailable):",
+        *(f"  [{row_id}] Account could not be verified; record retained." for row_id in row_ids),
+        "  Sign in to the account you want to use:",
+        "  /login radient in the app; local-operator login radient in a terminal.",
+        "  Older records have not been deleted or assigned to that account.",
+    ]
+
+
 def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> list[str]:
-    """The status listing as LINES: one per active credential plus env/legacy keys.
+    """Active credentials and separate retained-state notices, plus key names.
 
     Returned rather than printed so the CLI (``list_logins``, stdout) and the
     TUI's ``/login status`` (a transcript block) render ONE derivation: a
@@ -743,6 +783,7 @@ def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> 
 
     lines: list[str] = []
     rows = auth_store.list_credentials()
+    retained = format_retained_radient_logins(auth_store.retained_radient_login_ids())
     if rows:
         lines.append("Stored credentials:")
         now_ms = int(time.time() * 1000)
@@ -761,7 +802,9 @@ def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> 
                 detail = f"api_key ({source})"
             lines.append(f"  [{row.id}] {row.provider:<14} {detail:<22} identity={identity}")
     else:
-        lines.append("No stored credentials.")
+        lines.append("No usable stored credentials." if retained else "No stored credentials.")
+    if retained:
+        lines.extend(["", *retained])
 
     lines.append("")
     lines.append("Environment keys visible to the cascade:")

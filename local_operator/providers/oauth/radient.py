@@ -11,14 +11,17 @@ from __future__ import annotations
 import os
 import time
 import urllib.parse
-from typing import Any, Callable
+from copy import deepcopy
+from typing import Any, Callable, SupportsIndex
 
 import httpx
 
+from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
 from local_operator.harness.types import AbortSignal
 from local_operator.providers.oauth.callback_server import (
     CallbackFlowOptions,
     LoginCallbacks,
+    LoginCancelledError,
     LoginError,
     OAuthCallbackFlow,
     raise_for_refresh_failure,
@@ -38,6 +41,67 @@ TOKEN_URL = _env("RADIENT_OAUTH_TOKEN_URL", "https://api.radienthq.com/v1/auth/o
 CALLBACK_PORT = 54549
 CALLBACK_PATH = "/callback"
 EXPIRY_SKEW_MS = 5 * 60 * 1000  # 5 minutes skew
+
+
+class RadientLoginDisabled(LoginError):
+    """Known local preserved-disable outcome; hosts must not expose raw errors."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Sign-in verified; the existing credential remains unavailable. "
+            "Its saved disabled state was preserved."
+        )
+
+
+_LOGIN_ISSUER = object()
+
+
+class _VerifiedRadientLogin(dict[str, Any]):
+    """Ephemeral flow provenance, deliberately lost on dict/JSON copying.
+
+    This is not a persistent proof flag or a boundary against arbitrary Python
+    execution. Only a successful canonical exchange + authenticated /me response
+    issues it; hosts consume it after their cancellation check, once.
+    """
+
+    def __init__(self, payload: dict[str, Any], signal: AbortSignal | None, issuer: object) -> None:
+        if issuer is not _LOGIN_ISSUER:
+            raise LoginError("Radient login completion was not verified")
+        super().__init__(payload)
+        self._issued = deepcopy(payload)
+        self._signal = signal
+        self._consumed = False
+        # A host must finish the login promptly, not retain authority for a
+        # later unrelated UI action after the account/session context changes.
+        self._deadline = time.monotonic() + 60.0
+
+    def __copy__(self) -> dict[str, Any]:
+        return dict(self)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
+        return deepcopy(dict(self), memo)
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
+        # Background transports may copy credentials, not completion authority.
+        raise TypeError("A verified Radient completion cannot be serialized")
+
+    def consume(self) -> dict[str, Any]:
+        if self._consumed:
+            raise LoginError("Radient login completion was already consumed")
+        self._consumed = True
+        if self._signal is not None and self._signal.aborted:
+            raise LoginCancelledError(self._signal.reason or "Login cancelled")
+        if time.monotonic() > self._deadline:
+            raise LoginError("Radient login completion expired; sign in again")
+        if self != self._issued:
+            raise LoginError("Radient login completion changed after verification")
+        return deepcopy(self._issued)
+
+
+def consume_verified_login(result: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, _VerifiedRadientLogin) or type(result) is not _VerifiedRadientLogin:
+        raise LoginError("Radient login requires a verified interactive completion")
+    return result.consume()
 
 
 class RadientOAuthFlow(OAuthCallbackFlow):
@@ -65,6 +129,14 @@ class RadientOAuthFlow(OAuthCallbackFlow):
         )
         self._verifier: str | None = None
         self._http = http_client
+        # Capture the actual exchange destination, not a later config/default
+        # lookup. Only the published canonical issuer-to-hub contract is known.
+        self._token_url = TOKEN_URL
+        self._hub = (
+            DEFAULT_RADIENT_API_BASE_URL
+            if self._token_url == DEFAULT_RADIENT_API_BASE_URL + "/auth/oauth/token"
+            else None
+        )
 
     async def generate_auth_url(self, state: str, redirect_uri: str) -> str:
         verifier, challenge = create_pkce_pair()
@@ -84,6 +156,13 @@ class RadientOAuthFlow(OAuthCallbackFlow):
         if not self._verifier:
             raise LoginError("PKCE verifier is missing from session state")
 
+        if self._signal is not None and self._signal.aborted:
+            raise LoginCancelledError(self._signal.reason or "Login cancelled")
+        hub = self._hub
+        token_url = self._token_url
+        if hub is None or token_url != hub + "/auth/oauth/token":
+            raise LoginError("Radient token endpoint has no trusted API hub binding")
+
         payload = {
             "grant_type": "authorization_code",
             "client_id": CLIENT_ID,
@@ -94,32 +173,96 @@ class RadientOAuthFlow(OAuthCallbackFlow):
 
         async def _call(client: httpx.AsyncClient) -> httpx.Response:
             return await client.post(
-                TOKEN_URL,
+                token_url,
                 json=payload,
                 headers={"Content-Type": "application/json"},
                 timeout=30.0,
+                follow_redirects=False,
             )
 
-        if self._http is not None:
-            resp = await _call(self._http)
-        else:
-            async with httpx.AsyncClient() as client:
-                resp = await _call(client)
+        try:
+            if self._http is not None:
+                resp = await _call(self._http)
+            else:
+                async with httpx.AsyncClient() as client:
+                    resp = await _call(client)
+        except httpx.HTTPError as failure:
+            if self._signal is not None and self._signal.aborted:
+                raise LoginCancelledError(self._signal.reason or "Login cancelled") from failure
+            raise LoginError("Radient token exchange did not complete") from failure
 
+        if self._signal is not None and self._signal.aborted:
+            raise LoginCancelledError(self._signal.reason or "Login cancelled")
         if resp.status_code != 200:
-            raise LoginError(f"Radient token exchange failed: HTTP {resp.status_code} {resp.text}")
+            # A provider error body can contain credential material.
+            raise LoginError(f"Radient token exchange failed: HTTP {resp.status_code}")
 
-        data = resp.json()
+        try:
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError("object required")
+            lifetime = data.get("expires_in", 3600)
+            if isinstance(lifetime, bool) or not isinstance(lifetime, (int, str)):
+                raise ValueError("invalid lifetime")
+            expires_in = int(lifetime)
+            if expires_in <= 0:
+                raise ValueError("invalid lifetime")
+        except (ValueError, TypeError) as failure:
+            raise LoginError("Radient token exchange returned an invalid response") from failure
         access_token = data.get("access_token")
-        if not access_token:
+        if not isinstance(access_token, str) or not access_token.strip():
             raise LoginError("Radient token response missing access_token")
 
-        expires_in = data.get("expires_in", 3600)
-        expires_at = int(time.time() * 1000) + int(expires_in * 1000) - EXPIRY_SKEW_MS
+        expires_at = int(time.time() * 1000) + expires_in * 1000 - EXPIRY_SKEW_MS
+
+        # The committed server contract (8c2a35ac, MeHandlerEcho) authenticates
+        # this fresh bearer, loads its account, and returns matching IDs. JWT
+        # labels are display metadata only, never the account admission proof.
+        async def _profile(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.get(
+                hub + "/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10.0,
+                follow_redirects=False,
+            )
+
+        try:
+            if self._http is not None:
+                profile = await _profile(self._http)
+            else:
+                async with httpx.AsyncClient() as client:
+                    profile = await _profile(client)
+            if self._signal is not None and self._signal.aborted:
+                raise LoginCancelledError(self._signal.reason or "Login cancelled")
+            if profile.status_code != 200:
+                raise LoginError(
+                    f"Radient identity verification failed: HTTP {profile.status_code}"
+                )
+            body = profile.json()
+            result = body.get("result") if isinstance(body, dict) else None
+            identity = result.get("identity") if isinstance(result, dict) else None
+            account = result.get("account") if isinstance(result, dict) else None
+            account_id = identity.get("account_id") if isinstance(identity, dict) else None
+            actual_id = account.get("id") if isinstance(account, dict) else None
+            if (
+                not isinstance(account_id, str)
+                or not account_id.strip()
+                or account_id != account_id.strip()
+                or account_id != actual_id
+            ):
+                raise LoginError(
+                    "Radient identity verification returned an invalid account binding"
+                )
+        except (httpx.HTTPError, ValueError) as failure:
+            if self._signal is not None and self._signal.aborted:
+                raise LoginCancelledError(self._signal.reason or "Login cancelled") from failure
+            raise LoginError("Radient identity verification did not complete") from failure
 
         refresh_token = data.get("refresh_token")
-        return {
+        credentials = {
             **identity_from_token_response(data),
+            "account_id": account_id,
+            "api_endpoint": hub,
             # Declared type avoids structural guessing in AuthStore.upsert_credential.
             "type": "oauth",
             # AuthStore standard keys.
@@ -133,6 +276,7 @@ class RadientOAuthFlow(OAuthCallbackFlow):
             "token_type": data.get("token_type", "Bearer"),
             "scope": data.get("scope", ""),
         }
+        return _VerifiedRadientLogin(credentials, self._signal, _LOGIN_ISSUER)
 
 
 def identity_from_token_response(data: dict[str, Any]) -> dict[str, Any]:
@@ -182,6 +326,13 @@ async def refresh_radient_token(
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Refresh a Radient access token using rolling refresh token."""
+    token_url = TOKEN_URL
+    if token_url != DEFAULT_RADIENT_API_BASE_URL + "/auth/oauth/token" or credentials.get(
+        "api_endpoint"
+    ) not in (None, "", DEFAULT_RADIENT_API_BASE_URL):
+        # A background refresh cannot move a grant to another issuer or infer
+        # a new hub. Unknown legacy metadata remains unknown until sign-in.
+        raise LoginError("Radient refresh endpoint has no trusted API hub binding")
     # Check both standard 'refresh' and compatibility 'refresh_token' keys
     refresh_token = credentials.get("refresh") or credentials.get("refresh_token")
     if not refresh_token:
@@ -195,10 +346,11 @@ async def refresh_radient_token(
 
     async def _call(client: httpx.AsyncClient) -> httpx.Response:
         return await client.post(
-            TOKEN_URL,
+            token_url,
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=30.0,
+            follow_redirects=False,
         )
 
     if http_client is not None:
@@ -232,7 +384,11 @@ async def refresh_radient_token(
     merged = dict(credentials)
     # The refresh grant re-mints the id_token, so a name changed in the
     # console reaches the stored label on the next refresh.
-    merged.update(identity_from_token_response(data))
+    labels = identity_from_token_response(data)
+    # Refresh can update display labels, not switch or newly admit an account.
+    # The verified account/hub binding survives until another explicit login.
+    labels.pop("account_id", None)
+    merged.update(labels)
     merged.update(
         {
             "type": "oauth",
