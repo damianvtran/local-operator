@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import plistlib
+import sqlite3
 import subprocess
 import sys
 import time
@@ -304,20 +305,14 @@ def test_mixed_feed_failures_retain_exact_refs_and_retry_on_204(tmp_path, monkey
     controls the iteration's backoff. Conversation labels exercise the encoded
     ref identity; they must never leak into the closed failure diagnostic.
     """
-    from local_operator.team_bridge.types import ConversationFeedRef
+    from local_operator.team_bridge.types import (
+        ConversationFeedRef,
+        parse_conversation_ref_value,
+    )
 
     store, owner = _enroll(tmp_path)
     pair_failed = "bmsg_pair_failed"
     pair_ok = "bmsg_pair_ok"
-    conv_failed = ConversationFeedRef(
-        conversation_id="bcv_abcdefgh",
-        message_id="bcmsg_abcdef01",
-        conversation_seq=1,
-        mention=False,
-        conversation_name="PRIVATE_CONVERSATION_CANARY / name",
-        sender_label="PRIVATE_SENDER_CANARY / label",
-        sender_kind="human",
-    ).validated()
     conv_ok = ConversationFeedRef(
         conversation_id="bcv_abcdefgh",
         message_id="bcmsg_abcdef02",
@@ -325,13 +320,26 @@ def test_mixed_feed_failures_retain_exact_refs_and_retry_on_204(tmp_path, monkey
         mention=True,
     ).validated()
     pair_ref = f"message_available:message_id={pair_failed}"
+    legacy_failed = (
+        "message_available:conversation_id=bcv_abcdefgh/bcmsg_abcdef01/1/0/"
+        "PRIVATE_CONVERSATION_CANARY%20%2F%20name/PRIVATE_SENDER_CANARY/human"
+    )
+    conv_failed = parse_conversation_ref_value(legacy_failed.split("=", 1)[1])
+    assert conv_failed is not None and conv_failed.legacy_alias is not None
     refs = [
         pair_ref,
         f"message_available:message_id={pair_ok}",
-        conv_failed.encode(),
+        legacy_failed,
         conv_ok.encode(),
     ]
     store.record_feed_batch(owner, feed_seq(9), refs, resync_required=False)
+    # The writer canonicalizes even an older in-memory key. Restore a v6
+    # fixture on disk to exercise migration plus #2835's idle-poll retry.
+    with sqlite3.connect(store._path) as conn:
+        conn.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+        conn.execute(
+            "UPDATE feed_refs SET ref=? WHERE ref=?", (legacy_failed, conv_failed.encode())
+        )
     first = StoreRefused("policy_stale", "PRIVATE_PAIR_CANARY")
     second = RuntimeError("PRIVATE_CONVERSATION_EXCEPTION_CANARY")
     pair_calls = []
@@ -1514,8 +1522,6 @@ def test_v1_unengaged_conversation_message_holds_visibly_and_never_wakes(
         message_id="bcmsg_abcdef01",
         conversation_seq=1,
         mention=False,
-        conversation_name="qa",
-        sender_label="Ada",
         sender_kind="human",
     ).validated()
     out = asyncio.run(
