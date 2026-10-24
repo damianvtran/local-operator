@@ -1288,3 +1288,54 @@ def test_alias_retry_consumes_only_that_hold_not_canonical_or_sibling(tmp_path, 
     assert store.sync_state(owner) == before
     assert store.active_owner() == owner
     loop_mod._RETRY_ATTEMPTS.clear()
+
+
+# -- thread replies (agent-server threads, merged onto the ids-only ref) ------
+
+ROOT_ID = "bcmsg_root0001"
+
+
+def test_a_reply_card_names_its_thread_and_how_to_answer_in_it() -> None:
+    """A reply's card says it is a thread reply and gives the root id.
+
+    The labels here come from the EPHEMERAL body response (main's source), never
+    from the durable ref: the ref carries ids, the sequence, the mention flag,
+    the closed kind and — since this merge — a tagged thread root.
+    """
+
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="ten_1",
+            conversation_label="#agents",
+            sender_label="Bea's agent",
+            sender_kind="agent",
+            mention=False,
+            message_id=MESSAGE_ID,
+            conversation_seq=7,
+            thread_root_id=ROOT_ID,
+        )
+    )
+    lines = card.splitlines()
+    assert lines[0].startswith("Thread reply · #agents · from Bea's agent")
+    assert lines[1] == BRIDGE_UNTRUSTED_CLAUSE
+    assert f"thread_root_id: {ROOT_ID}" in lines
+    assert "channel_post with this thread_root_id" in card
+
+
+def test_a_channel_level_card_carries_no_thread_lines() -> None:
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="ten_1",
+            conversation_label="#agents",
+            sender_label="Ada",
+            sender_kind="human",
+            mention=True,
+            message_id=MESSAGE_ID,
+            conversation_seq=1,
+        )
+    )
+    assert card.splitlines()[0].startswith("Channel message · #agents")
+    assert "thread_root_id:" not in card
+    assert "channel_thread" not in card

@@ -346,6 +346,13 @@ class ConversationFeedRef:
     # Migration-only row identity. Never copied from wire ids or used for
     # message/body/admit/claim authority; preserves old pending aliases exactly.
     legacy_alias: str | None = None
+    #: Set only when the message is a thread REPLY (agent-server threads): the
+    #: root it answers. Persisted as a TAGGED slot (``/thread_root=<bcmsg_…>``)
+    #: rather than a positional part, because a positional part would collide
+    #: with the old seven-part name/label/kind layout. Optional and additive:
+    #: a ref written before threads parses exactly as it did, and a reader that
+    #: does not know the tag ignores it.
+    thread_root_id: str | None = None
 
     def validated(self) -> "ConversationFeedRef":
         """Refuse a ref the parser could not read back (never guess)."""
@@ -371,6 +378,10 @@ class ConversationFeedRef:
                 or re.fullmatch(r"[0-9a-f]{64}", self.legacy_alias) is None
             ):
                 raise TeamBridgeTypeError("invalid legacy conversation alias")
+        if self.thread_root_id is not None and (
+            _CONVERSATION_MESSAGE_ID.fullmatch(self.thread_root_id) is None
+        ):
+            raise TeamBridgeTypeError("thread_root_id is not a bcmsg_ id")
         return self
 
     def encode(self) -> str:
@@ -385,6 +396,9 @@ class ConversationFeedRef:
         if self.legacy_alias is not None:
             self.validated()
             encoded += f"/legacy_alias={self.legacy_alias}"
+        if self.thread_root_id is not None:
+            self.validated()
+            encoded += f"/thread_root={self.thread_root_id}"
         return encoded
 
 
@@ -409,26 +423,62 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
         return None
     if mention_text not in ("0", "1"):
         return None
-    kind = parts[4] if len(parts) in (5, 6) else parts[6] if len(parts) == 7 else None
-    legacy_alias = None
-    if len(parts) == 6:
-        tag = "legacy_alias="
-        if not parts[5].startswith(tag):
+    # Tagged vs positional: a segment carrying ``=`` is a NAME=value tag and is
+    # never read as a positional slot. That is what makes the shape extensible —
+    # ``thread_root=`` (and anything a later release adds) rides beside the
+    # existing parts instead of changing what a 6- or 7-part ref means. An
+    # unknown tag is IGNORED, never rejected: a reader that predates a tag must
+    # still decode the ref rather than dropping a durable queue row.
+    positional: list[str] = []
+    tags: dict[str, str] = {}
+    seen_tag = False
+    for segment in parts[4:]:
+        if "=" in segment:
+            name, _, tagged = segment.partition("=")
+            tags[name] = tagged
+            seen_tag = True
+            continue
+        if seen_tag:
+            # A POSITIONAL after a tag is the ambiguity the old parser refused
+            # (``legacy_alias=<hash>/human``): the tag would have to mean two
+            # different things depending on order. Tags may follow positionals,
+            # never precede one.
             return None
-        legacy_alias = parts[5][len(tag) :]
-    elif len(parts) == 7:
-        # A tagged alias plus an extra path component is not a legacy key.
-        # The old encoder percent-escaped '=' in label slots, so this literal
-        # sixth-slot tag cannot have been emitted there as a legacy name.
-        if parts[5].startswith("legacy_alias="):
+        positional.append(segment)
+
+    kind: str | None = None
+    if "legacy_alias" in tags:
+        # A KNOWN tag with an invalid value is malformed, not "no alias": the
+        # empty/mis-sized alias exists precisely to keep two rows distinct.
+        if re.fullmatch(r"[0-9a-f]{64}", tags["legacy_alias"]) is None:
             return None
-        # Include the prefix: this must match an older in-flight FULL key
-        # exactly, with no URL unquoting or Unicode/name normalization.
+    legacy_alias = tags.get("legacy_alias") or None
+    if len(positional) == 3:
+        # The OLD seven-part layout: name, label, kind. The names are discarded
+        # (they are a name cache and a privacy regression) and the alias is
+        # derived from the EXACT full old key's bytes, so two pending rows that
+        # differed only by display name stay distinct.
+        if tags:
+            return None
+        kind = positional[2] or None
         original = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}={value}"
         try:
             legacy_alias = hashlib.sha256(original.encode("utf-8")).hexdigest()
         except UnicodeEncodeError:
             return None
+    elif len(positional) == 1:
+        kind = positional[0] or None
+    elif len(positional) > 1:
+        return None
+
+    if "thread_root" in tags and "legacy_alias" in tags:
+        # REFUSED ON PURPOSE. A reply is written by the threads path, which
+        # never mints migration aliases; a ref carrying both is a combination
+        # no released writer can produce. Accepting it would quietly widen the
+        # grammar to every tag combination, and a widened grammar is how a
+        # reader starts honouring shapes nobody ever meant to persist.
+        return None
+    thread_root_id = tags.get("thread_root") or None
     try:
         return ConversationFeedRef(
             conversation_id=conversation_id,
@@ -437,6 +487,7 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
             mention=mention_text == "1",
             sender_kind=kind,
             legacy_alias=legacy_alias,
+            thread_root_id=thread_root_id,
         ).validated()
     except TeamBridgeTypeError:
         return None
