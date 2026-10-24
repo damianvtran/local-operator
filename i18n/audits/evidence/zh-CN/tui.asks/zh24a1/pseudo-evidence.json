@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.asks",
+  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "method": "Deterministic wide-substitution fit probe: every placeholder is replaced with a deliberately generous representative value and the result measured in display cells against the en sidecar maxCells. zh-CN is LTR CJK, so the ur bundle's Arabic tatweel stretch probe has no counterpart here; this is the analogue. No source or catalogue files are written. This is a synthetic fit probe, not native or rendered proof.",
+  "argument_parity_errors": [],
+  "plural_render_count": 7,
+  "plural_render_errors": [],
+  "width_rows": [
+    {
+      "key": "tui.asks.context.messages",
+      "maxCells": 78,
+      "zh_cells": 58,
+      "zh_rendered_cells": 32,
+      "zh_wide_cells": 34,
+      "over": -46
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "maxCells": 34,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "zh_wide_cells": 14,
+      "over": -20
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat_note",
+      "maxCells": 44,
+      "zh_cells": 16,
+      "zh_rendered_cells": 16,
+      "zh_wide_cells": 16,
+      "over": -28
+    },
+    {
+      "key": "tui.asks.dismiss.fleet_gone",
+      "maxCells": 60,
+      "zh_cells": 28,
+      "zh_rendered_cells": 28,
+      "zh_wide_cells": 28,
+      "over": -32
+    },
+    {
+      "key": "tui.asks.dismiss.hint",
+      "maxCells": 40,
+      "zh_cells": 19,
+      "zh_rendered_cells": 19,
+      "zh_wide_cells": 19,
+      "over": -21
+    },
+    {
+      "key": "tui.asks.dismiss.moot",
+      "maxCells": 34,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "zh_wide_cells": 8,
+      "over": -26
+    },
+    {
+      "key": "tui.asks.dismiss.moot_note",
+      "maxCells": 44,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "zh_wide_cells": 14,
+      "over": -30
+    },
+    {
+      "key": "tui.asks.dismiss.notice_answered_in_chat",
+      "maxCells": 44,
+      "zh_cells": 23,
+      "zh_rendered_cells": 23,
+      "zh_wide_cells": 23,
+      "over": -21
+    },
+    {
+      "key": "tui.asks.dismiss.notice_moot",
+      "maxCells": 44,
+      "zh_cells": 17,
+      "zh_rendered_cells": 17,
+      "zh_wide_cells": 17,
+      "over": -27
+    },
+    {
+      "key": "tui.asks.dismiss.notice_no_reply",
+      "maxCells": 44,
+      "zh_cells": 19,
+      "zh_rendered_cells": 19,
+      "zh_wide_cells": 19,
+      "over": -25
+    },
+    {
+      "key": "tui.asks.dismiss.title",
+      "maxCells": 60,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "zh_wide_cells": 10,
+      "over": -50
+    }
+  ],
+  "static_or_reserved_over_budget": []
+}

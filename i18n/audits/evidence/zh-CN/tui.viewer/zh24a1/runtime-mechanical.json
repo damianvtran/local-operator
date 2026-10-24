@@ -1,0 +1,201 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.viewer",
+  "revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "generated_utc": "2026-10-24T23:21:23Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 19,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "tui.viewer.title",
+      "zh_render": "文件查看器",
+      "en_render": "file viewer",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.description",
+      "zh_render": "查看本地文本文件",
+      "en_render": "View a local text file",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.usage",
+      "zh_render": "用法：/view <path>",
+      "en_render": "Usage: /view <path>",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.loading",
+      "zh_render": "正在读取……",
+      "en_render": "reading…",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.legend",
+      "zh_render": "↑↓←→ · PgUp/PgDn · Home/End\nw换行 · r重新加载 · y复制路径 · o外部打开 · esc关闭",
+      "en_render": "↑↓←→ · PgUp/PgDn · Home/End\nw wrap · r reload · y copy path · o open externally · esc close",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.truncated",
+      "zh_render": "预览已截断 — 上限：1 MiB / 20,000行",
+      "en_render": "Preview truncated — limit: 1 MiB / 20,000 lines",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.unreadable",
+      "zh_render": "无法读取此文件 — 文件缺失、不可读，或不在允许的根目录内",
+      "en_render": "Cannot read this file — missing, unreadable, or outside permitted roots",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.unsupported",
+      "zh_render": "此文件类型不支持内联预览 — 在外部打开",
+      "en_render": "This file type has no inline preview — open it externally",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.binary",
+      "zh_render": "无法预览二进制文件",
+      "en_render": "Cannot preview a binary file",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.changed",
+      "zh_render": "此文件在列出后已更改 — 打开前重新列出",
+      "en_render": "This file changed since it was listed — list it again before opening",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.copied",
+      "zh_render": "路径已复制",
+      "en_render": "Path copied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.copy_failed",
+      "zh_render": "剪贴板不可用 — 路径：/Users/damian/workspace/notes/today.md",
+      "en_render": "Clipboard unavailable — path: /Users/damian/workspace/notes/today.md",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.open_failed",
+      "zh_render": "无法在外部打开此文件",
+      "en_render": "Could not open this file externally",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.kind_code",
+      "zh_render": "代码",
+      "en_render": "code",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.kind_markdown",
+      "zh_render": "markdown",
+      "en_render": "markdown",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.kind_text",
+      "zh_render": "文本",
+      "en_render": "text",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.header",
+      "zh_render": "/Users/damian/workspace/notes/today.md · <kind> · 1,234 B",
+      "en_render": "/Users/damian/workspace/notes/today.md · <kind> · 1,234 B",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.wrap_on",
+      "zh_render": "自动换行：开启",
+      "en_render": "Wrapping on",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.viewer.wrap_off",
+      "zh_render": "自动换行：关闭",
+      "en_render": "Wrapping off",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{2,}(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]+",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}
