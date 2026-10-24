@@ -227,6 +227,90 @@ async def _wire_for(owner: Any, config_dir: Path, auth_store: Any) -> Any:
     )
 
 
+#: Closed outcomes of the reservation emit. A string constant rather than a
+#: bool so the caller can name WHY it held, and so the loop's backoff row
+#: carries a code an operator can act on.
+RESERVATION_RECORDED = "recorded"
+
+
+def _screening_fingerprint(receipt_row: Mapping[str, Any]) -> str:
+    """The digest ``consume_screening_receipt`` keys on, over the SAME columns.
+
+    WHY these five and not a smaller tuple: hydration re-reads the receipt and
+    must be able to reproduce this value. ``body_sha256`` alone is not enough
+    (the same bytes under a new template/model snapshots a different
+    admission), so the fingerprint carries the policy identity too.
+    """
+
+    return hashlib.sha256(
+        "\x1f".join(
+            str(receipt_row.get(field) or "")
+            for field in (
+                "body_sha256",
+                "template_sha256",
+                "model",
+                "admission_revision",
+                "envelope_digest",
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _record_body_reservation(
+    store: Any,
+    owner: Any,
+    ref: ConversationFeedRef,
+    *,
+    body_hash: str,
+    designation: str,
+) -> str:
+    """Record the CONTENTLESS reservation for one admitted message.
+
+    Called only after the hub accepted the message, and before any card: a card
+    without a reservation would wake the agent for a body nothing will deliver.
+
+    The arguments are named scalars on purpose. The body text and the display
+    labels are still in the CALLER's scope (screening needed them), and the
+    guarantee that they cannot reach the row is threefold: they are never
+    passed here, the table has no column for them, and the store validates
+    every written value against a closed grammar.
+
+    Returns ``RESERVATION_RECORDED`` or a closed hold code; the caller must not
+    post a card on a non-recorded answer, and must leave the message retryable.
+    """
+
+    receipt_row = store.receipt_for_message(owner, ref.message_id)
+    if receipt_row is None:
+        # No trusted receipt means the producer epoch never wrote one; the
+        # admission cannot be re-proved later, so the message stays pending.
+        return "receipt_unavailable"
+    if str(receipt_row.get("body_sha256") or "") != body_hash:
+        return "body_hash_mismatch"
+    consent = store.owner_consent_receipt(owner) or {}
+    try:
+        created = store.record_body_reservation(
+            owner,
+            conversation_id=ref.conversation_id,
+            message_id=ref.message_id,
+            conversation_seq=ref.conversation_seq,
+            mention=ref.mention,
+            body_sha256=body_hash,
+            screening_fingerprint=_screening_fingerprint(receipt_row),
+            policy_epoch=int(receipt_row.get("policy_epoch") or 0),
+            consent_version=consent.get("consent_version"),
+            designated_session=designation,
+            now=time.time(),
+        )
+    except Exception:  # noqa: BLE001 — closed structural code, never content
+        logger.warning("bridge: body reservation refused code=store_refused")
+        return "reservation_refused"
+    # STRUCTURAL ONLY: whether this call created the row is the one fact worth
+    # logging — a duplicate emit is normal after a crash, and no id or hash
+    # belongs in a log line about it.
+    logger.info("bridge: body reservation created=%s", created)
+    return RESERVATION_RECORDED
+
+
 async def _deliver_card(
     owner: Any,
     metadata: ConversationCardMetadata,
@@ -404,6 +488,20 @@ async def handle_conversation_available(
             endpoint_id=owner.endpoint_id,
             access=access,
         )
+        # THE ADMISSION POINT (seam design, Revision 5): the hub has accepted
+        # this message for this endpoint/member/consent tuple, so one
+        # designated session now owes it a body. Recorded BEFORE the card —
+        # a card with no reservation wakes an agent for a body that will never
+        # arrive — and a failure here is a RETRYABLE hold, never a delivery.
+        recorded = _record_body_reservation(
+            store,
+            owner,
+            ref,
+            body_hash=body_hash,
+            designation=designation,
+        )
+        if recorded != RESERVATION_RECORDED:
+            return {"action": "hold", "message_id": message_id, "code": recorded}
         detail = await _deliver_card(
             owner,
             admitted_metadata,
