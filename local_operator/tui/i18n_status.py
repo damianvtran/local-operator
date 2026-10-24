@@ -16,6 +16,56 @@ from local_operator.i18n.display import TechnicalSpan, isolated_status_text
 from local_operator.i18n.messages import Msg, RenderedMessage, render_record
 from local_operator.i18n.text import active_locale, tr_record
 
+_RLI, _LRI, _PDI = "\u2067", "\u2066", "\u2069"
+_PROJECTION_CONTROLS = "\u2066\u2067\u2069"
+
+
+def strip_display_controls(text: str) -> str:
+    """Remove only this renderer's isolates at a semantic/copy boundary."""
+    return text.translate({ord(control): None for control in _PROJECTION_CONTROLS})
+
+
+def _occurrence_spans(text: str, value: str) -> list[TechnicalSpan]:
+    spans: list[TechnicalSpan] = []
+    start = 0
+    while (offset := text.find(value, start)) >= 0:
+        spans.append(TechnicalSpan(offset, offset + len(value), value))
+        start = offset + len(value)
+    return spans
+
+
+def technical_literal_spans(
+    record: RenderedMessage, literals: Sequence[str]
+) -> tuple[TechnicalSpan, ...]:
+    """Locate owner-declared technical tokens authored inside catalogue prose."""
+    if any(not literal for literal in literals):
+        raise ValueError("technical display literals must be non-empty")
+    return tuple(
+        sorted(
+            (span for literal in literals for span in _occurrence_spans(record.text, literal)),
+            key=lambda span: span.start,
+        )
+    )
+
+
+def balance_display_line(line: Text) -> None:
+    """Close isolates left open by a head-preserving Rich single-line fit.
+
+    Rich truncation counts these controls as zero cells but may place the
+    ellipsis before their closing PDI. Styles and raw storage stay untouched;
+    only the final painted line receives the missing delimiters.
+    """
+    depth = 0
+    for char in line.plain:
+        if char in (_RLI, _LRI):
+            depth += 1
+        elif char == _PDI:
+            depth -= 1
+    if depth < 0:
+        raise ValueError("display line has an unmatched closing isolate")
+    if depth:
+        line.append(_PDI * depth)
+
 
 def technical_parameter_spans(
     record: RenderedMessage,
@@ -35,12 +85,9 @@ def technical_parameter_spans(
         value = params[name]
         if not isinstance(value, str) or not value:
             raise ValueError(f"technical display parameter {name!r} must be a non-empty string")
-        start = 0
-        found = False
-        while (offset := record.text.find(value, start)) >= 0:
-            found = True
-            spans.append(TechnicalSpan(offset, offset + len(value), value))
-            start = offset + len(value)
+        occurrences = _occurrence_spans(record.text, value)
+        found = bool(occurrences)
+        spans.extend(occurrences)
         if not found:
             raise ValueError(f"technical display parameter {name!r} is absent from rendered copy")
     return tuple(sorted(spans, key=lambda span: span.start))
@@ -51,20 +98,31 @@ def _record_display(
     message: Msg,
     technical: Sequence[TechnicalSpan],
     technical_params: Sequence[str],
+    technical_literals: Sequence[str],
 ) -> Text:
     if record.source_locale != "ur":
         return Text(record.text)
-    spans = tuple(technical) + technical_parameter_spans(record, message.params, technical_params)
+    spans = (
+        tuple(technical)
+        + technical_parameter_spans(record, message.params, technical_params)
+        + technical_literal_spans(record, technical_literals)
+    )
     return Text(isolated_status_text(record, spans))
 
 
-def display_tr(namespace: str, *, technical_params: Sequence[str] = ()) -> Callable[[Msg], str]:
+def display_tr(
+    namespace: str,
+    *,
+    technical_params: Sequence[str] = (),
+    technical_literals: Sequence[str] = (),
+) -> Callable[[Msg], str]:
     """Build the conventional per-namespace resolver for terminal paint."""
     resolve = tr_record(namespace)
     classified = tuple(technical_params)
+    literals = tuple(technical_literals)
 
     def display(message: Msg) -> str:
-        return _record_display(resolve(message), message, (), classified).plain
+        return _record_display(resolve(message), message, (), classified, literals).plain
 
     return display
 
@@ -75,10 +133,11 @@ def message_display(
     locale: str | None = None,
     technical: Sequence[TechnicalSpan] = (),
     technical_params: Sequence[str] = (),
+    technical_literals: Sequence[str] = (),
 ) -> Text:
     """Paint one catalogued message with source-aware Urdu and LTR islands."""
     record = render_record(message.code, message.params, locale=locale or active_locale())
-    return _record_display(record, message, technical, technical_params)
+    return _record_display(record, message, technical, technical_params, technical_literals)
 
 
 def technical_display(text: str, *, locale: str | None = None) -> Text:
@@ -107,6 +166,7 @@ def localized_display(
     locale: str | None = None,
     source_locale: str | None = None,
     technical: Sequence[TechnicalSpan] = (),
+    technical_literals: Sequence[str] = (),
 ) -> Text:
     """Paint an already-rendered TUI string without changing its stored value.
 
@@ -118,7 +178,9 @@ def localized_display(
     source = source_locale if source_locale is not None else (locale or active_locale())
     if source != "ur":
         return Text(text)
-    return Text(isolated_status_text(RenderedMessage(text, source), technical))
+    record = RenderedMessage(text, source)
+    spans = tuple(technical) + technical_literal_spans(record, technical_literals)
+    return Text(isolated_status_text(record, spans))
 
 
 def status_display(
