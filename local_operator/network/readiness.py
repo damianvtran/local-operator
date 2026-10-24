@@ -193,8 +193,12 @@ def _safe_text(value: Any, *, limit: int = 300) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _open_store(root: Path) -> Any | None:
+def _open_store(root: Path, *, read_only: bool = False) -> Any | None:
     """An ``AuthStore`` for ``root``, or ``None`` when no database exists yet.
+
+    ``read_only=True`` is the readiness path's no-write mode. Offer/share reads
+    keep the default: they need the live WAL answer even though the historical
+    constructor has side effects, which are outside this readiness fix.
 
     THE GUARD IS THE READ-ONLY PROMISE: ``AuthStore.__init__`` CREATES its
     database (mkdir, a 0600 file, then the schema), so constructing one on a
@@ -212,7 +216,29 @@ def _open_store(root: Path) -> Any | None:
         return None
     from local_operator.providers.auth_store import AuthStore
 
+    if read_only:
+        return AuthStore.open_read_only(database)
     return AuthStore(db_path=database, config_dir=root)
+
+
+def _read_only_store_unavailable(store: Any) -> bool:
+    """Whether an immutable store cannot prove its CURRENT credential contents.
+
+    Corrupt/foreign schemas and a non-empty, uncheckpointed WAL must both read as
+    UNKNOWN. Returning rows (or ``[]``) in either case would fabricate readiness.
+    """
+    if store is None:
+        return False
+    for name in ("read_only_unavailable", "read_only_sidecar_present"):
+        probe = getattr(store, name, None)
+        if not callable(probe):
+            continue
+        try:
+            if probe():
+                return True
+        except Exception:  # noqa: BLE001 — an unreadable probe cannot prove contents
+            return True
+    return False
 
 
 def operator_fact() -> dict[str, Any]:
@@ -560,7 +586,7 @@ def _server_refs(
     return rows
 
 
-def mcp_servers_fact(root: Path) -> dict[str, Any]:
+def mcp_servers_fact(root: Path, *, read_only: bool = False) -> dict[str, Any]:
     """The USER-SCOPE MCP servers, their login rows and their credential shapes.
 
     Reads the file the WRITERS target (``<root>/mcp.json``), not the merged
@@ -602,7 +628,8 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
     store = None
     store_unreadable = False
     try:
-        store = _open_store(root)
+        store = _open_store(root) if not read_only else _open_store(root, read_only=True)
+        store_unreadable = read_only and _read_only_store_unavailable(store)
     except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
         store_unreadable = True
     try:
@@ -790,7 +817,9 @@ def default_model_fact(root: Path) -> dict[str, Any]:
     }
 
 
-def has_local_provider_credential(root: Path, provider: str) -> bool | None:
+def has_local_provider_credential(
+    root: Path, provider: str, *, read_only: bool = False
+) -> bool | None:
     """Whether this device holds a credential row for ``provider``.
 
     Three-valued like ``has_stored_row``: ``None`` is "the store could not be
@@ -801,12 +830,14 @@ def has_local_provider_credential(root: Path, provider: str) -> bool | None:
     if not provider:
         return False
     try:
-        store = _open_store(root)
+        store = _open_store(root) if not read_only else _open_store(root, read_only=True)
     except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
         return None
     if store is None:
         return False
     try:
+        if read_only and _read_only_store_unavailable(store):
+            return None
         return bool(list(store.list_credentials(provider)))
     except Exception:  # noqa: BLE001
         return None
@@ -1023,9 +1054,9 @@ def collect_peer_facts(
         "provider": provider,
         # The provider is the ``provider`` key above; the fact is three-valued
         # (True / False / None = the store could not be read).
-        "has_local": has_local_provider_credential(root, provider),
+        "has_local": has_local_provider_credential(root, provider, read_only=True),
         "credential_placement": placement_fact(provider=provider, root=root),
-        "mcp": mcp_servers_fact(root),
+        "mcp": mcp_servers_fact(root, read_only=True),
         "git": git_identity_fact(home),
         "tooling": tooling_fact(home),
         "operator": operator_fact(),
@@ -1165,7 +1196,8 @@ class ViewerFacts:
     def _open(self) -> Any:
         if not self._opened:
             try:
-                self._store = _open_store(self.root)
+                self._store = _open_store(self.root, read_only=True)
+                self._store_unreadable = _read_only_store_unavailable(self._store)
             except Exception:  # noqa: BLE001 — unopenable is "could not be read"
                 self._store = None
                 self._store_unreadable = True
@@ -1177,8 +1209,10 @@ class ViewerFacts:
         if not provider:
             return []
         store = self._open()
+        if self._store_unreadable:
+            return None
         if store is None:
-            return None if self._store_unreadable else []
+            return []
         try:
             return list(store.list_credentials(provider))
         except Exception:  # noqa: BLE001
@@ -1186,8 +1220,10 @@ class ViewerFacts:
 
     def holds_mcp_login(self, url: str) -> bool | None:
         store = self._open()
+        if self._store_unreadable:
+            return None
         if store is None:
-            return None if self._store_unreadable else False
+            return False
         return _mcp_row_exists(store, url)
 
     def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:

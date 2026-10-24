@@ -363,6 +363,98 @@ def test_a_missing_store_is_read_without_creating_one(
     assert not (ambient / "auth.db").exists()
 
 
+def _root_file_snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
+    import hashlib
+
+    return {
+        path.name: (
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in root.iterdir()
+        if path.is_file()
+    }
+
+
+def _seed_mcp_row(root: Path, url: str) -> Any:
+    import asyncio
+
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    storage = McpTokenStorage(url, auth)
+    asyncio.run(
+        storage.set_tokens(
+            OAuthToken.model_validate(
+                {"access_token": "ready-fixture-access", "refresh_token": "ready-fixture-refresh"}
+            )
+        )
+    )
+    return auth
+
+
+def test_ready_reads_a_populated_closed_store_without_side_effects(tmp_path: Path) -> None:
+    """A quiescent DB stays accurate without schema/WAL writes (QA round 1, Q-1)."""
+    url = "https://mcp.notion.com/mcp"
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
+        encoding="utf-8",
+    )
+    auth = _seed_mcp_row(tmp_path, url)
+    auth.upsert_credential("openai", {"type": "oauth", "access": "ready-fixture-provider"})
+    auth.close()
+    before = _root_file_snapshot(tmp_path)
+    root_mtime = tmp_path.stat().st_mtime_ns
+
+    fact = viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login(url) is True
+    finally:
+        viewer.close()
+    fact = readiness.collect_peer_facts(tmp_path)["mcp"]
+
+    server = fact["servers"][0]
+    assert server["has_row"] is True
+    assert server["auth_diagnostics"]["sharing_mode"] == "finite_only"
+    assert readiness.has_local_provider_credential(tmp_path, "openai", read_only=True) is True
+    assert _root_file_snapshot(tmp_path) == before
+    assert tmp_path.stat().st_mtime_ns == root_mtime
+
+
+def test_ready_reports_an_open_wal_as_unavailable_not_empty_or_stale(tmp_path: Path) -> None:
+    """Immutable reads cannot see a live WAL; say UNKNOWN, never invent empty."""
+    url = "https://mcp.notion.com/mcp"
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
+        encoding="utf-8",
+    )
+    auth = _seed_mcp_row(tmp_path, url)
+    try:
+        assert auth.read_only_sidecar_present(), "the fixture needs an uncheckpointed WAL"
+        before = _root_file_snapshot(tmp_path)
+        root_mtime = tmp_path.stat().st_mtime_ns
+
+        fact = viewer = readiness.ViewerFacts(tmp_path)
+        try:
+            assert viewer.holds_mcp_login(url) is None
+        finally:
+            viewer.close()
+        fact = readiness.collect_peer_facts(tmp_path)["mcp"]
+
+        server = fact["servers"][0]
+        assert server["has_row"] is None
+        assert server["auth_diagnostics"]["access_state"] == "unknown"
+        assert server["auth_diagnostics"]["sharing_mode"] == "unavailable"
+        assert _root_file_snapshot(tmp_path) == before
+        assert tmp_path.stat().st_mtime_ns == root_mtime
+    finally:
+        auth.close()
+
+
 def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
     """An ``auth.db`` that exists but cannot be opened is "could not be read",
     never a crash (convergence round 2, MAJOR class): every open keeps
@@ -377,9 +469,14 @@ def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (tmp_path / "auth.db").write_bytes(b"not a database")
-    fact = readiness.mcp_servers_fact(tmp_path)
+    fact = viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login("https://mcp.notion.com/mcp") is None
+    finally:
+        viewer.close()
+    fact = readiness.collect_peer_facts(tmp_path)["mcp"]
     assert fact["servers"][0]["has_row"] is None
-    assert readiness.has_local_provider_credential(tmp_path, "openai") is None
+    assert readiness.has_local_provider_credential(tmp_path, "openai", read_only=True) is None
     viewer = readiness.ViewerFacts(tmp_path)
     try:
         assert viewer.holds_mcp_login("https://mcp.notion.com/mcp") is None
