@@ -82,10 +82,10 @@ class SecretParams(BaseModel):
 #: (bash/eval forms, when not to store) live in `guide://credentials`, which
 #: costs nothing until it is read.
 _DESCRIPTION = (
-    "Store and use secrets in the encrypted store (`lop secret`). Store a credential the user "
-    "hands you or one outliving this session, with a description so it is findable; a "
-    "non-technical user uses /credential. retrieve NEVER returns the value. Never echo, save or "
-    "commit one."
+    "Store and use secrets in this machine's encrypted store (`lop secret`). "
+    "Store a credential the user hands you or one outliving this session, with a "
+    "description so it is findable; a non-technical user uses /credential. retrieve NEVER "
+    "returns the value. Never echo, save or commit one."
 )
 
 
