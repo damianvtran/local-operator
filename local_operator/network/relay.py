@@ -4607,6 +4607,74 @@ def _model_choice_refusal(model: Any) -> str:
     )
 
 
+def _model_credential_refusal(root: Path, model: Any, birth: Any) -> str:
+    """Why this device cannot serve a create's resolved model, or ``""`` when it can.
+
+    The peer answers from its OWN config and credential inventory: the requester cannot
+    know either. Explicit choices follow the runtime's agent > flag > config precedence;
+    malformed choices stay with ``_model_choice_refusal`` rather than being misreported
+    as a credential failure. An unreadable inventory returns no accusation — ``None``
+    from the canonical access predicate means "cannot tell", not "no credential".
+    """
+    wanted_model = _model_choice(model)
+    if model and wanted_model is None:
+        return ""
+
+    from local_operator.config import ConfigManager
+    from local_operator.providers.model_access import credentialed_chat_providers_here
+
+    config = ConfigManager(config_dir=root)
+    configured_provider = str(config.get_config_value("hosting", "") or "")
+    pinned = birth is not None and bool(
+        str(getattr(birth, "provider", "") or "") or str(getattr(birth, "model_id", "") or "")
+    )
+    if pinned:
+        provider = str(getattr(birth, "provider", "") or "") or configured_provider
+        subject = "the attached identity's model"
+    elif wanted_model is not None:
+        provider = str(wanted_model["provider"])
+        subject = "the requested model"
+    else:
+        provider = configured_provider
+        subject = "the resolved default model"
+    if not provider:
+        return ""
+
+    accessible = credentialed_chat_providers_here(
+        config_dir=root, config_values=config.get_config().values
+    )
+    if accessible is None or provider in accessible:
+        return ""
+
+    # Keyless providers need no credential by definition. The narrower chat-access
+    # predicate deliberately excludes them, which must not turn into a false "missing
+    # credential" accusation at this door.
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition(provider)
+    if definition is not None and (definition.allows_missing_api_key or definition.wire == "mock"):
+        return ""
+
+    # The operator's standing radient decision is a SHARE policy, not a guessed reason
+    # for its absence. Keep the observable fact identical and only narrow the remedy:
+    # this flow must never offer a radient share command, even as an example.
+    if provider == "radient":
+        remedy = (
+            "Credential sharing for 'radient' is declined; create with "
+            "--model <provider>/<model-id> naming a provider this device holds instead"
+        )
+    else:
+        remedy = (
+            "Create with --model <provider>/<model-id> naming a provider this device holds, "
+            f"or share that credential to this device first with 'lop network credential "
+            f"share {provider} --with <peer>'"
+        )
+    return (
+        f"{subject} uses provider '{provider}', but this device holds no credential for it. "
+        f"{remedy}."
+    )
+
+
 def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     """The working directory a peer create names, or a refusal naming ``owner``.
 
@@ -8237,6 +8305,24 @@ class RelayServer:
         if stale:
             raise MeshRefusal("definition_stale", stale)
 
+        wanted_model = _model_choice(frame.get("model"))
+        credential_refusal = _model_credential_refusal(
+            self.root, frame.get("model"), identity.birth
+        )
+        if credential_refusal:
+            # Refuse before the mint and before any directory/claim exists. The error
+            # envelope keeps every existing caller fail-closed; the structured model
+            # block carries the SAME peer sentence on the create's established channel.
+            return {
+                "op": "error",
+                "req": frame.get("req"),
+                "code": "model_credential_missing",
+                "message": credential_refusal,
+                "detail": {
+                    "model": {"applied": False, "detail": credential_refusal},
+                },
+            }
+
         session_id = new_session_id()
         session_dir = self.root / "sessions" / session_id
         # THE WORKING DIRECTORY IS VALIDATED HERE, BY THE DEVICE THAT CAN SEE IT (QA
@@ -8355,7 +8441,6 @@ class RelayServer:
             write_session_title(session_dir, name, user_set=True, past_names=[])
 
         prompt = str(frame.get("prompt") or "")
-        wanted_model = _model_choice(frame.get("model"))
         # THE AGENT OUTRANKS THE FLAG, AND IT IS DECIDED ONCE FOR BOTH BRANCHES BELOW.
         # ``session_factory``'s own precedence for a local session is agent > flag >
         # config, so this is the parity answer rather than a preference of this op's;
