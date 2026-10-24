@@ -1,0 +1,2 @@
+cli.login_help.login	Log in to a provider (OAuth or API key)	登录提供商（OAuth或API密钥）
+cli.login_help.provider	Provider to log in to (e.g., openai, anthropic, kimi, xai). Omit to list login-capable providers.	要登录的提供商（如openai、anthropic、kimi、xai）。省略则列出支持登录的提供商。

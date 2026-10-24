@@ -1,0 +1,12 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "namespace": "tui.projects_edit",
+ "applicable": false,
+ "method": "NOT MEASURED. Pseudo-localisation is a length/RTL fit probe and zh-CN is LTR; this pass re-verifies carried bytes against a prior independent audit, so no pseudo-localisation or rendered fit was performed.",
+ "argument_parity_errors": [],
+ "plural_render_count": 0,
+ "plural_render_errors": [],
+ "width_rows": [],
+ "note": "Empty arrays mean not measured, not passed."
+}

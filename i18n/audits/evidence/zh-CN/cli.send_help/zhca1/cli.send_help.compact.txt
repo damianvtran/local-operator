@@ -1,0 +1,4 @@
+cli.send_help.message	message text; omit to read the body from stdin. With --pid/--session a single positional IS the message, and typing one while also piping a body is refused.	消息文本；省略则从stdin读取正文。使用--pid/--session时，单个位置参数就是消息；若同时通过管道传入正文则拒绝。
+cli.send_help.pid	target by exact pid	按确切pid指定目标
+cli.send_help.steer	inject mid-turn (steer) instead of the default mailbox	在轮次中途注入（引导），而非使用默认邮箱
+cli.send_help.target	conversation-name / session-id / cwd substring (case-insensitive). Omit when addressing with --pid/--session; passing both is refused.	conversation-name / session-id / cwd子串（不区分大小写）。用--pid/--session指定目标时省略；同时传入会被拒绝。

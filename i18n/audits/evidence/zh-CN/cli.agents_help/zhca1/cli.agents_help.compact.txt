@@ -1,0 +1,8 @@
+cli.agents_help.agents	Manage agents	管理智能体
+cli.agents_help.delete_org	Delete an agent from this organization's workspace instead of the public hub (Agent Hub org sharing; requires `lop login radient`)	从此组织的工作区而非公共hub删除智能体（Agent Hub组织共享；需先运行`lop login radient`）
+cli.agents_help.pull_id	ID of the agent to pull from Radient	要从Radient pull的智能体ID
+cli.agents_help.pull_org	Pull from this organization's workspace instead of the public hub (Agent Hub org sharing; requires `lop login radient`)	从此组织的工作区而非公共hub pull（Agent Hub组织共享；需先运行`lop login radient`）
+cli.agents_help.push	Push (upload) an agent to Radient; `--org` and `--hub-id` push through the preview/confirm flow (exit codes: 0 published, 1 error, 2 preview-only with changes pending, 3 declined, 130 cancelled)	将智能体push（上传）至Radient；`--org`和`--hub-id`通过预览/确认流程push（退出码：0已发布，1错误，2仅预览且有待处理更改，3已拒绝，130已取消）
+cli.agents_help.push_hub_id	Republish (overwrite) this hub listing from the local agent (checks for personal references first); needs --name (--id is a local id)	用本地智能体重新发布（覆盖）此hub条目（先检查个人信息引用）；需要--name（--id是本地ID）
+cli.agents_help.push_id	ID of the agent to push to Radient (explicit overwrite)	要push至Radient的智能体ID（显式覆盖）
+cli.agents_help.push_org	Publish into this organization's workspace instead of the public hub (Agent Hub org sharing; requires `lop login radient`)	发布到此组织的工作区而非公共hub（Agent Hub组织共享；需先运行`lop login radient`）

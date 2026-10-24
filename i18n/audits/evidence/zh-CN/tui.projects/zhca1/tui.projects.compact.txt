@@ -1,0 +1,18 @@
+tui.projects.binding_preview_attachment	Preview	预览
+tui.projects.binding_zoom_in	Finer time	细化时间
+tui.projects.form.owner_placeholder	owner	负责人
+tui.projects.form.readback_error	{label} error: {error}	{label}错误: {error}
+tui.projects.form.team_placeholder	team	团队
+tui.projects.notice_read_only	Read-only: this conversation's runtime is on another device, so project changes are not available here.	只读：此会话的运行时位于另一台设备，无法在此修改项目。
+tui.projects.refusal_done_gate	cannot mark done while these milestones are open: {names}	这些里程碑尚未完成，无法标记为完成：{names}
+tui.projects.render.next_clause	 — next: {joined}	 — 下一项：{joined}
+tui.projects.render.no_dates_label	no dates ({label}, {count}): 	无日期（{label}，{count}）： 
+tui.projects.render.progress_reported	progress reported {age} ago{suffix}: 	{age}前报告进展{suffix}： 
+tui.projects.render.todo_snapshots_none	todo snapshots: none yet	待办快照：暂无
+tui.projects.render.todos_counts	 · todos {open}/{total}	 · 待办{open}/{total}
+tui.projects.send.empty	no targets — esc closes · /project link adds one	无目标 — esc关闭 · /project link添加目标
+tui.projects.send.more	{count, plural, one {+{label} more} other {+{label} more}}	{count, plural, other {+{label}项}}
+tui.projects.this_session	 · this session ({count})	 · 本会话（{count}）
+tui.projects.view_board	board	看板
+tui.projects.view_list	list	列表
+tui.projects.zoom	 · zoom: {tier}	 · 缩放：{tier}

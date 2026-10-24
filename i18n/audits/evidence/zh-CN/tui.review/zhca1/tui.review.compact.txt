@@ -1,0 +1,16 @@
+tui.review.activity_comment	commented	评论
+tui.review.age_days	{amount, plural, one {updated # d ago} other {updated # d ago}}	{amount, plural, other {# d前更新}}
+tui.review.age_hours	{amount, plural, one {updated # h ago} other {updated # h ago}}	{amount, plural, other {# h前更新}}
+tui.review.age_minutes	{amount, plural, one {updated # min ago} other {updated # min ago}}	{amount, plural, other {# min前更新}}
+tui.review.ci_failing	{count, plural, one {# failing} other {# failing}}	{count, plural, other {#项失败}}
+tui.review.comments_count	{count, plural, one {# comment} other {# comments}}	{count, plural, other {#条评论}}
+tui.review.empty_body	Pull requests and merge requests this conversation opens or mentions will appear here.	本次会话创建或提及的PR和MR会显示在这里。
+tui.review.hint_open	open	打开
+tui.review.hint_refresh	refresh	刷新
+tui.review.lane_code	Code	代码
+tui.review.lane_round	Round {round} · {state}	第{round}轮 · {state}
+tui.review.lane_state_findings_open	findings open	问题待解决
+tui.review.refreshing	Refreshing code reviews…	正在刷新代码审查……
+tui.review.relation_inherited	inherited	继承而来
+tui.review.scan_failed	Couldn't scan this conversation; showing what was already recorded.	无法扫描本次会话，显示已有记录。
+tui.review.session_unavailable	No session is open yet.	尚未打开会话。

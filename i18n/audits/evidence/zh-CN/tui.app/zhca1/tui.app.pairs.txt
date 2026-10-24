@@ -1,0 +1,63 @@
+# tui.app — sampled en/zh pairs for attestation zhca1
+# 15/46 keys; all >120 chars and all plurals included
+
+## tui.app.aida.extras_used  [47 chars]
+EN: extra check-ins used today: {used} of {maximum}
+ZH: 今日额外回访已用：{used} / {maximum}
+
+## tui.app.aida.next_checkin  [20 chars]
+EN: next check-in {when}
+ZH: 下次回访{when}
+
+## tui.app.config.effect_new  [64 chars, PLURAL]
+EN: {names} {count, plural, one {takes} other {take}} effect on /new
+ZH: {names}{count, plural, other {在/new时生效}}
+
+## tui.app.config.needs_relaunch  [60 chars, PLURAL]
+EN: {names} {count, plural, one {needs} other {need}} a relaunch
+ZH: {names}{count, plural, other {需要重新启动}}
+
+## tui.app.help.model_saved_note  [39 chars]
+EN: switches back to the config.yml default
+ZH: 切回config.yml中的默认设置
+
+## tui.app.help.notify_note  [131 chars, LONG>120]
+EN: desktop toast when a turn finishes here, or when a detached session needs you; shell: `lop config edit display.notifications false`
+ZH: 本轮完成或分离会话需要你时显示桌面通知；shell：`lop config edit display.notifications false`
+
+## tui.app.help.notify_note_more  [125 chars, LONG>120]
+EN: or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for the terminal to be unfocused, detached ones click to reopen
+ZH: 或设置`LOCAL_OPERATOR_NO_NOTIFICATIONS=1`；当前会话的通知仅在终端失焦时显示，分离会话的通知可点击重新打开
+
+## tui.app.help.title_note  [90 chars]
+EN: shows session state outside the app; shell: `lop config edit display.terminal_title false`
+ZH: 在应用外显示会话状态；shell：`lop config edit display.terminal_title false`
+
+## tui.app.parked.monitors  [63 chars, PLURAL]
+EN: {count, plural, one {{shown} monitor} other {{shown} monitors}}
+ZH: {count, plural, other {{shown}个监控}}
+
+## tui.app.parked.wakes  [57 chars, PLURAL]
+EN: {count, plural, one {{shown} wake} other {{shown} wakes}}
+ZH: {count, plural, other {{shown}个唤醒}}
+
+## tui.app.providers.none  [6 chars]
+EN: (none)
+ZH: （无）
+
+## tui.app.providers.stale_named  [19 chars]
+EN: stale list: {names}
+ZH: 列表已过期：{names}
+
+## tui.app.skills.led_by  [80 chars, PLURAL]
+EN: Led by {manager} · {count, plural, one {{shown} member} other {{shown} members}}
+ZH: 由{manager}带领 · {count, plural, other {{shown}名成员}}
+
+## tui.app.stop_all.repeat_hint  [51 chars]
+EN: repeat /stop all within {seconds}s to stop them all
+ZH: 在{seconds}s内再次执行/stop all即可全部停止
+
+## tui.app.stop_all.will_be_stopped  [152 chars, LONG>120, PLURAL]
+EN: {count, plural, one {{shown} leaving, but it will be stopped, not left to finish} other {{shown} leaving, but they will be stopped, not left to finish}}
+ZH: {count, plural, other {{shown}个正在退出，但会被停止，不会等其完成}}
+

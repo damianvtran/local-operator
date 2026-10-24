@@ -1,0 +1,11 @@
+# wire.aida_cadence — sampled en/zh pairs for attestation zhca1
+# 2/2 keys; all >120 chars and all plurals included
+
+## wire.aida_cadence.interval_hours.help  [137 chars, LONG>120]
+EN: 0 keeps the daily local check-in time. 1–168 uses elapsed hours; 4 checks in every four hours. Changes preserve an already-owed check-in.
+ZH: 0保留每日本地问候时间。1–168按经过的小时数计时；4表示每四小时问候一次。更改会保留已到期应执行的问候。
+
+## wire.aida_cadence.interval_hours.label  [25 chars]
+EN: Check-in interval (hours)
+ZH: 问候间隔（小时）
+

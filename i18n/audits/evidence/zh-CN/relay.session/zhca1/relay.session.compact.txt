@@ -1,0 +1,4 @@
+relay.session.list.empty_hint	start one below, or from the TUI on your machine	在下方新建会话，或在电脑上的TUI中开始
+relay.session.model.loading	loading…	正在加载……
+relay.session.past.back	back	返回
+relay.session.view.empty_title	no messages yet	暂无消息

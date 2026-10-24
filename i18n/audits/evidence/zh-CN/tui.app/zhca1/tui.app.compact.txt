@@ -1,0 +1,15 @@
+tui.app.aida.extras_used	extra check-ins used today: {used} of {maximum}	今日额外回访已用：{used} / {maximum}
+tui.app.aida.next_checkin	next check-in {when}	下次回访{when}
+tui.app.config.effect_new	{names} {count, plural, one {takes} other {take}} effect on /new	{names}{count, plural, other {在/new时生效}}
+tui.app.config.needs_relaunch	{names} {count, plural, one {needs} other {need}} a relaunch	{names}{count, plural, other {需要重新启动}}
+tui.app.help.model_saved_note	switches back to the config.yml default	切回config.yml中的默认设置
+tui.app.help.notify_note	desktop toast when a turn finishes here, or when a detached session needs you; shell: `lop config edit display.notifications false`	本轮完成或分离会话需要你时显示桌面通知；shell：`lop config edit display.notifications false`
+tui.app.help.notify_note_more	or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for the terminal to be unfocused, detached ones click to reopen	或设置`LOCAL_OPERATOR_NO_NOTIFICATIONS=1`；当前会话的通知仅在终端失焦时显示，分离会话的通知可点击重新打开
+tui.app.help.title_note	shows session state outside the app; shell: `lop config edit display.terminal_title false`	在应用外显示会话状态；shell：`lop config edit display.terminal_title false`
+tui.app.parked.monitors	{count, plural, one {{shown} monitor} other {{shown} monitors}}	{count, plural, other {{shown}个监控}}
+tui.app.parked.wakes	{count, plural, one {{shown} wake} other {{shown} wakes}}	{count, plural, other {{shown}个唤醒}}
+tui.app.providers.none	(none)	（无）
+tui.app.providers.stale_named	stale list: {names}	列表已过期：{names}
+tui.app.skills.led_by	Led by {manager} · {count, plural, one {{shown} member} other {{shown} members}}	由{manager}带领 · {count, plural, other {{shown}名成员}}
+tui.app.stop_all.repeat_hint	repeat /stop all within {seconds}s to stop them all	在{seconds}s内再次执行/stop all即可全部停止
+tui.app.stop_all.will_be_stopped	{count, plural, one {{shown} leaving, but it will be stopped, not left to finish} other {{shown} leaving, but they will be stopped, not left to finish}}	{count, plural, other {{shown}个正在退出，但会被停止，不会等其完成}}

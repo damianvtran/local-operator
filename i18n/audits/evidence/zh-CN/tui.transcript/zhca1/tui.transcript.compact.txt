@@ -1,0 +1,7 @@
+tui.transcript.ask.not_provided	not provided	未提供
+tui.transcript.attach.receipt	↑ {count, plural, one {# image} other {# images}} attached	↑ 已附加 {count, plural, other {# 张图像}}
+tui.transcript.catchup.missed	{count, plural, one {# missed wake} other {# missed wakes}}	{count, plural, other {# 次错过的唤醒}}
+tui.transcript.group.actions	{count, plural, one {{label} action} other {{label} actions}}	{count, plural, other {{label}项操作}}
+tui.transcript.group.reply_requested	{count, plural, one {{label} reply requested} other {{label} reply requested}}	{count, plural, other {{label}项回复请求}}
+tui.transcript.group.steered	{count, plural, one {{label} steered} other {{label} steered}}	{count, plural, other {{label}项引导}}
+tui.transcript.queued.older	· queued for the next runtime	· 已排队，等待下次运行时

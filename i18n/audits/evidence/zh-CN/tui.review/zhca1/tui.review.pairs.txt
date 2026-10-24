@@ -1,0 +1,67 @@
+# tui.review — sampled en/zh pairs for attestation zhca1
+# 16/73 keys; all >120 chars and all plurals included
+
+## tui.review.activity_comment  [9 chars]
+EN: commented
+ZH: 评论
+
+## tui.review.age_days  [63 chars, PLURAL]
+EN: {amount, plural, one {updated # d ago} other {updated # d ago}}
+ZH: {amount, plural, other {# d前更新}}
+
+## tui.review.age_hours  [63 chars, PLURAL]
+EN: {amount, plural, one {updated # h ago} other {updated # h ago}}
+ZH: {amount, plural, other {# h前更新}}
+
+## tui.review.age_minutes  [67 chars, PLURAL]
+EN: {amount, plural, one {updated # min ago} other {updated # min ago}}
+ZH: {amount, plural, other {# min前更新}}
+
+## tui.review.ci_failing  [50 chars, PLURAL]
+EN: {count, plural, one {# failing} other {# failing}}
+ZH: {count, plural, other {#项失败}}
+
+## tui.review.comments_count  [51 chars, PLURAL]
+EN: {count, plural, one {# comment} other {# comments}}
+ZH: {count, plural, other {#条评论}}
+
+## tui.review.empty_body  [86 chars]
+EN: Pull requests and merge requests this conversation opens or mentions will appear here.
+ZH: 本次会话创建或提及的PR和MR会显示在这里。
+
+## tui.review.hint_open  [4 chars]
+EN: open
+ZH: 打开
+
+## tui.review.hint_refresh  [7 chars]
+EN: refresh
+ZH: 刷新
+
+## tui.review.lane_code  [4 chars]
+EN: Code
+ZH: 代码
+
+## tui.review.lane_round  [23 chars]
+EN: Round {round} · {state}
+ZH: 第{round}轮 · {state}
+
+## tui.review.lane_state_findings_open  [13 chars]
+EN: findings open
+ZH: 问题待解决
+
+## tui.review.refreshing  [24 chars]
+EN: Refreshing code reviews…
+ZH: 正在刷新代码审查……
+
+## tui.review.relation_inherited  [9 chars]
+EN: inherited
+ZH: 继承而来
+
+## tui.review.scan_failed  [67 chars]
+EN: Couldn't scan this conversation; showing what was already recorded.
+ZH: 无法扫描本次会话，显示已有记录。
+
+## tui.review.session_unavailable  [23 chars]
+EN: No session is open yet.
+ZH: 尚未打开会话。
+

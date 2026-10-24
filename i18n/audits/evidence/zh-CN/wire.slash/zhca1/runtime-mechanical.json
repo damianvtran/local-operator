@@ -1,0 +1,38 @@
+{
+ "arguments": {
+  "keys_checked": 52,
+  "failures": []
+ },
+ "plural_selector_parity": {
+  "failures": []
+ },
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [
+   {
+    "key": "wire.slash.language",
+    "token": "UI"
+   }
+  ],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width": {
+  "declared_max_cells_keys": 0,
+  "over_budget": 0
+ },
+ "review_disposition": "WITHHELD: the bytes are carried (source and target hashes equal), but the prior audit row is status=failed: wire.slash.credential was unreadable under ordinary tool-output redaction and the namespace was withheld at 51/52 pending an approved security disposition. An attestation cannot upgrade a failed audit; a fresh audit is required once that disposition exists."
+}

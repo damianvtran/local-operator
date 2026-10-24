@@ -1,0 +1,2 @@
+wire.aida_cadence.interval_hours.help	0 keeps the daily local check-in time. 1–168 uses elapsed hours; 4 checks in every four hours. Changes preserve an already-owed check-in.	0保留每日本地问候时间。1–168按经过的小时数计时；4表示每四小时问候一次。更改会保留已到期应执行的问候。
+wire.aida_cadence.interval_hours.label	Check-in interval (hours)	问候间隔（小时）

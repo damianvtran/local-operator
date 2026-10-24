@@ -1,0 +1,174 @@
+{
+ "namespace": "cli.browser",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. 64 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round.",
+ "hash_equality": {
+  "source_sha256_prior_row": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+  "source_sha256_held_candidate": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+  "source_sha256_current": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "ee537da4b8602e18728fe5a92f11e27d18b4c0714709fb356ea9577569da7bda",
+  "target_sha256_current": "ee537da4b8602e18728fe5a92f11e27d18b4c0714709fb356ea9577569da7bda",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 64,
+  "zh_count": 64,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 64,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 29,
+   "medium_40_80": 23,
+   "long_80_120": 6,
+   "over_120": 6
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 5,
+   "medium_40_80": 4,
+   "long_80_120": 1,
+   "over_120": 6
+  },
+  "all_over_120": [
+   "cli.browser.already_paired",
+   "cli.browser.cleanup_pending",
+   "cli.browser.handles_redacted",
+   "cli.browser.legacy_note",
+   "cli.browser.logs_missing",
+   "cli.browser.no_tabs_unknown"
+  ],
+  "all_plurals": [],
+  "keys_sampled": 16,
+  "fraction_of_namespace": 0.25,
+  "selected": [
+   "cli.browser.already_paired",
+   "cli.browser.authorised_installs",
+   "cli.browser.cleanup_pending",
+   "cli.browser.handles_redacted",
+   "cli.browser.invalid_session",
+   "cli.browser.legacy_note",
+   "cli.browser.logs_missing",
+   "cli.browser.no_changes",
+   "cli.browser.no_tabs_unknown",
+   "cli.browser.now_driving",
+   "cli.browser.pairing_code",
+   "cli.browser.read_only",
+   "cli.browser.revoke_no_match",
+   "cli.browser.supervisor_line",
+   "cli.browser.usage",
+   "cli.browser.waiting_header"
+  ]
+ },
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+ "cur_src": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+ "old_tgt": "ee537da4b8602e18728fe5a92f11e27d18b4c0714709fb356ea9577569da7bda",
+ "new_tgt": "ee537da4b8602e18728fe5a92f11e27d18b4c0714709fb356ea9577569da7bda",
+ "attest_sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 29,
+   "medium_40_80": 23,
+   "long_80_120": 6,
+   "over_120": 6
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 5,
+   "medium_40_80": 4,
+   "long_80_120": 1,
+   "over_120": 6
+  },
+  "all_over_120": [
+   "cli.browser.already_paired",
+   "cli.browser.cleanup_pending",
+   "cli.browser.handles_redacted",
+   "cli.browser.legacy_note",
+   "cli.browser.logs_missing",
+   "cli.browser.no_tabs_unknown"
+  ],
+  "all_plurals": [],
+  "keys_sampled": 16,
+  "fraction_of_namespace": 0.25,
+  "selected": [
+   "cli.browser.already_paired",
+   "cli.browser.authorised_installs",
+   "cli.browser.cleanup_pending",
+   "cli.browser.handles_redacted",
+   "cli.browser.invalid_session",
+   "cli.browser.legacy_note",
+   "cli.browser.logs_missing",
+   "cli.browser.no_changes",
+   "cli.browser.no_tabs_unknown",
+   "cli.browser.now_driving",
+   "cli.browser.pairing_code",
+   "cli.browser.read_only",
+   "cli.browser.revoke_no_match",
+   "cli.browser.supervisor_line",
+   "cli.browser.usage",
+   "cli.browser.waiting_header"
+  ]
+ },
+ "attest_verdict": "carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [
+   {
+    "key": "cli.browser.heartbeat_stale",
+    "token": "STALE"
+   },
+   {
+    "key": "cli.browser.already_paired",
+    "token": "ITS"
+   }
+  ],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

@@ -1,0 +1,2 @@
+wire.errors.files.html_utf8	HTML file is not valid UTF-8 text.	HTML文件不是有效的UTF-8文本。
+wire.errors.files.sign_auth	A local access token or desktop bearer is required.	需要本地访问令牌或桌面bearer令牌。

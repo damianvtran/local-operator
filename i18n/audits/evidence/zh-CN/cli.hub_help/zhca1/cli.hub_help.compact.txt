@@ -1,0 +1,3 @@
+cli.hub_help.link_set_auto_push	Unattended outbound publication for this link	此链接的无人值守出站发布
+cli.hub_help.link_set_confirm_public_egress	Explicit consent to publish authored changes to a PUBLIC origin	显式同意将创作的更改发布到公开（PUBLIC）来源
+cli.hub_help.status_json	Emit the desktop route payload	输出桌面端路由载荷
