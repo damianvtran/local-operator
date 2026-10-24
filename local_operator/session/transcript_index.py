@@ -247,9 +247,25 @@ _RESIDENT_SESSIONS = 4
 #: otherwise retry a broken journal every 1.5 s and log each time).
 _FAILURE_COOLDOWN_S = 60.0
 
-#: Waited for a just-started build before answering "building"; the rail's
-#: first paint budget (design D3: the loading state must appear within 200 ms).
+#: First-paint budget (design D3: the loading state must appear within 200 ms).
 _FIRST_PAINT_WAIT_S = 0.2
+
+#: What that budget is allowed to spend itself on: a journal scan rate the wait
+#: is planned against, so a build that cannot POSSIBLY finish inside the budget
+#: does not block the caller at all. Measured on this host with
+#: ``refresh_index`` over a 20,014-entry / 24,902,439-byte journal: 943.5 ms, so
+#: ~26 MB/s while the fleet was loaded — the constant is a third of that so a
+#: host three times slower than the measurement still fits. The 200 ms budget
+#: therefore covers ~1.6 MB; anything larger answers ``building`` at once, which
+#: is the answer the wait would have produced anyway, minus the wait.
+#:
+#: WHY THIS EXISTS (an UPPER-BOUND measurement, 2026-10-24): a cold open of a
+#: 20k-entry conversation spent 819.8 ms in ``GET .../checkpoints`` on a host at
+#: ~92% swap, answering ``building`` with an empty manifest. In-process on a
+#: quiet host that path is 204.0 ms nominal — 200 ms of it this budget, paid on
+#: an open whose answer could never have been ``ready`` (the same journal scans
+#: in 943.5 ms). The wait is only worth paying when the scan can land inside it.
+_FIRST_PAINT_SCAN_BYTES_PER_S = 8 << 20
 
 
 # ---------------------------------------------------------------------------
@@ -2590,6 +2606,10 @@ class IndexProbe:
     state: str  # "missing" | "ready" | "stale"
     index: TranscriptIndex | None
     built_at: float | None
+    #: The journal's size when it could be stat'ed. ``checkpoints_view`` reads it
+    #: to decide whether the first-paint budget can pay for the scan at all; the
+    #: probe already stats the journal, so this costs no second syscall.
+    journal_bytes: int | None = None
 
 
 def probe_index(config_dir: str | Path, session_id: str) -> IndexProbe:
@@ -2607,8 +2627,8 @@ def probe_index(config_dir: str | Path, session_id: str) -> IndexProbe:
     except OSError:
         built_at = None
     if index is not None and _sig_matches(index.sig, st):
-        return IndexProbe(state="ready", index=index, built_at=built_at)
-    return IndexProbe(state="stale", index=index, built_at=built_at)
+        return IndexProbe(state="ready", index=index, built_at=built_at, journal_bytes=st.st_size)
+    return IndexProbe(state="stale", index=index, built_at=built_at, journal_bytes=st.st_size)
 
 
 #: In-flight refreshes and the resident parsed indexes, keyed by
@@ -3018,9 +3038,22 @@ async def checkpoints_view(
     if started:
         # FIRST PAINT: only the call that STARTS the build owes this wait — the
         # rail's loading state must be able to appear within the budget (design
-        # D3) even while the build runs on.
-        done, _pending = await asyncio.wait({task}, timeout=wait_s)
-        settled = task in done
+        # D3) even while the build runs on. The wait is a wager that the scan
+        # lands inside the budget and this answer can be `ready`; when the
+        # journal is too large for that wager to be plausible, staking the
+        # caller's latency on it buys nothing. Answer `building` at once and let
+        # the build continue in its worker thread (measured: a 24.9 MB journal
+        # scans in 943.5 ms, so the 200 ms budget could not see it settle, and
+        # the answer it produced was `building` anyway — 204.0 ms later).
+        payable = (
+            probe.journal_bytes is not None
+            and probe.journal_bytes <= _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
+        )
+        if payable:
+            done, _pending = await asyncio.wait({task}, timeout=wait_s)
+            settled = task in done
+        else:
+            settled = False
     else:
         # JOINED an in-flight build: the starting call already owns the
         # first-paint wait for it, so re-awaiting it here would charge EVERY
