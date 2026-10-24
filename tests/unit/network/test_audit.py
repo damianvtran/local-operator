@@ -457,8 +457,13 @@ def test_a_device_actor_is_recorded_as_a_device(root: Path) -> None:
             detail={"previous": "old-box", "name": "build-box", "networks": [], "failed": []},
         )
     )
-    # BOTH ROTATION-FAMILY EMITTERS, because the omission the review caught was the
-    # rotation one: it passed no kind at all while the prose said rotation did.
+    # THESE CELLS PIN THE EVENT NAMES AND THE STORAGE PATH, not the emitters: the
+    # events are constructed here, so nothing below would fail if an emitter stopped
+    # passing the kind. The emitters are pinned two ways instead — the source walk in
+    # ``test_the_epoch_emitters_pass_the_kind_their_actor_deserves`` for the epoch
+    # pair, and EXECUTION for the rotation one (independent QA's real two-relay
+    # handshake with ``identity.rotate`` + ``announce_identity_rotation`` read
+    # ``actor_kind: "device"`` back from the peer's JSONL).
     log.record(
         AuditEvent(
             event="device_rotated",
@@ -468,11 +473,38 @@ def test_a_device_actor_is_recorded_as_a_device(root: Path) -> None:
             detail={"old_device": "d_" + "b" * 32, "new_device": "d_" + "c" * 32},
         )
     )
+    # The PEER-APPLIED epoch rotation passes ``device`` too; the LOCAL refusal after
+    # ``member rm`` passes no kind at all and keeps the default, because there the
+    # device is named but the operator acted.
+    log.record(
+        AuditEvent(
+            event="epoch_rotated",
+            network_id=NETWORK,
+            actor="d_" + "c" * 32,
+            actor_kind="device",
+            detail={"epoch_before": 1, "epoch_after": 2, "rotation_id": "d_" + "c" * 32},
+        )
+    )
+    log.record(
+        AuditEvent(
+            event="epoch_rotated",
+            network_id=NETWORK,
+            actor="d_" + "d" * 32,
+            outcome="refused",
+            cause="revoked",
+            detail={"epoch_before": 1, "epoch_after": 2, "rotation_id": "", "removed": []},
+        )
+    )
     log.close()
     records = _lines(root)
-    by_event = {record["event"]: record for record in records}
-    assert by_event["device_renamed"]["actor_kind"] == "device"
-    assert by_event["device_rotated"]["actor_kind"] == "device"
+    by_event: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_event.setdefault(str(record["event"]), []).append(record)
+    assert by_event["device_renamed"][0]["actor_kind"] == "device"
+    assert by_event["device_rotated"][0]["actor_kind"] == "device"
+    assert by_event["epoch_rotated"][0]["actor_kind"] == "device"
+    # The local refusal's row: no kind passed, so the closed-set default applies.
+    assert by_event["epoch_rotated"][1]["actor_kind"] == "unknown"
 
 
 def test_the_closed_set_still_coerces_an_unknown_actor_kind(root: Path) -> None:
@@ -488,3 +520,31 @@ def test_the_closed_set_still_coerces_an_unknown_actor_kind(root: Path) -> None:
     )
     log.close()
     assert _lines(root)[0]["actor_kind"] == "unknown"
+
+
+def test_the_epoch_emitters_pass_the_kind_their_actor_deserves() -> None:
+    """WHICH emitter carries ``device``, derived from the emitter's own source.
+
+    The storage cells above build the events themselves, so they cannot fail when an
+    emitter stops passing the kind — the review's N1. This walks ``relay.py`` and
+    asserts the two ``epoch_rotated`` call sites exactly: the peer-applied one
+    (``actor=link.device_id``) passes ``device``; the local refusal after
+    ``member rm`` (``actor=record.self_device_id``) passes none and keeps the
+    closed-set default, because there the actor id is this device while the
+    initiator is the operator.
+    """
+    source = Path(audit_mod.__file__).resolve().parent / "relay.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    kinds: dict[str, Any] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or getattr(node.func, "id", "") != "AuditEvent":
+            continue
+        kwargs = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg}
+        event = kwargs.get("event")
+        if not (isinstance(event, ast.Constant) and event.value == "epoch_rotated"):
+            continue
+        actor = ast.unparse(kwargs["actor"])
+        assert actor not in kinds, f"a third epoch_rotated emitter appeared: actor={actor}"
+        kind = kwargs.get("actor_kind")
+        kinds[actor] = kind.value if isinstance(kind, ast.Constant) else None
+    assert kinds == {"link.device_id": "device", "record.self_device_id": None}
