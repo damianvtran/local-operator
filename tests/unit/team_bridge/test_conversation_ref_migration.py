@@ -400,6 +400,22 @@ def test_an_unknown_tag_parses_and_is_ignored() -> None:
     assert parsed.encode().endswith(base)
 
 
+def test_a_thread_root_never_rides_with_a_migration_alias() -> None:
+    """The grammar stays narrow: no tag combination is legal just because it
+    parses. A reply has no migration alias, and an alias predates threads, so
+    a ref carrying both is refused rather than half-understood."""
+
+    from local_operator.team_bridge.types import parse_conversation_ref_value
+
+    base = "bcv_abcdefgh/bcmsg_abcdef01/1/1/human"
+    alias = "a" * 64
+    assert (
+        parse_conversation_ref_value(base + f"/legacy_alias={alias}/thread_root=bcmsg_root0001")
+        is None
+    )
+    assert parse_conversation_ref_value(base + f"/thread_root=bcmsg_root0001") is not None
+
+
 def test_a_positional_after_a_tag_is_still_malformed() -> None:
     """The one shape tags must not open up: order-dependent meaning."""
 
