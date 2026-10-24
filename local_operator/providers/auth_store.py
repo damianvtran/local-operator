@@ -3140,6 +3140,7 @@ class AuthStore:
             from local_operator.providers.oauth.callback_server import (
                 InvalidGrantError,
                 LoginError,
+                RefreshNotSentError,
             )
 
             presented = self._presented_refresh_token(fresh)
@@ -3206,11 +3207,22 @@ class AuthStore:
                     async with asyncio.timeout(PROVIDER_REFRESH_TOTAL_BUDGET_S):
                         refreshed = await refresh(fresh)
                 except AuthStoreError:
-                    # The refresh fn's OWN refusal. Nothing about it says what
-                    # happened to the token on the wire, so the marker is left
-                    # exactly as it is: armed if the exchange may have run, and
-                    # absent if it never did.
+                    # The provider's own failure, which cannot say whether the
+                    # request was written: keep the marker exactly as it is.
+                    # The case where nothing was sent has its own type below.
                     raise
+                except RefreshNotSentError as exc:
+                    # Nothing was presented: the provider refused before its
+                    # first request reached a socket, so the marker armed just
+                    # above is a claim this exchange cannot support. Keeping it
+                    # would defer the next refresh for the marker's whole bound
+                    # and report that deferral in place of this refusal. The
+                    # refusal still surfaces as the store's own error type, as
+                    # every refresh failure here does.
+                    self._clear_send_marker(row.id, armed)
+                    raise AuthStoreError(
+                        f"OAuth refresh for '{row.provider}' was refused before sending: {exc}"
+                    ) from exc
                 except InvalidGrantError as exc:
                     # RFC 6749 SS5.2 terminal grant error. Re-raised as the store's
                     # own permanent-failure type so nothing above imports the
