@@ -815,22 +815,33 @@ export function AskCard({
 					    ~10 px vs ~12 px, so a two-question receipt read as one
 					    four-line block. The gap BETWEEN pairs is now the container's;
 					    the gap inside a pair stays tight. */}
-					{settledPairs.length > 0 ? (
+					{status === "dismissed" && settledPairs.length > 0 ? (
+						/* A DISMISSED ROW HAS NO PAIRS, so it is not a `<dl>` (UX round
+						   2, U5). U3 removed the answer slot on a dismissal, which left
+						   each `<dt>` without its `<dd>` — a description list whose
+						   entries describe nothing, for a reader on assistive tech as
+						   much as on screen. The questions are the whole receipt here, so
+						   they are plain lines in the same register, one per question:
+						   dropping them would lose what the row is a receipt FOR, and a
+						   visually hidden `<dd>` would keep a value that does not exist. */
+						<div className="flex flex-col gap-1">
+							{settledPairs.map((pair) => (
+								<span key={pair.question} className="text-body-sm text-ink-muted">
+									{pair.question}
+								</span>
+							))}
+						</div>
+					) : settledPairs.length > 0 ? (
 						<dl className="flex flex-col gap-3">
 							{settledPairs.map((pair) => (
 								<div key={pair.question} className="flex flex-col">
 									<dt className="text-body-sm text-ink-muted">{pair.question}</dt>
-									{/* A DISMISSED ROW RECORDS NO ANSWER, and it says so by
-									    OMISSION (UX round 1, U3). The bare `—` is the settled
-									    register's placeholder for "an answer was expected here
-									    and is missing" (a declined row's, pre-existing); on a
-									    dismissal it reads as a value that failed to load,
-									    because the operator did not answer — they put the
-									    question away. Every other settled status keeps the
-									    placeholder exactly as it was. */}
-									{pair.answer || status !== "dismissed" ? (
-										<dd className="text-body-sm text-ink">{pair.answer || "—"}</dd>
-									) : null}
+									{/* The bare `—` is the settled register's placeholder for
+									    "an answer was expected here and is missing" (a declined
+									    row's, pre-existing); every status that reaches THIS
+									    branch answered or was put away by someone else, so it
+									    keeps the placeholder exactly as it was. */}
+									<dd className="text-body-sm text-ink">{pair.answer || "—"}</dd>
 								</div>
 							))}
 						</dl>

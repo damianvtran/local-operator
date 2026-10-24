@@ -192,22 +192,30 @@ export function AsksSheet({
 	/* THE HEAD FIRST, then the wire's own order (`orderedForDisplay`) — the
 	   order the minimized chip names (UX round 1, U8). */
 	const listed = useMemo(() => orderedForDisplay(rows), [rows]);
-	/* THE RECEIPT IS THE INSTANT ECHO, AND ONLY WHILE ITS OWN ROW IS MISSING
-	   (SA-D8, design D1 = UX U2). Since §17 a dismissal taken before the ask's
-	   deadline KEEPS the row as a settled receipt, so from the first read after
-	   the tap the sheet would state one fact twice: this unattributed line above
-	   the list, and the same catalogue sentence on the card below it — two type
-	   sizes, two ink tokens, one `gap-3` apart, and the upper one reads as a
-	   status of whatever sits directly under it.
+	/* THE RECEIPT IS THE INSTANT ECHO, AND IT STANDS DOWN WHEN ITS ROW HAS
+	   SETTLED (SA-D8, design D1 = UX U2; review round 2, M2). Since §17 a
+	   dismissal taken before the ask's deadline KEEPS the row as a settled
+	   receipt, so once that row is here the sheet would state one fact twice:
+	   this unattributed line above the list, and the same catalogue sentence on
+	   the card below it — two type sizes, two ink tokens, one `gap-3` apart, and
+	   the upper one reads as a status of whatever sits directly under it.
 
-	   The ROW is the statement; the receipt covers the gap until it arrives, and
-	   is matched on the ask id it already keeps. THE LAPSED DOOR IS THE
-	   EXCEPTION and stays unconditional: a dismissal at or after the deadline
-	   still removes the row (case 2 of §17), so no row ever arrives to replace
-	   the receipt — it is that door's only acknowledgement. */
+	   PRESENCE OF THE ID IS NOT THE TEST. The read that follows a tap is a round
+	   trip, and until it lands `rows` is the OLD list, which still carries the
+	   ask as `open` — the exact gap this line exists to cover. Suppressing on the
+	   id alone hid the acknowledgement precisely when it was needed and left a
+	   live-looking card after a successful dismissal, so the test is the ROW's
+	   own status: only a row that says `dismissed` replaces the sentence.
+
+	   THE LAPSED DOOR FALLS OUT OF THAT RULE rather than needing its own: a
+	   dismissal at or after the deadline removes the row (case 2 of §17), so the
+	   read either omits it or still shows it as `timed_out` — never `dismissed` —
+	   and the receipt stays as that door's only acknowledgement. */
 	const shownReceipt =
 		receipt &&
-		(receipt.reason === "lapsed" || !listed.some((row) => row.ask_id === receipt.askId))
+		!listed.some(
+			(row) => row.ask_id === receipt.askId && String(row.status) === "dismissed",
+		)
 			? receipt
 			: null;
 	/* QUESTIONS, the same unit the bar and the header entry state (agent review
