@@ -348,6 +348,13 @@ REVISED_ALREADY_DELIVERED = "already delivered — send a new message"
 #: role they were never shown.
 ROLE_BY_WORDS = frozenset({"operator"})
 
+#: No such ask in THIS session's log. Named rather than inlined because a caller
+#: can be looking at a list of OTHER conversations' asks, where the sentence is
+#: true of the row and false of the screen — that caller substitutes its own
+#: wording and must key the substitution on a constant, not on prose (UX round 1,
+#: U5).
+NOT_IN_QUEUE = "that ask is not in this session's queue — it may belong to another session."
+
 
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
     """Why an answer was refused, in one sentence per state (design §2.2).
@@ -360,7 +367,7 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
     from local_operator.asks import store
 
     if record is None:
-        return "that ask is not in this session's queue — it may belong to another session."
+        return NOT_IN_QUEUE
     status = str(record.get("status") or "")
     if status == store.STATUS_OPEN:
         return ""  # accepted
