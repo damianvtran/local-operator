@@ -308,7 +308,7 @@ async def retry_due_holds(
         except Exception:  # noqa: BLE001 — one row never stops the connector
             outcome = {"action": "hold", "message_id": message_id, "code": "retry_failed"}
         action = outcome.get("action")
-        if action in ("delivered", "bounce", "delivered_unadmitted", "skipped"):
+        if action in ("delivered", "bounce", "rejected", "skipped"):
             # A pre-upgrade conversation hold may still use the seven-part
             # label-bearing key. The spine clears the canonical locator; retire
             # the exact consumed row too, rather than replaying it forever.

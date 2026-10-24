@@ -701,7 +701,7 @@ def test_hold_retry_survives_restart(tmp_path, monkeypatch, legacy) -> None:
     assert [row["verdict"] for row in server.admits] == ["allow"]
 
 
-def test_denied_body_stays_metadata_only(tmp_path, monkeypatch) -> None:
+def test_denied_body_never_posts_a_card_or_wakes(tmp_path, monkeypatch) -> None:
     a = _owner("a", 1)
     config_dir = tmp_path / "a"
     config_dir.mkdir()
@@ -713,14 +713,12 @@ def test_denied_body_stays_metadata_only(tmp_path, monkeypatch) -> None:
     )
     out = _run(a, config_dir)
 
-    assert out["handled"][0]["action"] == "delivered_unadmitted"
+    # Rejection is a terminal moderation result, never permission to spend a
+    # recipient turn on even a metadata-only notification of the rejected body.
+    assert out["handled"][0]["action"] == "rejected"
     assert out["handled"][0]["code"] == "screening_bounce"
-    card = transcripts["sess_a"][0]["payload"]
-    assert "hello from the channel" not in card
-    assert "Ada" not in card and "#qa-coordination" not in card
-    assert "from unknown (unknown, same tenant)" in card
-    assert f"conversation_id: {CONVERSATION_ID}" in card
-    assert BRIDGE_UNTRUSTED_CLAUSE in card
+    assert transcripts["sess_a"] == []
+    assert not any(_modes.values()), "no session may be woken"
     assert [row["verdict"] for row in server.admits] == ["reject"]
 
 
@@ -742,15 +740,52 @@ def test_mutated_body_is_not_screened_admitted_or_rendered(tmp_path, monkeypatch
     )
     out = _run(a, config_dir)
 
-    assert out["handled"][0]["action"] == "delivered_unadmitted"
+    # Keep the locator retryable: neither the served bytes nor an unscreened
+    # metadata notification may cross the recipient's admission boundary.
+    assert out["handled"][0]["action"] == "hold"
     assert out["handled"][0]["code"] == "body_hash_mismatch"
     assert screen_calls == [] and server.admits == []
-    card = transcripts["sess_a"][0]["payload"]
-    assert "tampered bytes" not in card
-    assert "Ada" not in card and "#qa-coordination" not in card
-    assert "from unknown (unknown, same tenant)" in card
-    assert f"conversation_id: {CONVERSATION_ID}" in card
-    assert BRIDGE_UNTRUSTED_CLAUSE in card
+    assert transcripts["sess_a"] == []
+    assert not any(_modes.values()), "no session may be woken"
+
+    # The row SURVIVES: a hash mismatch is a pending, retryable state (the
+    # capacity delta's no-silent-loss rule), never a retirement. Only a
+    # confirmed rejection retires.
+    ref = _ref(server)
+    held = Store(config_dir).screening_hold(a, ref.encode())
+    assert held is not None and held["retry_at"] > 0
+
+
+def test_a_confirmed_reject_retires_its_row_on_the_retry_pass(tmp_path, monkeypatch) -> None:
+    """A bounce is terminal on the re-drive path too — not re-asked forever."""
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(
+        monkeypatch, server, {"a": (a, config_dir)}, disposition="bounce"
+    )
+    ref = _ref(server)
+    store = Store(config_dir)
+    store.persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
+    loop_mod._RETRY_ATTEMPTS.clear()  # a fresh process has no in-memory counter
+
+    out = asyncio.run(
+        loop_mod.retry_due_holds(
+            a,
+            config_dir=config_dir,
+            access=SimpleNamespace(credential_id=a.credential_id),
+            auth_store=None,
+        )
+    )
+
+    assert out["outcomes"][0]["action"] == "rejected"
+    assert transcripts["sess_a"] == []
+    assert not any(_modes.values()), "no session may be woken"
+    assert Store(config_dir).screening_hold(a, ref.encode()) is None
 
 
 def test_conversation_event_is_never_routed_as_a_pair_delivery() -> None:
