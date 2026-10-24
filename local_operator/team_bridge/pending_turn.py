@@ -59,16 +59,25 @@ logger = logging.getLogger(__name__)
 
 SUCCESS_STOP_REASONS = frozenset({"stop", "length", "toolUse"})
 
-#: The lease is renewed at the start of EVERY provider call, so the window it
-#: must survive is one call plus whatever runs between two calls — a tool batch,
-#: which this module cannot observe. NORMAL TURNS HAVE NO WALL-CLOCK DEADLINE
-#: (``LoopConfig.deadline`` is unset in the session path), so no finite TTL can
-#: be proven "above the maximum turn budget". One hour is chosen as the longest
-#: single tool batch we can name and state; a turn that exceeds it loses
-#: injection (fail-closed: that call goes without the frame, the row is
-#: released) rather than letting a second consumer serve the same body.
-#: A caller that KNOWS its run deadline passes a larger ``lease_ttl_seconds``.
-_DEFAULT_CLAIM_TTL_SECONDS = 3600.0
+#: DESIGN S-12 says the TTL must be above the max turn so that expiry means the
+#: holder is dead. That cannot be proven here — normal turns carry no wall-clock
+#: deadline (``LoopConfig.deadline`` is unset on this path) — so the lease is
+#: renewed at BOTH observable boundaries instead: every provider call
+#: (:meth:`PendingTurn.for_call`) and every tool batch (``Session._on_turn_end``
+#: calls :meth:`PendingTurn.renew`). The floor below is chosen well above any
+#: single operation we can name: a provider call is bounded by its own client
+#: timeout (30 s in ``team_bridge.client``) and a tool batch by its own tool,
+#: so 8 hours covers a long build/training run with hours to spare.
+#:
+#: THE RESIDUAL, stated rather than hidden: an operation that outlives 8 hours
+#: between two renewals can still expire mid-turn; a second turn may then claim
+#: the row and the body is served twice. A real turn deadline (option (b)) is
+#: what would close it.
+_LEASE_FLOOR_SECONDS = 8 * 60 * 60.0
+#: An UNCAPPED extension would let a crashed turn pin its row indefinitely,
+#: which defeats "expiry means dead" in the other direction. One day is above
+#: any legitimate run and short enough that a dead claim resurfaces.
+_LEASE_CAP_SECONDS = 24 * 60 * 60.0
 
 
 @dataclass(frozen=True)
@@ -108,10 +117,8 @@ class PendingTurn:
         self._store = store if store is not None else Store(config_dir)
         #: Never shorter than the stated floor: a caller's deadline may extend
         #: the lease, never shrink it below one long tool batch (S-12).
-        self._ttl = max(
-            _DEFAULT_CLAIM_TTL_SECONDS,
-            float(lease_ttl_seconds) if lease_ttl_seconds else 0.0,
-        )
+        requested = float(lease_ttl_seconds) if lease_ttl_seconds else 0.0
+        self._ttl = min(max(_LEASE_FLOOR_SECONDS, requested), _LEASE_CAP_SECONDS)
         self._fence = TurnFence()
         self._claim_token: str | None = None
         self._turn_token: str | None = None
@@ -255,6 +262,41 @@ class PendingTurn:
 
         return f"bridge-body:{self._conversation_id}:{self._message_id}"
 
+    def renew(self) -> bool:
+        """Extend the lease at a TOOL-BATCH boundary (design S-12).
+
+        WHY a separate method rather than re-calling :meth:`for_call`: the
+        session's tool boundary must not append a frame — there is no request
+        being built — it only needs to prove the turn is still alive. A False
+        answer means the lease was taken or expired; the turn must then stop
+        injecting, which `settle` records as `claim_lost`.
+        """
+
+        if self._claim_token is None or self._injected is None or self._drifted:
+            return False
+        if self._conversation_id is None or self._message_id is None:
+            return False
+        try:
+            held = self._store.renew_body_claim(
+                self._owner,
+                conversation_id=self._conversation_id,
+                message_id=self._message_id,
+                claim_token=self._claim_token,
+                turn_token=self._turn_token or "",
+                now=time.time(),
+                ttl=self._ttl,
+            )
+        except StoreRefused as failure:
+            # A busy store at an intermediate boundary is NOT a lost lease.
+            self._drift_reason = "admission_drift"
+            logger.debug("bridge: lease renewal refused code=%s", failure.code)
+            return False
+        if not held:
+            self._drifted = True
+            self._lost_lease = True
+            self._drift_reason = "claim_lost"
+        return held
+
     def for_call(self) -> str | None:
         """The bytes to append for THIS provider call, or None to send without.
 
@@ -385,10 +427,12 @@ class PendingTurn:
                 reason=reason,
                 now=time.time(),
             )
-        except StoreRefused:
-            # A lost token is a no-op by contract; a local failure here must
-            # not replace the turn's own outcome with an exception.
-            pass
+        except StoreRefused as failure:
+            # A lost token is a no-op by contract, but a REFUSED release is not
+            # nothing: the row would stay claimed with no ``last_error`` until
+            # its lease expires, and silence is how that parks unnoticed. One
+            # structural code, no content.
+            logger.warning("bridge: body release refused code=%s", failure.code)
         self._claim_token = None
         self._turn_token = None
 

@@ -79,6 +79,22 @@ def _reserve(store: Store, epoch: int) -> bool:
     )
 
 
+def _raw_row(tmp_path: Path) -> dict[str, Any]:
+    """The row WITHOUT the live-generation fence.
+
+    Needed after a re-login: every fenced reader correctly answers None for the
+    dead generation, so the orphan's own state can only be inspected directly.
+    """
+
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM body_reservations WHERE message_id = ?", (MESSAGE_ID,)
+        ).fetchone()
+    assert row is not None
+    return dict(row)
+
+
 def _row(store: Store) -> dict[str, Any]:
     row = store.body_reservation(_owner(), CONVERSATION_ID, MESSAGE_ID)
     assert row is not None
@@ -210,30 +226,69 @@ def test_an_aborted_or_failed_turn_leaves_the_row_retryable(tmp_path) -> None:
     assert _row(store)["state"] == "pending"
 
 
-def test_a_same_account_relogin_does_not_serve_the_old_generation(tmp_path) -> None:
-    """B1: the binding is the ROW's credential + generation, not just the key.
+def test_a_real_relogin_does_not_serve_and_retires_the_old_generation(tmp_path) -> None:
+    """B1: a REAL second enrollment, not a synthetic owner.
 
-    ``owner_key`` is identical across a re-login, so a reader matching only the
-    key would hand the OLD generation's reservation to the new owner — claim,
-    fetch and injection included (design S-3b).
+    The first version of this test built an owner that was never enrolled, so
+    ``_live_generation`` returned None before the row query and the test passed
+    against the pre-fix reader. Here the store actually commits credential 8 at
+    generation 2, so the only thing that can exclude the old row is the binding
+    predicate — and the orphan is retired rather than parked.
     """
 
     store, epoch = _store(tmp_path)
     assert _reserve(store, epoch)
 
     relogged = OwnerSnapshot(
-        credential_id=8,  # a new credential row
+        credential_id=8,
         account_id="acc_1",
         tenant_id="3f2a1111-2222-4333-8444-555566667777",
         endpoint_id="ep_1",
         canonical_base_url="https://hub.example",
         enrollment_generation=2,
     )
+    store.commit_enrollment(
+        relogged, OwnerReceipt("bridge_consent_v1", "ref-2"), cos_session_id=SESSION
+    )
+
+    # The orphan is terminal, not pending: nothing can ever claim it.
+    orphan = _raw_row(tmp_path)
+    assert orphan["state"] == "retired"
+    assert orphan["terminal_code"] == "binding_mismatch"
     assert store.pending_body_reservation_for(relogged, SESSION) is None
 
     turn = PendingTurn(relogged, SESSION, config_dir=tmp_path)
     assert asyncio.run(turn.open(budget=_budget(), fetch=_fetch)) is False
-    assert _row(store)["state"] == "pending"
+
+
+def test_the_tool_boundary_renewal_keeps_the_lease(tmp_path) -> None:
+    """M2: the second renewal site — the tool batch — actually extends it.
+
+    Without this, a long tool run lets the lease expire, a second turn claims
+    the row and the same body is served twice (S-12).
+    """
+
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+    turn = _turn(tmp_path)
+    assert asyncio.run(turn.open(budget=_budget(), fetch=_fetch)) is True
+
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        conn.execute("UPDATE body_reservations SET claim_expires_at = ?", (time.time() + 5,))
+
+    assert turn.renew() is True
+    row = _row(store)
+    assert row["state"] == "claimed"
+    assert float(row["claim_expires_at"]) > time.time() + 60, "the lease must extend"
+
+
+def test_the_lease_ttl_is_floored_and_capped(tmp_path) -> None:
+    """M2: a caller may extend the lease, never shrink or pin it forever."""
+
+    floored = PendingTurn(_owner(), SESSION, config_dir=tmp_path, lease_ttl_seconds=60)
+    assert floored._ttl == 8 * 60 * 60
+    capped = PendingTurn(_owner(), SESSION, config_dir=tmp_path, lease_ttl_seconds=10**9)
+    assert capped._ttl == 24 * 60 * 60
 
 
 def test_a_store_refusal_on_renew_is_drift_not_a_stolen_lease(tmp_path, monkeypatch) -> None:
