@@ -1,0 +1,13 @@
+{
+  "tui.asks.context.messages": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}",
+  "tui.asks.dismiss.answered_in_chat": "گفتگو میں جواب دیدہ",
+  "tui.asks.dismiss.answered_in_chat_note": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں",
+  "tui.asks.dismiss.fleet_gone": "یہ سوال متعلقہ گفتگو کے لاگ میں اب موجود نہیں۔",
+  "tui.asks.dismiss.hint": "enter خارج کریں · esc منسوخ کریں",
+  "tui.asks.dismiss.moot": "اب ضروری نہیں",
+  "tui.asks.dismiss.moot_note": "اب جواب کا انتظار نہیں ہوگا",
+  "tui.asks.dismiss.notice_answered_in_chat": "خارج کیا گیا — گفتگو میں جواب موجود ہے",
+  "tui.asks.dismiss.notice_moot": "خارج کیا گیا — اب ضرورت نہیں",
+  "tui.asks.dismiss.notice_no_reply": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
+  "tui.asks.dismiss.title": "یہ سوال خارج کریں"
+}
