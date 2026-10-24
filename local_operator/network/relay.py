@@ -14012,6 +14012,9 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
                 "is expected. The relay can run in the foreground instead."
             ),
         }
+    # systemd opens append-log targets before Python starts, so a fresh HOME
+    # needs this parent before enable --now; the daemon cannot create it in time.
+    log_path().parent.mkdir(parents=True, exist_ok=True)
     # Lingering BEFORE enable --now (mobile's ordering): without a user manager
     # the enable itself fails with the bus error, and enabling linger is what
     # spawns one. Best-effort — a refusal must not fail the install.
