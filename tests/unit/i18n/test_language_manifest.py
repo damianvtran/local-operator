@@ -648,14 +648,17 @@ def test_allowance_growth_permits_debt_for_an_untranslatable_locale(
     English copy: a deadlock rather than a ratchet.
     """
     base = {"pairs": []}
-    head = {"pairs": [{"locale": "ur", "namespace": "demo", "missing": ["demo.fresh"]}]}
+    # Urdu now carries audited core catalogues, so it no longer satisfies the
+    # no-current-catalogue carve-out this fixture exercises. Chinese remains
+    # supported but absent while its candidate is security-held.
+    head = {"pairs": [{"locale": "zh-CN", "namespace": "demo", "missing": ["demo.fresh"]}]}
     monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
     got = i18n_check.allowance_growth(
         base,
         head,
         ref="BASE",
         base_english={"demo.existing"},
-        inactive_locales={"ur"},
+        inactive_locales={"zh-CN"},
     )
     assert got == set()
 

@@ -29,6 +29,7 @@ import logging
 import re
 import secrets
 import time
+import unicodedata
 import uuid
 from asyncio import InvalidStateError
 from collections import deque
@@ -311,6 +312,33 @@ ASK_UNAVAILABLE_NOTICE = (
 #: not an arbitrary awaitable — widening the annotation here would push that
 #: distinction out to every caller.
 _AskGateFn = Callable[[list[Any]], Coroutine[Any, Any, dict[str, list[str]] | None]]
+
+
+def _quoted_echo_within_cells(text: str, budget: int = 20) -> str:
+    """Bound the echoed unknown language by rendered display cells.
+
+    Mirrors the terminal's helper, including the ``repr`` detail: the row shows
+    the ESCAPED payload, so twenty backslashes cost forty cells. This module
+    deliberately does not import ``rich`` (the runtime has no console), so
+    width comes from the East Asian Width property: wide and fullwidth
+    characters cost two cells.
+    """
+
+    def width(value: str) -> int:
+        total = 0
+        for char in value:
+            total += 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+        return total
+
+    shown = repr(text)[1:-1]
+    if width(shown) <= budget:
+        return f"'{shown}'"
+    out = ""
+    for char in shown:
+        if width(out + char) > budget - 1:
+            break
+        out += char
+    return f"'{out}…'"
 
 
 class AskUnavailableError(RuntimeError):
@@ -7940,7 +7968,8 @@ class ServingSessionHandle(SessionHandle):
             return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
         if command == "language":
             # The terminal's funnel, served: one `settings_io.write_setting`
-            # against the `language` key; receipts word for word (see
+            # against the `language` key; the receipt keeps the terminal's
+            # voice but enumerates the values for the phone (see
             # `_language_slash`).
             return self._language_slash(args, SlashResult)
         # THE DELETE-SCOPED VERBS ARE GATED HERE, where the verb is chosen.
@@ -9793,8 +9822,11 @@ class ServingSessionHandle(SessionHandle):
         from its config watcher (slice C's external-change path announces
         it), which is why this branch writes and receipts but never repaints.
 
-        The receipts mirror the terminal's word for word — the ``/effort``
-        precedent — the option list and the "already" no-op included.
+        The receipts keep the terminal's VOICE but not its bytes: the phone
+        sheet has no argument picker, so this client enumerates the accepted
+        values where the terminal names the space key instead (see the 70-cell
+        notice row in ``OperatorApp._cmd_language``). The "already" no-op stays
+        word for word.
         """
         from local_operator import settings_io
         from local_operator.i18n.resolve import (
@@ -9812,9 +9844,11 @@ class ServingSessionHandle(SessionHandle):
         if not wanted:
             return SlashResult(
                 kind="notice",
+                # The phone sheet has no argument picker, so this client DOES
+                # enumerate the value space; the terminal receipt (which has
+                # the space picker) does not, for its 70-cell notice row.
                 text=(
-                    f"language: {resolved} ({language_name(resolved)}) — "
-                    f"/language <{'|'.join(options)}>; space"
+                    f"language: {resolved} ({language_name(resolved)}) — " f"{', '.join(options)}"
                 ),
                 style="info",
             )
@@ -9828,7 +9862,10 @@ class ServingSessionHandle(SessionHandle):
             # unaudited locale keys no catalogue and would render codes.
             return SlashResult(
                 kind="notice",
-                text=f"unknown language {wanted!r} — available: {', '.join(options)}",
+                text=(
+                    f"unknown language {_quoted_echo_within_cells(wanted)} — "
+                    f"available: {', '.join(options)}"
+                ),
                 style="warning",
             )
         stored = config_value()

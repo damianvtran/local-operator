@@ -1,0 +1,837 @@
+{
+  "schema": 1,
+  "record_kind": "auditor_receipt",
+  "audit": {
+    "name": "Audit core ur round 1 second",
+    "locale": "ur",
+    "surface": "core",
+    "round": 1,
+    "independent_audit_ordinal": 2,
+    "date": "2026-10-23",
+    "commit": "2189b61739e08b5f219d317ead68b4a5f4cf709f",
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-ur-core",
+    "status": "failed",
+    "result": "changes_requested",
+    "overall_verdict": "changes_requested"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team); independent second core auditor",
+    "session": "3e0f499dc2ee",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "fallback": "none observed; the served model recorded above performed this audit",
+    "date": "2026-10-23",
+    "result": "failed",
+    "findings": 7
+  },
+  "independence": {
+    "independent_of_all_translator_sessions": true,
+    "translator_sessions": [
+      "3f68f20b2cad",
+      "52136848d1fc",
+      "7a648afb0f8d",
+      "7c4a4229b011",
+      "ffc94c8cb17d"
+    ],
+    "other_new_second_audit_receipt_read": false,
+    "source_used_for_independence_check": "i18n/provenance/ur-core.translator.json",
+    "note": "This audit read the English and Urdu catalogues directly. It did not read or reuse another new second-audit receipt."
+  },
+  "source_set": {
+    "namespace_count": 23,
+    "nonempty_namespace_count": 20,
+    "empty_namespace_count": 3,
+    "empty_namespaces": [
+      "wire.errors",
+      "wire.incidents",
+      "wire.notices"
+    ],
+    "key_count": 1355,
+    "keys_read": 1355,
+    "semantic_review": "Every English and Urdu value was read side by side, namespace by namespace; relevant English context sidecars were consulted for UI role, safety meaning, placeholders, and width.",
+    "hash_algorithm": "SHA-256 over exact UTF-8 file bytes; context_sha256 is null when English has no sidecar",
+    "translator_provenance_hash_mismatch_count": 0
+  },
+  "verdicts": {
+    "changes_requested_namespaces": [
+      "relay.ask",
+      "tui.asks",
+      "tui.welcome",
+      "wire.errors.settings",
+      "wire.remote_compute",
+      "wire.settings",
+      "wire.slash"
+    ],
+    "clean_with_followups_namespaces": [
+      "cli.exec_remote_help",
+      "tui.tags",
+      "tui.viewer"
+    ],
+    "clean_namespaces": [
+      "relay.session.tags",
+      "tui.authoring",
+      "tui.palette",
+      "tui.projects_edit",
+      "tui.review",
+      "tui.schedule",
+      "tui.status",
+      "tui.team_authoring",
+      "tui.transcript",
+      "wire.errors",
+      "wire.incidents",
+      "wire.memory",
+      "wire.notices"
+    ],
+    "namespace_count_by_verdict": {
+      "changes_requested": 7,
+      "clean_with_followups": 3,
+      "clean": 13
+    },
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 7,
+      "MINOR": 4,
+      "NIT": 0
+    },
+    "unresolved_blocker_major_count": 7,
+    "total_findings_including_minor_nit": 11
+  },
+  "checks": {
+    "repository": {
+      "head_verified": "2189b61739e08b5f219d317ead68b4a5f4cf709f",
+      "worktree_clean_after_audit": true,
+      "generate_check": {
+        "command": "env -i HOME=<isolated> LOCAL_OPERATOR_CONFIG_DIR=<isolated> PATH=$PATH TERM=xterm-256color PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python scripts/i18n/generate.py --check",
+        "actual_output": "generate.py --check: 91 artifact(s) byte-identical",
+        "exit_code": 0
+      },
+      "catalogue_check": {
+        "command": "env -i HOME=<isolated> LOCAL_OPERATOR_CONFIG_DIR=<isolated> PATH=$PATH TERM=xterm-256color PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+        "actual_output": "check.py: catalogue checks: 0 problem(s)",
+        "exit_code": 0
+      },
+      "interpreter_note": "The worktree had no local .venv; the existing primary-checkout interpreter ran the pinned worktree scripts with PYTHONPATH set to the pinned worktree. No dependency was installed."
+    },
+    "mechanical": {
+      "key_set_mismatch_count": 0,
+      "icu_signature_mismatch_count": 0,
+      "literal_token_mismatch_count": 0,
+      "number_date_time_skeleton_key_count": 0,
+      "literal_redaction_artifact_count": 1,
+      "literal_redaction_artifact_keys": [
+        "wire.errors.settings.inline_credentials"
+      ],
+      "note": "Mechanical parity is not semantic approval. The redaction artifact and English leakage required native review."
+    },
+    "plurals": {
+      "plural_key_count": 19,
+      "runtime_render_count": 95,
+      "counts": [
+        0,
+        1,
+        2,
+        21,
+        1.5
+      ],
+      "render_error_count": 0,
+      "cldr_category_mismatch_count": 0,
+      "missing_literal_count_count": 0,
+      "digit_policy": "Latin digits confirmed in runtime renders; one/other branches reviewed for native Urdu grammar."
+    },
+    "fit_and_pseudo": {
+      "explicit_maxCells_key_count": 54,
+      "actual_rendered_overflow_count": 0,
+      "worst_case_key_overflow_count": 0,
+      "pseudo_probe": "Independent deterministic stress probe, not an advertised repository workflow: ceil(actual rendered cells * 1.30).",
+      "pseudo_30pct_overflow_count": 26,
+      "pseudo_disposition": "Fit-risk evidence for the separate rendered gate; pseudo overflow alone is not counted as a translation defect when the actual Urdu fits.",
+      "materially_longer_candidate_count": 26,
+      "materially_longer_disposition": "25 have no declared maxCells and are retained for rendered fit review; tui.asks.dismiss.notice_no_reply has maxCells=44 and measures 39 cells, so it fits; length alone is not counted as a defect"
+    },
+    "native_semantics_register_glossary": {
+      "formality": "آپ and respectful imperatives are used; no تم address and no direct تو address were found in the complete read. تو occurs as the ordinary conjunction then.",
+      "glossary": "Shared session/wake/agent/subagent/tool/transcript/workspace/approval/project/model/prompt/compaction/schedule/monitor terms were checked. Drift and unendorsed Latin prose are findings, not silently accepted.",
+      "allowed_english": "Local Operator, lop/lo, omp/oh-my-pi, tool and command names, flags, config keys, paths, identifiers, URLs, event/machine tokens, official technology/product names, kept-Latin acronyms, enum/command syntax where the UI requires it, and the sidecar-required product noun Scratchpad.",
+      "english_leakage_result": "Failed in wire.settings, wire.slash, tui.welcome, wire.remote_compute, and wire.errors.settings; narrower script drift is recorded in cli.exec_remote_help."
+    },
+    "typography_rtl_static": {
+      "manual_bidi_control_key_count": 0,
+      "urdu_digit_key_count": 0,
+      "hindi_danda_key_count": 0,
+      "informal_tum_key_count": 0,
+      "urdu_punctuation_counts": {
+        "۔": 569,
+        "،": 200,
+        "؟": 6,
+        "؛": 139
+      },
+      "ascii_exclamation_keys": [
+        "tui.welcome.tip.shell"
+      ],
+      "ascii_exclamation_disposition": "tui.welcome.tip.shell exclamation is the literal bang shell operator, not prose punctuation",
+      "latin_runs": "Reviewed in every value; allowed machine/product tokens were distinguished from untranslated prose.",
+      "rendered_rtl_evidence": "NOT PERFORMED and NOT CLAIMED. Native bidi/shaping, RTL layout, punctuation rendering, and rendered fallback/long-text evidence remain a separate gate."
+    }
+  },
+  "namespaces": [
+    {
+      "namespace": "cli.exec_remote_help",
+      "keys_read": 11,
+      "en_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "ur_sha256": "6fe867390d79bd9c59172ffd17cfc0a3db6016df45b426b6a945fcbf74662cf6",
+      "context_sha256": "fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f",
+      "verdict": "clean_with_followups",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [
+        "UR2-008"
+      ],
+      "accepted_minor_nit_ids": [
+        "UR2-008"
+      ]
+    },
+    {
+      "namespace": "relay.ask",
+      "keys_read": 11,
+      "en_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "ur_sha256": "960c074ad43959e9fb01d09768d0ccdb4ced21f2b14db5a64713e998d0b78248",
+      "context_sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42",
+      "verdict": "changes_requested",
+      "result": "failed",
+      "unresolved_blocker_major_count": 1,
+      "finding_ids": [
+        "UR2-006"
+      ],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "relay.session.tags",
+      "keys_read": 19,
+      "en_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "ur_sha256": "4f0fab7f40bacc152b1cabba0244372b8d8dec40213c778ef8c417ac6be242aa",
+      "context_sha256": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.asks",
+      "keys_read": 11,
+      "en_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "ur_sha256": "a6b23ec177d56c65c3d7bb22c950f7e202a67ed2dd19467d847015a246a29a1f",
+      "context_sha256": "e09cd8e796359ab8c4d8de2fd5a59bb990c76f8488c28846cfb1623610507362",
+      "verdict": "changes_requested",
+      "result": "failed",
+      "unresolved_blocker_major_count": 2,
+      "finding_ids": [
+        "UR2-005",
+        "UR2-006"
+      ],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.authoring",
+      "keys_read": 49,
+      "en_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+      "ur_sha256": "81bb894f733b2ce4362b3c32d6e3054e8f0d167319ab5d6f2cf28a9f6a0fb61c",
+      "context_sha256": "df98bba4457c1080b3941e9a24a04a52e360d11d2a07bdda992861c6cb54928c",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.palette",
+      "keys_read": 7,
+      "en_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "ur_sha256": "1e320792eb96004d220e0ead013b628b749b9eb5f904421d00c6532f4513ccea",
+      "context_sha256": "edd5a12c66ec852e65e9afb4eee92f1b9436a3a148683b8d756a002b68ff06f7",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.projects_edit",
+      "keys_read": 35,
+      "en_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "ur_sha256": "971f60ecf5722347088e73ca36d881b2d143c3bcd9e1d0e3bb0bb0a615e0b477",
+      "context_sha256": "db995023c6489ee9313403c2f463c36ea65162ceea52a572c3da26db02fbd01c",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.review",
+      "keys_read": 73,
+      "en_sha256": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+      "ur_sha256": "683847761d616f3145caaaabd733f57af5c1e749c7c640403cd92f22e54bd868",
+      "context_sha256": "b879498a3ba2debfac6ec65a640a75b8d53e71073a1d32676dc41f7325dbc202",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.schedule",
+      "keys_read": 61,
+      "en_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "ur_sha256": "3d3dc64afa2a4cb1a486daae2d7b446e6ad13608e0131c26100d1fe3e43f0f0f",
+      "context_sha256": "829e18450b21ca836cc047813b9d18770414f1fd23f14c18b794c1f45648afb4",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.status",
+      "keys_read": 7,
+      "en_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "ur_sha256": "183a01fdfec59548bab675db30c675170e71ef20bb4d97c943f4fa211acf68f8",
+      "context_sha256": "3bab032efffea4adb669aa1f3c8d7a489f7b3b630b19b52636d70bd2b09bdfbc",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.tags",
+      "keys_read": 27,
+      "en_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "ur_sha256": "7a2e08723312b513b5af38691134ec2fdc381f120e913b691588b777d4265821",
+      "context_sha256": null,
+      "verdict": "clean_with_followups",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [
+        "UR2-010"
+      ],
+      "accepted_minor_nit_ids": [
+        "UR2-010"
+      ]
+    },
+    {
+      "namespace": "tui.team_authoring",
+      "keys_read": 36,
+      "en_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+      "ur_sha256": "50437b6e50c25040937f9863550a9cfea0afe159987f8dd5f942e38f772ccb80",
+      "context_sha256": "40e81d7469be5fb0da215e96d77189b218ed6a9879b13e4d4dc9f7b5f6c188ce",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.transcript",
+      "keys_read": 17,
+      "en_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "ur_sha256": "3772f0bc1cb8f893e261445180c69ac7cc77874a590e48be8aa909fb3116db86",
+      "context_sha256": "3c2252debbbc33c2fab2061a5dcdc9dfa036e07ab5793ba4dabdf889ac7113fc",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "tui.viewer",
+      "keys_read": 19,
+      "en_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "ur_sha256": "7a4f8d943e17fe8e706b1f1b567323bea822d51784b7778ec6b43032e849b743",
+      "context_sha256": "ed4535ceb6e3119c8a3b35f0aa0570ed0398d61c212a43f35bc6d2aa9ac389ae",
+      "verdict": "clean_with_followups",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [
+        "UR2-011"
+      ],
+      "accepted_minor_nit_ids": [
+        "UR2-011"
+      ]
+    },
+    {
+      "namespace": "tui.welcome",
+      "keys_read": 30,
+      "en_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "ur_sha256": "8c931ffd4d9284216d113daa043b99bda068acc1b34b3600e87011496333dacc",
+      "context_sha256": "bfd46d9dbcc5c4dfbee6a3fd93e47264f17f123e01ddf84a7aae99869c41debd",
+      "verdict": "changes_requested",
+      "result": "failed",
+      "unresolved_blocker_major_count": 1,
+      "finding_ids": [
+        "UR2-004"
+      ],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "wire.errors",
+      "keys_read": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "wire.errors.settings",
+      "keys_read": 12,
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "7da3d38e00605b0ce286e1c1aa02dddd8766e5d483d517ed026966b02b0e4c0c",
+      "context_sha256": null,
+      "verdict": "changes_requested",
+      "result": "failed",
+      "unresolved_blocker_major_count": 1,
+      "finding_ids": [
+        "UR2-009"
+      ],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "wire.incidents",
+      "keys_read": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "wire.memory",
+      "keys_read": 17,
+      "en_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "ur_sha256": "672982af74dc2436980566f94fcda01ac60e60dd2f588de1151a4176ac337a98",
+      "context_sha256": "852518b5d2bd41f4b8b72d6d89d961d35b1bafaf341726e0406973d12b1c5e7d",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "wire.notices",
+      "keys_read": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "keys_read": 43,
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "50991b04b030ff3851190fe1c7ef71d7b9306a712ca5af264b8edbfe7d4bb826",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "verdict": "changes_requested",
+      "result": "failed",
+      "unresolved_blocker_major_count": 1,
+      "finding_ids": [
+        "UR2-007"
+      ],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "wire.settings",
+      "keys_read": 818,
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "a9df8aff733066dc9786c40098bd1f4c992f645143991e503e5c8d57b683a942",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "verdict": "changes_requested",
+      "result": "failed",
+      "unresolved_blocker_major_count": 1,
+      "finding_ids": [
+        "UR2-001"
+      ],
+      "accepted_minor_nit_ids": []
+    },
+    {
+      "namespace": "wire.slash",
+      "keys_read": 52,
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "35ebd056ec897ded1cba799498ab2c67ba9fdff4636dcf1ca6a1cc1a2bec421a",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "verdict": "changes_requested",
+      "result": "failed",
+      "unresolved_blocker_major_count": 1,
+      "finding_ids": [
+        "UR2-002",
+        "UR2-003"
+      ],
+      "accepted_minor_nit_ids": []
+    }
+  ],
+  "findings": [
+    {
+      "id": "UR2-001",
+      "severity": "MAJOR",
+      "namespaces": [
+        "wire.settings"
+      ],
+      "category": [
+        "English leakage",
+        "native idiom",
+        "glossary consistency"
+      ],
+      "affected_scope": "Systematic across the 818-key namespace; the examples are representative, not a complete remediation list. Retranslate all ordinary English prose while preserving permitted machine tokens.",
+      "examples": [
+        {
+          "key": "wire.settings.classification.title",
+          "current": "Smart hints",
+          "proposed": "ذہین اشارے"
+        },
+        {
+          "key": "wire.settings.bash_query_budget_enabled.label",
+          "current": "Shell query budget",
+          "proposed": "شیل کوئری کا بجٹ"
+        },
+        {
+          "key": "wire.settings.desktop.title",
+          "current": "Desktop app",
+          "proposed": "ڈیسک ٹاپ ایپ"
+        },
+        {
+          "key": "wire.settings.display_heading_markers.label",
+          "current": "Heading markers",
+          "proposed": "سرخی کے نشانات"
+        },
+        {
+          "key": "wire.settings.web_search_providers.label",
+          "current": "Providers",
+          "proposed": "پرووائیڈرز"
+        },
+        {
+          "key": "wire.settings.speech_transcription_cleanup.label",
+          "current": "ٹرانسکرپٹion cleanup",
+          "proposed": "ٹرانسکرپشن صفائی"
+        }
+      ],
+      "reason": "Whole user-visible labels and many ordinary help clauses remain English or hybrid rather than native Urdu, far beyond the style guide's narrow permission for product names, identifiers, commands, flags, paths, tool names, and acronyms."
+    },
+    {
+      "id": "UR2-002",
+      "severity": "MAJOR",
+      "namespaces": [
+        "wire.slash"
+      ],
+      "category": [
+        "English leakage",
+        "glossary consistency",
+        "native idiom"
+      ],
+      "affected_scope": "Systematic Latin prose and drift from the wave's own پرووائیڈر decision across the 52 slash descriptions; inspect every value during remediation.",
+      "examples": [
+        {
+          "key": "wire.slash.agent",
+          "current": "ایجنٹس دیکھیں، class بدلیں، یا ایجنٹ بن کر بات کریں",
+          "proposed": "ایجنٹس دیکھیں، کسی ایجنٹ کی قسم بدلیں، یا اس سیشن سے بطور ایجنٹ بات کریں"
+        },
+        {
+          "key": "wire.slash.provider",
+          "current": "providers اور ان کی لاگ اِن/استعمال کی حالت کی فہرست",
+          "proposed": "پرووائیڈرز اور ان کے لاگ اِن/استعمال کی حالت کی فہرست"
+        },
+        {
+          "key": "wire.slash.move",
+          "current": "اس سیشن کی working directory بدلیں",
+          "proposed": "اس سیشن کی ورکنگ ڈائریکٹری بدلیں"
+        },
+        {
+          "key": "wire.slash.usage",
+          "current": "provider کا usage quota دکھائیں",
+          "proposed": "پرووائیڈر کے استعمال کا کوٹہ دکھائیں"
+        }
+      ],
+      "reason": "High-visibility slash help repeatedly leaves ordinary nouns in Latin and alternates provider/providers with the translator-endorsed پرووائیڈر, producing copy that reads code-switched rather than written in Urdu."
+    },
+    {
+      "id": "UR2-003",
+      "severity": "MINOR",
+      "namespaces": [
+        "wire.slash"
+      ],
+      "category": [
+        "accuracy"
+      ],
+      "examples": [
+        {
+          "key": "wire.slash.fork",
+          "current": "شاخ؛ --switch یہیں، --window باہر؛ <message> آغاز کرے",
+          "proposed": "اس گفتگو کی شاخ بنائیں؛ --switch یہیں، --window کہیں اور؛ <message> سے کام شروع کریں"
+        }
+      ],
+      "reason": "The terse Urdu drops both 'this chat' and the explicit 'starts work' relationship, making the command description less precise than the English."
+    },
+    {
+      "id": "UR2-004",
+      "severity": "MAJOR",
+      "namespaces": [
+        "tui.welcome"
+      ],
+      "category": [
+        "English leakage",
+        "high-visibility copy"
+      ],
+      "examples": [
+        {
+          "key": "tui.welcome.tip.fork_placement",
+          "current": "/settings → Fork → “فورک کہاں کھلے” سے مقام طے ہوتا ہے",
+          "proposed": "/settings → فورک → “فورک کہاں کھلے” سے مقام طے ہوتا ہے"
+        },
+        {
+          "key": "tui.welcome.tip.hotkeys",
+          "current": "/settings → Hotkeys سے یہ کلیدیں بدلیں",
+          "proposed": "/settings → ہاٹ کیز سے یہ کلیدیں بدلیں"
+        }
+      ],
+      "reason": "Two opening-screen navigation tips leave the visible settings section names in English even though the surrounding path and the corresponding fork wording are Urdu."
+    },
+    {
+      "id": "UR2-005",
+      "severity": "MAJOR",
+      "namespaces": [
+        "tui.asks"
+      ],
+      "category": [
+        "accuracy",
+        "safety meaning"
+      ],
+      "examples": [
+        {
+          "key": "tui.asks.dismiss.answered_in_chat",
+          "current": "گفتگو میں جواب دیدہ",
+          "proposed": "گفتگو میں جواب دے دیا"
+        }
+      ],
+      "reason": "دیدہ means 'seen' and does not express the operator's deliberate 'answered in chat' reason, so the dismiss chooser names the wrong action."
+    },
+    {
+      "id": "UR2-006",
+      "severity": "MAJOR",
+      "namespaces": [
+        "relay.ask",
+        "tui.asks"
+      ],
+      "category": [
+        "glossary consistency",
+        "explicit context contract"
+      ],
+      "examples": [
+        {
+          "key": "relay.ask.dismiss.open",
+          "current": "ختم کریں…",
+          "proposed": "خارج کریں…"
+        },
+        {
+          "key": "relay.ask.dismiss.title",
+          "current": "یہ سوال ختم کریں",
+          "proposed": "یہ سوال خارج کریں"
+        },
+        {
+          "key": "relay.ask.dismiss.receipt",
+          "current": "ختم کر دیا گیا — کوئی جواب نہیں بھیجا",
+          "proposed": "خارج کر دیا گیا — کوئی جواب نہیں بھیجا"
+        },
+        {
+          "key": "relay.ask.dismiss.receipt_answered_in_chat",
+          "current": "ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا",
+          "proposed": "خارج کر دیا گیا — گفتگو میں جواب دے دیا گیا"
+        },
+        {
+          "key": "relay.ask.dismiss.receipt_moot",
+          "current": "ختم کر دیا گیا — اب ضرورت نہیں",
+          "proposed": "خارج کر دیا گیا — اب ضرورت نہیں"
+        }
+      ],
+      "reason": "The phone uses ختم while the terminal uses خارج for the same dismiss act, directly violating the phone sidecar's instruction to use the terminal's verb and creating cross-surface terminology drift."
+    },
+    {
+      "id": "UR2-007",
+      "severity": "MAJOR",
+      "namespaces": [
+        "wire.remote_compute"
+      ],
+      "category": [
+        "English leakage",
+        "native idiom",
+        "glossary consistency"
+      ],
+      "affected_scope": "Systematic Latin technical prose across the namespace; preserve commands, flags, URLs, identifiers, product names, and Git operations while translating ordinary labels and prose.",
+      "examples": [
+        {
+          "key": "wire.remote_compute.finished_exit_code",
+          "current": "exit code: {exit_code}",
+          "proposed": "خروجی کوڈ: {exit_code}"
+        },
+        {
+          "key": "wire.remote_compute.detached",
+          "current": "ریموٹ رن {run_id} جمع کر دیا گیا۔\nnetwork (Radient کی تصدیق شدہ): {network_id}\nIdempotency key: {idempotency_key}\nاس کی نگرانی: lop exec --remote-status {run_id}\nاسے منسوخ کریں: lop exec --remote-cancel {run_id}",
+          "proposed": "ریموٹ رن {run_id} جمع کر دیا گیا۔\nنیٹ ورک (Radient کی تصدیق شدہ): {network_id}\nIdempotency key: {idempotency_key}\nاس کی نگرانی: lop exec --remote-status {run_id}\nاسے منسوخ کریں: lop exec --remote-cancel {run_id}"
+        },
+        {
+          "key": "wire.remote_compute.key_not_printable",
+          "current": "idempotency key صرف printable ASCII ہونی چاہیے: حروف، اعداد اور punctuation marks؛ accents، tabs یا newlines نہیں۔",
+          "proposed": "idempotency key صرف قابلِ طباعت ASCII حروف پر مشتمل ہونی چاہیے: حروف، اعداد اور اوقاف؛ ایکسنٹ والے حروف، ٹیبز یا نئی سطریں شامل نہیں۔"
+        }
+      ],
+      "reason": "A complete output label and substantial ordinary prose remain in English, while نیٹ ورک is already the established rendering elsewhere in the same namespace."
+    },
+    {
+      "id": "UR2-008",
+      "severity": "MINOR",
+      "namespaces": [
+        "cli.exec_remote_help"
+      ],
+      "category": [
+        "native idiom",
+        "script policy",
+        "glossary consistency"
+      ],
+      "examples": [
+        {
+          "key": "cli.exec_remote_help.idempotency_key",
+          "current": "نئی key بنانے کے بجائے استعمال کرنے کے لیے idempotency key، تاکہ جمع شدہ رن کو retry کرنے پر وہ دوبارہ نہ چلے",
+          "proposed": "نئی کلید بنانے کے بجائے موجودہ idempotency key استعمال کریں، تاکہ جمع شدہ رن کی دوبارہ کوشش پر وہ دوبارہ نہ چلے"
+        },
+        {
+          "key": "cli.exec_remote_help.repo",
+          "current": "Git URL جسے ریموٹ رن checkout کرے گا۔ --remote کے ساتھ درکار: مقامی فائلیں کبھی upload نہیں ہوتیں",
+          "proposed": "Git URL جسے ریموٹ رن checkout کرے گا۔ --remote کے ساتھ درکار: مقامی فائلیں کبھی اپلوڈ نہیں ہوتیں"
+        },
+        {
+          "key": "cli.exec_remote_help.size",
+          "current": "ریموٹ رن کا compute size: s، m یا l (ڈیفالٹ: m)",
+          "proposed": "ریموٹ رن کا کمپیوٹ سائز: s، m یا l (ڈیفالٹ: m)"
+        }
+      ],
+      "reason": "Several settled loanwords and ordinary operations remain Latin even though the same catalogue uses کلید and Urdu-script technical loanwords elsewhere."
+    },
+    {
+      "id": "UR2-009",
+      "severity": "MAJOR",
+      "namespaces": [
+        "wire.errors.settings"
+      ],
+      "category": [
+        "redaction artifact",
+        "accuracy",
+        "native idiom",
+        "English leakage"
+      ],
+      "examples": [
+        {
+          "key": "wire.errors.settings.credential_key_empty",
+          "current": "کریڈینشل key خالی نہیں ہو سکتی",
+          "proposed": "کریڈینشل کی کلید خالی نہیں ہو سکتی"
+        },
+        {
+          "key": "wire.errors.settings.inline_credentials",
+          "current": "ایسا [redacted] استعمال کریں جس میں inline credentials یا query parameters نہ ہوں۔",
+          "proposed": "ایسا اینڈ پوائنٹ استعمال کریں جس میں ان لائن کریڈینشلز یا کوئری پیرامیٹرز نہ ہوں۔"
+        },
+        {
+          "key": "wire.errors.settings.not_registered",
+          "current": "یہ ترتیب رجسٹر نہیں ہے۔",
+          "proposed": "یہ ترتیب رجسٹرڈ نہیں ہے۔"
+        }
+      ],
+      "reason": "The Urdu error replaces the English endpoint noun with a literal [redacted] artifact and also leaves inline credentials/query parameters in English, corrupting a security-relevant instruction rather than localizing it."
+    },
+    {
+      "id": "UR2-010",
+      "severity": "MINOR",
+      "namespaces": [
+        "tui.tags"
+      ],
+      "category": [
+        "register",
+        "grammatical consistency"
+      ],
+      "examples": [
+        {
+          "key": "tui.tags.added",
+          "current": "“{name}” شامل کی گئی۔",
+          "proposed": "“{name}” شامل کیا گیا۔"
+        },
+        {
+          "key": "tui.tags.create_help",
+          "current": "مشترکہ ٹیگ تیار کر کے یہاں لاگو کی جاتی ہے۔",
+          "proposed": "مشترکہ ٹیگ تیار کر کے یہاں لاگو کیا جاتا ہے۔"
+        },
+        {
+          "key": "tui.tags.created_applied",
+          "current": "“{name}” تیار کر کے لاگو کی گئی۔",
+          "proposed": "“{name}” تیار کر کے لاگو کیا گیا۔"
+        },
+        {
+          "key": "tui.tags.partial_create",
+          "current": "ٹیگ بن گئی، مگر لاگو نہیں ہو سکی۔ دوبارہ لاگو کرنے کی کوشش کریں۔",
+          "proposed": "ٹیگ بن گیا، مگر لاگو نہیں ہو سکا۔ دوبارہ لاگو کرنے کی کوشش کریں۔"
+        },
+        {
+          "key": "tui.tags.cap_applied",
+          "current": "8 ٹیگز لاگو ہیں۔ دوسری شامل کرنے سے پہلے ایک ہٹائیں۔",
+          "proposed": "8 ٹیگز لاگو ہیں۔ دوسرا شامل کرنے سے پہلے ایک ہٹائیں۔"
+        }
+      ],
+      "reason": "The terminal treats ٹیگ as feminine here but the relay and neighbouring plural constructions treat it as masculine, so the same noun changes gender across surfaces."
+    },
+    {
+      "id": "UR2-011",
+      "severity": "MINOR",
+      "namespaces": [
+        "tui.viewer"
+      ],
+      "category": [
+        "typography",
+        "native idiom"
+      ],
+      "examples": [
+        {
+          "key": "tui.viewer.unreadable",
+          "current": "یہ فائل پڑھی نہیں جا سکتی — موجود نہیں، ناقابلِ قرأت ہے، یا اجازت شدہ روٹ ڈائریکٹریوں سے باہر ہے",
+          "proposed": "یہ فائل موجود نہیں، پڑھنے کے قابل نہیں، یا اجازت شدہ روٹ ڈائریکٹریوں سے باہر ہے"
+        }
+      ],
+      "reason": "ناقابلِ قرأت is misspelled and awkward; the proposed wording preserves all three refusal causes in idiomatic Urdu."
+    }
+  ],
+  "evidence": {
+    "portable_bundle": "All paths below are sibling files in this receipt directory; .pairs files contain the complete 1,355-line English/Urdu review workbook.",
+    "findings_file": "findings.json",
+    "contract_checks_file": "contract-checks.json",
+    "mechanical_summary_file": "mechanical-summary.json",
+    "plural_evidence_file": "plurals-rendered.json",
+    "fit_evidence_file": "fit-rendered.json",
+    "length_candidates_file": "materially-longer.json",
+    "human_report_file": "ur-core-round1-second-audit.md",
+    "reproduction_scripts": [
+      "scripts/audit_ur_core.py",
+      "scripts/fit_ur_core.py",
+      "scripts/plural_ur_core.py"
+    ]
+  },
+  "not_claimed": [
+    "No catalogue, ledger, generated shipped.json, hold, source worktree, or PR was edited.",
+    "No native/rendered RTL or design sign-off is claimed.",
+    "No shipped eligibility or release approval is claimed.",
+    "No green mechanical check is presented as native semantic approval."
+  ]
+}

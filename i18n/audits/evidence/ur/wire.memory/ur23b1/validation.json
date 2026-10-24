@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "record_kind": "audit_evidence_validation",
+  "all_passed": true,
+  "checks": {
+    "commit_exact": true,
+    "namespace_count_23": true,
+    "receipt_keys_1355": true,
+    "namespace_key_sum_1355": true,
+    "all_current_examples_match_catalogue": true,
+    "all_proposals_nonempty_without_redaction": true,
+    "finding_ids_unique": true,
+    "severity_counts_exact": true,
+    "core_findings_unresolved_bm": true,
+    "namespace_verdict_counts": true,
+    "all_namespace_hashes_fresh": true,
+    "plural_evidence_19x5": true,
+    "fit_evidence_54_clean": true,
+    "redaction_artifact_recorded": true,
+    "human_report_covers_findings": true,
+    "pair_workbook_23_files_1355_unique_keys": true,
+    "independence_recorded": true,
+    "repository_log_green": true
+  },
+  "check_clarification": "The 1,355-key scope is the 23 carried Urdu namespaces; English contains additional uncarried namespaces and is not expected to have only 1,355 keys globally."
+}

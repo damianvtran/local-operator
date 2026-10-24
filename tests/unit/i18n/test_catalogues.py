@@ -38,8 +38,9 @@ def test_shipped_wire_namespaces_exist() -> None:
     # in its own slice test, so this list does not churn per TUI slice.
     # The held Chinese candidate lives on a separate remote ref, not in the
     # releasable package. Pin the whole set so partial restoration cannot
-    # accidentally admit nine passed groups without its failed slash audit.
-    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "vi")
+    # accidentally admit it without its failed slash audit. Urdu is present
+    # only after all 23 carried core namespaces passed their ledger gate.
+    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "ur", "vi")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.agents",

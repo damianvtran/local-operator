@@ -1,0 +1,24 @@
+tui.tags.added
+EN Added “{name}”.
+OLD “{name}” شامل کی گئی۔
+NEW “{name}” شامل کیا گیا۔
+tui.tags.cap_applied
+EN 8 tags applied. Remove one before adding another.
+OLD 8 ٹیگز لاگو ہیں۔ دوسری شامل کرنے سے پہلے ایک ہٹائیں۔
+NEW 8 ٹیگز لاگو ہیں۔ دوسرا شامل کرنے سے پہلے ایک ہٹائیں۔
+tui.tags.create_help
+EN Creates a shared tag and applies it here.
+OLD مشترکہ ٹیگ تیار کر کے یہاں لاگو کی جاتی ہے۔
+NEW مشترکہ ٹیگ تیار کر کے یہاں لاگو کیا جاتا ہے۔
+tui.tags.created_applied
+EN Created and applied “{name}”.
+OLD “{name}” تیار کر کے لاگو کی گئی۔
+NEW “{name}” تیار کر کے لاگو کیا گیا۔
+tui.tags.partial_create
+EN Tag created, but couldn't apply it. Retry applying.
+OLD ٹیگ بن گئی، مگر لاگو نہیں ہو سکی۔ دوبارہ لاگو کرنے کی کوشش کریں۔
+NEW ٹیگ بن گیا، مگر لاگو نہیں ہو سکا۔ دوبارہ لاگو کرنے کی کوشش کریں۔
+tui.tags.removed
+EN Removed “{name}”.
+OLD “{name}” ہٹا دی گئی۔
+NEW “{name}” ہٹا دیا گیا۔

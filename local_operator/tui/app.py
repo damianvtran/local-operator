@@ -4701,6 +4701,25 @@ def _offload_target_refusal(
     )
 
 
+def _quoted_echo_within_cells(text: str, budget: int = 20) -> str:
+    """The unknown value, quoted, bounded by DISPLAY CELLS as RENDERED.
+
+    A character cap is not a width cap, and the row renders ``repr``: twenty
+    backslashes are twenty raw cells but FORTY rendered ones (repr doubles
+    them), while twelve CJK characters are 72. Bound the escaped payload the
+    row actually shows, then re-quote it.
+    """
+    shown = repr(text)[1:-1]
+    if cell_len(shown) <= budget:
+        return f"'{shown}'"
+    out = ""
+    for char in shown:
+        if cell_len(out + char) > budget - 1:
+            break
+        out += char
+    return f"'{out}…'"
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -45978,11 +45997,13 @@ class OperatorApp(App[None]):
         resolved = resolve_language()
         options = dict(language_options())
         if not wanted:
-            # Within the picker's receipt budget; the space is the browse
-            # (`_language_choices`), and the /settings row has the same list.
+            # Within the notice row's 70-cell budget at 80 columns (design D2).
+            # The value space is NOT enumerated: shipped locales grow, and the
+            # space key opens `_language_choices`, which lists every accepted
+            # value. The refusal names that same affordance.
             self._system_notice(
                 f"language: {resolved} ({language_name(resolved)}) — "
-                f"/language <{'|'.join(options)}>; space"
+                "/language <value>; space browses"
             )
             return
         key = (
@@ -45991,8 +46012,12 @@ class OperatorApp(App[None]):
             else normalise_locale(wanted) or wanted
         )
         if key not in options:
+            # Bound the echoed token so the refusal cannot outgrow the notice
+            # row, then name the affordance this client actually has.
             self._system_notice(
-                f"unknown language {wanted!r} — available: {', '.join(options)}", "warning"
+                f"unknown language {_quoted_echo_within_cells(wanted)} — "
+                "press space to list values",
+                "warning",
             )
             return
         if key == self._language_current():
