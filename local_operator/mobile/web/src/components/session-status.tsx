@@ -174,7 +174,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 				>
 					{/* Reading order is the one both references use — the TUI band's right
 					    group and the desktop strip both read context before spend — and
-					    `ml-auto` sits on the SECOND cell rather than on `justify-between`,
+					    `ms-auto` sits on the SECOND cell rather than on `justify-between`,
 					    so a lone reading keeps a fixed edge and the row does not reflow as
 					    the other appears or vanishes. */}
 					{context.spelling ? (
@@ -186,7 +186,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							{/* The estimate marker: the desktop's dim WORD, not a glyph —
 							    D2's ruling; `contextEstimateMarker` names both precedents. */}
 							{estimateMarker ? (
-								<span className="ml-1 text-ink-dim">{estimateMarker}</span>
+								<span className="ms-1 text-ink-dim">{estimateMarker}</span>
 							) : null}
 						</span>
 					) : null}
@@ -201,7 +201,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 								   should hear; the suffix names what the press opens. */
 								aria-label={`${spend.text} spend breakdown`}
 								onClick={() => setExpanded((open) => !open)}
-								className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
+								className="ms-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
 							>
 								<span className="truncate">{spend.text}</span>
 								<span aria-hidden className={CHEVRON_BOX}>
@@ -214,7 +214,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							   dead control. */
 							<span
 								data-testid="session-status-spend"
-								className="ml-auto min-w-0 truncate text-ink-muted"
+								className="ms-auto min-w-0 truncate text-ink-muted"
 							>
 								{spend.text}
 							</span>
@@ -232,7 +232,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							aria-controls={expanded ? panelId : undefined}
 							aria-label="cost detail"
 							onClick={() => setExpanded((open) => !open)}
-							className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
+							className="ms-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
 						>
 							<span className="truncate">cost detail</span>
 							<span aria-hidden className={CHEVRON_BOX}>

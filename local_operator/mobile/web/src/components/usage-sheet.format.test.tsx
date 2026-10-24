@@ -11,7 +11,7 @@ const context = vi.hoisted(() => ({ backendLocale: "fr", uiLocale: "en", directi
 // This is component/DOM text proof, not an audited French bundle or pixels.
 vi.mock("../store", async () => {
 	const { createMessageRuntime } = await import("../i18n/runtime");
-	const runtime = createMessageRuntime(() => context, () => undefined);
+	const runtime = createMessageRuntime(() => context, () => undefined, Object.keys(BUNDLED_OWNED));
 	return { messageRuntime: runtime, useLanguage: () => context.backendLocale, useLocaleSnapshot: () => context };
 });
 vi.mock("../api", () => ({ getUsage: vi.fn() }));
@@ -19,7 +19,8 @@ import { messageRuntime } from "../store";
 
 function select(locale: "en" | "fr" | "es" | "ru" | "vi" | "hi", translated: boolean) {
 	context.backendLocale = locale;
-	for (const [namespace, messages] of Object.entries(BUNDLED_OWNED)) {
+	for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
+		const messages = locales.en;
 		messageRuntime.registerBundle(namespace, "en", { ...messages });
 		if (translated) messageRuntime.registerBundle(namespace, locale, {
 			...messages,
@@ -103,7 +104,7 @@ it.each([
 	select(locale, true);
 	// Category markers deliberately are NOT native translations: this separates
 	// the caller/runtime count proof from the independent native audit obligation.
-	const messages = { ...BUNDLED_OWNED["relay.shell"] };
+	const messages = { ...BUNDLED_OWNED["relay.shell"].en };
 	const valid = new Set(categories);
 	for (const unit of ["credits", "tokens", "requests"]) {
 		messages[`relay.shell.usage.unit_${unit}`] = `{count, plural, ${[...valid].map((category) => `${category} {${unit}_${category}}`).join(" ")}}`;
@@ -153,7 +154,7 @@ it("formats reset and snapshot dates consistently in the catalogue locale", asyn
 it("uses EN formatting when the backend preference has no complete owned bundle", async () => {
 	// Own runtime guarantees no French registration leaks from earlier tests.
 	const isolated = createMessageRuntime(() => ({ ...context, uiLocale: "en" }), () => undefined);
-	for (const [ns, copy] of Object.entries(BUNDLED_OWNED)) isolated.registerBundle(ns, "en", { ...copy });
+	for (const [ns, locales] of Object.entries(BUNDLED_OWNED)) isolated.registerBundle(ns, "en", { ...locales.en });
 	expect(isolated.uiLocaleFor("fr")).toBe("en");
 	context.backendLocale = "fr"; context.uiLocale = "en";
 	load([{ ...base, amount: { ...base.amount, remaining: 123.5, unit: "credits" } }], Date.UTC(2026, 0, 2, 15, 4));

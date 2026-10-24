@@ -43,7 +43,7 @@ describe("retainConfigStream", () => {
 		vi.stubGlobal("navigator", { language: "ur-PK", languages: ["ur-PK"] });
 		fresh.initializeLocaleMetadata();
 		const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
-		// Each approved OWNED English namespace registers once through the
+		// Each approved owned namespace/locale pair registers once through the
 		// existing repaint channel. Pin ownership identities independently, then
 		// derive the initial revision count; never suppress same-locale updates.
 		// The rebase unioned both branches' slices: relay.session (main, C2) and
@@ -61,7 +61,11 @@ describe("retainConfigStream", () => {
 			"relay.session.tags",
 			"relay.shell",
 		]);
-		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: ownedNamespaces.length });
+		const registrations = Object.values(BUNDLED_OWNED).reduce(
+			(count, locales) => count + Object.keys(locales).length,
+			0,
+		);
+		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: registrations });
 		expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
 		expect(fetchMock).not.toHaveBeenCalled(); unmount();
 	});

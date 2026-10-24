@@ -138,7 +138,7 @@ export function ModelSheet({
 							key={m.selector}
 							type="button"
 							onClick={() => void choose(m)}
-							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 						>
 							{/* The slot is always reserved so nothing shifts, but only
 							    the CURRENT row paints a dot. The inert `bg-hairline`

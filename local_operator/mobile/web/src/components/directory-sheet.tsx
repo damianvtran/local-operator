@@ -179,7 +179,7 @@ export function DirectorySheet({
 						   an unavailable action. The accent border, the wash and
 						   the word do the work at full opacity (4.86:1 / 4.57:1). */
 						className={cn(
-							"flex min-h-11 items-center gap-2 rounded-sm border px-3 text-left active:bg-elevated",
+							"flex min-h-11 items-center gap-2 rounded-sm border px-3 text-start active:bg-elevated",
 							tag === "current" ? "border-accent bg-accent-wash" : "border-control bg-surface",
 						)}
 					>
@@ -187,7 +187,7 @@ export function DirectorySheet({
 						    path's last segment is the part that NAMES the directory,
 						    and an end-ellipsis hid exactly that. The rows may wrap;
 						    the chip above them stays a single truncated line. */}
-						<span className="min-w-0 flex-1 break-all font-mono text-mono-sm text-ink">
+						<span dir="ltr" className="min-w-0 flex-1 break-all font-mono text-mono-sm text-ink">
 							{displayPath(path, dirs?.home ?? home)}
 						</span>
 						{/* TEXT, never a glyph: a tick renders as tofu on phones whose
@@ -204,6 +204,7 @@ export function DirectorySheet({
 				    them all. */}
 				<div className="flex items-center gap-2">
 					<input
+						dir="ltr"
 						value={typed}
 						onChange={(e) => setTyped(e.target.value)}
 						placeholder={messageRuntime.t("relay.session.directory.path_placeholder")}
@@ -303,7 +304,7 @@ export function WorkingDirectoryChip({
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
 					<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
 				</svg>
-				<span className="min-w-0 truncate">{label}</span>
+				<span dir="ltr" className="min-w-0 truncate">{label}</span>
 			</Chip>
 			<DirectorySheet
 				open={open}

@@ -120,7 +120,7 @@ export function AssetCard({
 				)}
 				{asset.highlighted ? (
 					<span
-						className="absolute left-1 top-1 rounded-xs bg-canvas/80 px-1 text-meta text-accent"
+						className="absolute start-1 top-1 rounded-xs bg-canvas/80 px-1 text-meta text-accent"
 						aria-label="highlighted"
 					>
 						★
@@ -128,7 +128,7 @@ export function AssetCard({
 				) : null}
 				<span
 					className={cn(
-						"absolute right-1 top-1 rounded-xs border px-1 text-meta",
+						"absolute end-1 top-1 rounded-xs border px-1 text-meta",
 						ORIGIN_CLASS[asset.origin_group] ?? ORIGIN_CLASS.mentioned,
 					)}
 				>
@@ -145,8 +145,8 @@ export function AssetCard({
 				<p className="line-clamp-2 text-body-sm font-medium text-ink">{asset.name}</p>
 				<p className="truncate text-meta text-ink-muted">{subtitle}</p>
 				{source ? (
-					<p className="truncate pr-8 text-meta text-ink-dim">
-						<span aria-hidden>↳ </span>
+					<p className="truncate pe-8 text-meta text-ink-dim">
+						<span aria-hidden className="lo-directional">↳ </span>
 						{source}
 					</p>
 				) : null}
@@ -168,7 +168,7 @@ export function AssetCard({
 				type="button"
 				onClick={onMenu}
 				aria-label={`actions for ${asset.name}`}
-				className="absolute bottom-0 right-0 flex min-h-11 min-w-11 items-center justify-center rounded-sm text-body text-ink-muted active:bg-elevated"
+				className="absolute bottom-0 end-0 flex min-h-11 min-w-11 items-center justify-center rounded-sm text-body text-ink-muted active:bg-elevated"
 			>
 				⋯
 			</button>

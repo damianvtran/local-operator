@@ -596,17 +596,17 @@ function CalloutRow({
 					   tail rows cannot honour. */
 					<button
 						type="button"
-						className="min-h-11 min-w-0 flex-1 truncate text-left text-meta text-ink active:text-ink-dim"
+						className="min-h-11 min-w-0 flex-1 truncate text-start text-meta text-ink active:text-ink-dim"
 						aria-expanded={open}
 						onClick={() => void toggle()}
 					>
 						{name || displayText(file.path)}
-						{path && name ? <span className="ml-2 text-ink-muted">{path}</span> : null}
+						{path && name ? <span dir="ltr" className="ms-2 text-ink-muted">{path}</span> : null}
 					</button>
 				) : (
 					<span className="min-w-0 flex-1 truncate text-meta text-ink">
 						{name || displayText(file.path)}
-						{path && name ? <span className="ml-2 text-ink-muted">{path}</span> : null}
+						{path && name ? <span dir="ltr" className="ms-2 text-ink-muted">{path}</span> : null}
 					</span>
 				)}
 				{size ? <span className="shrink-0 text-meta text-ink-dim">{size}</span> : null}
@@ -618,7 +618,7 @@ function CalloutRow({
 					)}
 					{preview.kind === "text" && (
 						<>
-							<pre className="max-h-64 overflow-auto rounded-sm bg-sunken px-2 py-1.5 font-mono text-mono-sm break-words whitespace-pre-wrap">
+							<pre dir="ltr" className="max-h-64 overflow-auto rounded-sm bg-sunken px-2 py-1.5 font-mono text-mono-sm break-words whitespace-pre-wrap">
 								{preview.text}
 							</pre>
 							{preview.truncated && (

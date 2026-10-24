@@ -28,7 +28,7 @@ import { Sheet } from "./ui/sheet";
 
 /** One full-width menu row: the 44px touch floor the header controls use. */
 const MENU_ROW =
-	"flex min-h-11 w-full items-center gap-2 rounded-sm px-3 text-left text-body active:bg-surface";
+	"flex min-h-11 w-full items-center gap-2 rounded-sm px-3 text-start text-body active:bg-surface";
 
 export function SessionMenu({
 	open,

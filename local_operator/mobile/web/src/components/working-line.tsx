@@ -84,14 +84,14 @@ export function WorkingLine({
 			</span>
 			{/* The clock's SLOT is reserved, not measured: ``w-[6ch]`` is the width of
 			 * the widest form the formatter can produce (``59m59s``/``41d16h``/
-			 * ``100d+``), right-aligned so the digits grow leftward into their own
+			 * ``100d+``), end-aligned so the digits grow leftward into their own
 			 * space. The TUI reserves ``WorkingBlock._CLOCK_COL`` for exactly this
 			 * reason — an unreserved clock re-clips the label as the number changes
 			 * form, so at 320px the label read 38 characters at ``1h`` and 28 at
 			 * ``1000h 40m`` and jumped 5 characters in the single tick across the
 			 * ``59m 59s`` → ``1h`` crossing (design round 1 D2). Reserved cells also
 			 * make withholding free: an empty slot is the same width as a full one. */}
-			<span className="w-[6ch] shrink-0 text-right font-mono text-mono-sm text-ink-dim tabular-nums">
+			<span className="w-[6ch] shrink-0 text-end font-mono text-mono-sm text-ink-dim tabular-nums">
 				{hasClock ? formatElapsed(elapsed) : ""}
 			</span>
 		</div>

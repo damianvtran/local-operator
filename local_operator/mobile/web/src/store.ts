@@ -88,13 +88,18 @@ let sessionsRevision = 0;
    "unchanged" — and the voice mic's rule for it is the rule for
    ``available: false``: hide. */
 let capabilities: Capabilities | null = null;
-/* Backend preference and actual UI copy language are different facts. Until
-   C bundles own copy, the SPA remains English/LTR under every backend frame.
-   No OS/device/storage guess is allowed to impersonate backend authority. */
+/* Backend preference and actual UI copy language are different facts. The
+   generated package may carry audited non-English bundles; an incomplete owned
+   surface still selects English/LTR as a whole. No OS/device/storage guess is
+   allowed to impersonate backend authority. */
 let localeSnapshot: LocaleSnapshot = Object.freeze({
 	backendLocale: null, uiLocale: "en", direction: "ltr", revision: 0,
 });
-export const messageRuntime = createMessageRuntime(() => localeSnapshot, () => publishLocaleSnapshot());
+export const messageRuntime = createMessageRuntime(
+	() => localeSnapshot,
+	() => publishLocaleSnapshot(),
+	Object.keys(BUNDLED_OWNED),
+);
 export const wireCatalogueLoader = createWireLoader({
 	context: () => ({ origin: typeof location === "object" ? location.origin : "", locale: localeSnapshot.backendLocale }),
 	capabilities: () => capabilities,
@@ -167,8 +172,10 @@ const listeners = new Set<() => void>();
    listener set is declared: an init-time registration notifies that set, so
    registering above it would emit into a `listeners` binding still in its
    temporal dead zone and abort module evaluation. */
-for (const [namespace, messages] of Object.entries(BUNDLED_OWNED)) {
-	messageRuntime.registerBundle(namespace, "en", { ...messages });
+for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
+	for (const [locale, messages] of Object.entries(locales)) {
+		messageRuntime.registerBundle(namespace, locale, { ...messages });
+	}
 }
 
 function emit() {

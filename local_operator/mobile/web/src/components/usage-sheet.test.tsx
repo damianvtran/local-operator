@@ -11,7 +11,7 @@ afterEach(() => {
 	cleanup();
 	vi.resetAllMocks();
 	// Synthetic row copy must not leak into later English identity assertions.
-	messageRuntime.registerBundle("relay.shell", "en", BUNDLED_OWNED["relay.shell"]);
+	messageRuntime.registerBundle("relay.shell", "en", BUNDLED_OWNED["relay.shell"].en);
 });
 
 it("an empty cache is not a measured zero credit balance", async () => {
@@ -59,7 +59,7 @@ it("lets catalogue row messages reorder all fields and own punctuation", async (
 	// Use synthetic English-bundle overrides, not an unaudited locale pretending
 	// to be shipped: this probes the real render/runtime path's composition freedom.
 	messageRuntime.registerBundle("relay.shell", "en", {
-		...BUNDLED_OWNED["relay.shell"],
+		...BUNDLED_OWNED["relay.shell"].en,
 		"relay.shell.usage.row": "{value} — {window} / {label}",
 		"relay.shell.usage.row_family": "{value} — {family} / {window} / {label}",
 	});

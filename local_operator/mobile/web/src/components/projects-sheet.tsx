@@ -274,7 +274,7 @@ function ProjectRow({
 		<button
 			type="button"
 			onClick={onOpen}
-			className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-2 text-left active:bg-surface"
+			className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-2 text-start active:bg-surface"
 		>
 			<span className="flex min-w-0 items-baseline gap-2">
 				<span className="min-w-0 flex-1 truncate text-body font-medium text-ink">
@@ -299,7 +299,7 @@ function ProjectRow({
 				>
 					{progress}
 				</span>
-				<span className="ml-auto shrink-0 text-ink-dim">{meta.join(" · ")}</span>
+				<span className="ms-auto shrink-0 text-ink-dim">{meta.join(" · ")}</span>
 			</span>
 		</button>
 	);
@@ -313,7 +313,7 @@ function BackRow({ onClick, label = "projects" }: { onClick: () => void; label?:
 			onClick={onClick}
 			className="flex min-h-11 items-center gap-1 px-3 text-body-sm text-ink-muted active:bg-surface"
 		>
-			<span aria-hidden>‹</span>
+			<span aria-hidden className="lo-directional">‹</span>
 			{label}
 		</button>
 	);
@@ -839,7 +839,7 @@ export function ProjectsSheet({
 							</div>
 							<Button
 								variant="outline"
-								className="ml-auto"
+								className="ms-auto"
 								onClick={() => {
 									setFormError("");
 									setView({ name: "create" });
@@ -1038,7 +1038,7 @@ export function ProjectsSheet({
 												disabled={busy}
 												aria-pressed={milestone.completed_at !== null}
 												onClick={() => void toggleMilestone(detail.project, milestone)}
-												className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm px-1 text-left active:bg-surface disabled:opacity-50"
+												className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm px-1 text-start active:bg-surface disabled:opacity-50"
 											>
 												<span
 													aria-hidden
@@ -1606,7 +1606,7 @@ export function ProjectsSheet({
 									type="button"
 									disabled={busy}
 									onClick={() => void linkSession(view.key, session.session_id)}
-									className="flex min-h-11 w-full flex-col items-start gap-0.5 rounded-sm px-1 py-1 text-left active:bg-surface disabled:opacity-50"
+									className="flex min-h-11 w-full flex-col items-start gap-0.5 rounded-sm px-1 py-1 text-start active:bg-surface disabled:opacity-50"
 								>
 									<span className="flex w-full min-w-0 items-baseline gap-2">
 										<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
