@@ -2843,6 +2843,13 @@ def _resolve_device(record: Any, name: str) -> str | None:
     (and refusing an ambiguous tail) is what stops a share from silently landing on
     the wrong device — a mistargeted share spends the wrong machine's quota.
 
+    AN AMBIGUOUS NAME IS REFUSED, NOT FIRST-MATCHED (P0 naming design): names are
+    cosmetic and unauthenticated, so two members may carry one spelling, and a
+    silent pick would hand `member rm` or `credential share --with` the wrong
+    device. The refusal names every candidate's short id and says to use the id.
+    An exact id still resolves, and so does a query where the same member matches
+    by both its id and its name.
+
     THE THREE VERBS THAT TAKE A DEVICE ALL COME THROUGH HERE: ``credential share
     --with``, ``member grant|revoke`` and ``member rm`` (review round 1, R3 added the
     last two). A verb that hands its raw argument to the row writer answers a valid
@@ -2852,10 +2859,39 @@ def _resolve_device(record: Any, name: str) -> str | None:
     wanted = str(name or "").strip()
     if not wanted:
         return None
-    for member in record.active_members():
-        if member.device_id == wanted or member.name == wanted:
-            return str(member.device_id)
-    matches = [m for m in record.active_members() if m.device_id.endswith(wanted)]
+    # NAMES ARE COSMETIC AND UNAUTHENTICATED (mesh-transport-identity §3.1): any
+    # member may claim any spelling, so a first-match over names is a MISTARGET
+    # — the write lands on whichever device happened to be listed first. Collect
+    # the exact hits and only answer when the query names exactly one device.
+    members = record.active_members()
+    by_id = [m for m in members if str(m.device_id) == wanted]
+    by_name = [m for m in members if str(m.name or "") == wanted]
+    if len(by_name) > 1:
+        from local_operator.network.types import MeshRefusal
+
+        listed = ", ".join(str(m.device_id)[:8] for m in by_name)
+        raise MeshRefusal(
+            "ambiguous_member",
+            f"{wanted!r} is the name of {len(by_name)} devices in {record.name} "
+            f"({listed}); use the device id",
+        )
+    if by_name:
+        # A name that equals ANOTHER device's id is the same collision from the
+        # other side: the query identifies one device and names a different one,
+        # so neither reading may win silently.
+        if by_id and str(by_id[0].device_id) != str(by_name[0].device_id):
+            from local_operator.network.types import MeshRefusal
+
+            raise MeshRefusal(
+                "ambiguous_member",
+                f"{wanted!r} is one device's id ({str(by_id[0].device_id)[:8]}) and "
+                f"another device's name ({str(by_name[0].device_id)[:8]}) in "
+                f"{record.name}; use the device id",
+            )
+        return str(by_name[0].device_id)
+    if by_id:
+        return str(by_id[0].device_id)
+    matches = [m for m in members if m.device_id.endswith(wanted)]
     return str(matches[0].device_id) if len(matches) == 1 else None
 
 
