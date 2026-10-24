@@ -824,6 +824,19 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     identity_rotate.add_argument("--json", action="store_true")
     identity_show = identity_actions.add_parser("show", help="This device's id and fingerprint")
     identity_show.add_argument("--json", action="store_true")
+    identity_set_name = identity_actions.add_parser(
+        "set-name",
+        help="Rename this device; peers pick the name up on their next membership pull",
+    )
+    identity_set_name.add_argument(
+        "name",
+        metavar="NAME",
+        # The limit and the rejected characters are ``identity.validate_member_name``'s
+        # (``MEMBER_NAME_MAX`` = 64); restated here because the parser must answer
+        # ``--help`` without importing the key module.
+        help="The new display name (1-64 characters; no '#', no control characters, not a device id)",
+    )
+    identity_set_name.add_argument("--json", action="store_true")
 
     actions.add_parser(
         "credentials",
@@ -8490,6 +8503,64 @@ def _cmd_identity_rotate(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _cmd_identity_set_name(args: argparse.Namespace) -> int:
+    """``lop network identity set-name <name>``: this device's own human name.
+
+    WHY A SELF-RENAME AND NOT A PEER RELABEL. A member row's name is the DEVICE's
+    own statement about itself (`docs/design/mesh-member-display-name.md` §3.1): it
+    is seeded at join from the ``joiner_name`` inside the signed transcript, and
+    after that only the device it names may move it (Rule N1,
+    ``relay.adopt_members``). A verb that relabelled a peer would therefore either
+    lie until the next pull or need a second field that silently disagrees with
+    what the peer says about itself — so the supported verb is the one that can be
+    true.
+
+    TWO PATHS, ONE PRIMITIVE — the ``member grant`` shape. When a relay answers,
+    the rename runs inside it so every surface THAT PROCESS serves agrees without a
+    restart (it reads ``self.identity``, not the file); when none answers, this
+    process runs the same ``relay.rename_self`` under the same store locks. Both
+    paths share validation, the collision guard and the audit record, because those
+    live in the primitive.
+
+    ``--json`` shape: ``{ok, device_id, name, previous, networks, converged}`` —
+    ``networks`` lists the records whose own row was rewritten, and ``converged``
+    says which path did the write (``relay`` or ``locally (relay not running)``).
+    """
+    name = str(getattr(args, "name", "") or "")
+    live = _relay_call("net_identity_name", name=name, allow_no_answer=True)
+    if live is not None:
+        document: dict[str, Any] = {
+            "ok": True,
+            "device_id": str(live.get("device_id") or ""),
+            "name": str(live.get("name") or ""),
+            "previous": str(live.get("previous") or ""),
+            "networks": list(live.get("networks") or []),
+            "converged": "relay",
+        }
+    else:
+        receipt = _import_relay().rename_self(name)
+        document = {
+            "ok": True,
+            "device_id": receipt.device_id,
+            "name": receipt.name,
+            "previous": receipt.previous,
+            "networks": list(receipt.networks),
+            "converged": "locally (relay not running)",
+        }
+    return _emit(
+        args,
+        document,
+        [
+            f"this device is now called {document['name']!r} (was {document['previous']!r})",
+            f"written to the identity file and to {len(document['networks'])} member row(s)",
+            "peers pick it up on their next membership pull — about 20 s on a live link; "
+            "a device the mesh cannot reach keeps the name it was admitted under",
+            "a name is cosmetic: nothing authenticates on it, and every verb that takes a "
+            "device accepts the id",
+        ],
+    )
+
+
 def _import_relay() -> Any:
     from local_operator.network import relay
 
@@ -9120,6 +9191,8 @@ def _guard_identity_subcommand(args: argparse.Namespace) -> int:
         return _cmd_identity_show(args)
     if getattr(args, "identity_command", None) == "rotate":
         return _cmd_identity_rotate(args)
+    if getattr(args, "identity_command", None) == "set-name":
+        return _cmd_identity_set_name(args)
     return _cmd_identity_show(args)
 
 
