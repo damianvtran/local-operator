@@ -413,8 +413,9 @@ async def test_controller_completes_real_flow_only_after_final_cancel_check(
     else:
         text = await host.login("radient", signal=signal)
         assert "Logged in" in text
-        assert "Account could not be verified" in text and f"[{legacy.id}]" in text
-        assert "local-operator login radient" in text
+        assert "Account could not be verified" in text and f"stored row {legacy.id}" in text
+        # The controller receipt is shared with hosts that are not terminals.
+        assert "To restore a retained record, sign in again to that account." in text
         assert (
             store.list_credentials("radient")[0].data["api_endpoint"]
             == DEFAULT_RADIENT_API_BASE_URL
@@ -469,7 +470,7 @@ def test_cli_completes_real_flow_only_after_final_cancel_check(
         expected = {
             "cancel": "Login cancelled",
             "refused": "Login failed:",
-            "disabled": "remains unavailable",
+            "disabled": "stays disabled",
         }[outcome]
         assert expected in text
         assert "Logged in" not in text
@@ -485,7 +486,7 @@ def test_cli_completes_real_flow_only_after_final_cancel_check(
         assert effects == []
     else:
         assert code == 0 and "Logged in" in text
-        assert "Account could not be verified" in text and f"[{legacy.id}]" in text
+        assert "Account could not be verified" in text and f"stored row {legacy.id}" in text
         assert "local-operator login radient" in text
         assert (
             store.list_credentials("radient")[0].data["api_endpoint"]

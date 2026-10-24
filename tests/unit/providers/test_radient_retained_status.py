@@ -35,9 +35,11 @@ def test_retained_status_is_distinct_from_usable_selection(
     before = store.list_credentials("radient", include_disabled=True)
     text = "\n".join(format_logins(store))
     assert "Retained Radient sign-ins (unavailable):" in text
-    assert f"[{retained_id}] Account could not be verified" in text
-    assert "local-operator login radient" in text
-    assert "/login radient" in text
+    assert f"Account could not be verified; record retained (stored row {retained_id})." in text
+    # The shared block is host-neutral: neither a slash command nor a shell
+    # command is an instruction every host's reader can follow (round 2, D5).
+    assert "To restore a retained record, sign in again to that account." in text
+    assert "/login radient" not in text
     assert "not been deleted or assigned" in text
     assert "do-not-print" not in text
     assert "unverified-label" not in text
@@ -56,9 +58,9 @@ def test_real_cli_status_prints_retention_and_recovery_without_writes(
     retained_id = _retained(store)
     assert list_logins(store) == 0
     output = capsys.readouterr().out
-    assert f"[{retained_id}]" in output
+    assert f"stored row {retained_id}" in output
     assert "Account could not be verified" in output
-    assert "local-operator login radient" in output
+    assert "To restore a retained record, sign in again to that account." in output
     assert _stored(store, retained_id).disabled_cause == "identity_unattributed"
 
 

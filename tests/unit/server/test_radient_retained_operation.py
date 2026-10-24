@@ -61,19 +61,27 @@ async def test_operation_publishes_only_trusted_retained_notice(
                 notice = published.get("retained_notice")
                 assert isinstance(notice, str)
                 assert "Account could not be verified" in notice
-                assert f"[{old.id}]" in notice
-                assert "local-operator login radient" in notice
+                assert f"stored row {old.id}" in notice
+                # Host-neutral by default: the desktop publishes this block and
+                # cannot instruct its reader in slash or shell syntax (round 2, D5).
+                assert "To restore a retained record, sign in again to that account." in notice
+                assert "local-operator login radient" not in notice
             else:
                 assert published.get("retained_notice") is None
             assert effects == ["defaults", "rehome"]
+        elif outcome == "disabled":
+            assert published.get("retained_notice") is None
+            # A verified sign-in whose row stays disabled is an OUTCOME, not a
+            # failure (round 2, D1); "unavailable" is reserved for retained rows (D2).
+            assert published["state"] == "succeeded"
+            assert "stays disabled" in published["message"]
+            assert "saved state was preserved" in published["message"]
+            assert "failed" not in published["message"].lower()
+            assert effects == []
         else:
             assert published.get("retained_notice") is None
             assert published["state"] == "failed"
-            if outcome == "disabled":
-                assert "remains unavailable" in published["message"]
-                assert "saved disabled state was preserved" in published["message"]
-            else:
-                assert published["message"] == "Sign-in failed. Check the provider and try again."
+            assert published["message"] == "Sign-in failed. Check the provider and try again."
             assert effects == []
     finally:
         await host.close()
