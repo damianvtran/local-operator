@@ -1,0 +1,13 @@
+{
+  "relay.ask.context.messages": "{count, plural, other {提问后你发来#条消息（最后{time}）}}",
+  "relay.ask.dismiss.answered_in_chat": "已在聊天中回答",
+  "relay.ask.dismiss.answered_in_chat_note": "你已在对话中回复",
+  "relay.ask.dismiss.cancel": "取消",
+  "relay.ask.dismiss.moot": "不再需要",
+  "relay.ask.dismiss.moot_note": "不再等待此问题",
+  "relay.ask.dismiss.open": "忽略……",
+  "relay.ask.dismiss.receipt": "已忽略 — 未发送回复",
+  "relay.ask.dismiss.receipt_answered_in_chat": "已忽略 — 已在聊天中回答",
+  "relay.ask.dismiss.receipt_moot": "已忽略 — 不再需要",
+  "relay.ask.dismiss.title": "忽略此问题"
+}
