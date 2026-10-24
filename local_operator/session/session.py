@@ -9894,27 +9894,26 @@ class Session:
         reason its sibling in ``process`` does: the body returns early on several
         paths, and every one of them is a state the settle has to be asked about.
         """
+        from local_operator.session.runtime.inbox import (
+            try_enter_read_batch, claim_inbox_batch, settle_read_batch,
+        )
+        from local_operator.wakes.spooled import await_spool_write
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            return
+        batch = try_enter_read_batch(directory)
+        if batch is None:
+            return  # BEFORE the rows helper's one-shot flag and any settlement
         body_error: BaseException | None = None
         try:
-            await self._drain_spooled_peer_inbox_rows()
+            await await_spool_write(claim_inbox_batch, batch)
+            await self._drain_spooled_peer_inbox_rows(batch)
         except BaseException as exc:
             body_error = exc
-        try:
-            directory = getattr(self._transcript, "directory", None)
-            if directory is not None:
-                from local_operator.wakes.spooled import await_spool_write
-                from local_operator.session.runtime.inbox import settle_owed_turn
+        await settle_read_batch(batch, body_error)
+        self._peer_inbox_drained = not batch.pending_after_commit
 
-                await await_spool_write(settle_owed_turn, directory)
-        except BaseException as settlement_error:
-            if body_error is not None:
-                raise BaseExceptionGroup("inbox delivery and settlement failed",
-                                         [body_error, settlement_error])
-            raise
-        if body_error is not None:
-            raise body_error
-
-    async def _drain_spooled_peer_inbox_rows(self) -> None:
+    async def _drain_spooled_peer_inbox_rows(self, batch) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
 
         Called by ``_run_turn_pipeline`` AFTER the turn's own messages are
@@ -9936,13 +9935,14 @@ class Session:
         """
         if self._peer_inbox_drained:
             return
-        self._peer_inbox_drained = True
+        # Completion flag is set only after durable handled-only commit.
         # Imported in-function: the runtime inbox lives behind the mobile
         # package's config-path machinery, and this module does not carry a
         # module-level dependency on it for a once-per-session path.
         from local_operator.wakes.spooled import await_spool_write
         from local_operator.session.runtime.inbox import (
             SOURCE_USER,
+            admit_batch_row,
             coalesce_wake_rows,
             drain_inbox,
         )
@@ -9950,16 +9950,14 @@ class Session:
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
             return
-        try:
-            lines = await await_spool_write(drain_inbox, directory)
-        except Exception:  # noqa: BLE001 — a bad spool must not fail the turn
-            logger.warning("peer inbox drain failed", exc_info=True)
-            return
+        entries = batch.delivery_rows()
+        ordinals = {id(line): indices for indices, line in entries}
+        lines = [line for _, line in entries]
         # BEFORE anything is delivered: a long handover spools one row per fired
         # occurrence, and every row would otherwise be its own wake and its own
         # turn (the reported 52-alarm flood). Coalescing first is also what keeps
         # this drain's own steer arm from queueing N copies of one reminder.
-        lines = coalesce_wake_rows(lines)
+        # Batch coalescing preserves original raw ordinals.
         # Rows of ONE batch carrying the same owner ``command_id``: ``drain_inbox``
         # empties the file, so a crash between the read and its receipt can
         # re-deliver the whole batch, and the steer arm's identity does not
@@ -9989,8 +9987,9 @@ class Session:
                 # ``_run_spooled_owner_prompt``).
                 if getattr(line, "source", "") == SOURCE_USER:
                     self._run_spooled_owner_prompt(line, seen=seen_owner_ids)
+                    batch.handled.update(ordinals[id(line)])
                 else:
-                    await self.receive_peer_message(
+                    await admit_batch_row(batch, ordinals[id(line)], self.receive_peer_message(
                         line.text,
                         mode="mailbox",
                         wake=bool(getattr(line, "wake", False)),
@@ -10012,7 +10011,7 @@ class Session:
                         # as before.
                         custom_type=getattr(line, "custom_type", "") or None,
                         bridge_meta=getattr(line, "bridge_meta", None) or None,
-                    )
+                    ))
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
 

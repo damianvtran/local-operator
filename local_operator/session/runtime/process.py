@@ -4389,6 +4389,28 @@ def _resume_consumed_ids(directory: Path) -> set[str]:
 
 
 async def _drain_inbox_into(handle: object) -> int:
+    from local_operator.session.runtime.inbox import (
+        try_enter_read_batch, claim_inbox_batch, settle_read_batch,
+    )
+    from local_operator.wakes.spooled import await_spool_write
+    directory = getattr(getattr(getattr(handle, "_session", None), "transcript", None), "directory", None)
+    if directory is None:
+        return 0
+    batch = try_enter_read_batch(directory)
+    if batch is None:
+        return 0  # nested queue-task reentry: no lease, settle or one-shot change
+    error: BaseException | None = None
+    delivered = 0
+    try:
+        await await_spool_write(claim_inbox_batch, batch)
+        delivered = await _drain_inbox_into_claimed(handle, batch)
+    except BaseException as exc:
+        error = exc
+    await settle_read_batch(batch, error, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))
+    return delivered
+
+
+async def _drain_inbox_into_claimed(handle: object, batch) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
     Also the handover path: the same file is where a DRAINING runtime spools what
@@ -4462,6 +4484,7 @@ async def _drain_inbox_into(handle: object) -> int:
     )
     from local_operator.session.runtime.inbox import (
         SOURCE_USER,
+        admit_batch_row,
         append_inbox,
         coalesce_wake_rows,
         drain_inbox,
@@ -4469,18 +4492,16 @@ async def _drain_inbox_into(handle: object) -> int:
     )
 
     requires_engagement = not durable_conversation_path(directory / TRANSCRIPT_FILENAME)
-    try:
-        lines = await await_spool_write(drain_inbox, directory)
-    except Exception:  # noqa: BLE001 — a bad spool must not block the runtime
-        logger.warning("inbox drain failed", exc_info=True)
-        return 0
+    entries = batch.delivery_rows()
+    ordinals = {id(line): indices for indices, line in entries}
+    lines = [line for _, line in entries]
     # BEFORE the deferral split below, which re-spools what it will not deliver:
     # a draining runtime spools one row per fired occurrence, so a schedule that
     # repeats across a long handover arrives here as dozens of identical wake rows
     # and each would be delivered as its own turn. Coalescing first means the
     # deferral writes back ONE row per wake (carrying its fire count), which is
     # also what keeps a later drain's merge from double-counting.
-    lines = coalesce_wake_rows(lines)
+    # Already structurally coalesced by batch.delivery_rows with ordinal mapping.
     # SUCCESSOR RESUME (ready-successor handoff). A checkpointed move may have
     # already delivered some spooled rows on the predecessor; the record's
     # ``inbox_consumed_ids`` is the durable "delivered once" set. Dropping those
@@ -4493,17 +4514,13 @@ async def _drain_inbox_into(handle: object) -> int:
 
     consumed = _resume_consumed_ids(directory)
     if consumed:
+        for line in lines:
+            if (getattr(line, "message_id", "") or "") in consumed:
+                batch.handled.update(ordinals[id(line)])
         lines = [line for line in lines if (getattr(line, "message_id", "") or "") not in consumed]
     if requires_engagement:
         keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
         lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]
-        for line in keep:
-            # Best-effort and order-preserving among themselves; a row that cannot
-            # be re-spooled is logged rather than lost silently.
-            if not await await_spool_write(append_inbox, directory, line):
-                logger.warning(
-                    "could not re-spool a deferred inbox row for %s", directory.name, exc_info=True
-                )
         if not lines:
             logger.info(
                 "inbox drain deferred for %s: no durable history yet, so the person has "
@@ -4518,7 +4535,7 @@ async def _drain_inbox_into(handle: object) -> int:
             # turn. The rows stay in the spool (touch nothing else here) and that
             # turn still drains them, which is the deferral the sender's receipt
             # describes.
-            await await_spool_write(drop_owed_turn, directory)
+            batch.drop_after_release = True
             return 0
     probed = getattr(handle, "receive_peer_message", None)
     if not lines:
@@ -4546,7 +4563,7 @@ async def _drain_inbox_into(handle: object) -> int:
         owner_row = getattr(line, "source", "") == SOURCE_USER
         try:
             if owner_row:
-                await _run_owner_prompt(handle, line, seen=seen_owner_ids)
+                await admit_batch_row(batch, ordinals[id(line)], _run_owner_prompt(handle, line, seen=seen_owner_ids))
             elif callable(probed):
                 fields: dict[str, Any] = {
                     "mode": "mailbox",
@@ -4594,7 +4611,7 @@ async def _drain_inbox_into(handle: object) -> int:
                             )
                             candidate = None
                     fields["bridge_meta"] = candidate
-                await receive(line.text, **fields)
+                await admit_batch_row(batch, ordinals[id(line)], receive(line.text, **fields))
             else:
                 raise RuntimeError("this handle cannot receive a spooled peer message")
             delivered += 1
@@ -4616,12 +4633,7 @@ async def _drain_inbox_into(handle: object) -> int:
             # written by an older build have no id and still deliver at-least-once,
             # which remains the deliberate direction (a duplicated note is visible
             # and harmless, a dropped one is neither).
-            if not await await_spool_write(append_inbox, directory, line):
-                logger.error(
-                    "could not re-spool an undelivered inbox row (command_id=%s); it is lost",
-                    getattr(line, "command_id", "") or "<none>",
-                    exc_info=True,
-                )
+            # Failed/unstarted rows remain in the original journal.
             if owner_row:
                 # LOUDER, AND FOR A DIFFERENT REASON: the owner's message is
                 # the one whose receipt already told the user it would run, and
@@ -4643,12 +4655,6 @@ async def _drain_inbox_into(handle: object) -> int:
     # otherwise leave the supervisor raising a runtime for a session with nothing
     # to run. Placed AFTER the loop rather than in a wrapper so the deferral
     # branch above keeps its own, opposite, decision.
-    from local_operator.wakes.spooled import await_spool_write
-    from local_operator.session.runtime.inbox import settle_owed_turn
-
-    await await_spool_write(
-        settle_owed_turn, directory, cwd=str(getattr(handle, "_desktop_cwd", "") or "")
-    )
     return delivered
 
 

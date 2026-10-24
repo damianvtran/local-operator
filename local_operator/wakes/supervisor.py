@@ -1914,6 +1914,7 @@ class _Sweeper:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._in_flight.clear()
+        self.raise_if_failed()
 
     def sweep(
         self,
@@ -2555,7 +2556,8 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             try:
                 await seat.shutdown()
             except BaseException as cleanup_error:
-                cleanup_errors.append(cleanup_error)
+                if cleanup_error is not primary_error and not any(cleanup_error is old for old in cleanup_errors):
+                    cleanup_errors.append(cleanup_error)
         if cleanup_errors:
             if primary_error is not None:
                 cleanup_errors.insert(0, primary_error)

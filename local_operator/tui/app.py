@@ -26201,9 +26201,9 @@ class OperatorApp(App[None]):
         """
         self.action_interrupt()
 
-    def on_stop_requested(self, message: StopRequested) -> None:
+    async def on_stop_requested(self, message: StopRequested) -> None:
         """Esc from the composer (the editor consumes the key so it never blurs)."""
-        self.action_stop()
+        await self.action_stop()
 
     def action_interrupt(self) -> None:
         """Ctrl+C: interrupt the turn. Twice in quick succession: leave.
@@ -26606,7 +26606,7 @@ class OperatorApp(App[None]):
         else:
             self._expand_asks()
 
-    def action_stop(self) -> None:
+    async def action_stop(self) -> None:
         """Esc: stop. One press, one meaning, wherever focus happens to be.
 
         A pending approval is NOT answered here and left at that. Esc used to
@@ -26880,7 +26880,7 @@ class OperatorApp(App[None]):
         # and the answer lands (UX round 4). ``"declined"`` and ``""`` still fall
         # through: nothing was said about a run, the composer is the obstacle, and
         # Esc keeps the meaning it has everywhere else in this method.
-        if self._withdraw_queued_prompt(self._interaction) in ("withdrawn", "missed"):
+        if await self._withdraw_queued_prompt(self._interaction) in ("withdrawn", "missed", "pending", "error"):
             return
         if not children:
             self._recall_queued_steers()
@@ -31598,6 +31598,28 @@ class OperatorApp(App[None]):
         self._terminal_title.stop()
         self._terminal_title = None
 
+    async def _join_queued_withdrawal(self) -> None:
+        task = getattr(self, "_queued_withdrawal_task", None)
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        cancellation = None
+        while not task.done():
+            try:
+                await asyncio.wait((task,))
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException as failure:
+            if cancellation is not None:
+                raise BaseExceptionGroup("recall closing also failed", [cancellation, failure])
+            raise
+        if cancellation is not None:
+            raise cancellation
+
     async def _shutdown(self) -> None:
         """Cancel this app's workers BEFORE Textual dismantles the widget tree.
 
@@ -31645,6 +31667,7 @@ class OperatorApp(App[None]):
         # Unlike paint-only workers, bang-mode owns a subprocess and a durable
         # receipt. Abort and join it BEFORE the blanket cancellation: cancelling
         # execute_bash directly can bypass its normal result/persistence path.
+        await self._join_queued_withdrawal()
         if self._restart_plan is not None:
             await self._detach_relaunch_gates()
         await self._settle_shell_command()
@@ -33674,6 +33697,7 @@ class OperatorApp(App[None]):
         await asyncio.gather(*pending)
 
     async def on_unmount(self) -> None:
+        await self._join_queued_withdrawal()
         from textual.worker import WorkerCancelled, WorkerFailed
 
         # Keep direct hook callers safe too; normal shutdown already withdrew
@@ -60479,7 +60503,7 @@ class OperatorApp(App[None]):
             return None
         return config_dir() / "sessions" / session_id
 
-    def _withdraw_queued_prompt(self, source: SessionInteraction) -> str:
+    async def _withdraw_queued_prompt(self, source: SessionInteraction) -> str:
         """Esc: take the newest spooled prompt back out of the successor's spool.
 
         THE NEIGHBOUR OF :meth:`_recall_queued_steers`, making the same promise
@@ -60507,6 +60531,9 @@ class OperatorApp(App[None]):
         marker stays up in that case, because the message is still queued — it is
         only out of reach.
         """
+        pending = getattr(self, "_queued_withdrawal_task", None)
+        if pending is not None and not pending.done():
+            return "pending"
         entries = list(source.turn.queued_prompts.items())
         if not entries:
             return ""
@@ -60525,11 +60552,26 @@ class OperatorApp(App[None]):
             return ""
         from local_operator.session.runtime.inbox import withdraw_inbox
 
+        from local_operator.wakes.spooled import await_spool_write
+
+        owner = asyncio.current_task()
+        self._queued_withdrawal_task = owner
+        original_text = editor.text
         try:
-            withdrawn = withdraw_inbox(directory, queued.command_id)
-        except Exception:  # a recall must never take the app down
+            withdrawn = await await_spool_write(withdraw_inbox, directory, queued.command_id)
+        except Exception:
             logger.debug("queued-prompt recall failed", exc_info=True)
-            return ""
+            return "error"  # consume Esc, never fall through to stopping the turn
+        finally:
+            if getattr(self, "_queued_withdrawal_task", None) is owner:
+                self._queued_withdrawal_task = None
+        if source.turn.queued_prompts.get(message_id) is not queued:
+            return "withdrawn" if withdrawn else "missed"
+        if withdrawn and (not self._is_current(source) or self._editor() is not editor
+                          or editor.text != original_text or self._aside_is_open()):
+            del source.turn.queued_prompts[message_id]
+            self._restore_unsent_for(source, queued.text, None)
+            return "withdrawn"
         if not withdrawn:
             self._replace_stop_notice(QUEUED_PROMPT_MISSED_NOTICE, "warning")
             return "missed"

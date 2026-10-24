@@ -40,6 +40,8 @@ import re
 import secrets
 import tempfile
 import time
+import asyncio
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -405,6 +407,219 @@ class _NonBlockingLock:
             pass
 
 
+# A live process-local seat also covers pre-existing command-queue tasks. A
+# ContextVar alone would miss boot prompt -> queued Session pipeline reentry.
+_ACTIVE_READS: dict[str, "InboxReadBatch"] = {}
+_ACTIVE_READS_LOCK = threading.Lock()
+
+
+class InboxReadBatch:
+    """Preallocated, nondestructive snapshot with raw ordinal delivery ownership."""
+    def __init__(self, directory: Path) -> None:
+        self.directory = Path(directory)
+        self.key = str(self.directory.resolve())
+        self.reader = WakeWriteLock(self.directory, name=".inbox-reader.lock")
+        self.acquired = False
+        self.raw: bytes | None = None
+        self.chunks: list[bytes] = []
+        self.rows: list[tuple[int, InboxLine]] = []
+        self.handled: set[int] = set()
+        self.nested_requested = False
+        self.pending_after_commit = True
+        self.drop_after_release = False
+        self.published = False
+        self.durable = False
+        self.path_identity: tuple[int, int] | None = None
+
+    def delivery_rows(self) -> list[tuple[tuple[int, ...], InboxLine]]:
+        lines = [line for _, line in self.rows]
+        result = []
+        for line in coalesce_wake_rows(lines):
+            # The existing coalescer merges exactly one structural wake group;
+            # mapping its known inputs back to ordinals never matches raw text.
+            if line.wake and line.wake_id:
+                ordinals = tuple(i for i, old in self.rows
+                                 if old.wake and old.wake_id == line.wake_id)
+            else:
+                ordinals = tuple(i for i, old in self.rows if old is line)
+            if not ordinals:
+                raise OSError("ambiguous inbox coalescing map")
+            result.append((ordinals, line))
+        return result
+
+
+def try_enter_read_batch(directory: Path) -> InboxReadBatch | None:
+    batch = InboxReadBatch(directory)  # canonicalization occurs outside mutex
+    with _ACTIVE_READS_LOCK:
+        previous = _ACTIVE_READS.get(batch.key)
+        if previous is not None:
+            previous.nested_requested = True
+            return None
+        _ACTIVE_READS[batch.key] = batch
+    return batch
+
+
+def leave_read_batch(batch: InboxReadBatch) -> None:
+    with _ACTIVE_READS_LOCK:
+        if _ACTIVE_READS.get(batch.key) is batch:
+            del _ACTIVE_READS[batch.key]
+
+
+def claim_inbox_batch(batch: InboxReadBatch) -> None:
+    """Reader -> journal; retain bytes on disk even if cancellation loses return."""
+    batch.reader.acquire()
+    batch.acquired = True
+    with _journal_lock(batch.directory):
+        path = inbox_path(batch.directory)
+        try:
+            raw = path.read_bytes()
+            stat = path.stat()
+        except FileNotFoundError:
+            raw = b""
+            batch.path_identity = None
+        else:
+            if path.is_symlink() or not path.is_file():
+                raise OSError("unsafe inbox path")
+            batch.path_identity = (stat.st_dev, stat.st_ino)
+        batch.raw = raw
+        batch.chunks = raw.splitlines(keepends=True)
+        parsed: list[tuple[int, InboxLine]] = []
+        for ordinal, chunk in enumerate(batch.chunks):
+            values = _parse(chunk)
+            if len(values) == 1:
+                parsed.append((ordinal, values[0]))
+        deliverable = _deliverable([line for _, line in parsed])
+        batch.rows = [(i, line) for i, line in parsed if any(line is v for v in deliverable)]
+        # Only parsed recall/withheld rows are handled here. Malformed bytes
+        # have no mapping and must survive every commit byte-for-byte.
+        batch.handled.update(i for i, line in parsed if not any(line is v for v in deliverable))
+
+
+def commit_inbox_batch(batch: InboxReadBatch) -> None:
+    """Remove only known handled raw ranges; never consume pending sole copies."""
+    if not batch.acquired or batch.raw is None:
+        return
+    if not batch.handled:
+        return
+    with _journal_lock(batch.directory):
+        path = inbox_path(batch.directory)
+        if path.is_symlink() or not path.is_file():
+            raise OSError("inbox disappeared during claim")
+        stat = path.stat()
+        if batch.path_identity != (stat.st_dev, stat.st_ino):
+            raise OSError("inbox inode changed during claim")
+        current = path.read_bytes()
+        if not current.startswith(batch.raw):
+            raise OSError("inbox snapshot prefix changed")
+        if any(type(i) is not int or i < 0 or i >= len(batch.chunks) for i in batch.handled):
+            raise OSError("invalid handled inbox ordinal")
+        payload = b"".join(chunk for i, chunk in enumerate(batch.chunks)
+                           if i not in batch.handled) + current[len(batch.raw):]
+        temporary: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".inbox-commit-", delete=False) as handle:
+                temporary = handle.name
+                count = handle.write(payload)
+                if count != len(payload):
+                    raise OSError("short staged inbox commit")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            batch.published = True
+            temporary = None
+            # Windows has no portable directory fsync; elsewhere failure after
+            # replace is explicit uncertain durability, never rollback of tail.
+            if os.name != "nt":
+                fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            batch.durable = True
+            batch.pending_after_commit = bool(payload)
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+
+
+def release_inbox_batch(batch: InboxReadBatch) -> None:
+    try:
+        batch.reader.release()
+    finally:
+        batch.acquired = False
+
+
+async def finish_read_batch(batch: InboxReadBatch) -> None:
+    """Commit/release complete before marker settlement or cancellation escapes."""
+    from local_operator.wakes.spooled import await_spool_write
+    error: BaseException | None = None
+    try:
+        await await_spool_write(commit_inbox_batch, batch)
+    except BaseException as exc:
+        error = exc
+    try:
+        await await_spool_write(release_inbox_batch, batch)
+    except BaseException as exc:
+        if error is not None:
+            raise BaseExceptionGroup("inbox commit and release failed", [error, exc])
+        raise
+    finally:
+        leave_read_batch(batch)
+    if error is not None:
+        raise error
+
+
+async def admit_batch_row(batch: InboxReadBatch, ordinals: tuple[int, ...], admission) -> object:
+    """Join a submitted admission and remember acceptance even under cancellation."""
+    task = asyncio.ensure_future(admission)
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.wait((task,))
+            result = task.result()
+            batch.handled.update(ordinals)
+            break
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                if cancellation is not None:
+                    raise BaseExceptionGroup("admission cancelled twice", [cancellation, exc])
+                raise
+            if cancellation is None:
+                cancellation = exc
+        except BaseException as exc:
+            if cancellation is not None:
+                raise BaseExceptionGroup("cancelled admission failed", [cancellation, exc])
+            raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+async def settle_read_batch(batch: InboxReadBatch, body_error: BaseException | None = None, *, cwd: str = "") -> None:
+    """One owner joins commit/release before marker bookkeeping, retaining faults."""
+    from local_operator.wakes.spooled import await_spool_write
+    errors: list[BaseException] = [] if body_error is None else [body_error]
+    try:
+        await finish_read_batch(batch)
+    except BaseException as exc:
+        errors.append(exc)
+    else:
+        try:
+            if batch.drop_after_release:
+                await await_spool_write(drop_owed_turn, batch.directory)
+            else:
+                await await_spool_write(settle_owed_turn, batch.directory, cwd=cwd)
+        except BaseException as exc:
+            errors.append(exc)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("inbox delivery and settlement failed", errors)
+
+
 def _journal_lock(session_dir: Path) -> WakeWriteLock:
     # Unlike the opportunistic inode flock, this persistent mutex serializes
     # EVERY cooperating append/recall/drain/purge, including rollback on Windows.
@@ -719,8 +934,9 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
     if not session_dir.is_dir():
         return False
     try:
-        with _journal_lock(session_dir):
-            return _withdraw_inbox_locked(session_dir, command_id)
+        with WakeWriteLock(session_dir, name=".inbox-reader.lock"):
+            with _journal_lock(session_dir):
+                return _withdraw_inbox_locked(session_dir, command_id)
     except (WakeLockBusy, WakeLockUnavailable, OSError):
         return False
 
@@ -826,8 +1042,9 @@ def remove_wake_rows(session_dir: Path, wake_id: str) -> int:
     if not session_dir.is_dir():
         return 0
     try:
-        with _journal_lock(session_dir):
-            return _remove_wake_rows_locked(session_dir, wake_id)
+        with WakeWriteLock(session_dir, name=".inbox-reader.lock"):
+            with _journal_lock(session_dir):
+                return _remove_wake_rows_locked(session_dir, wake_id)
     except (WakeLockBusy, WakeLockUnavailable, OSError):
         return 0
 
@@ -981,8 +1198,9 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
     if not session_dir.is_dir():
         return []
     try:
-        with _journal_lock(session_dir):
-            return _drain_inbox_locked(session_dir)
+        with WakeWriteLock(session_dir, name=".inbox-reader.lock"):
+            with _journal_lock(session_dir):
+                return _drain_inbox_locked(session_dir)
     except (WakeLockBusy, WakeLockUnavailable, OSError):
         return []
 

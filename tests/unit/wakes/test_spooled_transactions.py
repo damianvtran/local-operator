@@ -123,3 +123,113 @@ class OwnedWriteTests(unittest.IsolatedAsyncioTestCase):
                     release.set()
                     if not task.done():
                         await task
+
+
+class ReadBatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_after_claim_keeps_owed_row_and_releases_shared_seat(self):
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            row = inbox.InboxLine(text="owed", sender={}, mode="mailbox", written_at=1,
+                                  source=inbox.SOURCE_USER)
+            self.assertTrue(inbox.append_inbox(directory, row))
+            batch = inbox.try_enter_read_batch(directory)
+            self.assertIsNotNone(batch)
+            ready = asyncio.Event()
+            release = threading.Event()
+            loop = asyncio.get_running_loop()
+            def claim():
+                inbox.claim_inbox_batch(batch)
+                loop.call_soon_threadsafe(ready.set)
+                release.wait(5)
+            async def owner():
+                try:
+                    await spooled.await_spool_write(claim)
+                finally:
+                    await inbox.finish_read_batch(batch)
+            task = asyncio.create_task(owner())
+            try:
+                await asyncio.wait_for(ready.wait(), 2)
+                self.assertIsNone(inbox.try_enter_read_batch(directory))
+                task.cancel()
+                await asyncio.sleep(0)
+                task.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertEqual([r.text for r in inbox.peek_inbox(directory)], ["owed"])
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertTrue(spooled.spool_owes_turn(directory))
+                self.assertFalse(batch.acquired)
+                next_batch = inbox.try_enter_read_batch(directory)
+                self.assertIsNotNone(next_batch)
+                inbox.leave_read_batch(next_batch)
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_exact_ordinals_preserve_duplicate_idless_rows_and_concurrent_tail(self):
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            line = lambda text: inbox.InboxLine(text=text, sender={}, mode="mailbox", written_at=1)
+            for text in ("same", "same", "later"):
+                self.assertTrue(inbox.append_inbox(directory, line(text)))
+            batch = inbox.try_enter_read_batch(directory)
+            try:
+                await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
+                self.assertTrue(await spooled.await_spool_write(inbox.append_inbox, directory, line("tail")))
+                rows = batch.delivery_rows()
+                batch.handled.update(rows[0][0])
+                await inbox.finish_read_batch(batch)
+                self.assertTrue(batch.published and batch.durable)
+                self.assertEqual([r.text for r in inbox.peek_inbox(directory)], ["same", "later", "tail"])
+            finally:
+                if batch.acquired:
+                    await spooled.await_spool_write(inbox.release_inbox_batch, batch)
+                inbox.leave_read_batch(batch)
+
+    async def test_admission_accepted_just_before_cancel_is_committed_once(self):
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            inbox.append_inbox(directory, inbox.InboxLine(text="one", sender={}, mode="mailbox", written_at=1))
+            batch = inbox.try_enter_read_batch(directory)
+            await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            accepted = []
+            async def admission():
+                entered.set()
+                await release.wait()
+                accepted.append(1)
+                return "accepted"
+            task = asyncio.create_task(inbox.admit_batch_row(batch, batch.delivery_rows()[0][0], admission()))
+            try:
+                await entered.wait()
+                task.cancel()
+                await asyncio.sleep(0)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                await inbox.finish_read_batch(batch)
+                self.assertEqual(accepted, [1])
+                self.assertEqual(inbox.peek_inbox(directory), [])
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+                if batch.acquired:
+                    await spooled.await_spool_write(inbox.release_inbox_batch, batch)
+                inbox.leave_read_batch(batch)
+
+    async def test_prefix_conflict_never_overwrites_or_deletes_current_bytes(self):
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            inbox.append_inbox(directory, inbox.InboxLine(text="one", sender={}, mode="mailbox", written_at=1))
+            batch = inbox.try_enter_read_batch(directory)
+            await spooled.await_spool_write(inbox.claim_inbox_batch, batch)
+            batch.handled.add(0)
+            path = inbox.inbox_path(directory)
+            path.write_bytes(b"uncooperative mutation\n")
+            with self.assertRaises(OSError):
+                await inbox.finish_read_batch(batch)
+            self.assertEqual(path.read_bytes(), b"uncooperative mutation\n")
+            self.assertFalse(batch.acquired or batch.published)
