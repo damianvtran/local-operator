@@ -42,6 +42,7 @@ import { Disclosure } from "./ui/disclosure";
 import {
 	answeredPairs,
 	askStateLine,
+	dismissedReasonKey,
 	LAPSED_BODY,
 	isAnswerable,
 	isDeadConversation,
@@ -283,6 +284,12 @@ export function AskCard({
 	const cold = row.runtime_live === false;
 
 	const state = askStateLine(row, nowMs);
+	/* A DISMISSED ROW STATES ITS REASON (SA-D8, design §17). The reason is a
+	   catalogue sentence rather than a literal here, so the card says it in the
+	   operator's language: `askStateLine`'s `dismissed` arm is the fallback for a
+	   row that recorded none (and for an older daemon that never sent the key). */
+	const dismissReason = dismissedReasonKey(row);
+	const stateLine = dismissReason ? messageRuntime.t(dismissReason) : state.text;
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
 	/* A LAPSED ASK IS SHOWN, NOT OFFERED (Ben's report, 2026-10-15). Its deadline
@@ -481,7 +488,7 @@ export function AskCard({
 					{/* Under the `Timed out` badge the line starts at what that means:
 					    the badge says the word one line above (#2481 UX round 2, U13). A
 					    lapsed, non-terminal card is always inside that Disclosure. */}
-					<span role="status">{lapsed ? LAPSED_BODY : state.text}</span>
+					<span role="status">{lapsed ? LAPSED_BODY : stateLine}</span>
 					{row.urgent && offered ? (
 						<span className="text-ink-dim">· urgent</span>
 					) : null}
@@ -808,11 +815,32 @@ export function AskCard({
 					    ~10 px vs ~12 px, so a two-question receipt read as one
 					    four-line block. The gap BETWEEN pairs is now the container's;
 					    the gap inside a pair stays tight. */}
-					{settledPairs.length > 0 ? (
+					{status === "dismissed" && settledPairs.length > 0 ? (
+						/* A DISMISSED ROW HAS NO PAIRS, so it is not a `<dl>` (UX round
+						   2, U5). U3 removed the answer slot on a dismissal, which left
+						   each `<dt>` without its `<dd>` — a description list whose
+						   entries describe nothing, for a reader on assistive tech as
+						   much as on screen. The questions are the whole receipt here, so
+						   they are plain lines in the same register, one per question:
+						   dropping them would lose what the row is a receipt FOR, and a
+						   visually hidden `<dd>` would keep a value that does not exist. */
+						<div className="flex flex-col gap-1">
+							{settledPairs.map((pair) => (
+								<span key={pair.question} className="text-body-sm text-ink-muted">
+									{pair.question}
+								</span>
+							))}
+						</div>
+					) : settledPairs.length > 0 ? (
 						<dl className="flex flex-col gap-3">
 							{settledPairs.map((pair) => (
 								<div key={pair.question} className="flex flex-col">
 									<dt className="text-body-sm text-ink-muted">{pair.question}</dt>
+									{/* The bare `—` is the settled register's placeholder for
+									    "an answer was expected here and is missing" (a declined
+									    row's, pre-existing); every status that reaches THIS
+									    branch answered or was put away by someone else, so it
+									    keeps the placeholder exactly as it was. */}
 									<dd className="text-body-sm text-ink">{pair.answer || "—"}</dd>
 								</div>
 							))}

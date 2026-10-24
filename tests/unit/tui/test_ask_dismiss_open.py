@@ -34,10 +34,12 @@ from local_operator.tui.widgets.ask_queue import (
     DISMISS_CHOICES,
     FILTER_ALL,
     FILTER_SETTLED,
+    IN_FLIGHT_MARK,
     SUB_LINE_INDENT,
     AskQueueList,
     ask_rows,
     context_text,
+    dismiss_reason_text,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -250,6 +252,90 @@ async def test_a_refused_dismiss_reports_and_clears_the_mark(enabled):
         assert "a1" not in app._ask_in_flight
 
 
+async def test_a_dismissed_row_that_stays_drops_its_in_flight_mark(enabled):
+    """SA-D8 + UX U1: the mark ends when the row SETTLES, not when it leaves.
+
+    The mark's old life was "until the frame drops the row". A dismissal taken
+    before the ask's deadline now KEEPS the row as a settled receipt, so nothing
+    ever dropped it and the `…` glyph outlived the op — on a row that is
+    finished, holding one id for the life of the session. This cell dismisses a
+    live row, feeds the snapshot that carries it as `dismissed` (still present),
+    and asserts the row is there, settled, and unmarked.
+    """
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
+        await pilot.press("x")
+        await pilot.press("enter")
+        await _settle(pilot)
+        # The op landed and its mark is up while the reply has not been folded yet.
+        assert session.dismissed == [("a1", "terminal", store.DISMISS_REASON_DEFAULT)]
+        assert "a1" in app._ask_in_flight
+
+        # The next snapshot: the ask folds to `dismissed`, and the row STAYS.
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row(
+                        "a1",
+                        status="dismissed",
+                        dismissed_at=_NOW,
+                        dismissed_reason=store.DISMISS_REASON_DEFAULT,
+                    ),
+                    _row("a2"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        assert "a1" not in app._ask_dismiss_in_flight
+        assert "a1" not in app._ask_in_flight
+        assert "a1" in {row.ask_id for row in app._ask_rows}, "the receipt is the point"
+        painted = listing.render().plain.splitlines()
+        row_line = next(line for line in painted if "Question for a1?" in line)
+        assert IN_FLIGHT_MARK not in row_line, row_line
+        assert "dismissed" in row_line, row_line
+
+
+async def test_a_lapsed_dismissal_keeps_its_mark_until_its_row_leaves(enabled):
+    """Review round 2, m4/m5: the lapsed door's mark is NOT swept by a frame.
+
+    A `timed_out` row is settled before its one-key dismissal starts, so a sweep
+    keyed on "no longer answerable" cleared the mark on the very next frame and
+    re-opened the door for a second send — a narrowing of §14's double-tap guard
+    that no other cell covered. The mark survives a frame that still carries the
+    row, the second `x` sends nothing, and the frame that DROPS the row is what
+    ends it.
+    """
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        await _open_list(pilot, app, [_row("t1", status="timed_out")])
+        await pilot.press("x")
+        await _settle(pilot)
+        assert session.dismissed == [("t1", "terminal", None)]
+        assert "t1" in app._ask_dismiss_in_flight
+
+        # An unrelated frame that still carries the row as `timed_out` — the
+        # state the dismissal leaves it in until it leaves every list.
+        app._sync_ask_surface(ask_rows([_row("t1", status="timed_out")]))
+        await _settle(pilot)
+        assert "t1" in app._ask_dismiss_in_flight, "the lapsed door's mark must survive"
+        assert "t1" in app._ask_in_flight
+
+        # A second `x` is the guard's whole purpose: it must not send.
+        await pilot.press("x")
+        await _settle(pilot)
+        assert session.dismissed == [("t1", "terminal", None)]
+
+        # The row leaving is what ends the mark — unchanged from before SA-D8.
+        app._sync_ask_surface(ask_rows([]))
+        await _settle(pilot)
+        assert "t1" not in app._ask_dismiss_in_flight
+
+
 def test_the_offered_reasons_are_the_queue_vocabulary_in_chooser_order():
     """The LABEL is this surface's; the RECORDED WORD is the log's. They are
     paired here once, and this is the cell that keeps the pairing honest."""
@@ -336,6 +422,81 @@ async def test_the_context_line_is_part_of_its_row_for_the_pointer(enabled):
         # A click on a row opens its card; the ask it opened is the one above the
         # sub-line, never the one below.
         assert app._ask_mounted_id == "a1"
+
+
+# -- SA-D8: the dismissed row's reason line ---------------------------------
+
+
+def test_the_reason_line_names_the_operator_own_word():
+    """SA-D8 (design §17): the chip says ``dismissed``; only the detail line can
+    say WHY, and it reuses the dismissal receipt's sentences — one act, one
+    wording, on this surface too."""
+    moot = ask_rows([_row("a1", status="dismissed", dismissed_at=_NOW, dismissed_reason="moot")])
+    assert dismiss_reason_text(moot[0]) == "Dismissed — no longer needed"
+    chat = ask_rows(
+        [_row("a1", status="dismissed", dismissed_at=_NOW, dismissed_reason="answered_in_chat")]
+    )
+    assert dismiss_reason_text(chat[0]) == "Dismissed — answered in chat"
+    # No reason recorded (an older runtime wrote the row): the existing sentence,
+    # not an invented reason — and that sentence is only ever this fallback, since
+    # an open-ask dismissal DOES tell the agent.
+    legacy = ask_rows([_row("a1", status="dismissed", dismissed_at=_NOW)])
+    assert dismiss_reason_text(legacy[0]) == "Dismissed — no reply sent"
+    # Every other status owes no reason line, and an OPEN row keeps SA-D7's line.
+    assert dismiss_reason_text(ask_rows([_row("a1")])[0]) == ""
+    assert dismiss_reason_text(ask_rows([_row("a1", status="answered")])[0]) == ""
+
+
+async def test_the_reason_line_paints_under_the_dismissed_row(enabled):
+    """A MOUNTED list: the line is clipped against the painted width, so the
+    painted sequence is the only thing that proves it lands under its own row."""
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        listing = await _open_list(
+            pilot,
+            app,
+            [
+                _row("a1", status="dismissed", dismissed_at=_NOW, dismissed_reason="moot"),
+                _row("a2"),
+                _row("a3"),
+            ],
+        )
+        painted = listing.render().plain.splitlines()
+        # header + (settled row + its reason line) + the two open rows. TWO open
+        # rows because one answerable ask expands straight to its card (D11).
+        assert len(painted) == 1 + 2 + 1 + 1, painted
+        assert "Question for a1?" in painted[1]
+        assert "dismissed" in painted[1], "the chip stays the row's status"
+        assert painted[2].startswith(" " * SUB_LINE_INDENT)
+        assert "Dismissed — no longer needed" in painted[2]
+        assert "Question for a2?" in painted[3]
+
+
+async def test_the_reason_line_belongs_to_its_row_for_the_pointer(enabled):
+    """The detail slot is where a LAPSED row's collapsed card also sits, so the
+    line map has to count it: a click on the reason selects the row it explains."""
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        listing = await _open_list(
+            pilot,
+            app,
+            [
+                _row("a1", status="dismissed", dismissed_at=_NOW, dismissed_reason="moot"),
+                _row("a2"),
+                _row("a3"),
+            ],
+        )
+        top = listing.content_region.y - listing.region.y
+        await pilot.click(AskQueueList, offset=(4, top + listing.HEADER_ROWS + 1))
+        await _settle(pilot)
+        # A click on the reason line selects the row it explains (index 0 is the
+        # dismissed ask). Nothing mounts: a settled row has nothing to answer.
+        assert listing.index == 0
+        assert app._ask_mounted_id is None
 
 
 # -- round 1 remediation: the surfaces ---------------------------------------

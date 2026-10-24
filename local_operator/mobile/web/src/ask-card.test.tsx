@@ -515,6 +515,25 @@ describe("AskCard", () => {
 		expect(screen.getByTestId("ask-card")).toBeTruthy();
 	});
 
+	it("states a dismissed row's questions with no answer slot and no description list", () => {
+		/* UX round 2, U5 on round 1's U3: the reason line is the state, the
+		   question is the receipt, and there is nothing to pair it with — so no
+		   `—` (U3) and no `<dl>` whose `<dt>`s describe nothing (U5). */
+		renderCard(
+			ask({
+				status: "dismissed",
+				delivered: true,
+				dismissed_at: Date.now(),
+				dismissed_reason: "moot",
+			}),
+		);
+		expect(screen.getByText("Dismissed — no longer needed")).toBeTruthy();
+		expect(screen.getByText("ship the fix?")).toBeTruthy();
+		expect(screen.queryByText("—")).toBeNull();
+		expect(document.querySelector("dl")).toBeNull();
+		expect(document.querySelector("dt")).toBeNull();
+	});
+
 	it("shows the queue's own refusal sentence verbatim, and restores the controls", async () => {
 		(sendCommand as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
 			new Error("already answered by desktop."),

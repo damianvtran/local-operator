@@ -894,6 +894,71 @@ def lapsed_hidden(
     return now - int(expires_at) > max(0, int(lapsed_visible_ms))
 
 
+def dismissed_hidden(
+    status: Any,
+    dismissed_at: int | None,
+    expires_at: int,
+    now: int,
+    *,
+    relay: bool = False,
+) -> bool:
+    """Whether a DISMISSED row has left every list (decision SA-D8).
+
+    The ONE rule, shared by the index readers (:func:`_shown_rows`) and the live
+    projection (``AskQueue.projection``), so the phone's sheet, the desktop
+    fleet and a running session's own bar agree about a dismissed row at the
+    same instant. TIMING decides, which is what keeps the original
+    "put it away" contract beside the new receipt one:
+
+    * **Dismissed BEFORE the deadline** (``dismissed_at < expires_at`` — the
+      open-ask dismissal of design §15) is a SETTLED RECEIPT and stays shown for
+      the same 7 d horizon an answered row gets, counted from ``expires_at``.
+      Strictly past it, like the horizon beside it: ``now - expires_at > 7 d``.
+      It deliberately IGNORES ``asks.lapsed_visible_for``: that setting is the
+      display window for rows settled by the deadline ALONE, and with
+      ``at_expiry`` or an hour it would delete this receipt at (or an hour
+      after) the ask's own deadline — shorter than any answered ask's.
+    * **Dismissed AT OR AFTER the deadline** keeps leaving every list: that is
+      the lapsed row's Dismiss, whose whole effect is to clear the row (design
+      §13), and a receipt there would turn it into a relabel.
+    * **No ``dismissed_at``** (an index row written by a build before this key)
+      is hidden, exactly as today. Absence means the old behaviour: a row that
+      cannot prove it was dismissed early has not earned a receipt.
+    * **A RELAY row** stays hidden when dismissed. It is a pointer to another
+      conversation's ask, and its own card lives where the question was asked —
+      a receipt for somebody else's dismissal in this conversation's list is a
+      row the reader cannot act on. Passed IN rather than inferred from the
+      fields, because ``expires_at`` is 0 on a relay record until a derivation
+      copies the origin's and an index row can carry any shape: the rule must
+      not depend on which keys happen to be absent.
+
+    Takes the raw field values rather than a record, for the reason
+    :func:`lapsed_hidden` gives: its readers hold a dict on one surface and a
+    model on another, and the only things they share are the fields.
+    """
+    if str(status or "") != STATUS_DISMISSED:
+        return False
+    if relay:
+        return True
+    # FALSY IS ABSENT, and the two readers must agree on that (review round 1,
+    # m3). ``fold`` records ``int(at or 0)``, so a damaged or hand-written event
+    # yields 0; the projection read that 0 as an early stamp and SHOWED the row,
+    # while ``pending_row`` omits a falsy stamp from the index row and the index
+    # reader HID it. One row, two answers — the drift this predicate exists to
+    # stop. Absence and zero are the same statement here: "this row cannot prove
+    # it was dismissed before the deadline".
+    if not dismissed_at:
+        return True
+    try:
+        stamp = int(dismissed_at)
+        deadline = int(expires_at or 0)
+    except (TypeError, ValueError):
+        return True
+    if stamp >= deadline:
+        return True
+    return now - deadline > LATE_WINDOW_S * _MILLIS
+
+
 def outstanding_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Records still waiting on the user: ``open`` only (a ``timed_out`` ask
     is settled, #2388).
@@ -994,6 +1059,22 @@ def pending_row(
     answered_at = record.get("answered_at")
     if answered_at:
         row["answered_at"] = int(answered_at)
+    if str(row["status"]) == STATUS_DISMISSED:
+        # SA-D8: WHY a dismissal took the ask, so a settled row can say it. The
+        # pair is ADDED, never defaulted, and only on a dismissed row — every
+        # other status's row stays byte-identical, which is also what makes the
+        # keys additive on the wire (the phone's ``PendingAskWire`` and the
+        # desktop's ``PendingAskState`` both gained them as optionals).
+        # ``dismissed_at`` is what the shared visibility rule reads, so a reader
+        # can apply :func:`dismissed_hidden` without the log; ``dismissed_reason``
+        # is the operator's own word (``moot`` | ``answered_in_chat``), absent
+        # only for a log written before the field existed.
+        dismissed_at = record.get("dismissed_at")
+        if dismissed_at:
+            row["dismissed_at"] = int(dismissed_at)
+        dismissed_reason = record.get("dismissed_reason")
+        if dismissed_reason:
+            row["dismissed_reason"] = str(dismissed_reason)
     drafted = sorted(str(qid) for qid in (draft or ()))
     if user_messages_since is not None:
         row["user_messages_since"] = int(user_messages_since)
@@ -1187,10 +1268,25 @@ def _shown_rows(
     rows: list[dict[str, Any]] = []
     for ask in _entry_asks(entry):
         status = str(ask.get("status") or "")
-        if status in (STATUS_EXPIRED, STATUS_DISMISSED):
+        if status == STATUS_EXPIRED:
             continue
         expires_at = int(ask.get("expires_at") or 0)
         if expires_at and stamp - expires_at > horizon_ms:
+            continue
+        # SA-D8: a row dismissed BEFORE its deadline is a settled receipt and
+        # rides this list for the answered row's own 7 d; one dismissed at or
+        # after the deadline still leaves, and an index row from a build before
+        # ``dismissed_at`` stayed hidden. The rule lives in
+        # :func:`dismissed_hidden` because ``AskQueue.projection`` applies the
+        # same one — a second spelling here is the drift ``OUTSTANDING_STATUSES``
+        # exists to stop.
+        if dismissed_hidden(
+            status,
+            ask.get("dismissed_at"),
+            expires_at,
+            stamp,
+            relay=bool(ask.get("relay")),
+        ):
             continue
         row = dict(ask)
         # THE DEADLINE IS JUDGED HERE, NOT TAKEN FROM THE FILE. The index holds
@@ -1331,6 +1427,7 @@ __all__ = [
     "asks_dir",
     "asks_log_path",
     "delivered_hint",
+    "dismissed_hidden",
     "entry_is_stale",
     "entry_path",
     "expected_row_ids",

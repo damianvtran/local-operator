@@ -345,6 +345,13 @@ class AskRow:
     #: no line either, because there is nothing stale to report.
     user_messages_since: int | None = None
     last_user_message_at: int | None = None
+    #: WHY and WHEN this ask was dismissed (SA-D8, design §17), straight off the
+    #: wire (`asks/store.pending_row` adds the pair on a dismissed row only).
+    #: ``dismissed_reason`` picks the row's detail sentence (``moot`` /
+    #: ``answered_in_chat``); ``None`` is an older writer, which keeps the existing
+    #: "no reply was sent" sentence rather than inventing a reason.
+    dismissed_at: int | None = None
+    dismissed_reason: str | None = None
 
     @property
     def question_count(self) -> int:
@@ -487,6 +494,12 @@ def ask_rows(rows: Iterable[Any] | None) -> list[AskRow]:
                 cwd=str(_value(row, "cwd") or ""),
                 user_messages_since=_optional_int(_value(row, "user_messages_since")),
                 last_user_message_at=_optional_int(_value(row, "last_user_message_at")),
+                dismissed_at=_optional_int(_value(row, "dismissed_at")),
+                dismissed_reason=(
+                    str(_value(row, "dismissed_reason"))
+                    if _value(row, "dismissed_reason")
+                    else None
+                ),
             )
         )
     return out
@@ -1547,9 +1560,11 @@ class AskQueueList(Widget):
     def _line_owners(self, width: int) -> list[tuple[str, int] | None]:
         """What each painted line BELOW THE HEADER belongs to.
 
-        ``("row", i)`` — a visible ask's own line; ``("context", i)`` — a stale-ask
-        context line under it (one entry per PAINTED line, so a wrapped context
-        line owns both its lines); ``("reason", k)`` — a choice in the dismiss
+        ``("row", i)`` — a visible ask's own line; ``("detail", i)`` — the row's
+        sub-line (a stale-ask context line, or a dismissed row's reason — the two
+        are mutually exclusive by status), one entry per PAINTED line so a wrapped
+        detail block owns all of its lines; ``("reason", k)`` — a choice in the
+        dismiss
         reason block (the label line and its note line both belong to that
         reason); ``None`` — a line that answers no click (the empty-half sentence
         and the chooser's heading and hint).
@@ -1575,7 +1590,7 @@ class AskQueueList(Widget):
             owners.append(None)
         for index, row in enumerate(visible):
             owners.append(("row", index))
-            owners.extend([("context", index)] * self._context_line_count(row, width))
+            owners.extend([("detail", index)] * self._detail_line_count(row, width))
             if self._dismiss_for == row.ask_id:
                 owners.append(None)  # the heading
                 for k in range(len(DISMISS_CHOICES)):
@@ -1585,9 +1600,9 @@ class AskQueueList(Widget):
         return owners
 
     @staticmethod
-    def _context_line_count(row: AskRow, width: int) -> int:
-        """How many painted lines ``row``'s context line takes at ``width``."""
-        context = context_text(row)
+    def _detail_line_count(row: AskRow, width: int) -> int:
+        """How many painted lines ``row``'s detail block takes at ``width``."""
+        context = detail_text(row)
         if not context:
             return 0
         return len(_wrap_cells(CONTEXT_CUE + context, max(1, width - SUB_LINE_INDENT)))
@@ -1609,12 +1624,12 @@ class AskQueueList(Widget):
         into ``visible_rows`` — the rows the current filter draws — so a filtered
         view can never open a row the user cannot see.
 
-        A row's CONTEXT line belongs to that row: clicking the sentence under an
+        A row's DETAIL line belongs to that row: clicking the sentence under an
         ask selects the ask, not the one below it (``_line_owners`` is the single
         statement of that).
         """
         owner = self._line_at(y)
-        if owner is not None and owner[0] in {"row", "context"}:
+        if owner is not None and owner[0] in {"row", "detail"}:
             return owner[1]
         return None
 
@@ -2150,15 +2165,16 @@ class AskQueueList(Widget):
                 else:
                     line.append(tail, style=chip_warning if row.urgent else muted)
             text.append(line)
-            # THE STALE-ASK CONTEXT LINE (SA-D7/R5), on the row it belongs to and
+            # THE ROW'S DETAIL LINE — SA-D7's stale-ask context on an OPEN row,
+            # SA-D8's reason on a DISMISSED one — on the row it belongs to and
             # nowhere else: indented under the question, in the muted register —
-            # it is context for the question, never a second ask. It leads with a
+            # it is about the question, never a second ask. It leads with a
             # `└` connector (design D6): the same indent is also where a LAPSED
             # ask's collapsed row sits, so without a cue of its own the slot meant
             # two things at once. `└` is this surface's existing "child of the row
             # above" glyph (the tree sections and the analytics panel use it), and
             # no ask row ever starts with it.
-            context = context_text(row)
+            context = detail_text(row)
             if context:
                 for number, piece in enumerate(
                     _wrap_cells(f"{CONTEXT_CUE}{context}", max(1, width - SUB_LINE_INDENT))
@@ -2259,6 +2275,42 @@ def context_text(row: AskRow) -> str:
     count, last_ms = stamp
     when = datetime.fromtimestamp(last_ms / 1000).astimezone().strftime("%H:%M")
     return _a(_asks.context_messages(count=count, time=when))
+
+
+def dismiss_reason_text(row: AskRow) -> str:
+    """The reason line under a DISMISSED row (SA-D8, design §17), or ``""``.
+
+    A dismissal before the ask's deadline keeps a settled row for the answered
+    row's own 7 d (``store.dismissed_hidden``), and the row is only worth keeping
+    if it can state WHY the ask was put away — the chip says ``dismissed`` and
+    that word alone cannot tell "you already replied in the conversation" from
+    "you stopped waiting". The sentences are the ones the dismissal receipt
+    already uses (``tui.asks.dismiss.notice_moot`` / ``notice_answered_in_chat``,
+    #2841's catalogue), so no new copy and no second wording of one act.
+
+    ``None`` — a row written by a build that recorded no reason — falls back to
+    the existing no-reply sentence rather than guessing one. That sentence is
+    FALSE for an open ask dismissed since §15 (the agent IS told), which is why
+    it is only ever reached when nothing better is known.
+    """
+    if row.status != STATUS_DISMISSED:
+        return ""
+    if row.dismissed_reason == "answered_in_chat":
+        return _a(_asks.dismiss_notice_answered_in_chat())
+    if row.dismissed_reason == "moot":
+        return _a(_asks.dismiss_notice_moot())
+    return _a(_asks.dismiss_notice_no_reply())
+
+
+def detail_text(row: AskRow) -> str:
+    """The one sub-line ``row`` owes under itself, or ``""`` when it owes none.
+
+    TWO SOURCES, ONE SLOT: an open ask can carry SA-D7's staleness line, and a
+    dismissed one carries its reason. They are mutually exclusive by status, so
+    the slot never holds two sentences and the painted geometry stays one line
+    per row plus at most one wrapped detail block.
+    """
+    return dismiss_reason_text(row) or context_text(row)
 
 
 def expiry_text(row: AskRow, now_ms: int) -> str:
