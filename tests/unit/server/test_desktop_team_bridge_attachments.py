@@ -143,6 +143,20 @@ def proxy(tmp_path, monkeypatch):
         assert not hub_thread.is_alive()
 
 
+OWNER = "expected_account_id=acc_1"
+
+
+def _owner(url: str) -> str:
+    """Every attachment route REQUIRES the captured-owner receipt (#2772 B1).
+
+    The parameter is not optional by accident: an omitted receipt would take
+    the unguarded path, so the route refuses it and every fixture here must
+    present one the way a renderer does.
+    """
+
+    return f"{url}{'&' if '?' in url else '?'}{OWNER}"
+
+
 def test_route_constants_match_the_client() -> None:
     assert routes._ATTACHMENT_MAX_BYTES == bridge.ATTACHMENT_MAX_BYTES
     assert routes._ATTACHMENT_SERVABLE == set(bridge.ATTACHMENT_MIME_TYPES)
@@ -151,7 +165,7 @@ def test_route_constants_match_the_client() -> None:
 def test_upload_streams_raw_bytes_and_returns_201_descriptor(proxy):
     client, calls, _ = proxy
     response = client.post(
-        f"{BASE}/attachments?tenant_id=org-a",
+        _owner(f"{BASE}/attachments?tenant_id=org-a"),
         content=PNG,
         headers={"content-type": "image/svg+xml"},  # ignored: the hub sniffs
     )
@@ -168,17 +182,19 @@ def test_upload_streams_raw_bytes_and_returns_201_descriptor(proxy):
 
 def test_upload_refusals_happen_before_any_hub_call(proxy):
     client, calls, _ = proxy
-    too_big = client.post(f"{BASE}/attachments", content=b"\0" * (bridge.ATTACHMENT_MAX_BYTES + 1))
+    too_big = client.post(
+        _owner(f"{BASE}/attachments"), content=b"\0" * (bridge.ATTACHMENT_MAX_BYTES + 1)
+    )
     assert too_big.status_code == 413
     assert too_big.json()["detail"]["code"] == "attachment_too_large"
-    empty = client.post(f"{BASE}/attachments", content=b"")
+    empty = client.post(_owner(f"{BASE}/attachments"), content=b"")
     assert empty.status_code == 422
-    scoped = client.post(f"{BASE}/attachments?scope=account", content=PNG)
+    scoped = client.post(_owner(f"{BASE}/attachments?scope=account"), content=PNG)
     assert scoped.status_code == 422
-    dup = client.post(f"{BASE}/attachments?tenant_id=a&tenant_id=b", content=PNG)
+    dup = client.post(_owner(f"{BASE}/attachments?tenant_id=a&tenant_id=b"), content=PNG)
     assert dup.status_code == 422
     bad_cid = client.post(
-        "/v1/desktop/team-bridge/conversations/bcv_..%2F/attachments", content=PNG
+        _owner("/v1/desktop/team-bridge/conversations/bcv_..%2F/attachments"), content=PNG
     )
     assert bad_cid.status_code in (404, 422)
     assert calls == []
@@ -224,35 +240,70 @@ def test_the_matching_captured_owner_still_serves_all_three_verbs(proxy):
     assert [call[0] for call in calls] == ["POST", "GET", "DELETE"]
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("POST", f"{BASE}/attachments", PNG),
+        ("DELETE", f"{BASE}/attachments/{AID}", None),
+        ("GET", f"{BASE}/messages/{MID}/attachments/{AID}", None),
+    ],
+    ids=["upload", "delete", "fetch"],
+)
+def test_the_captured_owner_receipt_is_required_at_the_route(proxy, method, path, body):
+    """An omitted receipt must be refused HERE, not silently unguarded.
+
+    A guard whose reach depends on every caller remembering the parameter
+    regresses the first time a renderer forgets it. Omission, repetition and a
+    malformed value are all ``invalid_request`` and none reaches the hub.
+    """
+
+    client, calls, _ = proxy
+    omitted = client.request(method, path, content=body)
+    assert omitted.status_code == 422, omitted.text
+    assert omitted.json()["detail"]["code"] == "invalid_request"
+    repeated = client.request(
+        method, f"{path}{'&' if '?' in path else '?'}{OWNER}&{OWNER}", content=body
+    )
+    assert repeated.status_code == 422
+    malformed = client.request(
+        method,
+        f"{path}{'&' if '?' in path else '?'}expected_account_id=not-an-account",
+        content=body,
+    )
+    assert malformed.status_code == 422
+    assert malformed.json()["detail"]["code"] == "invalid_request"
+    assert calls == []
+
+
 def test_hub_refusals_pass_through_with_their_status(proxy):
     client, _calls, state = proxy
     state["error"] = (415, "attachment_type_unsupported")
-    response = client.post(f"{BASE}/attachments", content=b"<svg/>")
+    response = client.post(_owner(f"{BASE}/attachments"), content=b"<svg/>")
     assert response.status_code == 415
     assert response.json()["detail"]["code"] == "attachment_type_unsupported"
     state["error"] = (404, "attachment_not_found")
-    response = client.get(f"{BASE}/messages/{MID}/attachments/{AID}")
+    response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}"))
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "attachment_not_found"
 
 
 def test_delete_is_204_and_validates_the_id(proxy):
     client, calls, _ = proxy
-    response = client.delete(f"{BASE}/attachments/{AID}?tenant_id=org-a")
+    response = client.delete(_owner(f"{BASE}/attachments/{AID}?tenant_id=org-a"))
     assert response.status_code == 204 and response.content == b""
     assert calls[-1][:2] == (
         "DELETE",
         f"/v1/messaging/conversations/{CID}/attachments/{AID}?tenant_id=org-a",
     )
     before = len(calls)
-    assert client.delete(f"{BASE}/attachments/batt_x%2F..").status_code in (404, 422)
-    assert client.delete(f"{BASE}/attachments/not_an_id").status_code == 422
+    assert client.delete(_owner(f"{BASE}/attachments/batt_x%2F..")).status_code in (404, 422)
+    assert client.delete(_owner(f"{BASE}/attachments/not_an_id")).status_code == 422
     assert len(calls) == before
 
 
 def test_get_serves_bytes_with_the_closed_type_and_safe_headers(proxy):
     client, calls, _ = proxy
-    response = client.get(f"{BASE}/messages/{MID}/attachments/{AID}?tenant_id=org-a")
+    response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?tenant_id=org-a"))
     assert response.status_code == 200
     assert response.content == PNG
     assert response.headers["content-type"] == "image/png"
@@ -270,7 +321,7 @@ def test_get_refuses_any_served_type_outside_png_jpeg(proxy, served):
     client, _calls, state = proxy
     state["serve_type"] = served or "application/octet-stream"
     state["serve"] = b"<svg onload=alert(1)>"
-    response = client.get(f"{BASE}/messages/{MID}/attachments/{AID}")
+    response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}"))
     assert response.status_code == 502
     assert "svg" not in response.text
 
@@ -278,7 +329,10 @@ def test_get_refuses_any_served_type_outside_png_jpeg(proxy, served):
 def test_get_refuses_agent_query_names(proxy):
     client, calls, _ = proxy
     for query in ("endpoint_id=bep_1", "purpose=context", "scope=account"):
-        assert client.get(f"{BASE}/messages/{MID}/attachments/{AID}?{query}").status_code == 422
+        assert (
+            client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?{query}")).status_code
+            == 422
+        )
     assert calls == []
 
 
@@ -550,12 +604,14 @@ def test_e2e_access_log_of_real_upload_fetch_delete_has_no_ids_or_hashes(
             base_url=f"http://127.0.0.1:{port}",
             headers={"authorization": f"Bearer {RIG_DESKTOP_KEY}"},
         ) as client:
-            up = client.post(f"{BASE}/attachments?tenant_id=org-a", content=PNG)
+            up = client.post(_owner(f"{BASE}/attachments?tenant_id=org-a"), content=PNG)
             upload_reply = up.text
             statuses.append(up.status_code)
-            got = client.get(f"{BASE}/messages/{MID}/attachments/{AID}?tenant_id=org-a")
+            got = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?tenant_id=org-a"))
             statuses.append(got.status_code)
-            statuses.append(client.delete(f"{BASE}/attachments/{AID}?tenant_id=org-a").status_code)
+            statuses.append(
+                client.delete(_owner(f"{BASE}/attachments/{AID}?tenant_id=org-a")).status_code
+            )
     finally:
         server.should_exit = True
         thread.join(10)
@@ -572,10 +628,10 @@ def test_e2e_access_log_of_real_upload_fetch_delete_has_no_ids_or_hashes(
     assert len(hub_seen) == 3 and AID in upload_reply and sha_served[0] in upload_reply
     prefix = "/v1/desktop/team-bridge/conversations/:conversationid"
     for line in (
-        f'"POST {prefix}/attachments?tenant_id=org-a HTTP/1.1" 201',
-        f'"GET {prefix}/messages/:messageid/attachments/:attachmentid?tenant_id=org-a '
-        'HTTP/1.1" 200',
-        f'"DELETE {prefix}/attachments/:attachmentid?tenant_id=org-a HTTP/1.1" 204',
+        f'"POST {prefix}/attachments?tenant_id=org-a&{OWNER} HTTP/1.1" 201',
+        f'"GET {prefix}/messages/:messageid/attachments/:attachmentid?tenant_id=org-a'
+        f'&{OWNER} HTTP/1.1" 200',
+        f'"DELETE {prefix}/attachments/:attachmentid?tenant_id=org-a&{OWNER} HTTP/1.1" 204',
     ):
         assert line in log, f"request not logged as templated: {line}"
 

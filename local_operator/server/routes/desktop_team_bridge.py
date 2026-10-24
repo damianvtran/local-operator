@@ -1951,33 +1951,37 @@ def _status_with_attachments(payload: Any, read_capability: Any) -> Any:
     return out
 
 
-def _attachment_query(request: Request) -> tuple[str | None, str | None]:
-    """The attachment routes' accepted query names, refused when repeated.
+def _attachment_query(request: Request) -> tuple[str | None, str]:
+    """The attachment routes' accepted query names, closed and validated.
 
     Closed-table like every route here: ``scope`` (and anything else) is
     refused rather than dropped, and a duplicated name would let the URL parser
     pick a value differently from the hub.
 
-    ``expected_account_id`` is the CAPTURED-ACCOUNT receipt every mutating
-    desktop call already carries. The attachment routes were the hole: they
-    forwarded only the already-resolved ``access`` snapshot, so a chip uploaded
-    under account A could be discarded while the machine was signed in as B.
-    Returned as ``(tenant_id, expected_account_id)`` and passed to the client,
-    where the mismatch is refused BEFORE any dispatch.
+    ``expected_account_id`` is the CAPTURED-ACCOUNT receipt and it is
+    REQUIRED. These routes once forwarded only the already-resolved ``access``
+    snapshot, so a chip staged under account A could be fetched or deleted
+    while the machine was signed in as B. Optional, the guard would regress the
+    first time a new renderer forgot the parameter — a guard whose reach
+    depends on every caller remembering is not a guard — so an omission is
+    refused HERE, at the route, instead of silently taking the unguarded path.
+    The client compares the receipt against the exact dispatch snapshot before
+    any bytes move.
     """
 
     if set(request.query_params) - {"tenant_id", "expected_account_id"}:
         _raise_read("invalid_request")
-    out: list[str | None] = []
-    for name in ("tenant_id", "expected_account_id"):
-        values = request.query_params.getlist(name)
-        if len(values) > 1 or (values and (not values[0].strip() or len(values[0]) > 128)):
-            _raise_read("invalid_request")
-        out.append(values[0] if values else None)
-    tenant_id, expected = out
-    if expected is not None and not is_account_id(expected):
+    tenants = request.query_params.getlist("tenant_id")
+    if len(tenants) > 1 or (tenants and (not tenants[0].strip() or len(tenants[0]) > 128)):
         _raise_read("invalid_request")
-    return tenant_id, expected
+    expected = request.query_params.getlist("expected_account_id")
+    if len(expected) != 1 or not expected[0].strip() or len(expected[0]) > 128:
+        # Absent, repeated or blank all mean "no captured owner", and a route
+        # that proceeds without one cannot enforce its own guard.
+        _raise_read("invalid_request")
+    if not is_account_id(expected[0]):
+        _raise_read("invalid_request")
+    return (tenants[0] if tenants else None), expected[0]
 
 
 def _require_attachment_id(attachment_id: str) -> None:
