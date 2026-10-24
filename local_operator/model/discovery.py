@@ -252,6 +252,12 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: aggregators, since they are the only transports whose wire carries the field
 #: at all (the anthropic/zai/xai/kimi/alibaba/codex documents and models.dev do
 #: not, so ``anthropic`` stays at 2 and every default-1 transport stays at 1).
+#: Kimi is a correction to that list, and it is about WHICH key rather than
+#: whether one exists: its coding-plan listing does carry an effort ladder, under
+#: ``think_efforts.valid_efforts`` instead of ``reasoning.supported_efforts``
+#: (measured live 2026-10-24 on ``k3.1-pro``: low/high/max, all honoured). This
+#: paragraph's argument still holds for the aggregator key it names; see the
+#: version 2 ``kimi`` entry below for the bump that correction requires.
 #: Version 6 for ``openrouter`` and ``radient`` is ``_row_from_openai_entry``
 #: recording :attr:`DiscoveredModel.routed` — a MEANING the version-5 writer
 #: could not express, the same case as the version-3 ``free`` bump. A version-5
@@ -277,6 +283,19 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: reading a field its writer could not record (the ChatGPT catalogue's
 #: ``input_modalities`` is read for images, not audio, so ``openai``'s stamp
 #: does not move).
+#:
+#: Version 2 for ``kimi`` is ``_row_from_openai_entry`` reading the coding-plan
+#: listing's NATIVE capability keys — ``supports_image_in``,
+#: ``supports_reasoning`` and ``think_efforts.valid_efforts`` — into
+#: :attr:`DiscoveredModel.supports_images`, ``reasoning`` and
+#: ``reasoning_efforts``. All three are FIELDS the version-1 writer never
+#: recorded, the plain case for this stamp. A version-1 document parses to rows
+#: where all three are ``None``, and ``None`` is precisely "the listing said
+#: nothing": the ladder falls back to ``model.effort``'s table and the reasoning
+#: and image capabilities stay invisible on every install that already has a
+#: listing until its TTL rolls — the fix would ship and change nothing for a
+#: day. Only Kimi is bumped: no other transport's reader starts reading a field
+#: its writer could not record.
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {
     # Native Muse detail facts were omitted by its v1 writer; only this
     # transport needs a refetch, not every provider's healthy cached listing.
@@ -286,6 +305,11 @@ LISTING_CAPTURE_VERSIONS: dict[str, int] = {
     # original payload is gone, so it cannot safely authorize an empty native
     # inventory. Only DeepSeek pays the refetch; other caches stay valid.
     "deepseek": 2,
+    # Kimi's coding-plan v1 document predates the native capability read
+    # (``supports_image_in``, ``supports_reasoning``, ``think_efforts``): a
+    # cached row says "no capabilities stated", which is the invisible-fix case
+    # this stamp exists for. Only this transport pays the refetch.
+    "kimi": 2,
     "openai": 2,
     "openrouter": 7,
     "radient": 7,
@@ -1017,6 +1041,13 @@ def _row_from_openai_entry(
     gateways send ``id`` alone. Each field therefore reads a list of candidate
     keys and falls through to ``0``/``""`` so the merge can supply the bundled
     value.
+
+    Kimi's coding-plan wire (``api.kimi.com/coding/v1/models``) is the one
+    listing that states capabilities under NATIVE keys rather than OpenRouter's:
+    ``supports_image_in``, ``supports_reasoning`` and ``think_efforts``. Those
+    reads are gated on ``provider_id`` because no other wire in this tree uses
+    those names, and a generic ``supports_reasoning`` on a future wire need not
+    mean the same thing.
     """
     model_id = _first_str(entry.get("id"))
     if not model_id:
@@ -1029,10 +1060,36 @@ def _row_from_openai_entry(
     architecture = _mapping(entry.get("architecture"))
     reasoning = _mapping(entry.get("reasoning"))
 
+    # Kimi's coding-plan listing states its capabilities under NATIVE keys, so
+    # these reads are gated on the provider: every other provider answers
+    # through the OpenRouter/DeepSeek keys it already had.
+    #
+    # ``think_efforts.default_effort`` is deliberately NOT carried into
+    # ``reasoning_default_effort``. The sources DISAGREE about the default: the
+    # vendor's API doc (https://platform.kimi.ai/docs/guide/use-reasoning-effort)
+    # states ``max``, the coding-plan listing states ``high``, and repeated
+    # measurements against ``api.kimi.com/coding/v1/chat/completions`` on
+    # ``k3.1-pro`` do not settle it -- one run put omission at the BOTTOM of the
+    # ladder (low 16 / max 49 / omitted 116) and another BETWEEN the rungs
+    # (low 21 / max 148 / omitted 54). Seeding either stated default is
+    # therefore a guess that can move the depth every untouched turn runs at,
+    # so auto stays "omit the key": that is today's behaviour and the only
+    # choice that asserts nothing.
+    kimi = provider_id == "kimi"
+    if kimi:
+        kimi_images = _stated_bool(entry.get("supports_image_in"))
+        kimi_reasoning = _stated_bool(entry.get("supports_reasoning"))
+        # Kimi spells the ladder ``think_efforts.valid_efforts``; the normalising
+        # rules (sort, dedup, unknown words) stay in ``_effort_ladder``.
+        effort_ladder = _effort_ladder(_mapping(entry.get("think_efforts")).get("valid_efforts"))
+    else:
+        kimi_images = None
+        kimi_reasoning = None
+        effort_ladder = _effort_ladder(
+            reasoning.get("supported_efforts"), preserve_empty=provider_id == "deepseek"
+        )
+
     cache_read_price = _per_million(pricing.get("input_cache_read"))
-    effort_ladder = _effort_ladder(
-        reasoning.get("supported_efforts"), preserve_empty=provider_id == "deepseek"
-    )
     row = DiscoveredModel(
         id=model_id,
         name=_first_str(entry.get("name"), entry.get("display_name")),
@@ -1074,8 +1131,13 @@ def _row_from_openai_entry(
         ),
         routed=_is_meta_route(model_id, provider_id, pricing),
         cache_read_price=cache_read_price,
+        # Kimi states image input as a native boolean, three-state like every
+        # other image read: a stated ``false`` is a denial the registry may not
+        # overrule, while an absent key defers to it.
         supports_images=(
-            _stated_bool(entry.get("supports_images"))
+            kimi_images
+            if kimi
+            else _stated_bool(entry.get("supports_images"))
             if provider_id == "deepseek" and _stated_bool(entry.get("supports_images")) is not None
             else _has_image_input(architecture)
         ),
@@ -1087,7 +1149,13 @@ def _row_from_openai_entry(
         supports_tools=(
             _stated_bool(entry.get("supports_tools")) if provider_id == "deepseek" else None
         ),
-        reasoning=(_stated_bool(entry.get("reasoning")) if provider_id == "deepseek" else None),
+        reasoning=(
+            kimi_reasoning
+            if kimi
+            else _stated_bool(entry.get("reasoning"))
+            if provider_id == "deepseek"
+            else None
+        ),
         # A priced cache-read leg is the only machine-readable evidence of prompt
         # caching in these listings; there is no capability flag for it.
         supports_prompt_cache=cache_read_price > 0,
@@ -1100,6 +1168,10 @@ def _row_from_openai_entry(
         # transcribed `gpt-5.4` ladder applied to every `gpt-[5-9]` id — is
         # measurably wrong 34 times in BOTH directions against this listing.
         reasoning_efforts=effort_ladder,
+        # Only the OpenRouter wire states a default here. Kimi states one under
+        # ``think_efforts.default_effort`` and it is DELIBERATELY not read: it
+        # disagrees with the vendor's documented default and with measured
+        # omission, and none of the three is settled (see the block above).
         reasoning_default_effort=_effort_default(reasoning.get("default_effort"), effort_ladder),
     )
     if provider_id != "deepseek":
