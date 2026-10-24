@@ -195,9 +195,11 @@ FINGERPRINT`: it keeps one operation per fact (every head of a concurrent edit),
 every tombstone and the operations a cross-fact link pins, then prunes inert links,
 rewrites the portable session exports and rebuilds the file. Facts, quota and sync
 state are unchanged; superseded revisions become unreadable (`show --version` reports
-"Revision unavailable"), and a peer that is behind still catches up because the
-retained operation IS the state. Run it explicitly when the store nears its byte cap;
-it is not on a timer.
+"Revision unavailable"). A peer that is behind still catches up: it receives the
+retained operation as the state, skips the dropped revisions, and new operations keep
+sequence numbers ABOVE the highest ever used (the counter survives the pass), so no
+peer can be handed a new operation under an identity it already holds. Run it
+explicitly when the store nears its byte cap; it is not on a timer.
 
 Design inspiration: [Hindsight](https://github.com/vectorize-io/hindsight)'s
 structured retain/recall lifecycle, source/time filtering and bounded retrieval.

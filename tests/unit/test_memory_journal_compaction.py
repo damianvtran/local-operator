@@ -24,6 +24,7 @@ session export is rewritten so an import cannot resurrect what was dropped.
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import threading
 import time
@@ -86,6 +87,22 @@ def _rows(store: MemoryStore) -> dict[str, list[tuple[Any, ...]]]:
                 )
             ],
         }
+    finally:
+        db.close()
+
+
+def _all_ops(store: MemoryStore) -> list[dict[str, Any]]:
+    with store.connection() as db:
+        return [json.loads(row[0]) for row in db.execute("SELECT data FROM ops")]
+
+
+def _schema_objects(store: MemoryStore, name: str) -> int:
+    """Count a schema object through a READ-ONLY connection (``connection()`` would create it)."""
+    db = sqlite3.connect(f"{store.path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return int(
+            db.execute("SELECT count(*) FROM sqlite_master WHERE name=?", (name,)).fetchone()[0]
+        )
     finally:
         db.close()
 
@@ -418,3 +435,137 @@ def test_compaction_waits_for_a_concurrent_writer_and_deletes_nothing_mid_push(s
     assert not worker.is_alive()
     assert errors == []
     assert _live_ops(store) == plan["ops"]["kept"]
+
+
+def test_compaction_never_reissues_a_sequence_number_a_peer_already_holds(store):
+    """A delete must not lower the counter a peer's cursor is compared against.
+
+    With ``max(seq)+1`` the store re-issued ``(device-a, 1)`` for a NEW operation
+    after a peer's tombstone made the seq-1 put deletable. A receiver seeded at
+    cursor 1 then evaluates ``seq > 1`` as false and never learns the fact:
+    silent, permanent divergence produced by an ordinary forget.
+
+    Three layers are asserted here: allocation persisted the floor at write time
+    (``origin-high-water``), the pass keeps each origin's newest op so the floor
+    is readable from the journal, and the wire delivers the new op to a peer at
+    the old cursor. The floor-alone case (row gone behind the store's back) is
+    ``test_sequence_allocation_reads_the_persisted_floor_not_the_table``.
+    """
+    first = store.put("global", fact())
+    with store.connection() as db:
+        put = store._ops(db, first["id"])[0]
+    assert put["seq"] == 1
+    peer_tombstone = dict(
+        put,
+        op_id="peer-tombstone",
+        origin_device="device-b",
+        seq=1,
+        hlc=[put["hlc"][0] + 1, 0, "device-b"],
+        parents=[put["op_id"]],
+        kind="tombstone",
+        fact=None,
+    )
+    store.apply_ops([peer_tombstone], origins={"device-b"})
+    receipt = _compacted(store)
+    assert receipt["retained"]["tombstones"] == 1
+    # The put survives BECAUSE it is device-a's newest op (the floor defence).
+    assert first["version"] in {op["op_id"] for op in _all_ops(store)}
+
+    fresh = store.put("global", fact("A wholly new fact"))
+    with store.connection() as db:
+        seq = db.execute("SELECT seq FROM ops WHERE op_id=?", (fresh["version"],)).fetchone()[0]
+        floor = db.execute(
+            "SELECT value FROM meta WHERE key=?",
+            (MemoryStore.SEQ_HIGH_WATER + "device-a",),
+        ).fetchone()[0]
+    assert seq == 2, "the compacted store re-issued a sequence number"
+    assert int(floor) >= 2
+
+    from local_operator.network.memory import batch
+
+    wire = batch(
+        store,
+        {"device-a": 1},
+        ["global", "session", "team", "agent"],
+        {"device-a"},
+    )
+    assert [op["op_id"] for op in wire["ops"]] == [
+        fresh["version"]
+    ], "a peer at cursor 1 never receives the new fact"
+
+
+def test_sequence_allocation_reads_the_persisted_floor_not_the_table(store):
+    """The meta floor is the guarantee; keeping the newest row is only backup.
+
+    Simulates a store that already lost an origin's newest row (the state a pass
+    without the floor leaves behind): allocation must still skip the number that
+    row used, or the next operation reuses an identity a peer holds.
+    """
+    first = store.put("global", fact())
+    with store.connection() as db:
+        seq = store._ops(db, first["id"])[0]["seq"]
+        db.execute("DELETE FROM ops WHERE op_id=?", (first["version"],))
+        db.commit()
+
+    second = store.put("global", fact("Written after the row was removed"))
+    with store.connection() as db:
+        assert store._ops(db, second["id"])[0]["seq"] == seq + 1
+
+
+def test_compaction_does_not_promote_a_pinned_revision_into_a_phantom_head(store):
+    """A pin must drag the chain above it, or `_heads` promotes it to a second head.
+
+    ``replaces`` names the replaced entity's head as it was at write time. Two
+    later edits to that entity make the pinned revision a non-head, and its only
+    child is itself a non-head — so a retention set of "heads + pins" deletes the
+    link between them and `show()` reports a conflict nobody made.
+    """
+    old = store.put("global", fact("Old release location"))
+    replacement = store.put("global", fact("New release location", replaces=old["id"]))
+    edit_one = store.put(
+        "global",
+        fact("Old location, first correction"),
+        entity=old["id"],
+        expected_version=old["version"],
+    )
+    store.put(
+        "global",
+        fact("Old location, second correction"),
+        entity=old["id"],
+        expected_version=edit_one["version"],
+    )
+    before = store.show("global", old["id"])
+    assert before["conflicts"] == []
+    assert before["revisions"] == 3
+
+    receipt = _compacted(store)
+
+    after = store.show("global", old["id"])
+    assert after["conflicts"] == [], "compaction promoted a pinned revision into a head"
+    assert receipt["retained"]["closure_ops"] == 1
+    assert after["revisions"] == 3
+    assert after["fact"] == before["fact"]
+    # The replacement edge still hides the replaced fact: both endpoints survived.
+    assert [row["id"] for row in store.tagged("release")] == [replacement["id"]]
+
+
+def test_preview_creates_nothing_and_works_on_a_read_only_copy(store, tmp_path):
+    """A preview that mutates is a trap on the full store it exists to rescue."""
+    first = store.put("global", fact())
+    store.put("global", fact("Edited"), entity=first["id"], expected_version=first["version"])
+    with store.connection() as db:
+        db.execute("DROP TABLE journal_prune")
+        db.commit()
+
+    plan = store.journal_plan()
+
+    assert plan["last_pass"] is None
+    assert plan["ops"]["dropped"] == 1
+    assert _schema_objects(store, "journal_prune") == 0, "the preview created its audit table"
+
+    copy = tmp_path / "read-only" / "memory"
+    copy.mkdir(parents=True)
+    shutil.copyfile(store.path, copy / "memory.db")
+    (copy / "memory.db").chmod(0o444)
+    frozen = MemoryStore(copy.parent, MemoryIdentity("session-a", "team-a", "agent-a"), None)
+    assert frozen.journal_plan()["ops"]["dropped"] == 1
