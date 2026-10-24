@@ -870,6 +870,16 @@ class PendingAskWire:
     answers: dict[str, list[str]] | None = None
     answered_by: dict[str, Any] | None = None
     answered_at: int | None = None
+    #: WHY and WHEN an ask was dismissed (SA-D8, design §17), carried on the ROW
+    #: because the desktop and the phone read rows, not sessions. ``dismissed_at``
+    #: is the stamp the shared visibility rule reads (``asks.store.dismissed_hidden``:
+    #: before the deadline keeps a settled receipt, at or after it leaves), and
+    #: ``dismissed_reason`` is the operator's own word (``moot`` |
+    #: ``answered_in_chat``). Absent on every other status, and ``to_json`` drops
+    #: ``None``, so a non-dismissed row is byte-identical to what every build
+    #: before these fields sent.
+    dismissed_at: int | None = None
+    dismissed_reason: str | None = None
     #: Refs to the images attached to the answer (``{qid: [{"attachment",
     #: "mime_type", "bytes"}]}``); never bytes. Absent for a text-only ask --
     #: ``to_json`` drops ``None`` -- so the phone wire is unchanged for them.

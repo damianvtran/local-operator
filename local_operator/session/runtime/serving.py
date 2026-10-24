@@ -5530,6 +5530,33 @@ class ServingSessionHandle(SessionHandle):
             )
             if carried is not None:
                 spec = spec.model_copy(update={"reasoning_effort": carried})
+        # THE DIAL SURVIVES A PAIR RE-PICK, and a re-pick is the ONLY case
+        # (ui#1266, ui#1265). ``build_model_spec`` never seeds ``fast_mode`` -- a
+        # premium tier must not arrive by inference -- and ``Session.set_model``
+        # assigns the rebuilt spec BEFORE its same-pair early return, so a
+        # re-pick of the row already in force cleared a dial the user had set.
+        # That is exactly the RPC a draft created with the toggle on sends on its
+        # first turn (``attached._consume_model_override``), so the owner dropped
+        # to standard speed at the moment its viewer expected the tier it had
+        # just chosen.
+        #
+        # The carry lives HERE, in the spec this method rebuilds, and not inside
+        # ``Session.set_model``: that surface is also how the toggle itself lands
+        # (``/fast off`` is a same-pair ``model_copy``), so a blanket preserve
+        # there would erase the user's own OFF one edge later.
+        #
+        # A GENUINE switch does NOT carry it -- the tier is bought per model, and
+        # re-arming it on a different route is how a switch costs money nobody
+        # agreed to -- and it is carried only onto a route that SELLS the tier,
+        # the same ``supports_fast_mode`` clamp the journal restore and the spawn
+        # environment apply, because the alternative is a 400 on the next turn.
+        if (
+            current is not None
+            and getattr(current, "fast_mode", False)
+            and (spec.provider, spec.model_id) == (current.provider, current.model_id)
+            and spec.supports_fast_mode
+        ):
+            spec = spec.model_copy(update={"fast_mode": True})
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
@@ -9010,7 +9037,13 @@ class ServingSessionHandle(SessionHandle):
         """
         name, _, request = arg.partition(" ")
         name = name.strip()
-        if name.startswith("="):
+        # A leading ``=`` means "literal name, never a verb": captured before
+        # the strip so the detach below cannot fire on a team literally named
+        # ``clear``/``none``. Without this the TUI and the owner disagreed —
+        # `/team =clear` attached locally but detached on an attached session
+        # (command-palette round 3, MAJOR).
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_team`` and
@@ -9018,7 +9051,7 @@ class ServingSessionHandle(SessionHandle):
         # #2014), so detaching it is the ONE way to free that slot again, and a
         # request after the verb is a mistyped attach that falls through to the
         # ordinary name lookup below (which reports the unknown name).
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "attach_team", None)
             if not callable(detach):
                 # Same shape as the attach guard below: state what this session
@@ -9247,13 +9280,14 @@ class ServingSessionHandle(SessionHandle):
         # review round 4, R4-2). The local seam has had this since U1; without
         # it here the routed owner refused ``/agent =class`` while the same
         # command worked locally — the drift class U1 found.
-        if name.startswith("="):
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_agent``: only
         # the bare verb detaches, so ``/agent clear <text>`` stays a (mistyped)
         # attach and reports the unknown name rather than silently detaching.
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")
@@ -9722,9 +9756,15 @@ class ServingSessionHandle(SessionHandle):
         ITS spec: a phone toggling the dial must reach the spec the next
         provider call is built from, and the app's copy of the rule is not
         loaded in a headless process. Bare toggles, ``on``/``off`` name the
-        resulting state, ``status`` only reports. Session-scoped and never
-        persisted — fast mode is billed at a premium, so it must not outlive
-        the task it was switched on for.
+        resulting state, ``status`` only reports.
+
+        CONVERSATION-scoped, and now DURABLE within that scope: ``set_model``
+        journals the dial beside the model and its level, so a reopen comes back
+        on the speed the operator chose instead of silently reverting
+        (``damianvtran/local-operator-ui#1266``). It is still NOT a global
+        default — nothing here writes config, so a new conversation starts at
+        the model's standard speed and premium pricing never becomes the
+        machine's resting state. This command only names the resulting state.
         """
         spec = getattr(session, "model", None)
         label = getattr(session, "model_label", "") or "this model"
@@ -11092,6 +11132,7 @@ async def spawn_owned_session(
     provider: str | None = None,
     model_id: str | None = None,
     birth_effort: str | None = None,
+    birth_fast: bool = False,
     resume: str | None = None,
     model_selection_override: bool = True,
 ) -> ServingSessionHandle:
@@ -11108,6 +11149,13 @@ async def spawn_owned_session(
     ``--effort`` is applied by ``exec_session`` AFTER construction and RAISES on
     a level the model cannot express, where a stored birth choice must clamp.
     Two different contracts, so two different names.
+
+    ``birth_fast`` is the same kind of sample one field over (ui#1265): the SPEED
+    its viewer chose before the conversation existed, when there is no session to
+    hold a dial yet. It rides ``args.birth_fast`` into ``create_session``, which
+    clamps it on the route's own ``supports_fast_mode`` -- a pick can outlive the
+    catalogue that offered it, and refusing a birth record here would turn a
+    stale tier into a conversation that cannot open.
     """
     # These imports MUST stay function-local, and ``create_session`` most of
     # all. Do not "tidy" them to the top of the file.
@@ -11184,6 +11232,7 @@ async def spawn_owned_session(
         train=False,
         resume=resume,
         birth_effort=birth_effort,
+        birth_fast=birth_fast,
         model_selection_override=model_selection_override,
     )
 

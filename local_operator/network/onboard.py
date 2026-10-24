@@ -1490,9 +1490,14 @@ class OnboardRun:
                     else "no output"
                 ),
             )
+        # The approved name is signed with the device record; do not replace it
+        # with the remote host's default name when the join mints its identity.
+        # Attach the value so argparse also preserves names beginning with '-'.
+        name = str(self.view.device.get("name") or "")
         try:
             joined = self._remote_lop(
-                f"lop network join @{shlex.quote(remote_token)} --automated --json",
+                f"lop network join @{shlex.quote(remote_token)} "
+                f"--name={shlex.quote(name)} --automated --json",
                 timeout=self._step_timeout("join"),
             )
             payload = _json_from(joined.stdout or "")

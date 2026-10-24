@@ -178,7 +178,7 @@ async def dismiss_cold(
     if not store.append_event(directory, payload):
         return {"ok": False, "error": "the dismissal could not be recorded."}
 
-    _dismiss_in_index(root, session_id, ask_id)
+    _dismiss_in_index(root, session_id, ask_id, at=now, reason=payload["reason"])
     await _cancel_deadline_wake(root, session_id, ask_id)
     return {"ok": True}
 
@@ -200,14 +200,29 @@ def _live_owner(root: Path, session_id: str) -> int | None:
     return live_runtime_pid(root, session_id)
 
 
-def _dismiss_in_index(config_dir: Path, session_id: str, ask_id: str) -> None:
-    """Set this ask's row in the derived index to ``dismissed``.
+def _dismiss_in_index(
+    config_dir: Path,
+    session_id: str,
+    ask_id: str,
+    *,
+    at: int,
+    reason: str,
+) -> None:
+    """Set this ask's row in the derived index to a settled DISMISSAL.
 
     The index is what the cross-session view reads with no runtime to ask, so
     without this the phone keeps offering Dismiss on an ask the log has already
     settled until some runtime happens to reconcile. Best-effort by the same
     contract the queue's own writer keeps (``AskQueue._refresh``): the log is the
     truth and any writer heals the entry.
+
+    THREE FIELDS, NOT ONE (SA-D8). A stopped session has no runtime to reconcile
+    the entry from its log, so this write is the only chance the row has to state
+    WHEN and WHY it was dismissed — and both are load-bearing rather than nice:
+    the shared visibility rule (``store.dismissed_hidden``) decides "settled
+    receipt" from ``dismissed_at``, so a row carrying only ``status`` would hide
+    a pre-deadline dismissal the operator is owed a receipt for, and a surface
+    would have a chip with no reason to show under it.
     """
     try:
         entry = store.read_entry(config_dir, session_id)
@@ -218,6 +233,8 @@ def _dismiss_in_index(config_dir: Path, session_id: str, ask_id: str) -> None:
         for row in rows:
             if str(row.get("ask_id")) == ask_id:
                 row["status"] = store.STATUS_DISMISSED
+                row["dismissed_at"] = int(at)
+                row["dismissed_reason"] = store.normalize_dismiss_reason(reason)
                 touched = True
         if not touched:
             return

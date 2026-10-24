@@ -88,8 +88,19 @@ async def test_a_switch_is_journalled_with_the_boot_selector(tmp_path):
     session.set_model(SWITCHED)
     await wait_for(lambda: bool(_selection_entries(session)))
 
+    # ``fast`` is part of the same snapshot and is written on BOTH edges, so a
+    # switch on a standard-speed conversation records ``False`` rather than
+    # omitting the field: a row that omitted it would let an older
+    # ``"fast": true`` row stay the newest evidence on disk, and the restore's
+    # backward scan would resurrect a dial the user had already turned off.
     assert _selection_entries(session) == [
-        {"version": 2, "selector": "anthropic/claude-opus-5", "effort": None, "boot": "test/m"}
+        {
+            "version": 2,
+            "selector": "anthropic/claude-opus-5",
+            "effort": None,
+            "fast": False,
+            "boot": "test/m",
+        }
     ]
     await session.dispose()
 

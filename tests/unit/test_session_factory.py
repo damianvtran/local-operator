@@ -919,6 +919,64 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
 
 
 @pytest.mark.asyncio
+async def test_a_birth_fast_is_the_constructed_specs_dial(tmp_config_dir: Path) -> None:
+    """The chosen SPEED reaches the spec this session is BUILT on.
+
+    The desktop create path (ui#1265) can birth a conversation on fast, and the
+    dial travels the same channel as ``birth_effort``: the view's spawn
+    environment (``launch._spawn_runtime`` -> ``LOP_MOBILE_CHILD_FAST``) into
+    ``spawn_owned_session`` and then into this factory. Construction rather than
+    a later switch is the point — the owner's first frontend snapshot, its first
+    provider call and the selection row it journals at admission then agree with
+    the chip the user set before the conversation existed.
+
+    Two controls. A caller that names no dial gets today's spec (every caller
+    before this field, the CLI, the TUI). And a dial asked of a route that does
+    not SELL the tier is CLAMPED to off rather than raising: a stored choice may
+    outlive the catalogue that offered it, and the refusal belongs to the moment
+    the user picks (the create/preview 422), never to a launch that would then
+    fail to open the conversation.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n" "values:\n" "  hosting: anthropic\n" "  model_name: claude-opus-5\n"
+    )
+    chosen = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5", birth_fast=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert chosen.model.supports_fast_mode is True, "the registry must sell this tier"
+        assert chosen.model.fast_mode is True
+    finally:
+        await chosen.dispose()
+
+    default = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5"),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert default.model.fast_mode is False, "a caller that names no dial keeps today's spec"
+    finally:
+        await default.dispose()
+
+    clamped = await create_session(
+        _args(hosting="deepseek", model="deepseek-flash", birth_fast=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert clamped.model.supports_fast_mode is False
+        assert clamped.model.fast_mode is False, "no tier, no dial — and no failed launch"
+    finally:
+        await clamped.dispose()
+
+
+@pytest.mark.asyncio
 async def test_dict_compaction_config_flows_through_prompt(
     tmp_config_dir: Path,
 ) -> None:
@@ -3335,6 +3393,59 @@ async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: P
             await child.dispose()
     finally:
         await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_factory_closure_carries_the_open_asks_section(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SA-D3: the REAL prompt closure reads the reminder off the goal holder.
+
+    The section is built by the session (its queue, its stamp) but reaches the
+    provider through the holder the factory closure reads, so a missing argument
+    at ``build_system_blocks`` — or a missing read at the closure — would leave
+    the feature dead while every session-level test still passed.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.asks import policy
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+
+    async def hook(questions):  # pragma: no cover — presence is what gates ask
+        return None
+
+    session.set_ask_handler(hook)
+    queue = session.ask_queue()
+    assert queue is not None
+    try:
+        blocks = session._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        assert "<open-asks>" not in str(blocks[-1]), "nothing open, nothing shipped"
+
+        outcome = queue.enqueue(
+            [{"id": "ship", "question": "Ship it tonight?", "options": []}], 3600
+        )
+        assert outcome["ok"], outcome
+        blocks = session._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        tail = str(blocks[-1])
+        assert "<open-asks>" in tail
+        assert "Ship it tonight?" in tail
+        assert str(outcome["details"]["ask_id"]) in tail
+        # No prompt has been admitted, so there is no "as of" to claim — the
+        # honest shape, not a zero or a made-up clock.
+        assert "As of the user's message" not in tail
+    finally:
+        await session.dispose()
 
 
 def test_a_bom_does_not_survive_into_the_prompt(

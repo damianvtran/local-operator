@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.mobile.push_worker import PushWorker
+    from local_operator.providers.auth_store import StoredCredential
 
 from local_operator.harness.approval import (
     frame_authority,
@@ -9353,6 +9354,14 @@ class _UnreadableAuthStore:
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> Any:
         raise self._unavailable("upsert_credential")
+
+    def complete_radient_login(self, result: dict[str, object]) -> "StoredCredential":
+        # Unreadable storage cannot admit a login, even with a valid receipt.
+        raise self._unavailable("complete_radient_login")
+
+    def retained_radient_login_ids(self) -> tuple[int, ...]:
+        # Empty would falsely claim readable history with no retained records.
+        raise self._unavailable("retained_radient_login_ids")
 
     def delete_credentials_for_provider(self, provider: str, disabled_cause: str = "") -> int:
         raise self._unavailable("delete_credentials_for_provider")

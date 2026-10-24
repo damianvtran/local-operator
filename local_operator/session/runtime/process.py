@@ -5232,6 +5232,15 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # value this model cannot express is CLAMPED there rather than refused — a
     # stored choice may outlive the ladder that offered it.
     birth_effort = os.environ.get("LOP_MOBILE_CHILD_EFFORT") or None
+    # The FAST dial this conversation is BORN with, read from the same birth
+    # sample and for the same reason as the level above (ui#1265): the spec this
+    # process constructs has to CARRY it, or the first frontend snapshot, the
+    # first provider call and the selection row written at admission all report a
+    # tier the turn is not sending. PRESENCE of the key is the choice --
+    # ``launch._spawn_runtime`` writes it only when the model sells the tier and
+    # ``standby.CONTRACT_KEYS`` carries it to a warm spare -- and a value the
+    # model cannot serve is CLAMPED in the factory, never refused here.
+    birth_fast = os.environ.get("LOP_MOBILE_CHILD_FAST") == "1"
     resume = os.environ.get("LOP_MOBILE_CHILD_RESUME") or None
     if resume:
         # A runtime ADOPTS the id it was given rather than requiring a
@@ -5250,6 +5259,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
             provider=provider,
             model_id=model_id,
             birth_effort=birth_effort,
+            birth_fast=birth_fast,
             resume=resume,
             model_selection_override=os.environ.get("LOP_MODEL_SELECTION_OVERRIDE") == "1",
         )
