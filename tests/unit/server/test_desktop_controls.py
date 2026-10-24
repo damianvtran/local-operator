@@ -1490,7 +1490,12 @@ async def test_the_first_login_reply_carries_the_auth_url(desktop, monkeypatch):
     # unlike a LoginOperation.snapshot-only unit assertion.
     assert done["message"] == "Sign-in complete."
     assert "Account could not be verified" in done["retained_notice"]
-    assert f"[{legacy.id}]" in done["retained_notice"]
+    # Named by the CURRENT copy, not a bracket token: D4 settled the notation as
+    # "record retained (stored row N)". The semantics this test cares about are
+    # that the record is present and explicitly NOT assigned to the account
+    # that just signed in — a bare [N] drifts the moment the notation changes.
+    assert f"record retained (stored row {legacy.id})" in done["retained_notice"]
+    assert "not been deleted or assigned to that account" in done["retained_notice"]
 
 
 async def test_a_device_flow_publishes_its_user_code(desktop, monkeypatch):
