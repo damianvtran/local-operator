@@ -124,8 +124,24 @@ is **not** a redaction toggle:
 * It opens only these roots: `local_operator/i18n/catalogues/*/*.json`,
   `local_operator/i18n/keys/*.py`,
   `local_operator/mobile/web/src/i18n/keys.gen.ts`,
-  `local_operator/mobile/web/src/i18n/bundled.gen.ts`. There is no directory
-  rule and no extension rule; adding a root is an amendment under §5.
+  `local_operator/mobile/web/src/i18n/bundled.gen.ts`, and — in the companion
+  UI checkout — `src/i18n/catalogues/*/*.json` and `src/i18n/keys.gen.ts`.
+  The UI repository is a separate checkout, but its committed product copy is
+  equally public, so an auditor must be able to read a catalogue key where it
+  lives. There is no directory rule and no extension rule for either checkout;
+  adding a root is an amendment under §5, and the commit-clean/`HEAD`-blob and
+  audit-record requirements below apply identically in both.
+* The UI roots are keyed to **checkout identity, not path shape**: a
+  `src/i18n/...` path is served only when the workspace root is the checkout
+  root and the **last two path components** of `git remote get-url origin`,
+  compared case-insensitively, are `damianvtran/local-operator-ui`. The host is
+  not compared, so an SSH alias or mirror URL with that repository path
+  qualifies; a different `owner/repo` does not. Any repository can contain a
+  `src/i18n/` tree — a contributor's project, or one the agent creates in a
+  single command — so a matching spelling alone must not lift redaction. A
+  checkout with no origin, a different `owner/repo`, or an unusable origin is
+  refused with a sentence naming the expected identity (never the raw URL,
+  which can embed a credential).
 * It serves **the committed blob only**: the file must be tracked and its
   working tree clean against `HEAD` (`git ls-files --error-unmatch` plus
   `git diff --quiet HEAD --`). A working-tree difference or an untracked file is
@@ -133,13 +149,27 @@ is **not** a redaction toggle:
   still reads correctly. Commit the public copy before auditing it; that keeps
   the route from becoming a two-call bypass (write a secret into a catalogue,
   read it back). The route requires `git` on `PATH`.
+* Git runs with `--no-replace-objects`, so a `git replace` ref cannot substitute
+  the served blob while the index/worktree comparison still looks clean.
+* The resolved workspace root must equal `git rev-parse --show-toplevel`:
+  `ls-files` and `diff` are cwd-relative while `show HEAD:<path>` is
+  toplevel-relative, so a workspace below the checkout root could validate one
+  file and serve another. A subdirectory workspace is refused.
 * It returns a named catalogue key, or the lines of a key module / generated
   map that name the key. A whole catalogue is returned only when it is small
   and no key was given.
 * Every successful read appends a JSON line to
   `<config dir>/audit/public-copy-reads.jsonl` **before** the content is
   returned: timestamp, session, path, key, character count, SHA-256 and this
-  document. If the record cannot be written, the read is refused.
+  document. If the record cannot be written, the read is refused. On POSIX the
+  log is opened without following links (`O_NOFOLLOW`, relative to a directory
+  opened the same way, and `O_NONBLOCK` so a FIFO fails the open instead of
+  blocking it), must be a regular file, lives in a `0700` directory and is
+  kept at mode `0600`; a symlinked log or audit directory refuses the read, and
+  an existing permissive file is tightened on the pinned descriptor or the
+  read is refused. Windows has none of those flags: it refuses the two link
+  cases by `lstat`, checks that the opened handle is a regular file, and relies
+  on ACLs rather than mode bits.
 * Nothing else is exempt. `bash`, `read`, `grep` and every other tool still go
   through the normal redaction pass; a genuine secret read with any of them is
   masked exactly as before.
@@ -196,6 +226,18 @@ comment.
   without the refusal sentence — no working-tree secret is exposed, because the
   bytes still come from `HEAD`. A hard link is another working-tree name and
   does not change `HEAD`; it is served for the same reason.
+* The checkout-identity rule reads the checkout's own `origin` configuration;
+  it is not a signature. A process running as the same user can rewrite
+  `remote.origin.url` and claim the UI identity, just as it can reach the files
+  with `bash`. The rule removes the accidental/unreviewed-tree class — a
+  `src/i18n/` tree in an unrelated project no longer qualifies — and the audit
+  log records use; it is not a sandbox against a same-user process.
+* The audit log is append-only by construction, not tamper-proof: a process
+  running as the same user can rewrite, truncate or delete
+  `public-copy-reads.jsonl` (or create it first) after a record is written. The
+  route refuses symlinked logs and directories and keeps the file private, so
+  the record exists before content is returned; that is a policy control, not a
+  MAC.
 
 ## 7. Enforcement map
 
