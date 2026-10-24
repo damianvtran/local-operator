@@ -1,0 +1,67 @@
+{
+  "base": "fa839b7b751c012702741953a04de7b32aacd911",
+  "component_only": false,
+  "selector": "tests/unit/test_tui_responsiveness.py::test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free",
+  "modes": [
+    "healthy",
+    "async-delay"
+  ],
+  "sources": {
+    "tests/unit/test_tui_responsiveness.py": "82991c19dac493d62460bd53a1eb2bce7101c4545976226c04b8d3e17ec45756",
+    "tests/conftest.py": "18766004614a9796f7d9d92336c71316d3bf128115ce0ddfd9b5db171376ac08",
+    "tests/unit/tui/test_app_pilot.py": "bb35f366770549f3dfbfd4874184702a228792ee0e9b8cde6b18d8b4aec72b7d",
+    "local_operator/tui/app.py": "ae810d09612faa9dcc5f2b3a49abdcf88526d3568ec97c600a194185df785c48",
+    "local_operator/model/configure.py": "3ad7b51e1648740371de8059db7f5e01a12512796aac86fe8f111eea734972b2",
+    "local_operator/model/discovery.py": "fcaf7b125e9866252acf1c745575bb62e1ee5d921be90a1370b5c06acbd13cbe",
+    "local_operator/model/costs.py": "def89cd26adcb0b55288f49cc2225b5865f6f41224382e36ca987b0fceef39c8",
+    "scripts/diagnostics/native_worker_6911/carrier.py": "144cc6f0493395462b5aa31ee89955e6312143572868e8dfad5e0cb08f19912e",
+    "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
+    "tests/unit/lfs_s3_positive_plugin_6911.py": "d6a23662e6046ad928734f43daebcac9284a01b382732b26dae763e4d100a076",
+    "scripts/diagnostics/s3_positive_6911/controller.py": "6e2f5cd9c6ee7ed1b7b687dd5c5705bbe415e0e06b7f21d18f87f6c21362b672",
+    "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
+    "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60"
+  },
+  "loaded_sources": [
+    "tests/unit/test_tui_responsiveness.py",
+    "tests/unit/lfs_s3_positive_plugin_6911.py",
+    "tests/conftest.py",
+    "tests/unit/tui/test_app_pilot.py",
+    "local_operator/tui/app.py",
+    "local_operator/model/configure.py",
+    "local_operator/model/discovery.py",
+    "local_operator/model/costs.py"
+  ],
+  "native_api": "existing carrier.native_sources; expected S3_PRODUCER_NATIVE",
+  "remaining": "SOURCE ONLY: formatted current-main shipping overlay; all six native controls unexecuted; fresh reviews and explicit allocation GO required.",
+  "negative_producer_component_only": false,
+  "opt_in_negative_modes": [
+    "manual-cpu",
+    "inline-offload",
+    "body-fault",
+    "body-stop-fault"
+  ],
+  "batches": [
+    [
+      "healthy",
+      "async-delay",
+      "manual-cpu"
+    ],
+    [
+      "inline-offload",
+      "body-fault",
+      "body-stop-fault"
+    ]
+  ],
+  "tokens": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "expected_raw_pytest_rcs": [
+    1,
+    1
+  ]
+}
