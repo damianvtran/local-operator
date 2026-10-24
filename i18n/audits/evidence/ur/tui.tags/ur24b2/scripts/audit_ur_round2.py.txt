@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Read-only mechanical audit for the scoped Urdu round-2 remediation delta."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import unicodedata
+from collections import Counter
+from pathlib import Path
+
+REPO = Path('/Users/damian/local-operator/.worktrees/i18n-ur-core')
+OUT = Path('/Users/damian/.local-operator/sessions/3e0f499dc2ee/scratchpad/ur-core-round2-audit')
+ROOT = REPO / 'local_operator/i18n/catalogues'
+scope = json.loads((OUT / 'scope.json').read_text())
+review_namespaces = [n['namespace'] for n in scope['changed_namespaces']] + [scope['unchanged_neighbor']['namespace']]
+review_keys = {
+    key
+    for ns in scope['changed_namespaces']
+    for key in ns['changed_keys']
+} | set(json.loads((ROOT / 'ur' / f"{scope['unchanged_neighbor']['namespace']}.json").read_text()))
+
+
+def icu_signature(text: str) -> list[str]:
+    signatures = []
+    argument = re.compile(r'\{([A-Za-z_]\w*)\s*(?:\}|,\s*(plural|select|number|date|time)\s*([,}]))')
+    for match in argument.finditer(text):
+        name, kind, delimiter = match.groups()
+        signature = [name, kind or 'interpolation']
+        if kind in {'plural', 'select'}:
+            signature.append(re.findall(r'(?:^|[}\s])(=\d+|zero|one|two|few|many|other)\s*\{', text[match.end():]))
+        elif delimiter == ',':
+            end = text.find('}', match.end())
+            signature.append(text[match.end():end] if end >= 0 else 'UNCLOSED')
+        signatures.append(json.dumps(signature, ensure_ascii=False))
+    return signatures
+
+
+def literal_tokens(text: str) -> list[str]:
+    patterns = [
+        r'`[^`]*`',
+        r'\$\([^)]*\)',
+        r'%[0-9.]*[a-zA-Z%]',
+        r'\b(?:https?|ssh|file)://[^\s،؛۔]+',
+        r'(?<![\w{])--[\w-]+(?:=[\w{}.-]+)?',
+        r'<[A-Za-z_][\w-]*>',
+        r'(?<![:/\w{])/(?:[\w~][\w./~:-]*)',
+        r'(?<!\w)(?:ctrl|shift|alt)\+[a-z0-9_+-]+',
+    ]
+    found = []
+    for pattern in patterns:
+        found.extend(re.findall(pattern, text, flags=re.I))
+    return [token.rstrip('.،؛۔') if not token.startswith(('`', '$(')) else token for token in found]
+
+
+rows = []
+namespace_rows = []
+for ns in review_namespaces:
+    en_path = ROOT / 'en' / f'{ns}.json'
+    ur_path = ROOT / 'ur' / f'{ns}.json'
+    context_path = ROOT / 'en' / f'{ns}.context.json'
+    en_all = json.loads(en_path.read_text())
+    ur_all = json.loads(ur_path.read_text())
+    contexts = json.loads(context_path.read_text()) if context_path.exists() else {}
+    keys = [key for key in en_all if key in review_keys]
+    counts = Counter()
+    for key in keys:
+        source, target = en_all[key], ur_all[key]
+        flags = []
+        if icu_signature(source) != icu_signature(target):
+            flags.append('icu_signature_mismatch')
+        if literal_tokens(source) != literal_tokens(target):
+            flags.append('technical_token_mismatch')
+        if source.count('\n') != target.count('\n'):
+            flags.append('newline_mismatch')
+        if not unicodedata.is_normalized('NFC', target):
+            flags.append('non_nfc')
+        if set(target) & set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'):
+            flags.append('manual_bidi_control')
+        if re.search(r'[\u06f0-\u06f9\u0660-\u0669]', target):
+            flags.append('native_digit')
+        if '।' in target:
+            flags.append('hindi_danda')
+        if '[redacted]' in target.lower():
+            flags.append('literal_redaction_artifact')
+        if re.search(r'(?<!\w)تم(?!\w)', target):
+            flags.append('informal_tum')
+        if not re.search(r'[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]', target) and re.search(r'[A-Za-z]', target):
+            flags.append('all_latin_candidate')
+        phrases = re.findall(r'\b[A-Za-z][A-Za-z0-9_.-]*(?:\s+[A-Za-z][A-Za-z0-9_.-]*){1,}\b', target)
+        if phrases and re.search(r'[\u0600-\u06ff]', target):
+            flags.append('latin_phrase_candidate')
+        counts.update(flag.removesuffix('_candidate') for flag in flags)
+        rows.append({
+            'namespace': ns,
+            'key': key,
+            'en': source,
+            'ur': target,
+            'context': contexts.get(key),
+            'changed': any(key in n['changed_keys'] for n in scope['changed_namespaces']),
+            'flags': flags,
+        })
+    namespace_rows.append({
+        'namespace': ns,
+        'keys_reviewed': len(keys),
+        'en_sha256': hashlib.sha256(en_path.read_bytes()).hexdigest(),
+        'ur_sha256': hashlib.sha256(ur_path.read_bytes()).hexdigest(),
+        'context_sha256': hashlib.sha256(context_path.read_bytes()).hexdigest() if context_path.exists() else None,
+        'flag_counts': dict(counts),
+        'key_set_parity': set(en_all) == set(ur_all),
+    })
+
+summary = {
+    'old_commit': scope['old_commit'],
+    'new_commit': scope['new_commit'],
+    'changed_key_count': scope['changed_key_count'],
+    'neighbor_key_count': scope['unchanged_neighbor']['namespace_keys'],
+    'review_key_count': len(rows),
+    'plural_review_key_count': sum(', plural,' in r['en'] for r in rows),
+    'number_date_time_review_key_count': sum(bool(re.search(r',\s*(?:number|date|time)\s*[,}]', r['en'])) for r in rows),
+    'explicit_maxCells_review_key_count': sum(isinstance(r['context'], dict) and isinstance(r['context'].get('maxCells'), int) for r in rows),
+    'namespace_count': len(namespace_rows),
+    'namespace_rows': namespace_rows,
+    'flag_counts': dict(Counter(flag.removesuffix('_candidate') for r in rows for flag in r['flags'])),
+}
+(OUT / 'mechanical-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n')
+(OUT / 'mechanical-rows.json').write_text(json.dumps(rows, ensure_ascii=False, indent=2) + '\n')
+(OUT / 'latin-candidates.json').write_text(json.dumps([r for r in rows if any('latin' in f for f in r['flags'])], ensure_ascii=False, indent=2) + '\n')
+(OUT / 'plural-scope.json').write_text(json.dumps([r for r in rows if ', plural,' in r['en']], ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({k: v for k, v in summary.items() if k != 'namespace_rows'}, ensure_ascii=False, indent=2))
+for ns in namespace_rows:
+    print(ns['namespace'], ns['keys_reviewed'], ns['flag_counts'])

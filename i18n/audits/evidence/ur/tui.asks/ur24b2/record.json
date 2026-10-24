@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "audit_id": "ur24b2",
+  "audit_kind": "independent_core_round_2_audit_evidence",
+  "locale": "ur",
+  "namespace": "tui.asks",
+  "round": 2,
+  "audit_date": "2026-10-24",
+  "key_count": 11,
+  "source_audit_revision": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+  "assembly_revision": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "current_byte_peer_audit_id": "ur24a2",
+  "current_byte_peer_record": "i18n/audits/evidence/ur/tui.asks/ur24a2/record.json",
+  "translator": {
+    "agent": "translator specialist (ur-tui-shell)",
+    "session": "52136848d1fc",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "date": "2026-10-23",
+    "integrator_session": "3f68f20b2cad"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team); independent scoped round-2 core auditor",
+    "session": "3e0f499dc2ee",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Original auditor receipt ur-core-round2-audit.receipt.json; served model openrouter/moonshotai/kimi-k3.1-pro; fallback: none observed; the served model recorded above performed this audit"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.asks.json",
+      "sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.asks.context.json",
+      "sha256": "e09cd8e796359ab8c4d8de2fd5a59bb990c76f8488c28846cfb1623610507362"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/tui.asks.json",
+      "sha256": "dfa37a3f780b3bc257942a06d7d24a2b40e2c9f75d2641064abd0e84fd201b4d"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/ur.md",
+        "sha256": "157b1310a090ca98bd9c4b2262a8ebcf7d5ca92cd91fb5f9c7e82d21fe768c9c"
+      }
+    ],
+    "note": "Current assembly inputs are named here. Historical source-receipt hashes remain unchanged in the preserved namespace row; only selected current-byte rounds were required to match."
+  },
+  "source_receipt": {
+    "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/ur-core-round2-audit.receipt.json",
+    "sha256": "e23a8b64ae20e1bbedd29bb0fcc52be408d4b17c5c6b36106c1d8f93c8be6d48"
+  },
+  "source_companions": [
+    "dispositions.json",
+    "evidence-manifest.json",
+    "hash-checks.json",
+    "mechanical-rows.json",
+    "mechanical-summary.json",
+    "plural-scope.json",
+    "repository-checks.log",
+    "runtime-fit-plurals.json",
+    "scope.json",
+    "tui.asks.pairs",
+    "ur-core-round2-audit.md",
+    "ur-core-round2-audit.receipt.json",
+    "validation.json"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/audit.log",
+      "sha256": "0363bc701a362116f622897591da0fa86a83487f8315a8689b9678e350a8405d"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/dispositions.json",
+      "sha256": "98f74df811d879150b70e391b2a1578476bc0e76fba2ea2af946a90575e56572"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/evidence-manifest.json",
+      "sha256": "8584fab0605784b9aadf847b96f7fc3c0cbf2b53f606058e32f51521e6c407b2"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/hash-checks.json",
+      "sha256": "4a876609bec76d46120039e9020a9c57831357db9bf81acd49f550aef6fae7c6"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/mechanical-rows.json",
+      "sha256": "fa14193e1725a401351cadc2988c97370355c7784272de3bfe053e93a78ce209"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/mechanical-summary.json",
+      "sha256": "9bf226df1b5933dc664facb8c338d5c646b65bb593ac3b284cc6553f19fa7da5"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/plural-scope.json",
+      "sha256": "37f32d0018d59310d4a77c2e13214f805edf0ca57c9f3f8f2aa974f0407ec3f0"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/report.md",
+      "sha256": "cca0a7fda28fc050b00aae11e800f0736476b8d0867558642ae40eddb6272614"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/repository-checks.log",
+      "sha256": "0363bc701a362116f622897591da0fa86a83487f8315a8689b9678e350a8405d"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/runtime-fit-plurals.json",
+      "sha256": "23647fa0e381383f22f815d7bd1d3653111b04e29b4326688414e34080209d59"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/scope.json",
+      "sha256": "0f2501a7d11b0e7c328b9ae4ed993510b116d8b473ee44c6986b56443dd73bd1"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/tui.asks.pairs",
+      "sha256": "409d20275cc34901224711b4db59fdfcc65c7fb25466f4eb866e6e6b0a23d7e5"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/ur-core-round2-audit.md",
+      "sha256": "b11bbfec5e3581b313f662a2c23e440f9716d776962edbba59baff898b16c94b"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/ur-core-round2-audit.receipt.json",
+      "sha256": "e23a8b64ae20e1bbedd29bb0fcc52be408d4b17c5c6b36106c1d8f93c8be6d48"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.asks/ur24b2/validation.json",
+      "sha256": "a4542d6d99c659a8bb750c5b2d950932a0a8e453cdd009032051f3594168e74c"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "findings_total": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "source_verdict": "clean",
+    "rendered_followups": []
+  },
+  "audit_notes_not_execution_log": "report.md is an assembly index. The original source receipt/report and selected evidence companions are preserved byte-for-byte; audit.log distinguishes recorded source output from new execution. Native/rendered RTL and design sign-off were not performed by this assembly."
+}

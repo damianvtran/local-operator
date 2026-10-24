@@ -1,0 +1,52 @@
+wire.slash.accounts | List stored credentials | محفوظ کریڈینشلز کی فہرست
+wire.slash.agent | List agents, switch an agent's class, or speak to this session as one | ایجنٹس دیکھیں، class بدلیں، یا ایجنٹ بن کر بات کریں
+wire.slash.aida | Open your chief of staff, or send her a request | اپنی چیف آف اسٹاف کھولیں، یا اسے درخواست بھیجیں
+wire.slash.analytics | Aggregated token-consumption analytics across all sessions | تمام سیشنز کے ٹوکن استعمال کے مجموعی تجزیات
+wire.slash.approvals | Show or set tool approval mode for this session | اس سیشن کے لیے ٹول منظوری کا mode دیکھیں یا مقرر کریں
+wire.slash.archive | Hide from the lists, still resumable by id | فہرستوں سے چھپائیں؛ id سے دوبارہ کھولا جا سکتا ہے
+wire.slash.btw | Ask a side question off the record (esc closes it) | الگ سوال پوچھیں، ریکارڈ سے باہر (esc سے بند)
+wire.slash.clear | Clear the transcript (history is untouched) | ٹرانسکرپٹ صاف کریں (ماضی کا ریکارڈ محفوظ رہے گا)
+wire.slash.compact | Compact the context now | ابھی سیاق و سباق کی کمپریشن کریں
+wire.slash.context | Show prompt, tool-schema and message token usage | پرامپٹ، ٹول اسکیما اور پیغامات کے ٹوکن استعمال دکھائیں
+wire.slash.copy | Copy an agent message or code block | ایجنٹ کا پیغام یا code block نقل کریں
+wire.slash.credential | Type or paste a secret after a space; masked | space کے بعد secret لکھیں/paste کریں؛ حروف چھپے رہیں گے
+wire.slash.delete | Delete this conversation for good; asks to confirm | یہ گفتگو ہمیشہ کے لیے حذف کریں؛ تصدیق مانگی جائے گی
+wire.slash.effort | Show or set reasoning effort (shift+tab cycles) | استدلال کی سطح دیکھیں یا مقرر کریں (shift+tab سے بدلیں)
+wire.slash.exit | Quit the app | ایپ سے باہر نکلیں
+wire.slash.failovers | Show the model failover cascade and what is serving | ماڈل failover کی ترتیب اور فعال ماڈل دکھائیں
+wire.slash.fast | Toggle faster output at premium pricing | زیادہ قیمت پر تیز output کو آن/آف کریں
+wire.slash.fork | Branch this chat; --switch here, --window elsewhere; <message> starts work | شاخ؛ --switch یہیں، --window باہر؛ <message> آغاز کرے
+wire.slash.goal | Set the goal and start work; /goal --clear clears it | ہدف مقرر کر کے کام شروع کریں؛ /goal --clear سے صاف کریں
+wire.slash.help | List all commands | تمام کمانڈز کی فہرست
+wire.slash.highlights | Cancel, retry or steer the highlights under an answer | جواب کے نمایاں حصے منسوخ، دوبارہ آزمائیں یا رخ بدلیں
+wire.slash.hub | Open Hub links — per-link subscribe and auto-push policy | Hub links کھولیں — فی link رکنیت اور auto-push پالیسی
+wire.slash.info | Install, version, and running sessions on this machine | انسٹال، ورژن اور اس مشین کے چلتے سیشنز
+wire.slash.keys | Show the keyboard legend | کی بورڈ کی رہنما کلیدیں دکھائیں
+wire.slash.language | Show or set the UI language; auto follows the system | UI زبان دیکھیں/مقرر کریں؛ auto سسٹم کی پیروی کرتا ہے
+wire.slash.links | Open a link from this conversation in a browser | اس گفتگو کا link browser میں کھولیں
+wire.slash.login | Authenticate a provider | provider میں لاگ اِن کریں
+wire.slash.logout | Remove stored provider credentials | محفوظ provider کریڈینشلز ہٹائیں
+wire.slash.loop | Loop toward a goal: /loop <goal>, <n>; --stop cancels | ہدف تک loop: /loop <goal>, <n>؛ --stop سے منسوخ
+wire.slash.mcp | List MCP servers; add/remove one, or manage an OAuth grant | MCP servers دیکھیں/add/remove؛ OAuth grant منظم کریں
+wire.slash.mobile | Radient phone access: status, enable, stop, billing | Radient فون رسائی: حالت، فعال کرنا، روکنا، بلنگ
+wire.slash.model | Switch model; /model default saves it for new sessions | ماڈل بدلیں؛ /model default نئے سیشنز کے لیے محفوظ کریں
+wire.slash.move | Change this session's working directory | اس سیشن کی working directory بدلیں
+wire.slash.network | Networks, peers, and this device's mesh state | نیٹ ورکس، peers اور اس ڈیوائس کی mesh حالت
+wire.slash.new | Start a new conversation | نئی گفتگو شروع کریں
+wire.slash.notifications | Unread completions; read marks them read | ناپڑھی تکمیل کی اطلاعات؛ پڑھنے پر پڑھی گئی نشان زد
+wire.slash.project | Track workstreams: list, show, new, delete, link, unlink | ورک اسٹریمز: list, show, new, delete, link, unlink
+wire.slash.provider | List providers and their login/usage state | providers اور ان کی لاگ اِن/استعمال کی حالت کی فہرست
+wire.slash.reload | Relaunch this conversation on the current install | موجودہ install سے یہ گفتگو دوبارہ چلائیں
+wire.slash.rename | Name this conversation, or /title --refresh | اس گفتگو کو نام دیں، یا /title --refresh
+wire.slash.resume | Pick a past conversation to resume, or resume one (id) | پرانی گفتگو منتخب کر کے جاری رکھیں، یا id دیں
+wire.slash.search | Configure web search providers and load balancing | ویب تلاش کے providers اور load balancing ترتیب دیں
+wire.slash.session | Usage, cost, diagnostics; --copy copies the session ID | استعمال، لاگت، تشخیص؛ --copy سیشن ID نقل کرتا ہے
+wire.slash.settings | Change every setting on one page | تمام ترتیبات ایک صفحے پر بدلیں
+wire.slash.sidebar | Show or hide conversations; 'focus' keys the list | گفتگوئیں دکھائیں/چھپائیں؛ 'focus' سے فہرست پر جائیں
+wire.slash.skills | List loaded skills | لوڈ شدہ مہارتیں دکھائیں
+wire.slash.stop | End this session, another by name/pid, or all — /resume reopens it | سیشن بند کریں: یہ، دوسرا (نام/pid) یا سب؛ /resume کھولے
+wire.slash.team | List teams, chart a team's org, or send a request to a team's manager | ٹیمیں اور تنظیمی خاکہ دیکھیں؛ manager کو درخواست بھیجیں
+wire.slash.theme | Switch color theme; arrows preview live | رنگی تھیم بدلیں؛ arrow keys سے براہِ راست پیش منظر
+wire.slash.unarchive | Show this conversation in the lists again | یہ گفتگو دوبارہ فہرستوں میں دکھائیں
+wire.slash.update | Install the latest version from PyPI and relaunch | PyPI سے تازہ ورژن install کر کے دوبارہ شروع کریں
+wire.slash.usage | Show provider usage quota | provider کا usage quota دکھائیں

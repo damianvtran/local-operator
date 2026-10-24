@@ -1,0 +1,41 @@
+{
+  "key_set_mismatch_count": 0,
+  "icu_signature_mismatch_count": 0,
+  "literal_token_mismatch_count": 0,
+  "manual_bidi_control_keys": [],
+  "urdu_digit_keys": [],
+  "hindi_danda_keys": [],
+  "ascii_exclamation_keys": [
+    "tui.welcome.tip.shell"
+  ],
+  "informal_tum_keys": [],
+  "urdu_punctuation_counts": {
+    "۔": 569,
+    "،": 200,
+    "؟": 6,
+    "؛": 139
+  },
+  "translator_hash_mismatches": [],
+  "translator_sessions": [
+    "3f68f20b2cad",
+    "52136848d1fc",
+    "7a648afb0f8d",
+    "7c4a4229b011",
+    "ffc94c8cb17d"
+  ],
+  "auditor_session": "3e0f499dc2ee",
+  "independence": true,
+  "other_second_audit_receipt_read": false,
+  "raw_probe_notes": {
+    "raw_actual_overflow_candidates": 3,
+    "raw_overflow_disposition": "all three superseded by rendered ICU/sidecar-aware fit probe; actual rendered overflow=0",
+    "raw_forbidden_punctuation_candidates": 1,
+    "punctuation_disposition": "tui.welcome.tip.shell exclamation is the literal bang shell operator, not prose punctuation"
+  },
+  "literal_redaction_artifact_keys": [
+    "wire.errors.settings.inline_credentials"
+  ],
+  "literal_redaction_artifact_count": 1,
+  "materially_longer_candidate_count": 26,
+  "materially_longer_disposition": "25 have no declared maxCells and are retained for rendered fit review; tui.asks.dismiss.notice_no_reply has maxCells=44 and measures 39 cells, so it fits; length alone is not counted as a defect"
+}

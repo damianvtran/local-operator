@@ -1,0 +1,797 @@
+{
+  "schema": 1,
+  "record_kind": "translator_provenance",
+  "locale": "ur",
+  "scope": "core namespace set carried by shipped ru at base revision; excludes desktop catalogues",
+  "base_revision": "b8f47dd34745d9bfecafcdca884d79016c3004c5",
+  "date": "2026-10-23",
+  "status": "independent_round_3_audits_complete_native_rtl_and_client_gates_pending",
+  "source_set": {
+    "reference_locale": "ru",
+    "namespace_count": 23,
+    "key_count": 1355,
+    "empty_namespaces": [
+      "wire.errors",
+      "wire.incidents",
+      "wire.notices"
+    ]
+  },
+  "integrator": {
+    "agent": "translator (lopdev team)",
+    "session": "3f68f20b2cad",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "fallback": "none",
+    "note": "Integrated original translation and unified audit remediations; round-2 findings were applied directly with exact local predicates, including redaction-safe reuse of the established native credential plural."
+  },
+  "contributors": [
+    {
+      "agent": "translator specialist (ur-wire-settings)",
+      "task": "203043716d58",
+      "session": "ffc94c8cb17d",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none reported; parent model selected",
+      "round_1_remediation_task": "8fe35e368a1b"
+    },
+    {
+      "agent": "translator specialist (ur-wire-relay)",
+      "task": "df4e11a1ea6e",
+      "session": "7a648afb0f8d",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none reported; parent model selected",
+      "round_1_remediation_task": "39fb9b8ba667"
+    },
+    {
+      "agent": "translator specialist (ur-tui-flows)",
+      "task": "f9393060905d",
+      "session": "7c4a4229b011",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none reported; parent model selected",
+      "round_1_remediation_task": "f8979ecabea2"
+    },
+    {
+      "agent": "translator specialist (ur-tui-shell)",
+      "task": "89c8c9c3dff1",
+      "session": "52136848d1fc",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none reported; parent model selected",
+      "round_1_remediation_task": "44e12d84f3e9"
+    }
+  ],
+  "hash_algorithm": "SHA-256 over exact UTF-8 file bytes; context_sha256 is null when English has no sidecar",
+  "namespaces": [
+    {
+      "namespace": "cli.exec_remote_help",
+      "key_count": 11,
+      "en_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "ur_sha256": "e12f432f8cf3015f6e852af79ca4688e8e8087727997a3f885eb2dd458b95296",
+      "context_sha256": "fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f",
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 3,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "relay.ask",
+      "key_count": 11,
+      "en_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "ur_sha256": "534aa6d0f7a34c153a088695fa052cc2342fe716de96a0fb0bfc9e5dffba863c",
+      "context_sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42",
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 5,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key_count": 19,
+      "en_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "ur_sha256": "4f0fab7f40bacc152b1cabba0244372b8d8dec40213c778ef8c417ac6be242aa",
+      "context_sha256": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7",
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.asks",
+      "key_count": 11,
+      "en_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "ur_sha256": "dfa37a3f780b3bc257942a06d7d24a2b40e2c9f75d2641064abd0e84fd201b4d",
+      "context_sha256": "e09cd8e796359ab8c4d8de2fd5a59bb990c76f8488c28846cfb1623610507362",
+      "translator_session": "52136848d1fc",
+      "round_1_remediation_changed_keys": 1,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.authoring",
+      "key_count": 49,
+      "en_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+      "ur_sha256": "81bb894f733b2ce4362b3c32d6e3054e8f0d167319ab5d6f2cf28a9f6a0fb61c",
+      "context_sha256": "df98bba4457c1080b3941e9a24a04a52e360d11d2a07bdda992861c6cb54928c",
+      "translator_session": "7c4a4229b011",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.palette",
+      "key_count": 7,
+      "en_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "ur_sha256": "1e320792eb96004d220e0ead013b628b749b9eb5f904421d00c6532f4513ccea",
+      "context_sha256": "edd5a12c66ec852e65e9afb4eee92f1b9436a3a148683b8d756a002b68ff06f7",
+      "translator_session": "52136848d1fc",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.projects_edit",
+      "key_count": 35,
+      "en_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "ur_sha256": "971f60ecf5722347088e73ca36d881b2d143c3bcd9e1d0e3bb0bb0a615e0b477",
+      "context_sha256": "db995023c6489ee9313403c2f463c36ea65162ceea52a572c3da26db02fbd01c",
+      "translator_session": "7c4a4229b011",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.review",
+      "key_count": 73,
+      "en_sha256": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+      "ur_sha256": "175caf5610f2837c37e49fed9406339e93a3e1965820b664b03b5ed41658a996",
+      "context_sha256": "b879498a3ba2debfac6ec65a640a75b8d53e71073a1d32676dc41f7325dbc202",
+      "translator_session": "7c4a4229b011",
+      "round_1_remediation_changed_keys": 2,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.schedule",
+      "key_count": 61,
+      "en_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "ur_sha256": "3d3dc64afa2a4cb1a486daae2d7b446e6ad13608e0131c26100d1fe3e43f0f0f",
+      "context_sha256": "829e18450b21ca836cc047813b9d18770414f1fd23f14c18b794c1f45648afb4",
+      "translator_session": "7c4a4229b011",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.status",
+      "key_count": 7,
+      "en_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "ur_sha256": "183a01fdfec59548bab675db30c675170e71ef20bb4d97c943f4fa211acf68f8",
+      "context_sha256": "3bab032efffea4adb669aa1f3c8d7a489f7b3b630b19b52636d70bd2b09bdfbc",
+      "translator_session": "52136848d1fc",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.tags",
+      "key_count": 27,
+      "en_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "ur_sha256": "850ae391162ea317f72352f1788e44822d6ed7005f284d193cdde29510eb6f64",
+      "context_sha256": null,
+      "translator_session": "52136848d1fc",
+      "round_1_remediation_changed_keys": 6,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.team_authoring",
+      "key_count": 36,
+      "en_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+      "ur_sha256": "50437b6e50c25040937f9863550a9cfea0afe159987f8dd5f942e38f772ccb80",
+      "context_sha256": "40e81d7469be5fb0da215e96d77189b218ed6a9879b13e4d4dc9f7b5f6c188ce",
+      "translator_session": "7c4a4229b011",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.transcript",
+      "key_count": 17,
+      "en_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "ur_sha256": "3772f0bc1cb8f893e261445180c69ac7cc77874a590e48be8aa909fb3116db86",
+      "context_sha256": "3c2252debbbc33c2fab2061a5dcdc9dfa036e07ab5793ba4dabdf889ac7113fc",
+      "translator_session": "52136848d1fc",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.viewer",
+      "key_count": 19,
+      "en_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "ur_sha256": "9334ed44af55fe3d00940ae5914d937d270055f1def9b5796d0df13ca4374a1b",
+      "context_sha256": "ed4535ceb6e3119c8a3b35f0aa0570ed0398d61c212a43f35bc6d2aa9ac389ae",
+      "translator_session": "52136848d1fc",
+      "round_1_remediation_changed_keys": 1,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "tui.welcome",
+      "key_count": 30,
+      "en_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "ur_sha256": "db161318b2cf14288b928fc9aa9eaa9d597ea482e7a45dd88e7b989f8504718d",
+      "context_sha256": "bfd46d9dbcc5c4dfbee6a3fd93e47264f17f123e01ddf84a7aae99869c41debd",
+      "translator_session": "52136848d1fc",
+      "round_1_remediation_changed_keys": 2,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "wire.errors",
+      "key_count": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "wire.errors.settings",
+      "key_count": 12,
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "e5a010a1dbe5698c96b92d35f616e7dfc557c801b5e1eca1a6c84a543b92c91e",
+      "context_sha256": null,
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 4,
+      "round_2_remediation_changed_keys": 1
+    },
+    {
+      "namespace": "wire.incidents",
+      "key_count": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "wire.memory",
+      "key_count": 17,
+      "en_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "ur_sha256": "672982af74dc2436980566f94fcda01ac60e60dd2f588de1151a4176ac337a98",
+      "context_sha256": "852518b5d2bd41f4b8b72d6d89d961d35b1bafaf341726e0406973d12b1c5e7d",
+      "translator_session": "7a648afb0f8d",
+      "reused_byte_identical_from_commit": "4d03e96b47a8ced27f5ce9b987f30a1746b40882",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "wire.notices",
+      "key_count": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 0,
+      "round_2_remediation_changed_keys": 0
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "key_count": 43,
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "836d3410761ea771d3201602418322a8577b98681dbc946d590f9a8d48c6e509",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 21,
+      "round_2_remediation_changed_keys": 1
+    },
+    {
+      "namespace": "wire.settings",
+      "key_count": 818,
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "0bb60816444bcf86a6c2d93e9c6ee7211fd377dd080e8cb39ae7f7d39ec30840",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "translator_session": "ffc94c8cb17d",
+      "round_1_remediation_changed_keys": 589,
+      "round_2_remediation_changed_keys": 16
+    },
+    {
+      "namespace": "wire.slash",
+      "key_count": 52,
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "e1897b69d355d05d44dd6761affb866749fa431630234421dfb31c65141c8cb1",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "translator_session": "7a648afb0f8d",
+      "round_1_remediation_changed_keys": 23,
+      "round_2_remediation_changed_keys": 1
+    }
+  ],
+  "terminology_decisions": {
+    "credentials": "کریڈینشل / کریڈینشلز (the shared glossary ur cell was undecided)",
+    "job": "جاب",
+    "remote_compute": "ریموٹ کمپیوٹ",
+    "run": "رن",
+    "workstreams": "ورک اسٹریمز",
+    "proactive": "پیش قدم",
+    "reactive": "ردِ عمل",
+    "role": "کردار",
+    "specialist": "ماہر",
+    "milestone": "سنگ میل",
+    "turn": "ٹرن",
+    "estimate": "تخمینہ",
+    "aliases": "عرفی نام",
+    "provider": "پرووائیڈر",
+    "dismiss": "خارج کریں / خارج کیا گیا (context-dependent)",
+    "branch_in_slash_fork": "شاخ",
+    "scratchpad": "Scratchpad (sidecar-required product noun)"
+  },
+  "width": {
+    "explicit_maxCells_checked": 54,
+    "overflow_risks": [
+      {
+        "key": "wire.slash.agent",
+        "cells": 72,
+        "budget": "approximate 55-cell /help guide"
+      },
+      {
+        "key": "wire.slash.fork",
+        "cells": 84,
+        "budget": "approximate 55-cell /help guide"
+      },
+      {
+        "key": "wire.slash.highlights",
+        "cells": 59,
+        "budget": "approximate 55-cell /help guide"
+      }
+    ],
+    "help_approx_55_cells": {
+      "wire.slash.agent": 72,
+      "wire.slash.fork": 84,
+      "wire.slash.highlights": 59
+    },
+    "actual_explicit_maxCells_overflow_count": 0,
+    "pseudo_30pct_fit_risk_count": 27
+  },
+  "pending_gates": [
+    "Independent scoped round-3 audits of the four remediated namespaces.",
+    "Native rendered RTL/bidi/shaping, fallback and long-text/design evidence; pseudo and mechanical checks are not rendered sign-off.",
+    "Approximate /help fit risks remain reserved for rendered review and were not churned in this remediation.",
+    "Ledger rows and shipped eligibility remain unchanged until independent programme gates pass."
+  ],
+  "updated_date": "2026-10-24",
+  "round_1_remediation": {
+    "date": "2026-10-24",
+    "audited_revision": "2189b61739e08b5f219d317ead68b4a5f4cf709f",
+    "audit_receipts": [
+      {
+        "session": "5ebbaba9537e",
+        "receipt_sha256": "97fc61aad4a79ad83d049add51d111f7cfbe744faa99b675a63423d2385fcc49"
+      },
+      {
+        "session": "3e0f499dc2ee",
+        "receipt_sha256": "ed26fb8ab1944520c4c14f670955f5353a57ec0e9acd84f08d5c271a1d5ab49a"
+      }
+    ],
+    "changed_namespace_count": 11,
+    "changed_key_count": 657,
+    "changed_namespaces": {
+      "cli.exec_remote_help": 3,
+      "relay.ask": 5,
+      "tui.asks": 1,
+      "tui.review": 2,
+      "tui.tags": 6,
+      "tui.viewer": 1,
+      "tui.welcome": 2,
+      "wire.errors.settings": 4,
+      "wire.remote_compute": 21,
+      "wire.settings": 589,
+      "wire.slash": 23
+    },
+    "findings": [
+      {
+        "id": "UR-R1-001",
+        "disposition": "fixed",
+        "namespaces": [
+          "relay.ask"
+        ],
+        "note": "Five dismiss values now use خارج; answered receipt says the answer exists in chat and no-reply receipt says no answer was sent."
+      },
+      {
+        "id": "UR-R1-002",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Transcription cleanup label is ٹرانسکرپٹ کی صفائی."
+      },
+      {
+        "id": "UR-R1-003",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Named settled terms fixed and all 818 settings values swept; 589 keys changed."
+      },
+      {
+        "id": "UR-R1-004",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Monitor description rephrased naturally with all three behaviours."
+      },
+      {
+        "id": "UR-R1-005",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.slash"
+        ],
+        "note": "Provider/manager terminology localized consistently."
+      },
+      {
+        "id": "UR-R1-006",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.slash"
+        ],
+        "note": "Retry wording now uses دوبارہ کوشش کریں."
+      },
+      {
+        "id": "UR-R1-007",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Child/row now ذیلی ایجنٹ/قطار."
+      },
+      {
+        "id": "UR-R1-008",
+        "disposition": "superseded",
+        "namespaces": [
+          "relay.session.tags",
+          "tui.tags"
+        ],
+        "note": "Cross-audit conflict resolved with UR2-010: masculine ٹیگ is standardized across both surfaces; relay bytes remain unchanged and terminal forms changed."
+      },
+      {
+        "id": "UR-R1-009",
+        "disposition": "fixed",
+        "namespaces": [
+          "tui.review"
+        ],
+        "note": "Both stale lanes now read {reviewed} پر جائزہ."
+      },
+      {
+        "id": "UR-R1-010",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Manual-selection condition now uses منتخب ہونے پر لاگو حد."
+      },
+      {
+        "id": "UR2-001",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Systemic ordinary/hybrid prose remediated across the complete namespace; protected tokens retained."
+      },
+      {
+        "id": "UR2-002",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.slash"
+        ],
+        "note": "Systemic slash prose/provider sweep changed 23 keys."
+      },
+      {
+        "id": "UR2-003",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.slash"
+        ],
+        "note": "Fork restores this chat and <message> سے کام شروع کریں; 84-cell approximate /help overflow explicitly flagged."
+      },
+      {
+        "id": "UR2-004",
+        "disposition": "fixed",
+        "namespaces": [
+          "tui.welcome"
+        ],
+        "note": "Visible settings labels now فورک and ہاٹ کیز."
+      },
+      {
+        "id": "UR2-005",
+        "disposition": "fixed",
+        "namespaces": [
+          "tui.asks"
+        ],
+        "note": "Answered reason now expresses deliberate گفتگو میں جواب دے دیا."
+      },
+      {
+        "id": "UR2-006",
+        "disposition": "fixed",
+        "namespaces": [
+          "relay.ask",
+          "tui.asks"
+        ],
+        "note": "Phone and terminal use the same خارج dismiss act; relay receipts use consistent خارج کیا گیا."
+      },
+      {
+        "id": "UR2-007",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.remote_compute"
+        ],
+        "note": "Systemic remote prose sweep changed 21 keys, including خروجی کوڈ and نیٹ ورک."
+      },
+      {
+        "id": "UR2-008",
+        "disposition": "fixed",
+        "namespaces": [
+          "cli.exec_remote_help"
+        ],
+        "note": "Idempotency/upload/compute-size minors applied; protected syntax retained."
+      },
+      {
+        "id": "UR2-009",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.errors.settings"
+        ],
+        "note": "Inline-credential safety prose, credential key, registration and neighbouring field noun corrected using exact local predicates."
+      },
+      {
+        "id": "UR2-010",
+        "disposition": "fixed",
+        "namespaces": [
+          "tui.tags",
+          "relay.session.tags"
+        ],
+        "note": "Masculine ٹیگ standardized; six terminal keys changed including direct-neighbor removed, relay remains masculine and unchanged."
+      },
+      {
+        "id": "UR2-011",
+        "disposition": "fixed",
+        "namespaces": [
+          "tui.viewer"
+        ],
+        "note": "Unreadable refusal now names all three causes idiomatically; historical byte-reuse marker removed."
+      }
+    ],
+    "verification": {
+      "generator": "generate.py regenerated sanctioned artifacts; generate.py --check: 91 artifact(s) byte-identical",
+      "catalogues": "check.py --catalogues-only: 0 problem(s)",
+      "full_check": "check.py: ok — 179 files scanned, 2225 literals at/below baseline, catalogues consistent; 28 pre-existing report-only advisories",
+      "key_icu_tokens": "1355 keys; exact key order, ICU structure/order/skeleton/branches, backticks, angle tokens, flags, $() calls, newlines, bidi controls and Latin digits: 0 errors",
+      "named_audit_predicates": "30 exact values plus systemic and redaction-safe local predicates: PASS",
+      "plurals": "19 keys x 5 counts = 95 runtime renders; 0 errors; Node Intl.PluralRules(ur): 0/other, 1/one, 2/other, 21/other, 1.5/other",
+      "width": "54 explicit maxCells: 0 actual overflows; deterministic ceil(actual*1.30) pseudo-stretch: 27 fit-risk keys, not native/rendered failures",
+      "approximate_help_overflows": [
+        {
+          "key": "wire.slash.agent",
+          "cells": 72,
+          "guide_cells": 55
+        },
+        {
+          "key": "wire.slash.fork",
+          "cells": 84,
+          "guide_cells": 55
+        },
+        {
+          "key": "wire.slash.highlights",
+          "cells": 59,
+          "guide_cells": 55
+        }
+      ]
+    },
+    "pending_gates": [
+      "Independent scoped round-2 semantic audits over all 11 changed namespaces and direct neighbors.",
+      "Native Urdu/RTL/bidi/shaping, rendered fallback and long-text/design evidence remains unperformed.",
+      "No ledger row, shipped eligibility or hold changed; no row marked passed."
+    ]
+  },
+  "round_2_remediation": {
+    "date": "2026-10-24",
+    "audited_revision": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+    "audit_receipts": [
+      {
+        "session": "5ebbaba9537e",
+        "receipt_sha256": "3265d2979ff893e00e9cc687a2ff57d283ab2438e6dceee4242bdc55b2cfec9a"
+      },
+      {
+        "session": "3e0f499dc2ee",
+        "receipt_sha256": "e23a8b64ae20e1bbedd29bb0fcc52be408d4b17c5c6b36106c1d8f93c8be6d48"
+      }
+    ],
+    "translator": {
+      "agent": "translator (lopdev team integrator)",
+      "session": "3f68f20b2cad",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none"
+    },
+    "changed_namespace_count": 4,
+    "changed_key_count": 19,
+    "changed_namespaces": {
+      "wire.errors.settings": 1,
+      "wire.remote_compute": 1,
+      "wire.settings": 16,
+      "wire.slash": 1
+    },
+    "findings": [
+      {
+        "audit_session": "5ebbaba9537e",
+        "id": "UR-R2-001",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Settled states now use حتمی حالت والے, covering done/paused/archived without implying only completed."
+      },
+      {
+        "audit_session": "5ebbaba9537e",
+        "id": "UR-R2-002",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Coordinated passive negation guarantees files are neither listed nor sent to the decision model."
+      },
+      {
+        "audit_session": "5ebbaba9537e",
+        "id": "UR-R2-003",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Operator and all three background-job usages now use آپریٹر and جاب."
+      },
+      {
+        "audit_session": "5ebbaba9537e",
+        "id": "UR-R2-004",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.slash"
+        ],
+        "note": "Per-link subscription now uses سبسکرپشن."
+      },
+      {
+        "audit_session": "5ebbaba9537e",
+        "id": "UR-R2-005",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Preview feature status uses the second auditor-supported native تجرباتی rather than visual پیش نظارہ."
+      },
+      {
+        "audit_session": "5ebbaba9537e",
+        "id": "UR-R2-006",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.remote_compute"
+        ],
+        "note": "Process status now uses ایگزٹ کوڈ."
+      },
+      {
+        "audit_session": "5ebbaba9537e",
+        "id": "UR-R2-007",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Display-rail rule now states factual کرتی ہے."
+      },
+      {
+        "audit_session": "3e0f499dc2ee",
+        "id": "UR-R2-001",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.errors.settings"
+        ],
+        "note": "Reopened UR2-009 resolved: verified literal artifact removed and established native plural from credential_retrieve_failed reused; safety instruction preserved."
+      },
+      {
+        "audit_session": "3e0f499dc2ee",
+        "id": "UR-R2-002",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Four bytes residues and arrow-key now use بائٹس and ایرو کیز."
+      },
+      {
+        "audit_session": "3e0f499dc2ee",
+        "id": "UR-R2-003",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Same two Preview values fixed as تجرباتی; coordinated with first-audit UR-R2-005."
+      },
+      {
+        "audit_session": "3e0f499dc2ee",
+        "id": "UR-R2-004",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Proactive settings, not the singular wait, are now the subject agreeing with پڑھی جاتی ہیں."
+      },
+      {
+        "audit_session": "3e0f499dc2ee",
+        "id": "UR-R2-005",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Connectivity-retries phrase now uses کی and کوششوں."
+      },
+      {
+        "audit_session": "3e0f499dc2ee",
+        "id": "UR-R2-006",
+        "disposition": "fixed",
+        "namespaces": [
+          "wire.settings"
+        ],
+        "note": "Operator now uses آپریٹر; same key as first-audit UR-R2-003."
+      }
+    ],
+    "verification": {
+      "generator": "sanctioned generate.py run; generate.py --check: 91 artifact(s) byte-identical",
+      "catalogues": "check.py --catalogues-only: 0 problem(s)",
+      "full_check": "check.py: ok — 179 files scanned, 2225 literals at/below baseline, catalogues consistent; 28 pre-existing report-only advisories",
+      "delta_predicates": "19 changed keys / 4 namespaces; all named predicates and literal-artifact removal PASS; accepted approximate-help values unchanged",
+      "key_icu_tokens": "1355 keys; exact key order, ICU structure/order/skeleton/branches, backticks, angle tokens, flags, $() calls and newlines preserved",
+      "plurals": "19 keys x 5 counts = 95 runtime renders; Node Intl.PluralRules(ur) other/one/other/other/other for 0/1/2/21/1.5",
+      "width": "54 explicit maxCells: 0 actual overflows"
+    },
+    "pending_gates": [
+      "Independent scoped round-3 audits over wire.errors.settings, wire.remote_compute, wire.settings and wire.slash.",
+      "Native rendered RTL/bidi/shaping, fallback, long-text/design and approximate /help fit remain separate gates.",
+      "No ledger, shipped eligibility or hold changed; no row marked passed."
+    ]
+  },
+  "audit_provenance": {
+    "assembly_revision": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+    "evidence_root": "i18n/audits/evidence/ur/<namespace>/<audit-id>/",
+    "current_byte_rounds": {
+      "round_1": [
+        "tui.authoring",
+        "tui.palette",
+        "tui.projects_edit",
+        "tui.schedule",
+        "tui.status",
+        "tui.team_authoring",
+        "tui.transcript",
+        "wire.errors",
+        "wire.incidents",
+        "wire.memory",
+        "wire.notices"
+      ],
+      "round_2": [
+        "cli.exec_remote_help",
+        "relay.ask",
+        "relay.session.tags",
+        "tui.asks",
+        "tui.review",
+        "tui.tags",
+        "tui.viewer",
+        "tui.welcome"
+      ],
+      "round_3": [
+        "wire.errors.settings",
+        "wire.remote_compute",
+        "wire.settings",
+        "wire.slash"
+      ]
+    },
+    "auditors": [
+      {
+        "session": "5ebbaba9537e",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "audit_ids": [
+          "ur23a1",
+          "ur24a2",
+          "ur24a3"
+        ]
+      },
+      {
+        "session": "3e0f499dc2ee",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "audit_ids": [
+          "ur23b1",
+          "ur24b2",
+          "ur24b3"
+        ]
+      }
+    ],
+    "native_rtl_or_release_eligibility_claimed": false
+  }
+}

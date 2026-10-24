@@ -1,0 +1,7 @@
+tui.palette.kind_agent	EN="agent"	UR="ایجنٹ"
+tui.palette.kind_command	EN="command"	UR="کمانڈ"
+tui.palette.kind_session	EN="session"	UR="سیشن"
+tui.palette.kind_setting	EN="setting"	UR="ترتیب"
+tui.palette.kind_team	EN="team"	UR="ٹیم"
+tui.palette.no_matches	EN="No matches found"	UR="کوئی مماثلت نہیں ملی"
+tui.palette.placeholder	EN="Search commands, settings, sessions, agents…"	UR="کمانڈز، ترتیبات، سیشنز، ایجنٹس تلاش کریں…"

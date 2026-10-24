@@ -154,11 +154,19 @@ def test_unsupported_config_falls_through_to_env() -> None:
 
 
 def test_unshipped_locale_falls_back_to_en() -> None:
-    # Urdu is supported but waits for the final RTL wave: every chain path
-    # lands on en until its wave passes audit and ships.
-    assert resolve.resolve_language("ur", environ={}) == "en"
-    assert resolve.resolve_language("auto", environ={"LOP_LANG": "ur"}) == "en"
-    assert resolve.resolve_language("auto", environ={"LANG": "ur_PK.UTF-8"}, system="Linux") == "en"
+    # Chinese remains supported but its whole candidate is security-held:
+    # every chain path lands on en rather than admitting partial catalogues.
+    assert resolve.resolve_language("zh-CN", environ={}) == "en"
+    assert resolve.resolve_language("auto", environ={"LOP_LANG": "zh-CN"}) == "en"
+    assert resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "en"
+
+
+def test_shipped_urdu_resolves_across_the_source_chain() -> None:
+    # Audited Urdu core catalogues are eligible in this branch. Directional
+    # rendering is a separate client concern; the resolver admits the locale.
+    assert resolve.resolve_language("ur", environ={}) == "ur"
+    assert resolve.resolve_language("auto", environ={"LOP_LANG": "ur"}) == "ur"
+    assert resolve.resolve_language("auto", environ={"LANG": "ur_PK.UTF-8"}, system="Linux") == "ur"
 
 
 def test_os_is_consulted_last_and_filtered() -> None:
@@ -169,7 +177,7 @@ def test_os_is_consulted_last_and_filtered() -> None:
     assert resolve.resolve_language("auto", environ={"LANG": "ru_RU.UTF-8"}, system="Linux") == "ru"
     assert resolve.resolve_language("auto", environ={"LANG": "hi_IN.UTF-8"}, system="Linux") == "hi"
     assert resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "en"
-    assert resolve.resolve_language("auto", environ={"LANG": "ur_PK.UTF-8"}, system="Linux") == "en"
+    assert resolve.resolve_language("auto", environ={"LANG": "ur_PK.UTF-8"}, system="Linux") == "ur"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +235,7 @@ def test_shipped_locales_reads_generated_set() -> None:
     # The whole Chinese candidate is held outside this branch, not reduced
     # to nine passed groups. Historical exec ledger-only records still do
     # not unship earlier waves, which no longer carry exec files.
-    assert resolve.shipped_locales() == ("en", "fr", "es", "ru", "vi", "hi")
+    assert resolve.shipped_locales() == ("en", "fr", "es", "ru", "vi", "ur", "hi")
 
 
 def test_held_chinese_config_and_env_resolve_to_english() -> None:
@@ -261,15 +269,15 @@ def test_preferred_language_line_accepts_supported_but_unshipped_locales() -> No
 
     A supported locale whose translation wave has not shipped resolves to
     ``en`` for every live SURFACE (it cannot render unaudited catalogues), but
-    the model line must state the user's actual preference: an OS-Urdu user
-    gets en UI copy today AND a model told to answer in Urdu. A later
-    "unify the two filters" edit fails HERE rather than silently muting the
-    feature until ur ships.
+    the model line must state the user's actual preference: a Chinese user
+    gets en UI copy while the candidate is held AND a model told to answer in
+    Chinese. A later "unify the two filters" edit fails HERE rather than
+    silently muting the feature until zh-CN ships.
     """
-    assert resolve.resolve_language("ur", environ={}, system="Linux") == "en"
+    assert resolve.resolve_language("zh-CN", environ={}, system="Linux") == "en"
 
-    line = resolve.preferred_language_line("ur", environ={}, system="Linux")
-    assert "Urdu (ur)" in line
+    line = resolve.preferred_language_line("zh-CN", environ={}, system="Linux")
+    assert "Chinese (Simplified) (zh-CN)" in line
 
 
 def test_preferred_language_line_reads_the_env_override() -> None:

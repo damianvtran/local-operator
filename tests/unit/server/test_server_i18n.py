@@ -1,6 +1,6 @@
 """The i18n catalogue route, and the capability + language that advertise it.
 
-The held Chinese candidate is absent from this Hindi-only package. Route
+The held Chinese candidate is absent from this partial package. Route
 assertions cover shape and cache revalidation, not semantic approval or full
 CLI localization. Missing assets stay 404 even with their old candidate ETag;
 the public preview contract for ordinary present catalogues is unchanged.
@@ -37,6 +37,17 @@ async def test_a_wave1_locale_is_served_once_translated(test_app_client) -> None
     assert response.status_code == 200
     raw = (Path(catalogues.__file__).parent / "catalogues" / "fr" / "wire.errors.json").read_bytes()
     assert response.json()["result"]["content_sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_audited_urdu_catalogue_is_served_from_committed_bytes(test_app_client) -> None:
+    response = await test_app_client.get("/v1/i18n/catalogues/ur/wire.errors")
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["messages"] == catalogues.load_catalogue("ur", "wire.errors")
+    sha = catalogues.catalogue_sha256("ur", "wire.errors")
+    assert result["content_sha256"] == sha
+    assert response.headers["etag"] == f'"{sha}"'
 
 
 @pytest.mark.asyncio
@@ -112,7 +123,10 @@ async def test_weak_and_list_validators_still_revalidate_to_304(test_app_client)
 @pytest.mark.parametrize(
     "path",
     [
-        "/v1/i18n/catalogues/ur/wire.errors",  # supported locale, final RTL wave has no file yet
+        # Shipped Urdu carries no wire.exec file; the raw route must not
+        # synthesize one from English or return a synthetic empty namespace.
+        "/v1/i18n/catalogues/ur/wire.exec",
+        "/v1/i18n/catalogues/xx/wire.errors",  # unknown locale
         "/v1/i18n/catalogues/en/nope",  # unknown namespace
         "/v1/i18n/catalogues/en/..",  # traversal-shaped component
     ],
@@ -230,6 +244,26 @@ async def test_the_bundle_carries_a_translated_identity_and_revalidates(
 
 
 @pytest.mark.asyncio
+async def test_the_urdu_bundle_carries_committed_translations(test_app_client) -> None:
+    response = await test_app_client.get("/v1/i18n/catalogues/ur")
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["locale"] == "ur"
+    identity = "wire.errors.settings.not_registered"
+    assert (
+        result["messages"][identity]
+        == catalogues.load_catalogue("ur", "wire.errors.settings")[identity]
+    )
+    assert (
+        result["messages"][identity]
+        != catalogues.load_catalogue("en", "wire.errors.settings")[identity]
+    )
+    assert result["namespaces"]["wire.errors.settings"] == catalogues.catalogue_sha256(
+        "ur", "wire.errors.settings"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_bundle_excludes_client_owned_namespaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, test_app_client
 ) -> None:
@@ -264,10 +298,10 @@ async def test_a_shipped_locale_with_no_wire_files_is_an_empty_bundle(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("locale", ["ur", "zh-CN"])
+@pytest.mark.parametrize("locale", ["zh-CN", "xx"])
 async def test_an_unshipped_locale_bundle_is_404(test_app_client, locale: str) -> None:
-    # Zero-file locales must not answer 200-empty: eligibility is the same
-    # gate the per-namespace route applies, before any disk work.
+    # Held or unknown locales must not answer 200-empty: eligibility is the
+    # same gate the per-namespace route applies, before any disk work.
     response = await test_app_client.get(f"/v1/i18n/catalogues/{locale}")
     assert response.status_code == 404
 

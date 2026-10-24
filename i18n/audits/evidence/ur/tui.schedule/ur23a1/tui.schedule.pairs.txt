@@ -1,0 +1,244 @@
+tui.schedule.cadence_every
+EN "every {interval}"
+UR "ہر {interval}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Recurring interval, `{'every ' + duration}`; {interval} is already formatted (1d, 1h30m)."}
+tui.schedule.cadence_once
+EN "one-shot"
+UR "ایک بار"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "A wake with no interval: it fires once."}
+tui.schedule.cancel_confirm
+EN "cancel {id}? · y cancel · esc keep"
+UR "{id} منسوخ کریں؟ · y منسوخ · esc رکھیں"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Inline y/n confirm; {id} is the wake handle. `y` cancels, esc keeps the row."}
+tui.schedule.detail_cadence
+EN "Cadence"
+UR "تکرار"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane label for the repeat interval."}
+tui.schedule.detail_ends
+EN "Ends"
+UR "اختتام"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane label for the bound (limit or until)."}
+tui.schedule.detail_fired
+EN "Fired"
+UR "چلنے کی تعداد"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane label for the delivered count."}
+tui.schedule.detail_next
+EN "Next"
+UR "اگلی بار"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane label for the next due instant."}
+tui.schedule.detail_notify
+EN "Notify"
+UR "اطلاع"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane label for the notification flag."}
+tui.schedule.detail_status
+EN "Status"
+UR "حالت"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane label for the schedule state word."}
+tui.schedule.due_in
+EN "in {duration}"
+UR "{duration} بعد"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Relative due phrase for a future wake; {duration} is already formatted (30m, 1h30m)."}
+tui.schedule.due_now
+EN "due now"
+UR "ابھی چلنے کا وقت"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "The wake is due at this instant but has not fired yet."}
+tui.schedule.due_overdue
+EN "overdue {age}"
+UR "{age} سے تاخیر"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Overdue relative phrase; {age} is a single-unit ladder (2m, 3h)."}
+tui.schedule.empty_body
+EN "Press n to schedule one — a wake starts a turn in this conversation at the time you choose."
+UR "شیڈول کرنے کے لیے n دبائیں — بیداری آپ کے منتخب وقت پر اس گفتگو میں ٹرن شروع کرتی ہے۔"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Empty state: names the one key that creates a wake. The em dash clause explains what a wake is."}
+tui.schedule.empty_header
+EN "No scheduled wakes"
+UR "کوئی بیداری شیڈول نہیں"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Empty-state heading; the session has no user-facing wakes."}
+tui.schedule.ends_left
+EN "{count, plural, one {# left} other {# left}}"
+UR "{count, plural, one {# باقی} other {# باقی}}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Remaining fires under a `limit`; ICU plural, # is the count."}
+tui.schedule.ends_limit
+EN "limit {limit}"
+UR "حد {limit}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Bound phrase for a fire budget; {limit} is a raw integer."}
+tui.schedule.ends_until
+EN "until {time}"
+UR "{time} تک"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Bound phrase for a hard stop; {time} is an absolute local timestamp."}
+tui.schedule.ends_until_left
+EN "{duration} left"
+UR "{duration} باقی"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Time left before the `until` bound; {duration} is already formatted."}
+tui.schedule.fired
+EN "{count, plural, one {# fired} other {# fired}}"
+UR "{count, plural, one {# بار چلی} other {# بار چلی}}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Delivered count with no bound; ICU plural, # is the count."}
+tui.schedule.fired_detail
+EN "{count}"
+UR "{count}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane delivered count with no bound; {count} is a raw integer."}
+tui.schedule.fired_detail_of
+EN "{count} of {limit}"
+UR "{count} / {limit}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane delivered count under a bound; {count} and {limit} are raw integers."}
+tui.schedule.fired_of
+EN "{count, plural, one {# of {limit} fired} other {# of {limit} fired}}"
+UR "{count, plural, one {# / {limit} چلی} other {# / {limit} چلی}}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Delivered count against a limit; ICU plural, # is the count and {limit} the budget."}
+tui.schedule.form_ends_hint
+EN "blank = no bound"
+UR "خالی = کوئی حد نہیں"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Field hint: a blank Ends field means no bound."}
+tui.schedule.form_ends_label
+EN "ends"
+UR "اختتام"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Form field label for the bound (limit or until)."}
+tui.schedule.form_ends_placeholder
+EN "limit 3 · until 2026-10-20 09:00"
+UR "limit 3 · until 2026-10-20 09:00"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Placeholder showing both accepted spellings; the `until` example is a literal date format, not translatable prose."}
+tui.schedule.form_keys_hint
+EN "ctrl+s save · tab next field · esc back"
+UR "ctrl+s محفوظ · tab اگلا خانہ · esc واپس"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Form footer naming the three keys. `ctrl+s`, `tab` and `esc` stay literal."}
+tui.schedule.form_message_label
+EN "message"
+UR "پیغام"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Form field label for the self-prompt."}
+tui.schedule.form_message_placeholder
+EN "the prompt this wake runs"
+UR "وہ پرامپٹ جو یہ بیداری چلائے گی"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Message editor placeholder: what the wake will be told to do."}
+tui.schedule.form_notify_hint
+EN "tell me when the wake's turn finishes"
+UR "بیداری کا ٹرن مکمل ہو تو مجھے بتائیں"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Checkbox hint: the completion notification this wake asks for."}
+tui.schedule.form_notify_label
+EN "notify"
+UR "اطلاع"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Form field label for the notification checkbox."}
+tui.schedule.form_repeat_hint
+EN "blank = one-shot"
+UR "خالی = ایک بار"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Field hint: a blank Repeat field means a one-shot wake."}
+tui.schedule.form_repeat_label
+EN "repeat"
+UR "تکرار"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Form field label for the repeat interval."}
+tui.schedule.form_repeat_placeholder
+EN "every 1d"
+UR "every 1d"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Placeholder showing the interval spelling; `every` and `1d` stay literal."}
+tui.schedule.form_title_edit
+EN "Edit wake {id}"
+UR "بیداری {id} میں ترمیم کریں"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Edit form heading; {id} is the wake handle."}
+tui.schedule.form_title_new
+EN "New wake"
+UR "نئی بیداری"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Create form heading."}
+tui.schedule.form_when_hint
+EN "a bare duration means 'in'; a clock, ISO time or +duration means 'at'; blank keeps the time"
+UR "صرف مدت یعنی 'in'؛ گھڑی، ISO وقت یا +duration یعنی 'at'؛ خالی موجودہ وقت رکھتا ہے"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Field hint teaching the one When input: duration = in, clock/ISO/+duration = at, blank keeps the row's time on edit."}
+tui.schedule.form_when_label
+EN "when"
+UR "وقت"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Form field label for the due time."}
+tui.schedule.form_when_placeholder
+EN "in 30m · at 09:00"
+UR "in 30m · at 09:00"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Placeholder showing both accepted When spellings; `in`, `30m`, `at` and `09:00` stay literal."}
+tui.schedule.hint_back
+EN "back"
+UR "واپس"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Footer hint label for escape: leave the page."}
+tui.schedule.hint_cancel
+EN "cancel"
+UR "منسوخ"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Footer hint label for d: cancel the selected wake."}
+tui.schedule.hint_edit
+EN "edit"
+UR "ترمیم"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Footer hint label for e/enter: edit the selected wake."}
+tui.schedule.hint_move
+EN "move"
+UR "منتقلی"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Footer hint label for the arrow keys: move the selection."}
+tui.schedule.hint_new
+EN "new"
+UR "نئی"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Footer hint label for n: open the create form."}
+tui.schedule.hint_refresh
+EN "reread"
+UR "دوبارہ پڑھیں"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Footer hint label for r: re-read the session's scheduler. Deliberately the user's word `reread`, not the network word `refresh`."}
+tui.schedule.notice_cancelled
+EN "Cancelled {id}."
+UR "بیداری {id} منسوخ کر دی گئی۔"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Receipt after a cancel lands; {id} is the wake handle."}
+tui.schedule.notice_created
+EN "Scheduled {id} for {due}."
+UR "بیداری {id} کو {due} کے لیے شیڈول کی گئی۔"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Receipt after a create lands; {id} is the handle and {due} an absolute local timestamp."}
+tui.schedule.notice_edited
+EN "Saved {id} — next {due}."
+UR "بیداری {id} محفوظ — اگلی بار {due}۔"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Receipt after an edit lands; {id} is the handle and {due} the new next instant."}
+tui.schedule.notice_no_scheduler
+EN "Read-only: this runtime has no wake scheduler."
+UR "صرف پڑھنے کے لیے: اس رن ٹائم میں بیداری شیڈولر نہیں۔"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Read-only notice when the session exposes no wake scheduler at all."}
+tui.schedule.notice_read_only
+EN "Read-only: this conversation's runtime is on another device, so its wakes are listed, not changed."
+UR "صرف پڑھنے کے لیے: اس گفتگو کا رن ٹائم دوسرے ڈیوائس پر ہے، اس لیے اس کی بیداریاں صرف دکھائی جاتی ہیں، بدلی نہیں جاتیں۔"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Read-only notice for a follower: the runtime owning these wakes is on another device."}
+tui.schedule.notice_supervisor
+EN "Nothing supervises these wakes — they fire only while this conversation is running."
+UR "ان بیداریوں کی نگرانی کوئی نہیں کرتا — یہ صرف اس گفتگو کے چلنے کے دوران چلتی ہیں۔"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "One-line state notice covering BOTH supervisor conditions — unsupported on this platform and installed-but-not-running. Names the CONVERSATION's runtime as the thing that keeps wakes firing, not the /schedule page: closing the page does not stop the runtime."}
+tui.schedule.notice_write_failed
+EN "The change was not saved: {error}"
+UR "تبدیلی محفوظ نہیں ہوئی: {error}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "A failed write; {error} is the exception's own sentence."}
+tui.schedule.notify_on
+EN "notify"
+UR "اطلاع"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Marker on a row whose wake asks for a completion notification."}
+tui.schedule.session_unavailable
+EN "This conversation is still starting; its wakes are not available yet."
+UR "گفتگو ابھی شروع ہو رہی ہے؛ اس کی بیداریاں ابھی دستیاب نہیں۔"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Slash-command refusal while the session is still booting."}
+tui.schedule.slash_help
+EN "This conversation's scheduled wakes"
+UR "اس گفتگو کی شیڈول شدہ بیداریاں"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "One-line /help and command-picker description. Sized to the description column."}
+tui.schedule.status_due
+EN "due now"
+UR "ابھی چلنے کا وقت"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane state word: due, not yet fired."}
+tui.schedule.status_overdue
+EN "overdue {age}"
+UR "{age} سے تاخیر"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane state word with the age; {age} is a single-unit ladder (2m)."}
+tui.schedule.status_scheduled
+EN "scheduled"
+UR "شیڈول شدہ"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane state word for a future wake."}
+tui.schedule.subtitle
+EN "{count, plural, one {# wake in this conversation} other {# wakes in this conversation}}"
+UR "{count, plural, one {# بیداری اس گفتگو میں} other {# بیداریاں اس گفتگو میں}}"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Count of wakes under the page title; ICU plural, # is the count."}
+tui.schedule.title
+EN "Scheduled wakes"
+UR "شیڈول شدہ بیداریاں"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Page title."}
+tui.schedule.value_off
+EN "off"
+UR "بند"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane value: the notification flag is off."}
+tui.schedule.value_on
+EN "on"
+UR "چالو"
+CX {"role": "TUI /schedule page", "tone": "terse, operator-facing, one fact per sentence", "note": "Detail-pane value: the notification flag is on."}
