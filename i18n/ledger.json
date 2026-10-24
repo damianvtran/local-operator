@@ -4389,6 +4389,101 @@
       },
       "status": "passed",
       "note": "R3 current-byte dual audit clean, 0 B/M; ur24a3/ur24b3 (5ebbaba9537e/3e0f499dc2ee, same actual model); fit follow-up retained. Earlier failures retained. Record: i18n/audits/evidence/ur/wire.slash/ur24a3/record.json; peer ur24b3."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto (round 2); openrouter/moonshotai/kimi-k3.1-pro (round 1)",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.shell 44 keys — round 1 carried the one MAJOR above, fixed and re-audited; round 2 clean on the current bytes with 43 unchanged keys carried. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto (round 2); openrouter/moonshotai/kimi-k3.1-pro (round 1)",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.session 17 keys — round 1 clean; round 2 byte-identical, carried rather than re-audited. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto (round 2); openrouter/moonshotai/kimi-k3.1-pro (round 1)",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.account_policy 13 keys — round 1 clean, including the account-policy commit/rejection safety meaning; round 2 byte-identical. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto (round 2); openrouter/moonshotai/kimi-k3.1-pro (round 1)",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.library 1 key — round 1 clean; round 2 byte-identical. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "openrouter/moonshotai/kimi-k3.1-pro",
+        "date": "2026-10-24"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto (round 2); openrouter/moonshotai/kimi-k3.1-pro (round 1)",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.login 4 keys on the separate SSR auth gate — round 1 clean; round 2 byte-identical and unaffected by the SPA shell delta. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
     }
   ]
 }

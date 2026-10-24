@@ -58,12 +58,13 @@ describe("relay.session extraction", () => {
 		}
 	});
 
-	it("keeps the document EN/LTR under a French backend, because the copy is English", () => {
+	it("follows the actual owned-copy language, not the backend preference", () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-		// language (uiLocale), not the backend preference. With only English owned
-		// bundles, a French (or Urdu) backend still paints EN/LTR.
+		// language (uiLocale), not the backend preference. French has no owned
+		// relay bundle, so it still paints EN/LTR; Urdu's audited relay bundle is
+		// shipped, so an Urdu backend paints ur/RTL.
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
-		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		expect(result.current.uiLocale).toBe("en");
 		expect(result.current.direction).toBe("ltr");

@@ -5,7 +5,7 @@
   "scope": "six owned relay SPA namespaces together, plus the separate SSR relay.login namespace",
   "base_revision": "bdb8083cb06d109d5a0cf0ec21a93078478a400e",
   "date": "2026-10-24",
-  "status": "round_1_remediation_complete_pending_scoped_round_2_audits",
+  "status": "round_2_audits_clean_eligible_on_the_relay_slice",
   "source_set": {
     "reference_locale": "en",
     "namespace_count": 7,
@@ -69,11 +69,11 @@
     ]
   },
   "pending_gates": [
-    "Two independent audits of this seven-namespace Urdu relay set; this translator performed no semantic self-audit.",
-    "Independent native Urdu review of terminology, plural/safety meaning and RTL rendering.",
+    "ACTIVATION IS GATED: shipped.json makes Urdu globally eligible, so shipping it here would also expose Urdu to the CLI before #2863 (audited Urdu core completeness) and #2872 (TUI RTL projection) land, and before the operator's explicit activation decision. Hold this PR ready-but-unmerged until those land and activation is approved.",
+    "Independent native Urdu review of terminology, plural/safety meaning and RTL rendering; the two LLM audits below are not native human review.",
     "Rendered narrow-width review of relay.session.tags.saving and the six SPA namespaces together; relay.login remains separate SSR.",
-    "Integrator-owned coverage allowance and exact locale/package fixtures still assert Urdu is absent and must be reconciled outside translator catalogue scope.",
-    "Ledger rows and shipped eligibility remain unchanged until independent programme gates pass."
+    "Independent design/UX review of the RTL layout. The /language receipt copy is NOT changed here: #2863 owns it, and the 70-cell budget is breached at this branch's 7-value shipped set (72 cells at vi and at the 'klingon' refusal; zh-CN measures exactly 70), pinned in the tests and deferred to #2863.",
+    "Urdu namespaces outside this relay slice and the other clients remain English-source; nothing outside the relay slice is claimed translated."
   ],
   "namespaces": [
     {
@@ -146,5 +146,81 @@
         "note": "Cached-at timestamp now uses کے مطابق for as-of semantics; تک incorrectly implied until/expiry. ICU order and skeletons unchanged."
       }
     ]
+  },
+  "audit_evidence": {
+    "scope": "all 109 keys across the seven relay namespaces (six SPA, relay.login SSR)",
+    "independence": "Both auditors are a different agent role and session from the translator (905e702c8399); neither edited the repository, and neither read the other's round-2 receipt before reporting.",
+    "rounds": [
+      {
+        "round": 1,
+        "date": "2026-10-24",
+        "audited_revision": "9dc317f46f9283d050c6ea7d5841626f062022d1",
+        "scope": "all 109 keys read in depth",
+        "auditors": [
+          {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "49a2149e4f78",
+            "model": "openrouter/moonshotai/kimi-k3.1-pro",
+            "fallback": "none",
+            "result": "blocked_on_1_major",
+            "findings": 1,
+            "receipt": "scratchpad://ur-relay-audit-round1-49a2149e4f78.json"
+          },
+          {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "a017851a0ea0",
+            "model": "openrouter/moonshotai/kimi-k3.1-pro",
+            "fallback": "none",
+            "result": "clean",
+            "findings": 0,
+            "receipt": "scratchpad://i18n-ur-relay-round1-second-a017851a0ea0-receipt.md",
+            "evidence": "scratchpad://i18n-ur-relay-round1-second-a017851a0ea0-evidence.json"
+          }
+        ],
+        "finding": {
+          "id": "UR-RELAY-R1-001",
+          "severity": "major",
+          "namespace": "relay.shell",
+          "key": "relay.shell.usage.as_of",
+          "disposition": "fixed",
+          "remediation_revision": "9dc317f46f9283d050c6ea7d5841626f062022d1",
+          "note": "تک read as until/expiry for an 'as of' cached-at timestamp; replaced by کے مطابق with ICU arguments and order unchanged."
+        }
+      },
+      {
+        "round": 2,
+        "date": "2026-10-24",
+        "audited_revision": "ea2f92e052027265a8c5688df3c28092c98bc0e6",
+        "scope": "remediation 9dc317f4..ea2f92e0: relay.shell 44/44 re-read by session 49a2149e4f78; the one changed value read in depth by session a017851a0ea0, which proved the other 108 keys byte-identical",
+        "auditors": [
+          {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "49a2149e4f78",
+            "model": "radient/auto",
+            "fallback": "underlying served model not disclosed by the harness; selected route radient/auto",
+            "result": "clean",
+            "findings": 0,
+            "receipt": "scratchpad://ur-relay-audit-round2-49a2149e4f78.json"
+          },
+          {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "a017851a0ea0",
+            "model": "radient/auto",
+            "fallback": "none stated",
+            "result": "clean",
+            "findings": 0,
+            "receipt": "scratchpad://i18n-ur-relay-round2-independent-a017851a0ea0-receipt.md",
+            "evidence": "scratchpad://i18n-ur-relay-round2-independent-a017851a0ea0-evidence.json"
+          }
+        ],
+        "verdict": "clean for all 109 keys; zero unresolved BLOCKER/MAJOR/MINOR/NIT"
+      }
+    ],
+    "ledger": "Seven ur relay rows in i18n/ledger.json record these auditors, sessions and models; the coverage allowance no longer lists the complete relay pairs.",
+    "rendered_evidence": "Not captured in either round: no browser, screenshot, shaping, bidi or narrow-width measurement is claimed. Rendered RTL/design sign-off remains a separate gate.",
+    "integration_rebase": {
+      "base": "fd3302ea8757d6d386255380c7feafded1aa97f6",
+      "note": "Rebased after the audits; all seven English and Urdu relay catalogue SHA-256 values still match the audited receipt values, so the clearance is on the current bytes."
+    }
   }
 }
