@@ -1623,7 +1623,9 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
                     app._refresh_working_activity()
                     block.finalize_text()
                     card.mark_done("", None)
-                    app._status.update(context_tokens=10_200, context_is_estimate=False)
+                    status = app._status
+                    assert status is not None, "the status band exists once the app is booted"
+                    status.update(context_tokens=10_200, context_is_estimate=False)
                     for _ in range(20):
                         await pilot.pause(0.05)
                     peak = recorder.end_leg() if measure else None
