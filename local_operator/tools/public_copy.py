@@ -27,6 +27,27 @@ normal redaction pass.  A genuine credential read with ``bash``, ``read`` or
 IDENTITY in :data:`local_operator.harness.redaction.PUBLIC_COPY_TOOLS`, never to
 an argument the caller supplies, so another tool cannot borrow it.
 
+WHICH CHECKOUTS
+---------------
+Two separate checkouts publish copy through this route: this repository
+(``local_operator/i18n/...`` plus the mobile web key maps) and the companion
+UI repository (``src/i18n/catalogues/*/*.json`` and ``src/i18n/keys.gen.ts``).
+The UI checkout is a different repository, but its committed product copy is
+equally public — an auditor has to be able to read a catalogue key where it
+lives, and the alternative is the workaround this route exists to replace. The
+roots stay an EXACT GLOB LIST in both checkouts: no directory rule
+(``src/i18n/*``) and no extension rule (``*.json`` under any root), because
+either would admit files nobody reviewed as public copy. The commit-clean /
+``HEAD``-blob / audit-log requirements below apply equally to both.
+
+The ``src/`` roots are additionally bound to checkout identity: they are
+exposed only when the workspace's ``origin`` remote names the UI repository and
+the workspace is the root of its checkout. A path is not an identity — any
+repository, including one created on the spot, can hold a ``src/i18n/`` tree —
+so ``git remote get-url origin`` must resolve to :data:`UI_REPOSITORY`. The gate
+lives in :func:`_committed_public_copy`; ``docs/security/redaction-policy.md``
+states the exact rule and the same-UID residual.
+
 THE TRUST BOUNDARY
 ------------------
 The allowlisted roots are public copy by repository policy
@@ -44,6 +65,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -63,22 +85,56 @@ TOOL_NAME = "read_public_copy"
 #: Public-copy roots, relative to the session working directory (the checkout).
 #: These are the only paths this reader will open.  No directory rule and no
 #: extension rule: an exact glob list, so adding a root is a reviewed policy
-#: change rather than an accident.
+#: change rather than an accident.  The list spans two checkouts — this
+#: repository and the companion UI repository — because both publish committed
+#: product copy; a session resolves the roots against its own working directory,
+#: so each checkout only ever exposes its own copy.
+#:
+#: The `src/` roots additionally require checkout IDENTITY (:data:`UI_REPOSITORY`):
+#: a path shape is not an identity, and any repository — including one the agent
+#: creates itself — can contain a `src/i18n/` tree (review S-1).
 PUBLIC_COPY_GLOBS: tuple[str, ...] = (
+    # This repository: TUI/server catalogues, key modules and mobile web maps.
     "local_operator/i18n/catalogues/*/*.json",
     "local_operator/i18n/keys/*.py",
     "local_operator/mobile/web/src/i18n/keys.gen.ts",
     "local_operator/mobile/web/src/i18n/bundled.gen.ts",
+    # The companion UI checkout: a separate repository whose committed product
+    # copy is equally public.  Its roots are spelled from that checkout's own
+    # root, so they cannot alias a path inside this repository.
+    "src/i18n/catalogues/*/*.json",
+    "src/i18n/keys.gen.ts",
 )
+
+#: The companion UI checkout's repository identity.  The `src/` roots are served
+#: only when the workspace's `origin` remote names this repository: any checkout
+#: can contain a `src/i18n/` tree, so the path alone must not lift redaction
+#: (review S-1).  A fork that wants the same treatment belongs in this list, in
+#: review — not in a path rule.
+UI_REPOSITORY = "damianvtran/local-operator-ui"
 
 #: The same list as anchored patterns. ``fnmatch``'s ``*`` crosses ``/``, which
 #: would admit ``catalogues/a/b/c.json``; these do not. Kept beside the globs so
-#: the human-readable list and the enforcement list are edited together.
-_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
+#: the human-readable list and the enforcement list are edited together.  The
+#: UI patterns are a separate tuple because they carry the identity requirement
+#: above; :data:`_PUBLIC_COPY_PATTERNS` is their concatenation and no call site
+#: matches against the UI tuple alone except the identity gate itself.
+_CORE_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"local_operator/i18n/catalogues/[^/]+/[^/]+\.json"),
     re.compile(r"local_operator/i18n/keys/[^/]+\.py"),
     re.compile(r"local_operator/mobile/web/src/i18n/keys\.gen\.ts"),
     re.compile(r"local_operator/mobile/web/src/i18n/bundled\.gen\.ts"),
+)
+
+_UI_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Anchored at ``src/``, so a lookalike deeper in a tree
+    # (``vendor/src/i18n/keys.gen.ts``) is still refused.
+    re.compile(r"src/i18n/catalogues/[^/]+/[^/]+\.json"),
+    re.compile(r"src/i18n/keys\.gen\.ts"),
+)
+
+_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _CORE_PUBLIC_COPY_PATTERNS + _UI_PUBLIC_COPY_PATTERNS
 )
 
 #: The policy document this route cites.  The tool's details carry it so a
@@ -133,6 +189,37 @@ def _matches_public_copy(relative: str) -> bool:
     return any(pattern.fullmatch(relative) for pattern in _PUBLIC_COPY_PATTERNS)
 
 
+def _requires_ui_checkout(relative: str) -> bool:
+    """Whether ``relative`` belongs to the companion UI checkout's roots."""
+    return any(pattern.fullmatch(relative) for pattern in _UI_PUBLIC_COPY_PATTERNS)
+
+
+def _origin_identity(url: str) -> str:
+    """Reduce an origin URL to ``owner/repo``, lower case; ``""`` if unreadable.
+
+    Git hands back three shapes for a GitHub remote: the scp form
+    (``git@github.com:owner/repo.git``), an ssh/https URL, or a local path.  Only
+    the last two path components matter, and only :data:`UI_REPOSITORY` matches
+    them, so a lookalike repository in another namespace does not qualify.  The
+    raw URL is never echoed: it can embed a credential, and this string reaches
+    the model-visible refusal sentence.
+    """
+    value = url.strip().rstrip("/")
+    if value.endswith(".git"):
+        value = value[:-4]
+    if "://" in value:
+        after_scheme = value.split("://", 1)[1]
+        path = after_scheme.split("/", 1)[1] if "/" in after_scheme else ""
+    elif re.match(r"^[^/@]+@[^/:]+:", value):
+        path = value.split(":", 1)[1]
+    else:
+        path = value
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 2:
+        return ""
+    return "/".join(parts[-2:]).lower()
+
+
 def _audit_path() -> Path:
     """The audit log this process appends to.
 
@@ -141,6 +228,56 @@ def _audit_path() -> Path:
     ``~/.local-operator`` — the same invariant the secret store keeps.
     """
     return config_dir() / _AUDIT_DIRNAME / _AUDIT_FILENAME
+
+
+def _open_audit_log(audit_dir: Path) -> int:
+    """Open the audit log without following links; return a private regular fd.
+
+    The record is a control, so the log is not opened like an ordinary file.
+    Review S-3 measured the bypasses this closes: a symlink at
+    ``public-copy-reads.jsonl`` (to ``/dev/null`` or anywhere else) suppressed
+    the record while the read served, a symlinked ``audit`` directory redirected
+    records, and an existing permissive file stayed permissive.
+
+    POSIX opens the directory itself with ``O_DIRECTORY | O_NOFOLLOW``, pins the
+    file to that directory with ``dir_fd`` and ``O_NOFOLLOW``, requires a regular
+    file and enforces mode ``0600`` on the open inode (``fchmod`` on the pinned
+    object, not a path lookup).  Windows has neither flag, so it refuses the two
+    link cases by ``lstat`` and checks the opened handle; ACLs replace the mode
+    check there.  Any failure raises and the caller refuses the read.
+    """
+    audit_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = audit_dir / _AUDIT_FILENAME
+    if os.name == "nt":
+        if audit_dir.is_symlink() or path.is_symlink():
+            raise OSError(f"{path} is reached through a symlink")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    else:
+        dir_fd = os.open(audit_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fchmod(dir_fd, 0o700)
+            fd = os.open(
+                _AUDIT_FILENAME,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=dir_fd,
+            )
+        finally:
+            os.close(dir_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(f"{path} is not a regular file")
+        if os.name != "nt":
+            if info.st_mode & 0o777 != 0o600:
+                os.fchmod(fd, 0o600)
+                info = os.fstat(fd)
+            if info.st_mode & 0o777 != 0o600:
+                raise OSError(f"{path} is not mode 0600")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _record_read(
@@ -158,7 +295,6 @@ def _record_read(
     a silent bypass with a policy name on it.
     """
     path = _audit_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     session = Path(context.session_dir).name if context.session_dir else "unknown"
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -173,7 +309,7 @@ def _record_read(
     line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
     # O_APPEND keeps concurrent readers' records whole without a lock file; a
     # single write of a short line is atomic on the local filesystem.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = _open_audit_log(path.parent)
     try:
         os.write(fd, line.encode("utf-8"))
         # The record is the control, not a log best-effort: flush it to stable
@@ -210,17 +346,28 @@ def _read_key_source(text: str, key: str) -> str:
     return "\n".join(matches[:_MAX_KEY_LINES])
 
 
-def _committed_public_copy(root: Path, relative: str) -> tuple[bytes, str | None]:
+def _committed_public_copy(
+    root: Path, relative: str, *, requires_ui_identity: bool = False
+) -> tuple[bytes, str | None]:
     """The committed blob for ``relative``, or a refusal sentence.
 
     ``HEAD`` is the committed copy, and this reader serves THAT blob rather than
-    the working-tree file. Two consequences, both measured in review:
+    the working-tree file. Five consequences, all measured in review:
 
     * a working-tree secret cannot be read back (the write-a-secret bypass);
     * a clean checkout with ``core.autocrlf=true`` (Git for Windows' default)
       still serves, because the comparison is Git's own index/worktree
       comparison and the bytes are the blob's LF bytes. Raw byte equality
-      against the working tree failed every read on that platform.
+      against the working tree failed every read on that platform;
+    * ``--no-replace-objects`` keeps a replace ref from substituting the served
+      blob while ``status``/``diff`` still look clean (review S-4);
+    * the workspace root must be the checkout root (review S-5): ``ls-files``
+      and ``diff`` are cwd-relative while ``show HEAD:<path>`` is
+      toplevel-relative, so a workspace below the toplevel could validate one
+      file and serve another;
+    * the UI roots need checkout identity, not path shape (review S-1);
+      ``requires_ui_identity`` gates that check here so all git probing shares
+      one wrapper.
 
     The helper is synchronous and runs off the event loop
     (:func:`execute_read_public_copy` awaits it in a thread).
@@ -228,7 +375,7 @@ def _committed_public_copy(root: Path, relative: str) -> tuple[bytes, str | None
 
     def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
-            ["git", "-C", str(root), *args],
+            ["git", "-C", str(root), "--no-replace-objects", *args],
             capture_output=True,
             check=False,
             timeout=10,
@@ -238,6 +385,27 @@ def _committed_public_copy(root: Path, relative: str) -> tuple[bytes, str | None
         inside = _git("rev-parse", "--is-inside-work-tree")
         if inside.returncode != 0 or inside.stdout.strip() != b"true":
             return b"", "the workspace is not a git checkout"
+        top = _git("rev-parse", "--show-toplevel")
+        if top.returncode != 0 or not top.stdout.strip():
+            return b"", "the workspace is not a git checkout"
+        checkout_root = Path(top.stdout.decode("utf-8", "replace").strip()).resolve()
+        if checkout_root != root:
+            return b"", (
+                f"the workspace root {root} is not the checkout root {checkout_root}; "
+                "run read_public_copy from the checkout root"
+            )
+        if requires_ui_identity:
+            origin = _git("remote", "get-url", "origin")
+            identity = (
+                _origin_identity(origin.stdout.decode("utf-8", "replace"))
+                if origin.returncode == 0
+                else ""
+            )
+            if identity != UI_REPOSITORY:
+                return b"", (
+                    f"{relative} is the companion UI checkout's copy; this workspace"
+                    f" is not {UI_REPOSITORY} (origin: {identity or 'unusable'})"
+                )
         tracked = _git("ls-files", "--error-unmatch", "--", relative)
         if tracked.returncode != 0:
             return b"", f"{relative} is not committed at HEAD; commit the public copy first"
@@ -310,7 +478,9 @@ async def execute_read_public_copy(
     # verbatim. ``_committed_public_copy`` serves the HEAD blob and refuses a
     # working-tree difference or an untracked file; it is also why a CRLF
     # checkout works (Git's comparison, not raw byte equality).
-    blob, refusal = await asyncio.to_thread(_committed_public_copy, root, relative)
+    blob, refusal = await asyncio.to_thread(
+        _committed_public_copy, root, relative, requires_ui_identity=_requires_ui_checkout(relative)
+    )
     if refusal is not None:
         return _text(tool_call_id, f"refused: {refusal}", is_error=True)
     try:
