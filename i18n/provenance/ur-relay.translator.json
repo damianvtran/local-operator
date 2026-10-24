@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "record_kind": "translator_provenance",
+  "locale": "ur",
+  "scope": "six owned relay SPA namespaces together, plus the separate SSR relay.login namespace",
+  "base_revision": "bdb8083cb06d109d5a0cf0ec21a93078478a400e",
+  "date": "2026-10-24",
+  "status": "translation_complete_pending_two_independent_audits",
+  "source_set": {
+    "reference_locale": "en",
+    "namespace_count": 7,
+    "key_count": 109,
+    "spa_namespaces": [
+      "relay.shell",
+      "relay.session",
+      "relay.session.tags",
+      "relay.account_policy",
+      "relay.library",
+      "relay.ask"
+    ],
+    "ssr_namespaces": [
+      "relay.login"
+    ]
+  },
+  "integrator": {
+    "agent": "translator (lopdev team)",
+    "session": "905e702c8399",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "fallback": "none",
+    "note": "Translated five newly owned namespaces and carried the two byte-identical prior Urdu candidates whose English source hashes still match. No self-audit, ledger pass, eligibility or hold change."
+  },
+  "hash_algorithm": "SHA-256 over exact UTF-8 file bytes; context_sha256 covers the English context sidecar",
+  "reused_translations": {
+    "relay.ask": {
+      "source_revision": "8f2084d507",
+      "source_record": "i18n/provenance/ur-core.translator.json",
+      "english_hash_matches_current": true,
+      "urdu_bytes_identical": true,
+      "note": "Reuse is translation provenance, not a fresh independent audit of this relay set."
+    },
+    "relay.session.tags": {
+      "source_revision": "8f2084d507",
+      "source_record": "i18n/provenance/ur-core.translator.json",
+      "english_hash_matches_current": true,
+      "urdu_bytes_identical": true,
+      "note": "Reuse is translation provenance, not a fresh independent audit of this relay set."
+    }
+  },
+  "terminology_decisions": {
+    "projection": "سیشن کا منظر (the arriving live session view, not graphical projection)",
+    "cached_usage": "کیش شدہ استعمال",
+    "model_family": "ماڈل فیملی",
+    "allowance": "الاؤنس",
+    "asset": "اثاثہ / اثاثے",
+    "account_routing": "اکاؤنٹ روٹنگ",
+    "working_directory": "ورکنگ ڈائریکٹری",
+    "path": "پاتھ",
+    "dismiss": "خارج کریں / خارج کیا گیا (carried from the prior Urdu core candidate)"
+  },
+  "width": {
+    "explicit_maxCells_samples_checked": 12,
+    "actual_explicit_maxCells_overflow_count": 0,
+    "overflow_risks": [
+      {
+        "key": "relay.session.tags.saving",
+        "cells": 16,
+        "budget": "No en maxCells; prior relay tag audits document a min-w-14/nowrap status area. Preserved reviewed bytes; rendered fit remains for independent design audit."
+      }
+    ]
+  },
+  "pending_gates": [
+    "Two independent audits of this seven-namespace Urdu relay set; this translator performed no semantic self-audit.",
+    "Independent native Urdu review of terminology, plural/safety meaning and RTL rendering.",
+    "Rendered narrow-width review of relay.session.tags.saving and the six SPA namespaces together; relay.login remains separate SSR.",
+    "Integrator-owned coverage allowance and exact locale/package fixtures still assert Urdu is absent and must be reconciled outside translator catalogue scope.",
+    "Ledger rows and shipped eligibility remain unchanged until independent programme gates pass."
+  ],
+  "namespaces": [
+    {
+      "namespace": "relay.shell",
+      "key_count": 44,
+      "en_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "ur_sha256": "2a493cc7aad00e87b9014b505029f12c97e77bde918dfc0655823ee97b628bf1",
+      "context_sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.session",
+      "key_count": 17,
+      "en_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "ur_sha256": "4747e1c5414e7d137a2bc4ac177aee54b13e1c272ce4cae6f4167a4fa4936a11",
+      "context_sha256": "8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key_count": 19,
+      "en_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "ur_sha256": "4f0fab7f40bacc152b1cabba0244372b8d8dec40213c778ef8c417ac6be242aa",
+      "context_sha256": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.account_policy",
+      "key_count": 13,
+      "en_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "ur_sha256": "e86334cb4a8627f3c616a30a8bd19661fe9191ce1557f80177927dc9bb51d509",
+      "context_sha256": "7e55e4fadebcde0a6b93d545a62b2743fbb16009498cdf4e2122cb309ecc07f4",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.library",
+      "key_count": 1,
+      "en_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "ur_sha256": "57e1c543fc084deda49a88eeb94c405e81b86a3cdf0a8037bf7ed571f4b9ce1d",
+      "context_sha256": "877b88290cf14602e63b2bb1c58719fac96a20ae53ff04b147e21de23df93c54",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.ask",
+      "key_count": 11,
+      "en_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "ur_sha256": "534aa6d0f7a34c153a088695fa052cc2342fe716de96a0fb0bfc9e5dffba863c",
+      "context_sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.login",
+      "key_count": 4,
+      "en_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "ur_sha256": "2b3cfdd6808fa3091485c2c788d1708b3944b6a4730752246aa3777d4b23a985",
+      "context_sha256": "9fcd5a1669e6831b10b7041d82f77c69e858183c001ba9faa949532b4d71980a",
+      "translator_session": "905e702c8399"
+    }
+  ]
+}
