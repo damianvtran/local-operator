@@ -654,10 +654,11 @@ async def test_language_slash_writes_through_the_shared_funnel(
 
     setting = settings_io.resolve_key("language")
     assert setting is not None
-    long_refusal = await handle._slash_result("language", "語" * 30, SlashResult)
-    assert long_refusal.text.startswith("unknown language '"), long_refusal.text
-    assert "…" in long_refusal.text, long_refusal.text
-    assert "語語語語語語語語語語語語語語語語語語語語" not in long_refusal.text
+    for token in ("語" * 30, "\\" * 20):
+        long_refusal = await handle._slash_result("language", token, SlashResult)
+        assert long_refusal.text.startswith("unknown language '"), long_refusal.text
+        assert "…" in long_refusal.text, long_refusal.text
+        assert token not in long_refusal.text
 
     # Bare: this client enumerates the value space (no phone picker).
     bare = await handle._slash_result("language", "", SlashResult)
