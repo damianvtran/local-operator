@@ -18,10 +18,10 @@ that produce them. Two hard rules, both from the frozen contract (§13.9's
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, NewType
-from urllib.parse import quote, unquote
 
 __all__ = [
     "CONVERSATION_ID_PATTERN",
@@ -59,11 +59,6 @@ CONVERSATION_ID_PATTERN = r"^bcv_[0-9a-z]{8,64}$"
 _CONVERSATION_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{1,64}$")
 CONVERSATION_FEED_KIND = "conversation_id"
 CONVERSATION_FEED_TYPE = "message_available"
-#: Bound on the card labels the feed may carry (the same 200 the server uses
-#: for a display label). Kept here because the ref is persisted, not just
-#: rendered.
-_CONVERSATION_CARD_LABEL_MAX = 200
-
 
 #: §6.2's closed ack states for ONE recipient advancing their own delivery:
 #: unread→read (with an allow verdict) or unread/held→blocked (with a reject
@@ -276,35 +271,25 @@ def _optional_id(value: Any) -> str | None:
 
 @dataclass(frozen=True)
 class ConversationFeedRef:
-    """One conversation-delivery signal from the feed — refs, mention and card labels.
+    """Contentless durable locator, never a cache of display names.
 
-    The conversation lane does not share the pair lane's ``message_id``-only
-    ref: a card needs the conversation it belongs to, the message's position in
-    that conversation, whether this endpoint was mentioned, and — for an
-    agent-only membership that cannot read the person-gated conversation view —
-    the server-resolved display labels. ``conversation_name``/``sender_label``/
-    ``sender_kind`` are optional so pair-shaped legacy rows still parse; when
-    absent the handler falls back to the person-gated view.
-
-    The encoded form is what :class:`~...store.Store` persists in
-    ``feed_refs`` — one opaque string, exactly like the existing pair refs, so
-    the once-only durable consumption path needs no schema change. Labels are
-    percent-encoded so a name containing ``/`` (or anything else) cannot split
-    the ref.
+    New refs contain IDs, sequence, mention and the closed sender-kind enum.
+    Migration-only aliases distinguish old queue rows, never authority. Old
+    four/seven-part refs remain readable, but legacy labels are discarded
+    on read. Names are fetched ephemerally through the endpoint-authorized body
+    route and only rendered after screening/hash/admission. The store's v7
+    migration removes old name-bearing queue keys transactionally; this parser
+    also accepts older in-flight refs. Transcripts are never rewritten.
     """
 
     conversation_id: str
     message_id: str
     conversation_seq: int
     mention: bool
-    conversation_name: str | None = None
-    sender_label: str | None = None
     sender_kind: str | None = None
-
-    def has_card_metadata(self) -> bool:
-        """Whether the feed supplied enough provenance to render without a human read."""
-
-        return bool(self.sender_label and self.sender_kind)
+    # Migration-only row identity. Never copied from wire ids or used for
+    # message/body/admit/claim authority; preserves old pending aliases exactly.
+    legacy_alias: str | None = None
 
     def validated(self) -> "ConversationFeedRef":
         """Refuse a ref the parser could not read back (never guess)."""
@@ -321,20 +306,15 @@ class ConversationFeedRef:
             raise TeamBridgeTypeError("conversation_seq must be a positive integer")
         if not isinstance(self.mention, bool):
             raise TeamBridgeTypeError("mention must be a boolean")
-        card_fields = (self.conversation_name, self.sender_label, self.sender_kind)
-        if any(value is not None for value in card_fields):
-            # All-or-nothing for the SENDER half: a label without a kind (or
-            # vice versa) cannot render a dynamic header, so it is malformed
-            # rather than a reason to trust the person-gated view.
-            if not isinstance(self.sender_label, str) or not self.sender_label.strip():
-                raise TeamBridgeTypeError("sender_label is required with card metadata")
-            if self.sender_kind not in ("human", "agent"):
-                raise TeamBridgeTypeError("sender_kind must be human or agent")
-            if self.conversation_name is not None and not isinstance(self.conversation_name, str):
-                raise TeamBridgeTypeError("conversation_name must be a string")
-            for value in card_fields:
-                if value is not None and len(value) > _CONVERSATION_CARD_LABEL_MAX:
-                    raise TeamBridgeTypeError("card label exceeds its bound")
+        if self.sender_kind is not None and self.sender_kind not in ("human", "agent"):
+            raise TeamBridgeTypeError("sender_kind must be human or agent")
+        if self.legacy_alias is not None:
+            if (
+                self.sender_kind is None
+                or not isinstance(self.legacy_alias, str)
+                or re.fullmatch(r"[0-9a-f]{64}", self.legacy_alias) is None
+            ):
+                raise TeamBridgeTypeError("invalid legacy conversation alias")
         return self
 
     def encode(self) -> str:
@@ -345,53 +325,62 @@ class ConversationFeedRef:
             f"{self.conversation_id}/{self.message_id}/{self.conversation_seq}/"
             f"{1 if self.mention else 0}"
         )
-        if not any(
-            value is not None
-            for value in (self.conversation_name, self.sender_label, self.sender_kind)
-        ):
-            return base
-        name = quote(self.conversation_name or "", safe="")
-        label = quote(self.sender_label or "", safe="")
-        return f"{base}/{name}/{label}/{self.sender_kind or ''}"
+        encoded = base if self.sender_kind is None else f"{base}/{self.sender_kind}"
+        if self.legacy_alias is not None:
+            self.validated()
+            encoded += f"/legacy_alias={self.legacy_alias}"
+        return encoded
 
 
 def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     """Decode a conversation feed ref value; ``None`` means malformed (skip, never guess).
 
-    Four parts is the original ref (no card metadata); seven is the additive
-    form carrying the server-resolved name/label/kind. Anything else is
-    malformed, including a partial metadata tuple.
+    Four parts is the original locator; five adds the closed sender kind.
+    Six adds a migration-only legacy_alias=<sha256> slot. Seven is the old
+    name/label/kind layout: discard both name slots and derive a stable alias
+    from the EXACT full old key's UTF-8 bytes. This preserves distinct pending
+    states even when names were the only difference. It is a name-derived
+    operational digest, NOT anonymization, authority or forensic erasure.
     """
 
     if not isinstance(value, str):
         return None
     parts = value.split("/")
-    if len(parts) not in (4, 7):
+    if len(parts) not in (4, 5, 6, 7):
         return None
     conversation_id, message_id, seq_text, mention_text = parts[:4]
     if _CANONICAL_DECIMAL.fullmatch(seq_text) is None:
         return None
     if mention_text not in ("0", "1"):
         return None
-    name = label = kind = None
-    if len(parts) == 7:
-        encoded_name, encoded_label, kind = parts[4:]
-        if (
-            len(encoded_name) > _CONVERSATION_CARD_LABEL_MAX * 12
-            or len(encoded_label) > _CONVERSATION_CARD_LABEL_MAX * 12
-        ):
+    kind = parts[4] if len(parts) in (5, 6) else parts[6] if len(parts) == 7 else None
+    legacy_alias = None
+    if len(parts) == 6:
+        tag = "legacy_alias="
+        if not parts[5].startswith(tag):
             return None
-        name = unquote(encoded_name)
-        label = unquote(encoded_label)
+        legacy_alias = parts[5][len(tag) :]
+    elif len(parts) == 7:
+        # A tagged alias plus an extra path component is not a legacy key.
+        # The old encoder percent-escaped '=' in label slots, so this literal
+        # sixth-slot tag cannot have been emitted there as a legacy name.
+        if parts[5].startswith("legacy_alias="):
+            return None
+        # Include the prefix: this must match an older in-flight FULL key
+        # exactly, with no URL unquoting or Unicode/name normalization.
+        original = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}={value}"
+        try:
+            legacy_alias = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        except UnicodeEncodeError:
+            return None
     try:
         return ConversationFeedRef(
             conversation_id=conversation_id,
             message_id=message_id,
             conversation_seq=int(seq_text),
             mention=mention_text == "1",
-            conversation_name=name,
-            sender_label=label,
             sender_kind=kind,
+            legacy_alias=legacy_alias,
         ).validated()
     except TeamBridgeTypeError:
         return None
@@ -642,15 +631,12 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
             # The server omits ``mention`` when false (Go's ``omitempty`` on a
             # bool), so an absent bit is a NON-mention delivery, not a
             # malformed one.
-            card_meta = {}
-            for field_name in ("conversation_name", "sender_label", "sender_kind"):
-                if field_name in ids:
-                    value = ids.get(field_name)
-                    if not isinstance(value, str):
-                        raise TeamBridgeTypeError(
-                            f"events[{index}].ids.{field_name} must be a string"
-                        )
-                    card_meta[field_name] = value
+            # Wire labels are deliberately not read: feed/hold refs survive
+            # restart and must not become a persistent name cache. Only the
+            # closed provenance enum may accompany the locator.
+            kind = ids.get("sender_kind")
+            if kind is not None and kind not in ("human", "agent"):
+                raise TeamBridgeTypeError(f"events[{index}].ids.sender_kind is invalid")
             at = raw.get("at")
             if not isinstance(at, str) or not at:
                 raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")
@@ -660,7 +646,7 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
                     message_id=message_id,
                     conversation_seq=int(seq_text),
                     mention=mention,
-                    **card_meta,
+                    sender_kind=kind,
                 )
                 .validated()
                 .encode()

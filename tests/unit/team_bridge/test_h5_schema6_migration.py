@@ -178,7 +178,7 @@ def test_baseline_v5_migrates_additively_preserving_every_row(tmp_path) -> None:
     assert reopened.active_owner() is not None  # the migration ran on open
 
     after, version = _snapshot(store._path)
-    assert version == str(SCHEMA_VERSION) == "6"
+    assert version == str(SCHEMA_VERSION)
     assert after == before  # byte-for-byte on every preserved table
     assert _table_exists(store._path, "screened_request_deliveries")
     # EMPTY: legacy messages never backfill producer authority.
@@ -215,7 +215,7 @@ def test_wip_v5_with_table_and_rows_migrates_without_losing_them(tmp_path) -> No
     reopened = Store(tmp_path)
     assert reopened.active_owner() is not None
     _, version = _snapshot(store._path)
-    assert version == "6"
+    assert version == str(SCHEMA_VERSION)
     assert _count(store._path, "screened_request_deliveries") == 1
 
 
@@ -240,7 +240,7 @@ def test_a_failed_migration_leaves_no_half_state(tmp_path, monkeypatch) -> None:
     reopened = Store(tmp_path)
     assert reopened.active_owner() is not None
     after, version = _snapshot(store._path)
-    assert version == "6"
+    assert version == str(SCHEMA_VERSION)
     assert after == before
     assert _table_exists(store._path, "screened_request_deliveries")
 
