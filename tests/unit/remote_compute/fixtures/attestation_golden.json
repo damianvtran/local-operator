@@ -1,0 +1,20 @@
+{
+  "canonical": "{\"v\":1,\"workload_id\":\"wl_0123456789abcdef01234567\",\"account_id\":\"acct_0123456789abcdef01234567\",\"network_id\":\"n_0123456789abcdef01234567\",\"device_key\":\"gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q\",\"issued_at\":1760000000,\"expires_at\":1760000600}",
+  "device_seed_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+  "note": "The attestation golden vector: canonical statement bytes, payload and signature for v1, reproducible from the signer and device seeds recorded here alone.",
+  "payload": {
+    "v": 1,
+    "workload_id": "wl_0123456789abcdef01234567",
+    "account_id": "acct_0123456789abcdef01234567",
+    "network_id": "n_0123456789abcdef01234567",
+    "device_key": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+    "issued_at": 1760000000,
+    "expires_at": 1760000600
+  },
+  "payload_b64": "eyJ2IjoxLCJ3b3JrbG9hZF9pZCI6IndsXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2NyIsImFjY291bnRfaWQiOiJhY2N0XzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2NyIsIm5ldHdvcmtfaWQiOiJuXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2NyIsImRldmljZV9rZXkiOiJnVGwzRHFoOUYxOVdvMVJtdzB4LXpNdU5pcEcwN2plaVhmWVBXNF9KczVRIiwiaXNzdWVkX2F0IjoxNzYwMDAwMDAwLCJleHBpcmVzX2F0IjoxNzYwMDAwNjAwfQ",
+  "signature_b64": "GNvFTwel56TEADZ4mut-pi_adaWdlJX8nEGjCblgvkCiozqI3vPekNqDnS7bD_KUdqey6W5dEGeMEmKnj6UnAg",
+  "signature_hex": "18dbc54f07a5e7a4c40036789aeb7ea62fda75a59d9495fc9c41a309b960be40a2a33a88def3de90da839d2edb0ff29476a7b2e96e5d10678c1262a78fa52702",
+  "signer_key_id": "attest-test-1",
+  "signer_seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "verifier_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+}
