@@ -4621,7 +4621,10 @@ def _model_credential_refusal(root: Path, model: Any, birth: Any) -> str:
         return ""
 
     from local_operator.config import ConfigManager
-    from local_operator.providers.model_access import credentialed_chat_providers_here
+    from local_operator.providers.model_access import (
+        credentialed_chat_providers_here,
+        is_accessible,
+    )
 
     config = ConfigManager(config_dir=root)
     configured_provider = str(config.get_config_value("hosting", "") or "")
@@ -4643,25 +4646,31 @@ def _model_credential_refusal(root: Path, model: Any, birth: Any) -> str:
     accessible = credentialed_chat_providers_here(
         config_dir=root, config_values=config.get_config().values
     )
-    if accessible is None or provider in accessible:
+    if accessible is None or is_accessible(provider, accessible):
+        # A login flavour and its stored row need not share a raw id (xai-oauth
+        # stores as xai), so membership must use the credential plane's canonical
+        # alias-aware comparison rather than the requested spelling.
         return ""
 
     # Keyless providers need no credential by definition. The narrower chat-access
     # predicate deliberately excludes them, which must not turn into a false "missing
     # credential" accusation at this door.
-    from local_operator.providers.registry import get_provider_definition
+    from local_operator.providers.registry import (
+        credential_provider_id,
+        get_provider_definition,
+    )
 
     definition = get_provider_definition(provider)
     if definition is not None and (definition.allows_missing_api_key or definition.wire == "mock"):
         return ""
 
-    # The operator's standing radient decision is a SHARE policy, not a guessed reason
-    # for its absence. Keep the observable fact identical and only narrow the remedy:
-    # this flow must never offer a radient share command, even as an example.
-    if provider == "radient":
+    # Radient's remedy is model-only BY PRODUCT RULE; no decline state is persisted
+    # or inferred here. Canonicalising the provider also covers radient-key, whose
+    # credential row lives under radient, without widening the guard to other ids.
+    if credential_provider_id(provider) == "radient":
         remedy = (
-            "Credential sharing for 'radient' is declined; create with "
-            "--model <provider>/<model-id> naming a provider this device holds instead"
+            "Create with --model <provider>/<model-id> naming a provider this device "
+            "holds instead"
         )
     else:
         remedy = (

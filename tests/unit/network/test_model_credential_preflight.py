@@ -66,13 +66,15 @@ def _configure_default(root: Path, provider: str) -> None:
     ConfigManager(config_dir=root).update_config({"hosting": provider, "model_name": MODEL})
 
 
-def _hold_credential(root: Path, provider: str = HELD) -> None:
+def _hold_credential(
+    root: Path, provider: str = HELD, payload: dict[str, Any] | None = None
+) -> None:
     """Write one synthetic row through the real store; never read its value back."""
     auth = AuthStore(db_path=root / "auth.db", config_dir=root)
     try:
         auth.upsert_credential(
             provider,
-            {"type": "api_key", "source": "login", "key": "synthetic-fixture-only"},
+            payload or {"type": "api_key", "source": "login", "key": "synthetic-fixture-only"},
         )
     finally:
         auth.close()
@@ -137,19 +139,38 @@ def test_an_explicit_held_provider_escapes_an_unserviceable_default(root: Path) 
     }
 
 
-def test_radient_names_the_declined_share_without_reoffering_it(root: Path) -> None:
-    _configure_default(root, "radient")
+def test_a_login_flavour_uses_its_canonical_held_credential(root: Path) -> None:
+    """xai-oauth must see the real xai OAuth row, not refuse its raw spelling."""
+    _configure_default(root, MISSING)
+    _hold_credential(
+        root,
+        "xai",
+        {"access": "synthetic-access-only", "refresh": "synthetic-refresh-only"},
+    )
+
+    reply = _create(root, prompt="", model={"provider": "xai-oauth", "model_id": MODEL})
+
+    assert reply["session_id"]
+    assert reply["warming"] is True
+    assert reply["model"]["detail"] == (
+        "the runtime is joining; the model is applied when it arrives"
+    )
+
+
+@pytest.mark.parametrize("provider", ["radient", "radient-key"])
+def test_the_radient_family_gets_a_model_only_remedy(root: Path, provider: str) -> None:
+    _configure_default(root, provider)
 
     reply = _create(root, prompt="run on the default")
 
     sentence = (
-        "the resolved default model uses provider 'radient', but this device holds no "
-        "credential for it. Credential sharing for 'radient' is declined; create with "
-        "--model <provider>/<model-id> naming a provider this device holds instead."
+        f"the resolved default model uses provider '{provider}', but this device holds no "
+        "credential for it. Create with --model <provider>/<model-id> naming a provider "
+        "this device holds instead."
     )
     _assert_refused_before_mint(root, reply, sentence)
-    assert "credential share radient" not in sentence
-    assert "declined" in sentence
+    assert "credential share" not in sentence
+    assert "declined" not in sentence
 
 
 def test_the_refusal_and_model_sentence_cross_a_real_peer_link(
