@@ -10,6 +10,11 @@ working-tree name and does not change ``HEAD``, so it is served.
 
 The fixture is a real miniature git checkout: ``HEAD`` is the whole control, so
 a test that never commits is not testing the route.
+
+Two fixtures exist because the allowlist spans two checkouts: ``_public_repo``
+models this repository's copy roots and ``_ui_repo`` models the companion UI
+checkout's (``src/i18n/...``).  A UI path is only ever read from a checkout whose
+working directory is that checkout, which is what the second fixture pins.
 """
 
 from __future__ import annotations
@@ -22,9 +27,39 @@ from pathlib import Path
 import pytest
 
 from local_operator.harness.types import ToolContext
-from local_operator.tools.public_copy import execute_read_public_copy
+from local_operator.tools.public_copy import (
+    PUBLIC_COPY_GLOBS,
+    _matches_public_copy,
+    execute_read_public_copy,
+)
 
 FAKE_GITHUB = "ghp_" + "A" * 36
+
+#: Every reviewed root, with one representative file.  ``PUBLIC_COPY_GLOBS`` is
+#: asserted against :data:`ACCEPTED_PUBLIC_COPY_GLOBS` below, and each sample is
+#: run through the enforcement patterns: an added root or a widened pattern
+#: moves this set and the diff is what review sees.
+UI_CATALOGUE = "src/i18n/catalogues/en/wire.slash.json"
+UI_KEYS = "src/i18n/keys.gen.ts"
+UI_VALUE = "Type or paste a secret after a space; masked"
+
+ACCEPTED_PUBLIC_COPY_GLOBS: tuple[str, ...] = (
+    "local_operator/i18n/catalogues/*/*.json",
+    "local_operator/i18n/keys/*.py",
+    "local_operator/mobile/web/src/i18n/keys.gen.ts",
+    "local_operator/mobile/web/src/i18n/bundled.gen.ts",
+    "src/i18n/catalogues/*/*.json",
+    "src/i18n/keys.gen.ts",
+)
+
+ACCEPTED_PUBLIC_COPY_PATHS: tuple[str, ...] = (
+    "local_operator/i18n/catalogues/en/wire.slash.json",
+    "local_operator/i18n/keys/wire_slash.py",
+    "local_operator/mobile/web/src/i18n/keys.gen.ts",
+    "local_operator/mobile/web/src/i18n/bundled.gen.ts",
+    UI_CATALOGUE,
+    UI_KEYS,
+)
 
 
 def _git(root: Path, *args: str) -> None:
@@ -64,6 +99,192 @@ def _public_repo(tmp_path: Path) -> Path:
 
 def _context(root: Path, tmp_path: Path) -> ToolContext:
     return ToolContext(cwd=str(root), session_dir=str(tmp_path / "sessions" / "abc123"))
+
+
+def _ui_repo(tmp_path: Path) -> Path:
+    """A committed miniature UI checkout with the companion repo's copy roots."""
+    root = tmp_path / "ui"
+    catalogue = root / "src/i18n/catalogues/en"
+    catalogue.mkdir(parents=True)
+    (catalogue / "wire.slash.json").write_text(
+        json.dumps({"wire.slash.credential": UI_VALUE}), encoding="utf-8"
+    )
+    (root / "src/i18n/keys.gen.ts").write_text(
+        "export const keys = {\n" f'  "wire.slash.credential": "{UI_VALUE}",\n' "} as const;\n",
+        encoding="utf-8",
+    )
+    # Committed lookalikes: each must be refused by the allowlist even though it
+    # exists at HEAD, so a refusal cannot be an accident of a missing file.
+    (root / "src/i18n/other.json").write_text(
+        json.dumps({"wire.other": "not an allowlisted catalogue"}), encoding="utf-8"
+    )
+    (root / "src/i18n/x.json").write_text(
+        json.dumps({"wire.x": "not an allowlisted catalogue"}), encoding="utf-8"
+    )
+    (root / "README.md").write_text("not public copy\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "add", "-A")
+    _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "ui fixture")
+    return root
+
+
+def test_the_allowlist_is_exactly_the_reviewed_set() -> None:
+    """A future widening has to edit this tuple and show up as a reviewed diff."""
+    assert PUBLIC_COPY_GLOBS == ACCEPTED_PUBLIC_COPY_GLOBS
+
+
+@pytest.mark.parametrize("path", ACCEPTED_PUBLIC_COPY_PATHS)
+def test_every_reviewed_root_is_accepted(path: str) -> None:
+    assert _matches_public_copy(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # A file beside the catalogues, not inside them.
+        "src/i18n/other.json",
+        # Traversal that resolves out of a catalogue directory.
+        "src/i18n/catalogues/en/../x.json",
+        # One level too deep: ``[^/]+`` does not span a second separator.
+        "src/i18n/catalogues/en/deep/x.json",
+        # A name that merely ends like the generated map.
+        "src/i18n/keys.gen.ts.bak",
+        # The same spelling nested somewhere else in the tree.
+        "vendor/src/i18n/keys.gen.ts",
+    ],
+)
+def test_paths_outside_the_reviewed_roots_are_not_matched(path: str) -> None:
+    assert not _matches_public_copy(path)
+
+
+@pytest.mark.asyncio
+async def test_a_ui_catalogue_key_is_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _ui_repo(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-ui-1",
+        {"path": UI_CATALOGUE, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert not result.is_error, result.text
+    assert UI_VALUE in result.text
+    assert result.details is not None
+    assert result.details["public_copy"] is True
+    assert result.details["path"] == UI_CATALOGUE
+
+
+@pytest.mark.asyncio
+async def test_a_ui_generated_key_map_is_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _ui_repo(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-ui-2",
+        {"path": UI_KEYS, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert not result.is_error, result.text
+    assert UI_VALUE in result.text
+    assert result.details is not None
+    assert result.details["path"] == UI_KEYS
+
+
+@pytest.mark.asyncio
+async def test_a_ui_working_tree_change_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-a-secret bypass is refused in the UI checkout too."""
+    root = _ui_repo(tmp_path)
+    (root / UI_CATALOGUE).write_text(
+        json.dumps({"wire.slash.credential": "[redacted]" + FAKE_GITHUB}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-ui-3",
+        {"path": UI_CATALOGUE, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "differs from HEAD" in result.text
+    assert FAKE_GITHUB not in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_untracked_ui_copy_file_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _ui_repo(tmp_path)
+    (root / "src/i18n/catalogues/en/new.json").write_text(
+        json.dumps({"wire.slash.new": "public"}), encoding="utf-8"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-ui-4",
+        {"path": "src/i18n/catalogues/en/new.json", "key": "wire.slash.new"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "not committed at HEAD" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["src/i18n/other.json", "src/i18n/catalogues/en/../x.json"])
+async def test_a_ui_path_outside_the_allowlist_is_refused(
+    path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _ui_repo(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-ui-5", {"path": path, "key": "wire.other"}, None, None, _context(root, tmp_path)
+    )
+
+    assert result.is_error
+    assert "not a public-copy path" in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_absolute_ui_path_outside_the_checkout_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _ui_repo(tmp_path)
+    elsewhere = tmp_path / "elsewhere" / UI_KEYS
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text('"wire.slash.credential": "public"\n', encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-ui-6",
+        {"path": str(elsewhere), "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "not inside this session's workspace" in result.text
 
 
 @pytest.mark.asyncio
