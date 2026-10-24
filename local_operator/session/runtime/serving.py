@@ -77,7 +77,7 @@ from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
-    from local_operator.harness.types import AudioContent, ImageContent
+    from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
     from local_operator.secrets.session import SessionRegistration
     from local_operator.session.errors import RuntimeRetiring
     from local_operator.session.runtime.publication import PublicationGate
@@ -111,6 +111,7 @@ from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
 from local_operator.session.runtime.server import AckDetail, SessionHandle
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
+from local_operator.session.runtime.server import document_blocks as _document_blocks
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
@@ -282,6 +283,62 @@ DEFAULT_UNATTENDED_GATE_TIMEOUT_H = 24
 #: Kept as a module-level name here because it is part of this module's
 #: published surface — the tests and the mobile bridge import it from here.
 GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
+
+#: What an ask reports when the host that owns this run has NOBODY to put the
+#: question in front of. Model-facing English, like every tool refusal.
+#:
+#: It exists for the arm where a resume worker's ask surface is present but the
+#: queued engine is not (`LOP_ASK_NONBLOCKING=0`, the operator's kill switch):
+#: the `ask` tool is gated on the HOOK, so a hook is what makes the tool exist,
+#: and on that arm `execute_ask` awaits it instead of enqueueing. Returning
+#: ``None`` there would report "the user closed the question without answering"
+#: — a picker nobody was ever shown — so the one honest answer is to refuse.
+#:
+#: Shaped after :class:`~local_operator.harness.approval.ApprovalUnavailableError`,
+#: which is the same defect one subsystem over: a gate that cannot ask anyone
+#: must not render as a decision somebody made.
+ASK_UNAVAILABLE_NOTICE = (
+    "No one can be asked on this run: it is a resumed conversation running "
+    "headless, so it has no interactive ask surface ({reason}). Nothing was "
+    "shown to the operator and nothing was chosen — decide yourself, or say "
+    "what you need and carry on."
+)
+
+
+#: The ask gate's shape: a coroutine FUNCTION, not the wider ``AskUserFn``
+#: (``Awaitable``) spelling. ``handle._ask_gate`` is what tests and the parked-gate
+#: timeout schedule directly, and ``asyncio.create_task`` accepts a coroutine and
+#: not an arbitrary awaitable — widening the annotation here would push that
+#: distinction out to every caller.
+_AskGateFn = Callable[[list[Any]], Coroutine[Any, Any, dict[str, list[str]] | None]]
+
+
+class AskUnavailableError(RuntimeError):
+    """A host with no ask surface was asked a question it cannot present.
+
+    Raised only by :func:`_unanswerable_ask`, the handler a resume worker
+    installs so its queued-ask surface exists. A host that CAN present a
+    question never raises this; it returns the answer or ``None``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(ASK_UNAVAILABLE_NOTICE.format(reason=reason))
+
+
+async def _unanswerable_ask(questions: list[Any]) -> dict[str, list[str]] | None:
+    """The queued-only surface's handler: refuse in words if it is ever awaited.
+
+    Under the queued engine this closure is never called at all — `execute_ask`
+    only awaits ``ask_user`` on the BLOCKING arm (``builtin.py``'s queued door
+    returns at once with a receipt) — so its presence is a capability flag, not
+    a behaviour. It is awaited only if the queued engine is switched off under a
+    worker that still has no human: then nothing can present the questions, and
+    a raise is the only answer that does not invent a user.
+    """
+    raise AskUnavailableError("the queued-ask engine is off for this process")
+
+
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
@@ -451,6 +508,10 @@ class _PromptCommand:
     #: recording to carry. The blocks are ALREADY sniffed (``audio_blocks``):
     #: this queue never re-derives the format.
     audio: list["AudioContent"] | None = None
+    #: The resolved document blocks that ride this admission onto
+    #: ``Message.user(..., documents=...)``. Resolved from ``Prompt.files`` in
+    #: the synchronous prelude, so nothing here touches the store again.
+    documents: list["DocumentContent"] | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -753,6 +814,7 @@ class ServingSessionHandle(SessionHandle):
         auto_approve: bool = False,
         approval_pinned: bool = False,
         install_gates: bool = True,
+        install_ask_surface: bool = False,
         config_dir: Path | None = None,
         mcp_publication_gate: PublicationGate | None = None,
     ) -> None:
@@ -1154,6 +1216,14 @@ class ServingSessionHandle(SessionHandle):
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
+        elif install_ask_surface:
+            # A RESUMED, UNSUPERVISED run with the queued engine ON (#2803): the
+            # conversation owes its ask queue, but no approval gate — nothing can
+            # answer a parked card here, which is why `lop sessions` withholds
+            # `--control` from a resume worker. The caller also requires
+            # `asks.policy.enabled()`, so the kill-switch arm advertises no tool
+            # at all (review round 1, MINOR-1). See `_install_ask_surface`.
+            self._install_ask_surface()
         # THE ACCESS CLAIM IS PUBLISHED AT SESSION OPEN, before this host serves
         # a single frame, so a desktop session is never read with no claim at
         # all (the band's sentence is unrenderable then) — the same fact the
@@ -1304,9 +1374,38 @@ class ServingSessionHandle(SessionHandle):
         # lets tests (and any future direct caller) exercise the exact closure
         # the harness will await, rather than a re-implementation of it.
         self._approval_gate = approval_gate
-        self._ask_gate = ask_gate
         self._session.set_approval_handler(approval_gate)
-        self._session.set_ask_handler(ask_gate)
+        self._install_ask_surface(ask_gate)
+
+    def _install_ask_surface(self, handler: "_AskGateFn | None" = None) -> None:
+        """Install the queued-ask surface — the ask half of ``_install_gates``.
+
+        FACTORED OUT so a run that must NOT install approval gates can still own
+        an ask queue (#2803): a resumed conversation's open asks and its deadline
+        wakes belong to the conversation, and without this hook the queue is
+        never built (``Session.ask_queue`` returns ``None`` without a handler),
+        so `ask`/`ask_withdraw` never reach the model and every owed response
+        row waits for some later turn that may never come.
+
+        ``handler`` is the host's real ask gate when the approval gates exist
+        (:meth:`_install_gates` passes its closure in). Absent it, the surface is
+        QUEUED-ONLY: the handler is :func:`_unanswerable_ask`, which can refuse
+        but never present, because a run that reaches this arm has nobody at a
+        keyboard. That arm is BELT-AND-BRACES now: `exec_control` installs this
+        surface only while the queued engine is on, and the queued arm of
+        `execute_ask` never awaits the hook — its presence is what makes the
+        tools exist. The refusal is what a host that installs the surface
+        directly gets instead of a fabricated "the user closed the question".
+
+        The reach probe and the state sink ride along for the reason they were
+        installed with the gate in the first place: the receipt may name where an
+        ask is showing, and the phone projection is repainted by the host. A
+        resume worker publishes a discovery record like every other exec run, so
+        both answers are real there — a client may be attached.
+        """
+        gate: _AskGateFn = handler if handler is not None else _unanswerable_ask
+        self._ask_gate = gate
+        self._session.set_ask_handler(gate)
         # The queued-ask RECEIPT may name where the ask is showing, and only this
         # handle can answer that: a Session cannot see the attach table. The probe
         # is the SAME predicate the parked-gate timeout uses -- ``_attached_surfaces``
@@ -3537,6 +3636,7 @@ class ServingSessionHandle(SessionHandle):
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
+        files: list[dict[str, Any]] | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
@@ -3556,6 +3656,14 @@ class ServingSessionHandle(SessionHandle):
         ingest images already use) or pass through already-decoded, and the
         blocks reach ``Session.prompt`` only when its signature takes the
         keyword — same probe, same reasoning.
+
+        ``files`` are ``Prompt.files``' references; they are resolved against
+        THIS owner's attachment store in the synchronous prelude below, so a
+        missing digest is an :class:`AttachmentMissing` refusal raised where
+        this method's caller can report it (contract amendment 3) rather than
+        a detached failure. A session whose ``prompt`` predates the
+        ``documents`` keyword is refused (``DocumentCarriageUnsupported``),
+        never forwarded without its files.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
@@ -3631,6 +3739,20 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(audio)
             else _audio_blocks(cast(list[dict[str, str]] | None, audio))
         )
+        # Documents are resolved in the same synchronous prelude, for the same
+        # measured reason audio is (no thread hop: ``_admit_without_waiting_
+        # for_the_turn`` budgets a few loop turns for reportable refusals), and
+        # deliberately NOT with the image path's drop-on-bad-entry contract: a
+        # missing digest raises ``AttachmentMissing`` naming the file. The
+        # store read is bounded by the upload cap (32 MB/file, 8 files).
+        document_blocks_decoded = _document_blocks(files, getattr(self._session, "model", None))
+        if document_blocks_decoded:
+            parameters = inspect.signature(self._session.prompt).parameters
+            if "documents" not in parameters:
+                from local_operator.session.errors import DocumentCarriageUnsupported
+
+                self._command_reservations.reject(command_id)
+                raise DocumentCarriageUnsupported()
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
         # Restore intentionally keeps missing attachments readable. Admission is
@@ -3688,13 +3810,14 @@ class ServingSessionHandle(SessionHandle):
         # (``process._refresh_for``), so the queue is never a promise to a
         # successor that does not come.
         if self._updating:
-            if blocks:
-                # An inbox row is text, so carrying an image-carrying prompt
-                # would shed the user's file while promising it was queued. The
-                # refusal returns the draft, which is true here — the text IS
-                # still theirs — and it names no build: the window's own phrase
-                # would claim "the one it loaded is gone from disk", which is
-                # false for a superseded tree (the D10/MAJOR-2 class).
+            if blocks or document_blocks_decoded:
+                # An inbox row is text, so carrying an image- or document-
+                # carrying prompt would shed the user's file while promising it
+                # was queued. The refusal returns the draft, which is true here
+                # — the text IS still theirs — and it names no build: the
+                # window's own phrase would claim "the one it loaded is gone
+                # from disk", which is false for a superseded tree (the
+                # D10/MAJOR-2 class).
                 self._command_reservations.reject(command_id)
                 raise self._retiring_refusal()
             try:
@@ -3742,7 +3865,12 @@ class ServingSessionHandle(SessionHandle):
             # prompt would return a receipt for a message that arrives without
             # its attachment — losing the user's file while telling them it was
             # queued. It takes the refusal, which returns both to the composer.
-            if self._draining and not self._exit_committed and not blocks:
+            if (
+                self._draining
+                and not self._exit_committed
+                and not blocks
+                and not document_blocks_decoded
+            ):
                 try:
                     receipt = await self._spool_for_successor(
                         text,
@@ -3784,6 +3912,7 @@ class ServingSessionHandle(SessionHandle):
             input_mode=input_mode,
             input_path=input_path,
             audio=audio_blocks_decoded,
+            documents=document_blocks_decoded,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -4663,6 +4792,13 @@ class ServingSessionHandle(SessionHandle):
                     # this command's prelude.
                     if "audio" in parameters:
                         fields["audio"] = command.audio
+                    # Documents, probed the same way. The reservation path
+                    # already refused a session without this keyword when the
+                    # command carried documents, so the probe cannot silently
+                    # drop them here; it keeps a reduced test session that
+                    # never sees documents on its exact old call shape.
+                    if "documents" in parameters:
+                        fields["documents"] = command.documents
                     await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;
@@ -4735,6 +4871,7 @@ class ServingSessionHandle(SessionHandle):
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
+        files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
     ) -> str:
         self._check_loop_thread()
@@ -4759,6 +4896,18 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(audio)
             else _audio_blocks(cast(list[dict[str, str]] | None, audio))
         )
+        # Documents ride a steer exactly as they ride a prompt: resolved in the
+        # same synchronous prelude (a missing digest refuses the correction
+        # before it is queued), and refused when this session's ``steer``
+        # predates the keyword rather than dropped on the floor.
+        document_blocks_decoded = _document_blocks(files, getattr(self._session, "model", None))
+        if document_blocks_decoded:
+            parameters = inspect.signature(self._session.steer).parameters
+            if "documents" not in parameters:
+                from local_operator.session.errors import DocumentCarriageUnsupported
+
+                self._command_reservations.reject(command_id)
+                raise DocumentCarriageUnsupported()
         if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted"
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
@@ -4770,14 +4919,17 @@ class ServingSessionHandle(SessionHandle):
         # the owner's receipt: the successor runs it, at the head of the turn the
         # prompt above it opens.
         #
-        # IMAGES (AND NOW A RECORDING) ARE THE ONE THING THE VEHICLE CANNOT
-        # CARRY and take the refusal, exactly as an attachment-carrying prompt
-        # does (see that arm for why an inbox row cannot hold them). Checked on
-        # the RAW argument rather than on the decoded blocks because the
-        # decision has to happen before the attach, and a non-empty ``images``
-        # or ``audio`` is the same fact one decode earlier.
+        # ATTACHMENTS — IMAGES, A RECORDING, AND NOW DOCUMENTS — ARE THE ONE
+        # THING THE VEHICLE CANNOT CARRY and take the refusal, exactly as an
+        # attachment-carrying prompt does (see that arm for why an inbox row
+        # cannot hold them). Checked on the RAW image/audio arguments rather
+        # than on the decoded blocks because the decision has to happen before
+        # the attach, and a non-empty ``images`` or ``audio`` is the same fact
+        # one decode earlier; a resolved document block is the only form the
+        # fact takes, because resolving it is what raises the refusal a
+        # missing digest owes.
         if self._updating:
-            if images or audio:
+            if images or audio or document_blocks_decoded:
                 self._command_reservations.reject(command_id)
                 raise self._retiring_refusal()
             try:
@@ -4817,6 +4969,11 @@ class ServingSessionHandle(SessionHandle):
         # keyword it would drop.
         if "audio" in parameters:
             fields["audio"] = audio_blocks_decoded
+        # Documents ride the correction's keyword, probed like the rest; the
+        # reservation path above already refused a session without it when
+        # documents were present.
+        if "documents" in parameters:
+            fields["documents"] = document_blocks_decoded
         # The structural stamp rides the steer for the same reason it rides a
         # prompt: a MID-TURN delivery is one of the two ways a spooled owner
         # prompt replays (``process._run_owner_prompt``'s steer fallback), and
@@ -6049,12 +6206,13 @@ class ServingSessionHandle(SessionHandle):
     async def ask_dismiss(self, ask_id: str, by: str = "", reason: str | None = None) -> str:
         """Dismiss an ask from the view. Asks the model nothing, ever.
 
-        An OPEN ask is accepted only while the session is stopped (D6, design §15);
-        the refusal arrives as the ``ValueError`` below.
-
-        The dismissal's own act injects nothing; the deadline notice the ask had
-        not delivered is a separate, still-owed row (fork A, 2026-10-16, design
-        §14), and ``dismiss_ask``'s ``_settled`` reconcile is what delivers it.
+        An OPEN ask is accepted in EVERY live state (SA-D4, design §15, replacing
+        D6's stopped-session gate); the refusal arrives as the ``ValueError`` below,
+        in the queue's own words. Mid-turn the response row rides the steering
+        queue to this turn's next boundary; the dismissal's own act injects
+        nothing, and the deadline notice the ask had not delivered is a separate,
+        still-owed row (fork A, 2026-10-16, design §14). ``dismiss_ask``'s
+        ``_settled`` reconcile is what delivers either one.
         """
         outcome = self._session.dismiss_ask(ask_id, by=by or "remote", reason=reason)
         if not outcome.get("ok"):
@@ -8852,7 +9010,13 @@ class ServingSessionHandle(SessionHandle):
         """
         name, _, request = arg.partition(" ")
         name = name.strip()
-        if name.startswith("="):
+        # A leading ``=`` means "literal name, never a verb": captured before
+        # the strip so the detach below cannot fire on a team literally named
+        # ``clear``/``none``. Without this the TUI and the owner disagreed —
+        # `/team =clear` attached locally but detached on an attached session
+        # (command-palette round 3, MAJOR).
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_team`` and
@@ -8860,7 +9024,7 @@ class ServingSessionHandle(SessionHandle):
         # #2014), so detaching it is the ONE way to free that slot again, and a
         # request after the verb is a mistyped attach that falls through to the
         # ordinary name lookup below (which reports the unknown name).
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "attach_team", None)
             if not callable(detach):
                 # Same shape as the attach guard below: state what this session
@@ -9089,13 +9253,14 @@ class ServingSessionHandle(SessionHandle):
         # review round 4, R4-2). The local seam has had this since U1; without
         # it here the routed owner refused ``/agent =class`` while the same
         # command worked locally — the drift class U1 found.
-        if name.startswith("="):
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_agent``: only
         # the bare verb detaches, so ``/agent clear <text>`` stays a (mistyped)
         # attach and reports the unknown name rather than silently detaching.
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")

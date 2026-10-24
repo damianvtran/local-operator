@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import tempfile
+from collections.abc import Mapping
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime
@@ -130,6 +131,14 @@ _MODELLED_TOP_LEVEL = ("version", "metadata", "values")
 #: non-string keys this store cannot address, reported beside the others.
 _UNMODELLED_WARNED: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
 
+#: ``(path, sorted preserved paths)`` a write has already reported keeping, so a
+#: long-lived process (a settings page, a watcher tick, a migration retried every
+#: launch) says it ONCE per distinct key set. Same rationale as
+#: ``_UNMODELLED_WARNED`` next door, and the same shape: the file's ``stat`` is
+#: deliberately not part of the key, because an unrelated rewrite must not
+#: re-report keys the operator has not touched.
+_PRESERVED_WARNED: set[tuple[str, tuple[str, ...]]] = set()
+
 #: One parsed ``config.yml`` per path, keyed by what ``fstat`` said about the
 #: bytes it was parsed from. See :func:`_parse_config_stream`.
 _PARSED: dict[str, tuple[tuple[int, ...], Any]] = {}
@@ -245,26 +254,6 @@ def read_config_values(config_dir: Path) -> "Dict[str, Any] | None":
     return values if isinstance(values, dict) else {}
 
 
-def _unmodelled_top_level(path: Path) -> Dict[str, Any]:
-    """Top-level keys of the config file that this store has no field for.
-
-    Read from the FILE, not from the live ``Config``, because ``Config`` holds only
-    the modelled keys — that is what makes them unmodelled. An unreadable or
-    unparseable file answers ``{}``: every caller is on a path that already reports
-    that condition with its own message (``ConfigManager._load_config`` moves a bad
-    file aside; ``_write_config`` is about to overwrite it), and a second complaint
-    from here would be the louder of the two for no reason.
-    """
-    try:
-        with open(path, "r", encoding="utf-8") as stream:
-            parsed = _parse_config_stream(path, stream)
-    except (OSError, yaml.YAMLError):
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    return {key: value for key, value in parsed.items() if key not in _MODELLED_TOP_LEVEL}
-
-
 def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> None:
     """Say ONCE per process that a top-level key is not a setting, and where one lives.
 
@@ -349,6 +338,283 @@ def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> Non
         named,
         homes,
         unnamed,
+    )
+
+
+def _dotted(path: "tuple[str, ...] | list[str]") -> str:
+    """A path tuple the way a person reads it in ``config.yml``."""
+    return ".".join(path)
+
+
+def _covered_by_drop(path: "tuple[str, ...]", drops: "Mapping[tuple[str, ...], str]") -> bool:
+    """Whether ``path`` — or any ancestor of it — is declared retired.
+
+    A declaration retires a SUBTREE, not just the exact path. Every deletion the
+    product performs is expressed by removing a key from a mapping it then writes
+    whole (``/settings`` removing ``subagents.models.hi``, the hub's revert removing
+    ``hub.links.<id>``), and the natural declaration names the removed entry, not
+    each of its children. Matching only the exact leaf meant a declared parent
+    suppressed nothing: the children were copied back, the emptied parent was
+    recreated around them, and the write reported a removal it had not performed
+    (review round 1, B1/Q6).
+
+    Checking every PREFIX is what makes both spellings work: declaring
+    ``("keymap", "quick_send")`` covers that leaf, declaring ``("keymap",)`` covers
+    everything beneath it.
+    """
+    return any(path[:end] in drops for end in range(1, len(path) + 1))
+
+
+def _leaf_paths(value: Any, prefix: "tuple[str, ...]" = ()) -> "list[tuple[str, ...]]":
+    """Every addressable leaf under ``value``, as path tuples.
+
+    A LIST is one leaf (``web_search.providers`` is one setting, not three), and
+    so is a scalar; only a non-empty mapping is descended into. An EMPTY mapping
+    contributes nothing: it holds no setting, so calling it lost would be false.
+
+    Used by the startup shrink report, which compares the leaf set it recorded at
+    the last launch against the one on disk now. Leaves rather than top-level keys
+    because the 2026-10-23 loss was mostly INSIDE top-level keys that the migration
+    then back-filled: ``retry`` came back as the defaults while
+    ``retry.fallbackChains.default`` did not, so a top-level inventory would have
+    reported nothing at all.
+    """
+    if isinstance(value, Mapping):
+        if not value:
+            # An EMPTY mapping is NOT a leaf, even nested: it holds no setting, so
+            # it is nothing to record and nothing a write must account for.
+            # `_leaf_values` takes the same view — the two are read side by side
+            # (the inventory compares paths, the refusal compares values), and a
+            # third caller copying whichever it found first would inherit a
+            # disagreement about what "a setting" is (review round 1, n1).
+            return []
+        leaves: "list[tuple[str, ...]]" = []
+        for key, child in value.items():
+            leaves.extend(_leaf_paths(child, (*prefix, str(key))))
+        return leaves
+    return [prefix] if prefix else []
+
+
+def _leaf_values(values: Mapping[str, Any]) -> "dict[tuple[str, ...], Any]":
+    """``{leaf path: value}`` — the comparable form of a ``values`` mapping.
+
+    The same leaf rule as :func:`_leaf_paths`, but keeping the values so two files
+    can be compared by CONTENT as well as by shape. Used only by the never-read
+    refusal, where "a path is missing" and "a path holds a different value" are
+    the same finding: the write was not based on anything it reads.
+    """
+    leaves: "dict[tuple[str, ...], Any]" = {}
+    for key, child in values.items():
+        path = (str(key),)
+        if isinstance(child, Mapping):
+            # An EMPTY mapping is not a leaf, deliberately: it holds no setting, so
+            # it is neither something lost nor something a write must account for.
+            # `_leaf_paths` takes the same view — the two are read side by side
+            # (the refusal compares values, the inventory compares paths), and a
+            # third caller copying whichever it found first would be a silent
+            # disagreement about what "a setting" is.
+            if child:
+                for sub, value in _leaf_values(child).items():
+                    leaves[(*path, *sub)] = value
+            continue
+        leaves[path] = child
+    return leaves
+
+
+def _differing_paths(
+    payload: Mapping[str, Any], disk: Mapping[str, Any]
+) -> "list[tuple[str, ...]]":
+    """Leaf paths where ``payload`` disagrees with what is on disk — either way.
+
+    Both directions count. A payload value that OVERWRITES a different disk value
+    is the same defect as a disk value the payload omits (it would disappear), and
+    both are invisible in the file afterwards, so the refusal names both: an
+    operator reading the message has to know which settings the write was about to
+    change, not which half of the comparison noticed.
+    """
+    payload_leaves = _leaf_values(payload)
+    disk_leaves = _leaf_values(disk)
+    differing = {
+        path
+        for path, value in payload_leaves.items()
+        if path not in disk_leaves or disk_leaves[path] != value
+    }
+    differing.update(path for path in disk_leaves if path not in payload_leaves)
+    return sorted(differing)
+
+
+def _path_present(values: Mapping[str, Any], path: "tuple[str, ...]") -> bool:
+    """Whether ``path`` names a key that exists in ``values`` right now."""
+    cursor: Any = values
+    for part in path:
+        if not isinstance(cursor, Mapping) or part not in cursor:
+            return False
+        cursor = cursor[part]
+    return True
+
+
+def _declared_path_existed(
+    values: Mapping[str, Any], drops: "Mapping[tuple[str, ...], str]"
+) -> bool:
+    """Whether any declared retirement names something the disk actually holds.
+
+    A write that DECLARES a removal it did not perform (the cleanup migration names
+    ceilings an already-migrated file no longer has) must not disturb the startup
+    inventory: nothing changed, so the next launch's key set is the same one.
+    """
+    for path in drops:
+        if _path_present(values, path):
+            return True
+    return any(_covered_by_drop(leaf, drops) for leaf in _leaf_paths(values))
+
+
+def _carry_through_unmodelled(
+    payload: Dict[str, Any],
+    disk: Mapping[str, Any],
+    *,
+    drops: "Mapping[tuple[str, ...], str]",
+    prefix: "tuple[str, ...]",
+    preserved: "list[tuple[str, ...]]",
+) -> None:
+    """Copy every disk setting ``payload`` does not model into ``payload``.
+
+    WHY THIS IS DEEP, not the top-level carry-through it sits beside. The
+    top-level version exists because ``vars(Config)`` holds only
+    ``version``/``metadata``/``values``, so a key beside ``values`` was erased.
+    Related keys are now erased one level DOWN, by a writer whose dict is
+    default-shaped rather than absent: ``web_search/service.py`` dumps a pydantic
+    model over the subtree, and ``DEFAULT_CONFIG["subagents"]`` is ``{}`` — so a
+    writer that passed the defaults collapsed ``subagents.models.{hi,med,lo}`` to
+    ``{}`` and disabled the tier (the September 2026 incident). Recursing into
+    dicts present on BOTH sides keeps those nested user keys while still letting
+    the payload change every key it does carry.
+
+    What is NOT merged: lists and scalars. A payload that holds a different list
+    is a writer that read the file and changed it (the only way to reach a
+    different list without reading is the never-read refusal upstream), so
+    preferring the payload is correct there. Merging lists would also have to
+    choose between append and replace, and both are wrong for somebody.
+
+    Deletions are expressed by the caller, never inferred: ``drops`` paths are the
+    only ones skipped, and :meth:`ConfigManager._write_config` has already refused
+    a payload that still contains one.
+    """
+    for key, disk_value in disk.items():
+        path = (*prefix, str(key))
+        if _covered_by_drop(path, drops):
+            continue
+        if key not in payload:
+            if isinstance(disk_value, Mapping) and disk_value:
+                # A missing parent is copied LEAF-WISE, so declared descendants are
+                # skipped inside it. Copying the subtree wholesale is what let a
+                # declared removal come back, and is the same defect one level up.
+                carried: Dict[str, Any] = {}
+                _carry_through_unmodelled(
+                    carried, disk_value, drops=drops, prefix=path, preserved=preserved
+                )
+                if carried:
+                    payload[key] = carried
+                # An EMPTY `carried` means every child was retired: the parent is
+                # not recreated, or the removal would leave `keymap: {}` behind
+                # after the user reset the last key in it.
+                continue
+            payload[key] = deepcopy(disk_value)
+            preserved.extend(_leaf_paths(disk_value, path))
+            continue
+        payload_value = payload[key]
+        if isinstance(disk_value, Mapping) and isinstance(payload_value, dict):
+            _carry_through_unmodelled(
+                payload_value, disk_value, drops=drops, prefix=path, preserved=preserved
+            )
+
+
+def _validated_drops(
+    drop: "Mapping[tuple[str, ...], str] | None", config: Mapping[str, Any]
+) -> "dict[tuple[str, ...], str]":
+    """Check a write's declared retirements against its own payload.
+
+    Both refusals are programmer errors, not user errors, and both fail before the
+    file is touched:
+
+    * a drop path still PRESENT in the payload is a contradiction — the caller both
+      writes the key and declares it retired, and whichever won would be a surprise
+      at a distance (the write would look like a delete, or the delete like a
+      no-op);
+    * an EMPTY reason is a drop nobody can audit. The declaration exists to leave a
+      record of why a setting is gone, so a blank one is the record missing.
+    """
+    drops = dict(drop or {})
+    values = config.get("values")
+    for path, reason in drops.items():
+        if not isinstance(path, tuple) or not path:
+            raise ValueError(f"a drop path must be a non-empty tuple of key names, not {path!r}")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"drop path {_dotted(path)!r} needs a non-empty reason")
+        if isinstance(values, Mapping) and _path_present(values, path):
+            raise ValueError(
+                f"drop path {_dotted(path)!r} is still present in the payload; remove "
+                "it from the values mapping — a drop declares what this write retires"
+            )
+    return drops
+
+
+def _read_config_document(path: Path) -> "Dict[str, Any] | None":
+    """``config.yml`` as a whole document, for a write to base itself on.
+
+    ``None`` means there is nothing to base the write on: a missing file, a 0-byte
+    one (``_write_config`` ``touch``es a missing file a moment before this read, so
+    the case is ordinary rather than exotic), or a file holding only comments.
+    Every one of those is an empty file, where the payload is everything there is.
+
+    A file with BYTES that cannot be read as a mapping raises
+    :class:`ConfigWriteRefused` rather than answering ``None``. ``None`` would mean
+    "nothing to lose", the opposite of the truth: the operator's settings may be in
+    there, and a write based on defaults would replace them. ``_load_config``
+    degrades to defaults for the same bytes (a startup must not lock the user out);
+    a WRITE must not, because the file is the only copy of what they had set.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            parsed = _parse_config_stream(path, stream)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ConfigWriteRefused(
+            f"{path} cannot be read as a configuration ({exc}); nothing was written"
+        ) from exc
+    if parsed is None:
+        return None
+    if not isinstance(parsed, dict):
+        raise ConfigWriteRefused(
+            f"{path} is not a configuration mapping (top level is "
+            f"{type(parsed).__name__}); nothing was written"
+        )
+    return parsed
+
+
+def _report_preserved(path: Path, preserved: "list[tuple[str, ...]]") -> None:
+    """Say ONCE per (file, key set) that a write kept settings it did not model.
+
+    A warning rather than silence because the write is the one place a setting can
+    disappear with no trace, and the operator is the only one who can say whether
+    the payload SHOULD have carried it. Once per distinct set, because
+    ``/settings`` writes on every Enter and ``run_startup_migrations`` runs on every
+    ``lop`` verb: repeating it per write would train the reader to skip it.
+    """
+    listed = tuple(sorted(_dotted(item) for item in preserved))
+    seen = (str(path), listed)
+    if seen in _PRESERVED_WARNED:
+        return
+    _PRESERVED_WARNED.add(seen)
+    logger.warning(
+        "%s: this write did not model %d setting(s), so they were kept: %s",
+        path,
+        len(listed),
+        ", ".join(listed),
     )
 
 
@@ -802,6 +1068,35 @@ def _dotted_write_refusal(key: str) -> "str | None":
     )
 
 
+class ConfigWriteRefused(RuntimeError):
+    """A write was refused because it would have erased settings it never modelled.
+
+    WHY A TYPE OF ITS OWN. ``ValueError`` is what this module already uses for a
+    bad argument — a dotted key, a malformed drop declaration — and a caller that
+    treats it as "you passed the wrong thing" would be right. This one says the
+    FILE holds something the write does not account for, so the fix is to read
+    (or to declare the retirement), not to retype the argument. ``settings_io``'s
+    ``ConfigUnreadableError`` draws the same distinction from the other side.
+
+    ``code`` follows ``ConfigWriteLockTimeout.code`` / ``ConfigWriteLockError.code``
+    so a caller can branch on the KIND of refusal without matching a message.
+    No surface maps it yet: ``PATCH /v1/config`` catches this with the rest of
+    ``Exception`` and answers its generic 500 with the text appended, and the CLI
+    prints the message. The attribute is the handle for whoever wires that up; it
+    is not a contract anything honours today.
+
+    THE CASE IT EXISTS FOR (2026-10-23). A manager that never read ``config.yml``
+    — constructed while the file was missing, or when it held nothing — writes
+    ``vars(self.config)``, which is the SHIPPED DEFAULTS. Over a file another
+    writer has populated since, that is a silent restore-to-defaults: the
+    operator's live config lost 9 top-level keys and every nested user value to a
+    writer whose payload was default-shaped. Refusing is recoverable (read the
+    file, or declare what you mean to retire); overwriting is not.
+    """
+
+    code = "config-write-refused"
+
+
 class ConfigManager:
     """Manages configuration settings for Local Operator.
 
@@ -817,6 +1112,14 @@ class ConfigManager:
     config_dir: Path
     config_file: Path
     config: Config
+
+    #: Whether this manager's current snapshot came from ``config.yml``. False for
+    #: every shape ``_load_config`` degrades on — a missing file, an empty one, a
+    #: parse error, a top level that is not a mapping — because those all hand back
+    #: the SHIPPED DEFAULTS, and a write based on defaults over a file another
+    #: writer populated since is the 2026-10-23 loss. ``_write_config`` refuses that
+    #: write instead of performing it (see ``ConfigWriteRefused``).
+    _loaded_from_disk: bool
 
     def __init__(self, config_dir: Path) -> None:
         """Initialize the config manager with default or existing settings.
@@ -834,6 +1137,9 @@ class ConfigManager:
         """
         self.config_dir = config_dir
         self.config_file = self.config_dir / CONFIG_FILE_NAME
+        # Set here as well as in `_load_config` so the attribute exists even if the
+        # load raises; a later write must never guess at it.
+        self._loaded_from_disk = False
         self.config = self._load_config()
 
     def _handle_bad_config(self, detail: str) -> None:
@@ -891,6 +1197,7 @@ class ConfigManager:
             # to every other account on a shared host. Never chmod an existing
             # dir on upgrade — a user may have widened it on purpose.
             self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._loaded_from_disk = False
             return _fresh_default_config()
 
         with open(self.config_file, "r", encoding="utf-8") as f:
@@ -907,13 +1214,28 @@ class ConfigManager:
                 loaded = _parse_config_stream(self.config_file, f)
             except yaml.YAMLError as exc:
                 self._handle_bad_config(f"could not parse {self.config_file}: {exc}")
+                self._loaded_from_disk = False
                 return _fresh_default_config()
             if loaded is not None and not isinstance(loaded, dict):
                 self._handle_bad_config(
                     f"{self.config_file} is not a valid configuration mapping "
                     f"(top level is {type(loaded).__name__})"
                 )
+                self._loaded_from_disk = False
                 return _fresh_default_config()
+            # True only when the parsed document actually carried SETTINGS — a
+            # non-empty `values` mapping. Everything else (None from a 0-byte or
+            # comment-only file, `{}`, or a document with `version:`/`metadata:`
+            # but no `values:`) leaves the snapshot below as the SHIPPED DEFAULTS,
+            # and a later write must treat that exactly like the missing-file case:
+            # the file it is about to replace may hold settings this manager never
+            # saw. Truthiness of the document itself is not enough — a
+            # metadata-only file is truthy and carries no settings at all.
+            self._loaded_from_disk = (
+                isinstance(loaded, dict)
+                and isinstance(loaded.get("values"), dict)
+                and bool(loaded["values"])
+            )
             config_dict = loaded or deepcopy(vars(DEFAULT_CONFIG))
 
             # Check if config version is older than current version
@@ -955,14 +1277,59 @@ class ConfigManager:
     # constructing this class cannot trigger them.
 
     @serialized_config_write
-    def _write_config(self, config: Dict[str, Any]) -> None:
-        """Write configuration to YAML file.
+    def _write_config(
+        self,
+        config: Dict[str, Any],
+        *,
+        drop: "Mapping[tuple[str, ...], str] | None" = None,
+    ) -> None:
+        """Write configuration to YAML file, keeping what this write did not model.
+
+        ``drop`` is the ONE way this writer deletes anything: a mapping of payload
+        path (a top-level key is a 1-tuple, a nested leaf is ``(top, ..., leaf)``)
+        to a non-empty human reason. Uncertainty is resolved towards KEEPING a
+        setting: every disk value the payload does not carry is copied through,
+        recursively, and every declared drop is reported with its reason so the
+        removal leaves a record. Before this, a setting absent from the payload
+        simply vanished, which is how an operator's 26-key config became 34 bytes
+        of ``values: {tool_approval_mode: ask}`` with no error anywhere.
+
+        Three refusals, all before the file is touched:
+
+        * the existing file has bytes but cannot be read as a mapping
+          (``ConfigWriteRefused``) — the write would otherwise be based on
+          defaults over the user's only copy;
+        * this manager never got its values FROM the file and the file now holds
+          settings (``ConfigWriteRefused``, naming every differing leaf) — the
+          ``_fresh_default_config`` class: an app that never read the file must
+          not write defaults over it;
+        * a drop declaration is malformed or contradicts the payload
+          (``ValueError``).
 
         Creates the config file first if it doesn't exist.
 
+        Preservation is applied to a DEEP COPY of ``values``: the disk settings the
+        payload does not model are merged into that copy, and the merged copy is
+        assigned back into ``config`` at the DICT level. The caller's own nested
+        mappings are therefore never mutated — a caller may legitimately hand in a
+        shallow copy of the shipped defaults — while its snapshot still ends up
+        agreeing with the file it just wrote: a manager that kept its pre-write view
+        would read a preserved key as absent until the next reload. ``metadata``
+        (the timestamp) is still mutated in place, and always has been.
+
         Args:
             config (Dict[str, Any]): Configuration dictionary to write
+            drop (Mapping[tuple[str, ...], str] | None): Paths this write retires,
+                each with the reason it is being retired.
+
+        Raises:
+            ConfigWriteRefused: The file holds settings this write cannot account
+                for; nothing was written.
+            ValueError: A drop declaration is empty or names a key the payload
+                still contains.
         """
+        drops = _validated_drops(drop, config)
+
         if not self.config_file.exists():
             # 0700 at creation for the same reason as _load_config above (item 17).
             self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -990,9 +1357,76 @@ class ConfigManager:
         # (`_parse_config_stream`), so a write pays a dict lookup when the file has
         # not moved since the read that preceded it, against the `yaml.dump` + fsync
         # it is about to do.
+        #
+        # ONE read of the file serves all three needs (carry-through, refusal,
+        # preservation), and it happens under this method's lock so the bytes it
+        # describes cannot be replaced between the check and the write.
+        #
+        # Read from the FILE rather than remembered from load: ``Config`` holds only
+        # the modelled keys, so the file is the only place the key still exists once
+        # the manager is constructed — and a key the operator removed by hand must
+        # stop being carried at the next write.
+        disk_document = _read_config_document(self.config_file)
         document: Dict[str, Any] = dict(config)
-        for key, value in _unmodelled_top_level(self.config_file).items():
-            document.setdefault(key, value)
+        # THE PAYLOAD'S `values` IS COPIED, not adopted. Preservation below merges
+        # into it in place, and this method does not own the caller's nested
+        # mappings: a caller may pass a shallow copy of the shipped defaults
+        # (`dict(DEFAULT_CONFIG.values["retry"])`), and merging into that wrote the
+        # file's chains into the process-wide `DEFAULT_CONFIG` — the next manager
+        # built on an empty config dir then inherited a cascade nobody had stored
+        # (review round 1 follow-up; caught by CI). The copy is handed back to the
+        # caller at the end so its snapshot still agrees with the file.
+        borrowed_values = document.get("values")
+        if isinstance(borrowed_values, dict):
+            document["values"] = deepcopy(borrowed_values)
+        if disk_document is not None:
+            for key, value in disk_document.items():
+                if key not in _MODELLED_TOP_LEVEL:
+                    document.setdefault(key, value)
+
+        disk_values = disk_document.get("values") if disk_document is not None else None
+        if disk_values is not None and not isinstance(disk_values, Mapping):
+            # A `values:` that is not a mapping is not a shape this writer can
+            # merge into; refusing keeps the operator's bytes (and the error names
+            # the file) instead of replacing an unreadable-by-this-build subtree
+            # with defaults.
+            raise ConfigWriteRefused(
+                f"{self.config_file} holds a `values` that is not a mapping "
+                f"({type(disk_values).__name__}); nothing was written"
+            )
+
+        preserved: "list[tuple[str, ...]]" = []
+        if isinstance(disk_values, Mapping) and disk_values:
+            payload_values = document.get("values")
+            if not isinstance(payload_values, dict):
+                raise ConfigWriteRefused(
+                    f"{self.config_file} holds settings but this write has no "
+                    f"`values` mapping to preserve them into; nothing was written"
+                )
+            if not self._loaded_from_disk:
+                # THE `_fresh_default_config` CLASS. An app that never read this
+                # file (constructed while it was missing or empty) now holds the
+                # shipped defaults, and writing them here would restore every
+                # setting the operator changed — silently, because the write
+                # succeeds. Every differing leaf must be one the caller declared it
+                # means to retire; otherwise the write is not based on this file at
+                # all and has no business replacing it.
+                differing = [
+                    path
+                    for path in _differing_paths(payload_values, disk_values)
+                    if not _covered_by_drop(path, drops)
+                ]
+                if differing:
+                    raise ConfigWriteRefused(
+                        f"{self.config_file} was never read by this writer, and writing "
+                        f"would change {len(differing)} setting(s) it does not model: "
+                        f"{', '.join(_dotted(path) for path in differing)}. "
+                        "Re-read the config (ConfigManager.reload) or declare each "
+                        "retirement with drop=...; nothing was written."
+                    )
+            _carry_through_unmodelled(
+                payload_values, disk_values, drops=drops, prefix=(), preserved=preserved
+            )
 
         # ATOMIC. This was a plain `open(..., "w")`, which truncates the file
         # before it writes a byte: a crash, a full disk, or a kill between the
@@ -1060,6 +1494,50 @@ class ConfigManager:
                 pass
             raise
 
+        if drops and _declared_path_existed(disk_values or {}, drops):
+            # A removal THIS BUILD performed must not be reported next launch as "a
+            # writer outside this build removed them" — and because the shrink
+            # report deliberately does not re-baseline on a hit, it would otherwise
+            # repeat on every `lop` verb forever, advising a restore that would undo
+            # the user's own choice (review round 1, M2). The inventory has those
+            # paths subtracted, after the replace, so it describes the file that
+            # now exists without adopting any gap this write did not cause.
+            from local_operator.config_migrations import record_config_key_inventory
+
+            record_config_key_inventory(self.config_dir, list(drops))
+
+        # The caller's config dict takes the merged `values` mapping, so its
+        # snapshot is what the file holds (the payload, plus everything preserved
+        # into it). A dict-level assignment only: the mappings the caller handed in
+        # are never rewritten, which is the point of the copy above.
+        if isinstance(config.get("values"), dict):
+            config["values"] = document["values"]
+
+        # This manager's snapshot is now what the file holds (the payload, plus
+        # everything preserved into it), so a LATER write through the same manager
+        # is based on bytes it knows — the never-read refusal above must not fire
+        # on it. Without this, a manager built on a missing file and then written
+        # would refuse its own second write, and every `reset_to_defaults` after an
+        # `update_config` in the same process would fail.
+        self._loaded_from_disk = True
+
+        # Reported only AFTER the replace succeeds: a write that failed did not
+        # keep or retire anything, and a warning saying it did would be the same
+        # kind of lie this whole path exists to stop.
+        if preserved:
+            _report_preserved(self.config_file, preserved)
+        # Every DECLARED drop, present or not: "not carried through" is true of
+        # both, and the reason is the audit record for why the key is gone. Naming
+        # a key that was already absent costs one line and keeps the declaration
+        # itself visible in the log the operator will read next.
+        for path in sorted(drops):
+            logger.warning(
+                "%s: this write does not carry %s through (%s)",
+                self.config_file,
+                _dotted(path),
+                drops[path],
+            )
+
     def get_config(self) -> Config:
         """Get the current configuration settings.
 
@@ -1081,7 +1559,13 @@ class ConfigManager:
         """
         self.config = self._load_config()
 
-    def update_config(self, updates: Dict[str, Any], write: bool = True) -> None:
+    def update_config(
+        self,
+        updates: Dict[str, Any],
+        write: bool = True,
+        *,
+        drop: "Mapping[tuple[str, ...], str] | None" = None,
+    ) -> None:
         """Update configuration with new values.
 
         The same two rules as :meth:`set_config_value`, for the same reasons: a
@@ -1108,9 +1592,17 @@ class ConfigManager:
         :meth:`update_config_from_args` relies on to layer one run's CLI
         overrides over the file without persisting them.
 
+        ``drop`` is :meth:`_write_config`'s, and a FLUSH is its main caller:
+        ``settings_io._delete`` removes a top-level key from the live mapping and
+        flushes, so it must also declare the key, or ``_write_config``'s
+        preservation would copy it straight back off disk. ``write=False`` never
+        reaches a write, so a ``drop`` there is meaningless and ignored.
+
         Args:
             updates (Dict[str, Any]): Dictionary of configuration updates
             write (bool): Whether to write the updated config to the config file
+            drop (Mapping[tuple[str, ...], str] | None): Paths this write retires,
+                each with the reason it is being retired.
 
         Raises:
             ValueError: a key is dotted and is not a declared flat-dotted
@@ -1136,12 +1628,17 @@ class ConfigManager:
 
                 settings_io._reload_before_write(self)
 
-            # Update each field individually to work with Config class
+            # Update each field individually to work with Config class. The COPY
+            # matters even though `_write_config` merges into a copy of `values`:
+            # this snapshot is what the manager reads BETWEEN writes, and with
+            # `write=False` no write happens at all — holding the caller's own
+            # mapping would make the manager's state a view of somebody else's
+            # object (the `_fresh_default_config` incident, one layer out).
             for key, value in updates.items():
-                self.config.set_value(key, value)
+                self.config.set_value(key, deepcopy(value))
 
             if write:
-                self._write_config(vars(self.config))
+                self._write_config(vars(self.config), drop=drop)
 
     def update_config_from_args(self, args: argparse.Namespace) -> None:
         """Update configuration with values from command line arguments.
@@ -1161,12 +1658,44 @@ class ConfigManager:
 
     @serialized_config_write
     def reset_to_defaults(self) -> None:
-        """Reset configuration to default values."""
+        """Reset ``values`` to the shipped defaults.
+
+        Every leaf under ``values`` that the defaults do not carry — unknown
+        top-level keys and nested user keys alike — is DECLARED removed, with the
+        reason that says so. Without the declaration, ``_write_config``'s
+        preservation would copy them straight back: the reset would report success
+        and keep the operator's settings, the failure mode the whole drop mechanism
+        exists to make impossible.
+
+        Keys BESIDE ``values`` (a hand-written ``network:`` block) are not settings
+        and are not touched: the document-level carry-through keeps them exactly as
+        it did before preservation existed, and ``drop`` cannot express them.
+        """
         # A COPY, for the reason `_fresh_default_config` exists: adopting the
         # module-level object made the next `set_config_value` a write into the
         # process's defaults.
         self.config = _fresh_default_config()
-        self._write_config(vars(self.config))
+        # Read from DISK, not from `self.config`: the manager may have been built
+        # before a hand-edit, and the reset means "the file holds nothing of mine".
+        # `read_config_values` never constructs a manager, so a file it cannot
+        # parse answers None here and `_write_config` refuses it with the real
+        # message rather than this loop guessing.
+        on_disk = read_config_values(self.config_dir) or {}
+        defaults = self.config.values
+        # LEAF depth, and only what the defaults do not carry. A top-level key the
+        # shipped defaults also have (``conversation_length``) is not retired by a
+        # reset — it is written back with its default VALUE, which is what the
+        # reset means, and declaring it dropped would be the contradiction
+        # `_validated_drops` refuses. What IS retired: unknown top-level keys, and
+        # every nested user leaf under a modelled dict (``retry.pinnedFallback``,
+        # ``subagents.models.hi``), because preservation would otherwise copy those
+        # straight back off disk and the reset would reset nothing.
+        drop = {
+            path: "explicit reset to defaults"
+            for path in _leaf_paths(on_disk)
+            if not _path_present(defaults, path)
+        }
+        self._write_config(vars(self.config), drop=drop)
 
     def get_config_value(self, key: str, default: Any = None) -> Any:
         """Get a specific configuration variable.
@@ -1207,7 +1736,13 @@ class ConfigManager:
         return current
 
     @serialized_config_write
-    def set_config_value(self, key: str, value: Any) -> None:
+    def set_config_value(
+        self,
+        key: str,
+        value: Any,
+        *,
+        drop: "Mapping[tuple[str, ...], str] | None" = None,
+    ) -> None:
         """Set a specific configuration variable.
 
         ``key`` is a TOP-LEVEL key of ``values``. A key containing a dot is
@@ -1218,9 +1753,16 @@ class ConfigManager:
         refusal rather than a split-and-recurse, and why it is not routed
         through ``settings_io`` from here.
 
+        ``drop`` is :meth:`_write_config`'s: a caller that rewrites a whole subtree
+        to remove something inside it (``/settings``' reset of one nested key, the
+        account-policy alias reset, a deleted failover chain) must also declare the
+        leaf, or preservation reads it back off disk and the deletion is undone.
+
         Args:
             key (str): The configuration key to set
             value (Any): The value to set for the key
+            drop (Mapping[tuple[str, ...], str] | None): Paths this write retires,
+                each with the reason it is being retired.
 
         Raises:
             ValueError: ``key`` is dotted and is not a declared flat-dotted
@@ -1254,6 +1796,9 @@ class ConfigManager:
         # write must not leave the process believing a value it never saved;
         # restore-by-writing would also clobber another writer's later change.
         candidate = deepcopy(self.config)
-        candidate.set_value(key, value)
-        self._write_config(vars(candidate))
+        # The VALUE is copied too: `_write_config` applies preservation in place,
+        # and a caller handing in its own mapping (a default read from
+        # `DEFAULT_CONFIG`, a model's dict) must not have it rewritten.
+        candidate.set_value(key, deepcopy(value))
+        self._write_config(vars(candidate), drop=drop)
         self.config = candidate

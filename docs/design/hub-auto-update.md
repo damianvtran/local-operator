@@ -943,7 +943,7 @@ literal-dotted `display.*` exception):
 |---|---|---|---|---|
 | `hub.auto_update.agents` | `("hub","auto_update","agents")` | BOOL | `True` | `Merge hub updates into pulled agents automatically.` |
 | `hub.auto_update.teams` | `("hub","auto_update","teams")` | BOOL | `True` | `Merge hub updates into pulled teams automatically.` |
-| `hub.check_interval_min` | `("hub","check_interval_min")` | INT, min 5, max 1440 | `60` | `Minutes between hub update checks (both modes).` |
+| `hub.check_interval_min` | `("hub","check_interval_min")` | INT, min 5, max 1440 | `15` | `Minutes between hub update checks (both modes).` |
 | `hub.merge_model` | `("hub","merge_model")` | TEXT, `empty_unsets=True` | `""` | `provider/model for merges; empty uses your default model.` |
 
 Module-level defaults live NEXT TO THE READER, in `local_operator/hub_sync/settings.py`:
@@ -951,7 +951,7 @@ Module-level defaults live NEXT TO THE READER, in `local_operator/hub_sync/setti
 ```python
 DEFAULT_AUTO_UPDATE_AGENTS = True
 DEFAULT_AUTO_UPDATE_TEAMS = True
-DEFAULT_CHECK_INTERVAL_MIN = 60
+DEFAULT_CHECK_INTERVAL_MIN = 15
 MIN_CHECK_INTERVAL_MIN, MAX_CHECK_INTERVAL_MIN = 5, 1440
 
 @dataclass(frozen=True)
@@ -1030,6 +1030,16 @@ class HubSyncRunner:
 - **No boot blocking**: `run_forever` first `await asyncio.sleep(45 + jitter(0-15))`
   (`reason="startup"`), then loops `tick`, then `sleep(interval_min*60 ±10 %)`.
   Interval re-read each loop (LIVE).
+- **A session start asks for one check** (added after conditional checks made an
+  unchanged tick cheap): the session-create route calls
+  `HubSyncRunner.note_session_start()` once the receipt settled, which schedules
+  `check_now` as a fire-and-forget task and returns immediately. Two throttles,
+  both claimed synchronously before the task exists: one check in flight, and
+  `SESSION_START_CHECK_THROTTLE_S` (120 s) since the last check started by any
+  route. It never merges -- auto-apply stays on the scheduled tick. The interval
+  default moved from 60 to 15 minutes in the same change; the app-focus half of
+  the trigger ("check when the window regains focus") is the desktop client's,
+  which calls the existing `POST /v1/desktop/hub/updates/check`.
 - **Only when a credential resolves**: each tick starts with
   `resolve_radient_credential(config_dir, base_url, store=…)`
   (`providers/radient_credentials.py:147-171`) and, for org items,
@@ -1222,7 +1232,7 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 {
   "generated_at": "2026-09-29T12:00:00Z",
   "credential": "ok | none",
-  "settings": {"auto_agents": true, "auto_teams": true, "interval_min": 60},
+  "settings": {"auto_agents": true, "auto_teams": true, "interval_min": 15},
   "counts": {"available": 2, "failed": 1, "updating": 0, "up-to-date": 9},
   "items": [
     {"kind":"agent","name":"coder","local_id":"…","hub_id":"…","tenant_id":null,

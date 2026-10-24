@@ -156,7 +156,15 @@ as its own turn — a receipt is never consent, so run nothing the ask was meant
 to authorise until then. Continue other work meanwhile, or end the turn saying
 what is queued. On a timeout notice take your own recommendation and say what
 you assumed; for an urgent one, delegate the question to a `task` subagent and
-decide on its answer.{{/if}}
+decide on its answer. Before you end a turn, settle every ask the user's
+messages answered (`ask_withdraw` with `answered_in_chat` and their words) or
+made irrelevant (`moot`: they dropped or handed off the work the question was
+about, or you decided it under a timeout). When you report open asks, settle
+the ones the user's messages answered or made irrelevant in that same turn. An
+ask the user has not addressed stays open, however old it is; if unsure, leave
+it open. An answer, even if they used their own words rather than the options,
+is `answered_in_chat` — never `moot`. Use a 24 h timeout only for a decision
+that stays valid for a day.{{/if}}
 
 ### Resources
 

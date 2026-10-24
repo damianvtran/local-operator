@@ -13,7 +13,17 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, Any, Callable, Literal, NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
@@ -21,6 +31,7 @@ from pydantic import (
     Field,
     StrictBool,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from starlette.background import BackgroundTask
@@ -65,6 +76,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionList,
     SessionSearch,
     SessionSnapshot,
+    StoredFile,
     SupplementReceipt,
     WarmReceipt,
     WatchReceipt,
@@ -318,15 +330,34 @@ def _admission_failure_detail(error: BaseException) -> str:
     distinction a caller acts on. Everything else gets the generic sentence.
     """
     from local_operator.session.errors import (
+        AttachmentMissing,
         AttachmentUnavailable,
         AudioInputUnsupported,
+        DocumentCarriageUnsupported,
         ProfileRegistryUnavailable,
+        RemoteDocumentUnsupported,
         RuntimeRetiring,
     )
 
+    if isinstance(error, AttachmentMissing):
+        # The FILE NAME is client-supplied, so it is bounded and stripped
+        # here rather than quoted through the category's sentence: the frame
+        # may be replayed to later viewers, and this method's rule is that no
+        # owner-supplied text crosses. The HTTP 409 carries the full sentence
+        # to the composer that can act on it.
+        name = "".join(character for character in error.filename if character.isprintable())[:120]
+        subject = name or "an attached file"
+        return f"failed; {subject} could not be found in the attachment store"
     if isinstance(
         error,
-        (AttachmentUnavailable, AudioInputUnsupported, ProfileRegistryUnavailable, RuntimeRetiring),
+        (
+            AttachmentUnavailable,
+            AudioInputUnsupported,
+            DocumentCarriageUnsupported,
+            ProfileRegistryUnavailable,
+            RemoteDocumentUnsupported,
+            RuntimeRetiring,
+        ),
     ):
         # Safe by construction: these carry no owner-supplied text.
         return f"failed; {error}"
@@ -1110,6 +1141,31 @@ class Image(Input):
         return value
 
 
+class PromptImage(Image):
+    """An image on the MESSAGE route, with optional file provenance.
+
+    Separate from :class:`Image` rather than a field on it because the ANSWER
+    route's body is compared key-for-key with what was sent (its own tests pin
+    ``model_dump`` equality), and a new null key on every answer image would
+    change a wire shape that has nothing to do with documents. The wrap
+    serializer drops the key when unset, so a composer that pasted a
+    screenshot sends the exact frame it always did.
+
+    ``origin_path`` is the client's absolute path for a dropped/picked file:
+    provenance and display only (``ImageContent.path``). No serializer reads
+    it.
+    """
+
+    origin_path: str | None = Field(default=None, max_length=4096)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_origin(self, handler: Any, info: Any) -> Any:
+        data = handler(self)
+        if isinstance(data, dict) and data.get("origin_path") is None:
+            data.pop("origin_path", None)
+        return data
+
+
 class AnswerImage(Image):
     """One image on a QUEUED-ASK answer, tagged with the question it answers.
 
@@ -1153,10 +1209,37 @@ class Audio(Input):
         return value
 
 
+class FileRef(Input):
+    """One staged document the composer is sending, BY REFERENCE.
+
+    The bytes live in the attachment store from the upload
+    (``POST /v1/desktop/attachments``); this record is ~120 bytes, which is
+    what lets a PDF ride a 900 kB control frame. ``name``/``path`` are the
+    SEND's provenance (contract amendment 7): the store's sidecar keeps only
+    MIME and size, so a second upload of identical bytes cannot inherit an
+    earlier chip's name.
+
+    ``digest`` is validated here as 32 lowercase hex — the store's own
+    filename shape — before a handler can touch the disk. A digest that does
+    not RESOLVE on the owner is a refusal of the send (409), never a drop.
+    """
+
+    digest: str = Field(pattern=r"^[a-f0-9]{32}$")
+    name: str | None = Field(default=None, max_length=260)
+    mime_type: str | None = Field(default=None, max_length=200)
+    bytes: int | None = Field(default=None, ge=0)
+    path: str | None = Field(default=None, max_length=4096)
+
+
 class Prompt(Input):
     request_id: RequestID
     text: str = Field(max_length=200_000)
-    images: list[Image] = Field(default_factory=list, max_length=8)
+    images: list[PromptImage] = Field(default_factory=list, max_length=8)
+    # Documents ride as REFERENCES: the upload route stored the bytes, and the
+    # frame carries only digests. The eight-file bound matches the image
+    # bound, and the bytes do not ride the frame, so the 900 kB body cap is
+    # untouched (contract §1.2).
+    files: list[FileRef] = Field(default_factory=list, max_length=8)
     # The recording door: at most one block in v1 (a send is one recording —
     # the sidecar forks once per block, and the wire budgets in `stt/audio.py`
     # are sized for a single capture inside the 900 kB body cap).
@@ -1187,7 +1270,7 @@ class Prompt(Input):
 
     @model_validator(mode="after")
     def nonempty(self):
-        if not self.text.strip() and not self.images and not self.audio:
+        if not self.text.strip() and not self.images and not self.audio and not self.files:
             raise ValueError("Enter a message or attach an image or recording")
         # A slash CONTROL must never become paid model chat, and this is the one
         # test that decides it: a draft that, as a whole, IS a command was meant
@@ -1260,7 +1343,9 @@ class Answer(Input):
       refuse exactly the case the feature exists for — a cold session whose asks
       are still open. The single-winner rule that replaces the epoch check lives
       on the ask log (the first ``answered`` event wins), so a stale screen
-      cannot settle a question twice.
+      cannot settle a question twice;
+    * ``{ask_id, dismiss, reason?}`` — PUT AN OPEN ASK AWAY (SA-D5), on the same
+      epoch-free door for the same reason.
     """
 
     #: The owner epoch, for the two gate shapes. Defaulted rather than required
@@ -1288,6 +1373,23 @@ class Answer(Input):
     #: runtime has to interpret. Accepted while the answer is undelivered, refused
     #: once the response row exists; the runtime decides, not this schema.
     revise: StrictBool | None = None
+    #: PUT AN ASK AWAY instead of answering it (SA-D5, design §15). A modifier on the
+    #: ``{ask_id}`` body rather than a fourth route: a dismissal is the same
+    #: epoch-free queued-ask door an answer is, addressed by an id that outlives
+    #: any owner, and a separate route would be a second copy of that contract.
+    #:
+    #: Only ``true`` selects the shape — ``false`` is the same statement as
+    #: omitting it, and a body that sets it beside answers/decline/revise is
+    #: malformed rather than ambiguous (you cannot answer and dismiss one ask).
+    #: ``Answer`` is ``extra="forbid"``, so a renderer gates the affordance on
+    #: ``capabilities.features.ask_dismiss``: an older backend 422s this field
+    #: rather than ignoring it, and the renderer's stale-read backstop is that 422.
+    dismiss: StrictBool | None = None
+    #: Why the operator put it away: ``answered_in_chat`` (the conversation
+    #: already answered it) or ``moot`` (no longer needed). Optional; the log
+    #: records ``moot`` when absent. Refused without ``dismiss`` — a no-op field
+    #: is a 422 here rather than a silently dropped intent (§10).
+    reason: Literal["answered_in_chat", "moot"] | None = None
     #: IMAGES attached to the answer, each tagged with the question it answers
     #: (``AnswerImage.question_id``). OMITTED by every client that has none —
     #: ``Answer`` is ``extra="forbid"``, so a client built before this field must
@@ -1309,6 +1411,21 @@ class Answer(Input):
 
     @model_validator(mode="after")
     def one_answer(self):
+        if self.dismiss is True:
+            # THE FOURTH SHAPE (SA-D5): an id and nothing else. Every other field
+            # of this body is a different act, so a body that carries one is
+            # refused here rather than at the owner.
+            if not self.ask_id:
+                raise ValueError("a dismissal needs an ask_id")
+            if self.answers is not None or self.decline is True or self.revise is True:
+                raise ValueError("a dismissal carries no answers, decline or revise")
+            if self.images:
+                raise ValueError("a dismissal carries no images")
+            return self
+        if self.reason is not None:
+            # Same rule as ``images`` above: a field a shape cannot honour is
+            # refused in words, never ignored.
+            raise ValueError("reason applies to a dismissal")
         if self.images:
             # Checked FIRST and for every shape: the gate shapes (approval / ask
             # picker) have no use for images either, and a field a shape cannot
@@ -2006,10 +2123,13 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         from local_operator.session.errors import (
             AsideAdoptRefused,
             AsideUnanswered,
+            AttachmentMissing,
             AttachmentUnavailable,
             AudioInputUnsupported,
+            DocumentCarriageUnsupported,
             ForkRefused,
             ProfileRegistryUnavailable,
+            RemoteDocumentUnsupported,
             RuntimeRetiring,
         )
         from local_operator.session.model_admission import RuntimeUpgradeNeededError
@@ -2083,9 +2203,12 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         if isinstance(
             error,
             (
+                AttachmentMissing,
                 AttachmentUnavailable,
                 AudioInputUnsupported,
+                DocumentCarriageUnsupported,
                 ProfileRegistryUnavailable,
+                RemoteDocumentUnsupported,
                 RuntimeRetiring,
             ),
         ):
@@ -2687,6 +2810,41 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     )
 
 
+def _note_hub_session_start(request: Request) -> None:
+    """A conversation just began: let the hub runner check, without waiting for it.
+
+    WHY HERE AND NOWHERE ELSE. The runner's timer already keeps the sidebar
+    current, but a session start is the moment the operator is about to look at
+    it, and it is a natural, already-happening event -- so it is worth asking the
+    hub once. It is NOT a per-message trigger: a check costs a network pass over
+    every linked item, and a conversation sends dozens of messages for every one
+    opening.
+
+    NOTHING ABOUT A CREATE MAY DEPEND ON THIS. The runner schedules the work and
+    returns (``HubSyncRunner.note_session_start``), the work never raises, and
+    the lookup itself is a ``getattr`` because a bare router in a test has no
+    ``hub_sync`` on ``app.state`` at all. A hub that is down, a runner that was
+    never started, or a scheduling error costs nothing but this call: the create
+    has already succeeded and its response is built either way. That is why the
+    trigger sits AFTER the receipt settled, on the success path only -- a refused
+    create did not start a conversation, and a receipt replay is a retry of one
+    that already did (the runner would throttle it, but firing it at all would
+    misrepresent what the route just did).
+
+    The throttle (two minutes, one check in flight) lives in the runner, not
+    here: it belongs to the check, so every caller inherits it and there is one
+    place to reason about.
+    """
+
+    runner = getattr(request.app.state, "hub_sync", None)
+    if runner is None:
+        return
+    try:
+        runner.note_session_start()
+    except Exception:  # noqa: BLE001 - auto-update never costs a conversation
+        logger.debug("hub check for a session start could not be scheduled", exc_info=True)
+
+
 @router.post("/v1/desktop/sessions", response_model=CRUDResponse[CreatedSession])
 async def create_session(body: CreateSession, request: Request):
     """Create a new conversation, optionally born on a chosen model and effort.
@@ -3027,6 +3185,12 @@ async def create_session(body: CreateSession, request: Request):
                     error=str(result.get("message") or "that device refused")
                 ).envelope(code=code),
             )
+        # A replayed receipt is a retry of a create that already ran: no new
+        # conversation began, so it is not a session start. Anything else that
+        # reached this line created one (locally or on a peer) and gets the
+        # fire-and-forget check.
+        if not result.get("replayed"):
+            _note_hub_session_start(request)
         return reply(result)
 
 
@@ -3166,18 +3330,46 @@ async def draft_mint(body: DraftMint, request: Request):
     is one per new-chat pane that ever received a keystroke, the same order of
     cost as the ``create:`` row each chat already writes.
 
+    THE REPLAY IS CONDITIONAL ON THE ID STILL OPENING (operator-reported
+    regression, 2026-10-23). The id a receipt records is not durable: the draft
+    registry entry expires after ``DRAFT_TTL_S``, and a draft that materialised
+    can have its conversation deleted. Replaying either handed the client an id
+    every door answers "Unknown session" for — its ``/events`` streams 404 and
+    the pane painted the terminal missing state over a brand-new chat. So the
+    journal's ``replay_guard`` asks the pool whether the recorded id is still
+    servable (``session_id_servable``); when it is not, the mint RUNS AGAIN and
+    supersedes the row, so this retry and every later one answer the fresh id.
+    A still-registered or still-materialised id replays unchanged.
+
     The SAME admissions ``create`` applies, in the same order (cwd, model,
     target) and BEFORE the receipt is claimed — for the two reasons
     ``create``'s own docstring states: a refusal must leave the store exactly as
-    it found it, and the pool re-runs every admission as its own contract.
+    it found it, and the pool re-runs every admission as its own contract. A
+    STALE replay is the one path where they run after a row already exists (it
+    is superseded, not claimed): ``mint_draft`` re-runs the cwd and target
+    checks and ``mint`` resolves the model spec, so the fresh draft is admitted
+    exactly as the first one was.
 
     A LATCHED daemon mints nothing: the refusal is ``assert_admitting``'s, asked
     first, exactly as on ``create``.
     """
 
     async def mint():
+        # ``spec`` is assigned below, in the admission block; the declaration is
+        # needed because a STALE replay (see ``replay_guard``) re-runs this
+        # operation after that block was skipped for the recorded key.
+        nonlocal spec
         pool = host(request)
         target = body.target.model_dump() if body.target else None
+        if spec is None and body.model is not None:
+            # RESOLVED HERE TOO, not only in the admission block: that block is
+            # skipped for a recorded key, and a stale record still mints. Same
+            # resolver and same refusals as the first mint, so the fresh draft is
+            # born on the model the body named rather than the configured default.
+            # ``mint_draft`` re-runs the pool's own admissions (cwd, target) for
+            # every mint, which is what makes the stale path's re-admission
+            # complete without this route asking twice on the first path.
+            spec = await asyncio.to_thread(_draft_model_spec, body.model)
         draft_id = await pool.mint_draft(
             body.cwd,
             target=target,
@@ -3212,7 +3404,20 @@ async def draft_mint(body: DraftMint, request: Request):
                     target_row["kind"],
                     target_row["name"],
                 )
-        return reply(await receipts(request).run(key, body.model_dump(), mint))
+        return reply(
+            await receipts(request).run(
+                key,
+                body.model_dump(),
+                mint,
+                # THE RECORDED ID IS ONLY AN ANSWER WHILE THE POOL CAN STILL
+                # SERVE IT. Asked under the receipt's per-key lock, so the
+                # judgement and the write that may follow cannot race another
+                # same-id request; ``False`` re-mints and supersedes the row.
+                replay_guard=lambda cached: pool.session_id_servable(
+                    str(cached.get("draft_id") or "")
+                ),
+            )
+        )
 
 
 @router.get("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[SessionSnapshot])
@@ -3759,6 +3964,92 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
     )
 
 
+@router.post("/v1/desktop/attachments", response_model=CRUDResponse[StoredFile])
+async def upload_attachment(
+    request: Request,
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+    origin_path: str | None = Form(default=None),
+):
+    """Store one composer attachment and return its digest-bearing reference.
+
+    THE UPLOAD IS THE ONLY PATH THAT CARRIES THE BYTES, and it is deliberately
+    NOT session-scoped: a composer stages a file before the conversation it
+    will be sent to exists (the first message of a new chat), and the store is
+    content-addressed and shared across conversations by design (the byte
+    route beside this one states the same rule). ``session_id`` would be an
+    existence check with nothing to check against.
+
+    MULTIPART rather than base64 JSON: a 32 MB file is 43 MB of base64, and
+    the control-frame limit (900 kB) is not a number this route may raise —
+    the frame carries DIGESTS, never bytes.
+
+    MIME COMES FROM THE BYTES (``sniff_document_mime``), never from the
+    client's ``file.content_type``: the browser derives that from the
+    extension, which is exactly the claim a renamed PDF has to survive. The
+    sidecar keeps MIME and size only (contract amendment 7); ``name`` and
+    ``origin_path`` ride this response and ``Prompt.files``, so a second
+    upload of identical bytes cannot inherit an earlier chip's name.
+
+    IDEMPOTENT by content digest: the store's own contract — the second write
+    is a hash and a stat, and both sends get the same record.
+
+    Refusals: an empty file is 400, over :data:`MAX_ATTACHMENT_UPLOAD_BYTES`
+    is 413 (the cap matches Anthropic's request ceiling, the tightest native
+    document limit), and a store write failure is 503 with the ladder's
+    envelope. All three name the file: a chip that silently vanished is the
+    class of defect this whole contract exists to remove.
+    """
+    from local_operator.i18n.keys import wire_errors_desktop as _wd
+    from local_operator.session.attachments import (
+        MAX_ATTACHMENT_UPLOAD_BYTES,
+        AttachmentStore,
+        sniff_document_mime,
+    )
+
+    display_name = name or (file.filename or "")
+    # One byte over the cap is enough to answer 413; reading the whole upload
+    # first would be the memory the cap exists to bound.
+    raw = await file.read(MAX_ATTACHMENT_UPLOAD_BYTES + 1)
+    if not raw:
+        raise HTTPException(
+            400,
+            _wd.desktop_refusal(error=f"{display_name or 'the file'} is empty").envelope(
+                code="attachment_empty"
+            ),
+        )
+    if len(raw) > MAX_ATTACHMENT_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            _wd.desktop_refusal(
+                error=(
+                    f"{display_name or 'the file'} is larger than "
+                    f"{MAX_ATTACHMENT_UPLOAD_BYTES // (1024 * 1024)} MB"
+                )
+            ).envelope(code="attachment_too_large"),
+        )
+    mime_type = sniff_document_mime(raw, display_name)
+    store = AttachmentStore()
+    ref = await asyncio.to_thread(store.put_bytes, raw, mime_type)
+    if ref is None:
+        raise HTTPException(
+            503,
+            _wd.desktop_refusal(
+                error="the attachment store could not save the file; check free disk space"
+            ).envelope(code="attachment_store_unavailable"),
+        )
+    return reply(
+        StoredFile(
+            digest=ref.digest,
+            name=display_name or None,
+            mime_type=ref.mime_type,
+            bytes=ref.bytes,
+            path=origin_path or None,
+            stored_path=str(store.path_for(ref.digest)),
+        )
+    )
+
+
 @router.get("/v1/desktop/sessions/{session_id}/attachments/{digest}/waveform")
 async def attachment_waveform(session_id: str, digest: AttachmentDigest, request: Request):
     """Precomputed waveform peaks for one attachment: ``{version, bars, peaks}``.
@@ -3916,6 +4207,12 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                         body.text,
                         command_id=body.request_id,
                         images=images,
+                        # Documents ride as REFERENCES and are resolved by the
+                        # OWNER (its store holds them for a local session).
+                        # A peer owner is refused on this side before the frame
+                        # is sent — ``admit_prompt`` raises
+                        # ``RemoteDocumentUnsupported`` (contract amendment 2).
+                        files=[reference.model_dump() for reference in body.files],
                         # Recordings travel UNSTAGED, deliberately: the peer
                         # image stage exists so the SENDER's viewer can resolve
                         # the digest the owner journals, and v1 has no audio
@@ -4199,6 +4496,88 @@ async def decode_images(images: list[Image]):
     return await image_blocks_in_thread([image.model_dump() for image in images])
 
 
+#: The dismissal refusal's LAST RESORT, and not user copy (agent review round 1,
+#: R1-5). Every refusal this door can receive already IS a sentence: the cold door
+#: answers with ``render.dismiss_refusal``'s words and the facade's verdict with
+#: the owner's, so an empty one means a door broke its contract, not that the user
+#: needs telling something new. Keying this string would translate one of FOUR
+#: identical guards (the two ``serving.py`` op refusals and the answer arm just
+#: below keep theirs unkeyed) and would still leave a blank 409 the worse failure.
+#: `test_a_door_that_refuses_without_a_sentence_still_answers_409` pins both
+#: halves: a real door always supplies one, and a broken one still gets a body.
+_DISMISSAL_REFUSED = "the dismissal was refused"
+
+
+def _dismissal_refusal(error: object) -> HTTPException:
+    """The 409 for a refused dismissal, in the ask's own words when there are any.
+
+    ``None`` is normalised away explicitly: ``str(None)`` is ``"None"``, which a
+    bare ``or`` would happily put on the wire.
+    """
+    sentence = "" if error is None else str(error).strip()
+    return HTTPException(409, sentence or _DISMISSAL_REFUSED)
+
+
+async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, body: Answer) -> str:
+    """Put a queued ask away from the desktop — the NO-BOOT door (SA-D5, §14).
+
+    THE ORDER IS THE CONTRACT. The cold door (``asks.dismiss.dismiss_cold``) runs
+    FIRST because it is the only one that can settle an ask nobody is serving
+    without starting something: it writes the ``dismissed`` event, rewrites the
+    derived index and disarms the deadline wake row, and it refuses with
+    ``ask_owner_present`` when a runtime IS serving the session. Dialling the
+    facade first — ``bridge.remote.ask_respond``'s shape — would bind, and a bind
+    on a cold session STARTS a runtime (§14: "a dismissal boots nothing"), which
+    is the one regression this arm exists to prevent.
+
+    So: a live owner gets the live op over the existing client (which is
+    ``AttachedSession.dismiss_ask`` → the ``ask_dismiss`` frame → the owner's
+    queue), and everything else is settled here. Every refusal that is not
+    ``ask_owner_present`` is the ASK'S OWN sentence — the same words the phone and
+    the TUI get from the same function — answered as a 409, never a 503: the
+    owner is fine and the ask is settled, so a reconnect remedy would be a lie.
+
+    A PEER'S CONVERSATION (``bridge.remote_row``) skips the cold door: this device
+    holds no ask log for it (the rows come from the owner's projection), so the
+    local fold could only answer "not in this session's queue". It takes the same
+    live dial every other ask op on that surface takes, which is the viewer's
+    "act warms the owner" model — not a new boot path.
+    """
+    from local_operator.asks.dismiss import dismiss_cold
+
+    ask_id = str(body.ask_id or "")
+    if getattr(bridge, "remote_row", None) is None:
+        outcome = await dismiss_cold(
+            store_root(request),
+            session_id,
+            ask_id,
+            # The word every other desktop ask op records (``ask_respond`` passes
+            # ``by="desktop"``), so an audit line names the surface that tapped.
+            by="desktop",
+            reason=body.reason,
+        )
+        if outcome.get("ok"):
+            return "dismissed"
+        if str(outcome.get("code") or "") != "ask_owner_present":
+            raise _dismissal_refusal(outcome.get("error"))
+    try:
+        # THE FACADE'S VERDICT CONTRACT (``AttachedSession.dismiss_ask``): a dict,
+        # and a refusal is ``{"ok": False, "error": …}`` rather than an exception.
+        # Reading it as a detail string — what ``ask_respond`` one method up
+        # returns — would answer 200 with the refusal buried in an object the
+        # receipt's ``detail: str`` cannot even carry.
+        verdict = await bridge.remote.dismiss_ask(ask_id, by="desktop", reason=body.reason)
+    except (ValueError, RuntimeError, ConnectionError) as error:
+        # Belt for a facade that predates the verdict shape: the same classes
+        # ``_ask_verdict`` swallows, mapped to the refusal they describe rather
+        # than to the 503 the shared ladder would produce.
+        raise _dismissal_refusal(error) from None
+    if not (isinstance(verdict, Mapping) and verdict.get("ok")):
+        refusal = verdict.get("error") if isinstance(verdict, Mapping) else verdict
+        raise _dismissal_refusal(refusal)
+    return "dismissed"
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/answers", response_model=CRUDResponse[AnswerReceipt]
 )
@@ -4241,6 +4620,12 @@ async def answer(session_id: str, body: Answer, request: Request):
             # than this route's generic "no longer pending", because unlike a
             # gate the ask is still there and the user's next move depends on
             # which of those it is.
+            if body.dismiss is True:
+                # PUT IT AWAY (SA-D5). Its own door, because a dismissal must not
+                # bind: see ``_dismiss_queued_ask`` for the order and the §14 cost.
+                return reply(
+                    {"detail": await _dismiss_queued_ask(request, session_id, bridge, body)}
+                )
             try:
                 # ``images`` is passed ONLY when the body carries some, so a
                 # text-only answer calls the facade exactly as it always did —

@@ -3244,3 +3244,91 @@ def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(
         settings_io.write_setting(manager, setting, "bogus")
     # The rejected write did not land.
     assert settings_io.read_setting(manager, setting) == "off"
+
+
+# ---------------------------------------------------------------------------
+# A reset must REMOVE the leaf, not have it copied back off disk
+# ---------------------------------------------------------------------------
+
+
+def test_a_reset_removes_the_leaf_it_promises_to_remove(tmp_path: Path) -> None:
+    """Deep preservation is why ``_delete`` has to DECLARE its deletion.
+
+    ``ConfigManager._write_config`` now copies every disk value the payload does
+    not model straight back into the file — that is what keeps an unknown
+    ``retry.fallbackChains`` alive through a writer whose dict is default-shaped.
+    The same mechanism resurrects a key ``/settings`` just removed unless the
+    delete names it, so ``reset_setting`` would report success and the value
+    would still be there after the next read: silently, because the page's own
+    manager sees the deleted state until it reloads.
+    """
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["retry.maxRetries"], 4)
+    settings_io.write_setting(manager, settings_io.BY_KEY["model_name"], "openai/gpt-5")
+
+    settings_io.reset_setting(manager, settings_io.BY_KEY["retry.maxRetries"])
+    settings_io.reset_setting(manager, settings_io.BY_KEY["model_name"])
+
+    # Read the FILE, not a fresh manager's view: ``_load_config`` back-fills the
+    # shipped top-level defaults, so ``model_name`` would be there either way.
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text(encoding="utf-8"))["values"]
+    assert "maxRetries" not in stored["retry"], stored["retry"]
+    # The sibling a defaults-shaped write would have taken with it is untouched.
+    assert stored["retry"]["baseDelayMs"] == 500
+    assert "model_name" not in stored
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["retry.maxRetries"]) == 10
+
+
+def test_the_account_policy_reset_retires_its_legacy_aliases(tmp_path: Path) -> None:
+    """``_reset_account_policy`` is a DELIBERATE deletion, so it must declare one.
+
+    It pops the four legacy aliases and writes the ``retry`` subtree whole; under
+    deep preservation an undeclared pop is copied straight back off disk and the
+    reset is a no-op that reports success (review round 1, n2 — the same story as
+    B1, caught here rather than in production).
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value(
+        "retry",
+        {
+            "maxRetries": 4,
+            "accountSelectionPolicy": "headroom",
+            "account_selection_policy": "headroom",
+            "usageAwareAccountPick": True,
+            "usage_aware_account_pick": True,
+        },
+    )
+
+    settings_io.reset_setting(manager, settings_io.BY_KEY["retry.accountSelectionPolicy"])
+
+    stored = ConfigManager(tmp_path).get_config().values["retry"]
+    for alias in (
+        "accountSelectionPolicy",
+        "account_selection_policy",
+        "usageAwareAccountPick",
+        "usage_aware_account_pick",
+    ):
+        assert alias not in stored, f"{alias} survived the reset: {stored!r}"
+    assert stored["maxRetries"] == 4
+
+
+def test_deleting_a_chain_actually_deletes_it(tmp_path: Path) -> None:
+    """``write_chains`` removes chains; the removal has to be declared (n2).
+
+    ``merged`` is built from what is on disk plus the caller's edits, so a chain
+    that is on disk and absent from the result is one this call deleted. Without
+    the declaration, preservation re-adds it and the page's delete does nothing.
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value(
+        "retry",
+        {"fallbackChains": {"default": ["openai/gpt-5"], "extra": ["openrouter/x"]}},
+    )
+    base = settings_io.read_chains(manager)
+    assert set(base) == {"default", "extra"}
+
+    settings_io.write_chains(manager, {"default": ["openai/gpt-5"]}, base=base)
+
+    stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+    assert "extra" not in stored, stored
+    assert stored["default"] == ["openai/gpt-5"]

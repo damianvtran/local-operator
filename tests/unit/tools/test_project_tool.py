@@ -967,3 +967,34 @@ async def test_an_unreadable_row_does_not_produce_a_truncation_note(
 
     assert "alpha" in body and "beta" in body
     assert "not listed here" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_trimmed_history_says_that_evidence_was_kept(
+    context: ToolContext, registry: ProjectRegistry
+) -> None:
+    """The receipt names the trim ONLY when it happened, and says what survived."""
+    from local_operator.projects import UPDATES_MAX, Project, ProjectUpdateEntry
+
+    entries = [
+        ProjectUpdateEntry(at=f"2026-10-01T00:00:{index % 60:02d}Z", text=f"line {index}")
+        for index in range(UPDATES_MAX)
+    ]
+    row = Project(id="historyrow0000000000000000000000", name="history-row", updates=entries)
+    registry.projects_dir.mkdir(parents=True, exist_ok=True)
+    (registry.projects_dir / f"{row.id}.json").write_text(
+        json.dumps(row.model_dump(mode="json", by_alias=True))
+    )
+
+    body = await call(context, op="update", name="history-row", progress="one past the cap")
+
+    assert "updated project 'history-row'" in body
+    assert "history trimmed, 1 oldest text entry dropped — attached evidence is kept" in body
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_update_does_not_mention_trimming(context: ToolContext) -> None:
+    """A receipt that always mentioned the cap would be noise on every write."""
+    await call(context, op="create", name="ordinary")
+    body = await call(context, op="update", name="ordinary", progress="a line")
+    assert "history trimmed" not in body

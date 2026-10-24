@@ -246,6 +246,20 @@ _WALK_DEPTH_CAP = 2
 # doc gains the same scope rule and its delete semantics. Both were measured
 # through this test's own printed table on the rebased tree, whose upstream
 # baseline is the #2520 ask raise above (ask 1063, unmoved here).
+# RE-MEASURED 2026-10-23 (stale asks, ``feat/ask-stale-guidance``; design
+# ask-nonblocking §16/SA-D1): ``ask`` 1063 -> 1079 and ``ask_withdraw``
+# 314 -> 452 are the ONLY entries that moved, and both moves ARE the change:
+# the ``ask`` queued tail gains one clause (settle it the moment it stops
+# mattering — the tool the clause names is NOT in this doc's schema, so the
+# property list is unchanged), and ``ask_withdraw``'s doc renders the rewritten
+# description plus the widened ``answers`` field copy (the empty-list recipe,
+# the ids rule, the all-empty refusal, and "latest or earlier" beside VERBATIM —
+# the last two taken in review round 1, which is the 418 -> 452 part). Measured
+# through this test's own printed table on the branch; every other entry is
+# byte-identical. BOTH ledgers move together: the same two descriptions are the
+# +663 chars of ``tool_schemas`` in ``scripts/bench_context_budget.py``'s
+# top-arm raise (32,872 -> 33,364), whose child arm carries neither tool and
+# moves only by the shared ``system.md`` paragraph.
 MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S3): 1044 -> 1056. The delta is the one-clause
     # fork exception on the ephemeral bullet ("a fork starts with a copy of
@@ -258,9 +272,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``confirm_replace`` (the second is the overwrite AND the user's answer, so
     # its wording is the safety-critical part). Trimmed once already; the same
     # printed table measured it.
-    "agent": 1119,
-    "ask": 1063,
-    "ask_withdraw": 314,
+    # RE-MEASURED (LOH-9 S5): 1119 -> 1365. The delta is the completed guidance:
+    # a ``promote`` row in the authored ops table and the promote step in the
+    # notes, the corrected refusal remedy (the TUI form and the create/install
+    # retry, with update/reset/sync naming no retry), the collision clause and
+    # the host-dependent default. The same printed table measured it; the
+    # 8 KiB soft cap still holds.
+    "agent": 1365,
+    "ask": 1079,
+    "ask_withdraw": 452,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
@@ -292,7 +312,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # the field's own description to the doc — the deliberate cost of the value
     # never appearing in the transcript (incident: a literal password in `type`
     # reached a subagent's transcript, where no shape pass could see it).
-    "browser": 1424,
+    "browser": 1380,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -452,6 +472,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # 528 -> 531 in review round 2: the receipt claim is qualified to
     # ``assign``, because ``create``/``list``/``rename`` name categories only.
     "tags": 531,
+    # NEW (claude.ai artifact data store, 2026-10-21): the ``artifact_data``
+    # doc — the per-action field table, the path/`me` rules and the
+    # ``if_version`` contract. The tool is DEFERRED, so this doc is what the
+    # first ``tool://`` read or call teaches; its schema adds nothing to the
+    # start context (``scripts/bench_context_budget.py`` unchanged).
+    "artifact_data": 836,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than
@@ -468,7 +494,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S4): 1030 -> 1109, the same promotion delta; the team
     # doc also states that a replace may cover a member, which the agent twin
     # does not need.
-    "team": 1109,
+    # RE-MEASURED (LOH-9 S5): 1109 -> 1400 — the promote row, the promote and
+    # member-copy step, the corrected refusal copy and the collision clause;
+    # the same printed table.
+    "team": 1400,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -502,7 +531,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: the canonical arm; `task` stays 764.
 #: RE-MEASURED (LOH-9 S4): agent 1085 -> 1148; ``task`` is unmoved because the
 #: promotion fields are on ``agent``/``team``, not on the launch tool.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1148, "task": 764}
+#: RE-MEASURED (LOH-9 S5): agent 1148 -> 1394, the same +246 the canonical arm
+#: takes because both arms render the completed notes; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1394, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -908,6 +939,21 @@ def test_cut_wire_prose_moved_into_the_tool_doc(
             f"{name}: phrase still on the always-loaded wire — the move saved "
             f"nothing, so either cut it or drop it from MOVED_WIRE_DETAIL: {phrase!r}"
         )
+
+
+@pytest.mark.parametrize("name", ["agent", "team"])
+def test_the_promote_op_and_step_are_reachable_in_the_rendered_doc(
+    default_surface: list[AgentTool], name: str
+) -> None:
+    """The ledger pins SIZE, not content: a same-length edit could drop the row.
+
+    The design's guidance-reachability metric is an assertion, not eyeballing, so
+    both halves the model reads are pinned by phrase: the authored Ops-table row
+    and the narrative PROMOTE step.
+    """
+    doc = render_tool_doc(next(tool for tool in default_surface if tool.name == name))
+    assert "\n- promote: " in doc, f"tool://{name} lost its promote row"
+    assert "\n- PROMOTE: " in doc, f"tool://{name} lost the promote step in its notes"
 
 
 def test_authored_notes_and_renderers_name_real_tools(

@@ -57,7 +57,10 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+# V7 changes durable key contents, not the table layout. Older structural
+# upgrades still validate/build the v6 floor before the atomic key migration.
+_LAYOUT_VERSION = 6
 
 #: Every table a stamped-V3 database must carry. A stamped store missing any
 #: of these is DAMAGED and refuses: re-running DDL is NOT repair — it
@@ -987,6 +990,29 @@ class OwnerReceipt:
     consent_ref: str
 
 
+def _contentless_delivery_key(value: str) -> str:
+    """Canonicalise only the declared conversation-ref namespace, without names.
+
+    Pair IDs and refresh refs are untouched. A malformed declared conversation
+    ref cannot be silently carried under a stamp claiming label-free queues.
+    No exception includes the original key or a decoded display value.
+    """
+
+    from local_operator.team_bridge.types import (
+        CONVERSATION_FEED_KIND,
+        CONVERSATION_FEED_TYPE,
+        parse_conversation_ref_value,
+    )
+
+    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+    if not value.startswith(prefix):
+        return value
+    ref = parse_conversation_ref_value(value[len(prefix) :])
+    if ref is None:
+        raise StoreRefused("ref_migration_malformed", "malformed conversation delivery key")
+    return ref.encode()
+
+
 class Store:
     """Transactional metadata access. Construct per operation, not long-lived."""
 
@@ -1048,6 +1074,96 @@ class Store:
             conn.close()
 
     def _init(self, conn: sqlite3.Connection) -> None:
+        """Validate layout, then atomically remove legacy name-bearing keys.
+
+        This runs on the store's existing write-capable entry points, never by
+        mutating the operator's database from an external script. Read-only
+        surfaces remain read-only. A v7 stamp certifies logical rows only: WAL,
+        free pages, backups and transcripts are NOT claimed securely erased.
+        """
+
+        self._init_layout(conn)
+        version = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+        if version == str(SCHEMA_VERSION):
+            return
+        try:
+            # Serialise the rekey and stamp. Existing legacy upgrades may
+            # already hold the write transaction; never commit it underneath
+            # them. A failure must roll back both queues and the version.
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            version = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()[0]
+            if version == str(SCHEMA_VERSION):
+                return  # another opener completed it before we got the lock
+            if version != str(_LAYOUT_VERSION):
+                raise StoreRefused("schema_unsupported", "unexpected ref migration source")
+            self._migrate_conversation_ref_keys(conn)
+            conn.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
+        except sqlite3.Error as error:
+            raise StoreRefused("state_unreadable", "conversation ref migration failed") from error
+
+    @staticmethod
+    def _migrate_conversation_ref_keys(conn: sqlite3.Connection) -> None:
+        """Rekey the two queues, preserving their owner and all non-key state.
+
+        Only feed_refs.ref and screening_holds.message_id carry encoded
+        conversation refs. Claims, attempts, receipts and ACKs use the bare
+        message id; owner_key and sync cursors do not reference these keys.
+        No other table or history is rewritten. Scan by rowid in bounded
+        batches so updating indexed keys cannot skip the next legacy row.
+
+        Each old seven-part key gets its own tagged SHA256 alias of its exact
+        original UTF-8 spelling. Canonical rows stay canonical, and ALL old
+        rows survive even when payloads match or their deadlines/reasons differ.
+        The digest is name-derived operational identity, not anonymization or
+        authority. A true target collision is refused atomically even when the
+        payload matches: never collapse or replace a pending sibling.
+        """
+
+        for table, key_column in (
+            ("feed_refs", "ref"),
+            ("screening_holds", "message_id"),
+        ):
+            last_rowid: int | None = None
+            while True:
+                # SQLite allows explicitly assigned nonpositive rowids too.
+                # The first page must not exclude those pending entries.
+                where = "" if last_rowid is None else "WHERE rowid > ? "
+                params = () if last_rowid is None else (last_rowid,)
+                rows = conn.execute(
+                    f"SELECT rowid AS migration_rowid, * FROM {table} "
+                    f"{where}ORDER BY rowid LIMIT 128",
+                    params,
+                ).fetchall()
+                if not rows:
+                    break
+                last_rowid = rows[-1]["migration_rowid"]
+                for row in rows:
+                    raw = row[key_column]
+                    canonical = _contentless_delivery_key(raw)
+                    if raw == canonical:
+                        continue
+                    other = conn.execute(
+                        f"SELECT * FROM {table} WHERE owner_key = ? AND {key_column} = ?",
+                        (row["owner_key"], canonical),
+                    ).fetchone()
+                    if other is not None:
+                        raise StoreRefused(
+                            "ref_migration_conflict", "conversation alias target already exists"
+                        )
+                    conn.execute(
+                        f"UPDATE {table} SET {key_column} = ? WHERE rowid = ?",
+                        (canonical, row["migration_rowid"]),
+                    )
+
+    def _init_layout(self, conn: sqlite3.Connection) -> None:
         """Validate BEFORE any DDL; refuse damage instead of repairing it.
 
         Order is the safety property (H3-Q4): read what the file IS, decide,
@@ -1107,7 +1223,7 @@ class Store:
                 raise StoreRefused("state_unreadable", str(error)) from error
             conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                (str(SCHEMA_VERSION),),
+                (str(_LAYOUT_VERSION),),
             )
             return
 
@@ -1133,7 +1249,7 @@ class Store:
                 raise StoreRefused("state_unreadable", str(error)) from error
             conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                (str(SCHEMA_VERSION),),
+                (str(_LAYOUT_VERSION),),
             )
             return
 
@@ -1159,7 +1275,7 @@ class Store:
                 raise StoreRefused("state_unreadable", str(error)) from error
             conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                (str(SCHEMA_VERSION),),
+                (str(_LAYOUT_VERSION),),
             )
             return
 
@@ -1203,11 +1319,11 @@ class Store:
             _ensure_producer_table(conn)
             conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                (str(SCHEMA_VERSION),),
+                (str(_LAYOUT_VERSION),),
             )
             return
 
-        if version == str(SCHEMA_VERSION):
+        if version in (str(_LAYOUT_VERSION), str(SCHEMA_VERSION)):
             # Stamped V5: VERIFY, never re-create. Missing tables or missing
             # binding/policy columns mean damage — refuse, no DDL at all.
             missing = (_V3_TABLES | _V4_ADDED) - pre_existing
@@ -1690,10 +1806,21 @@ class Store:
         with self._connect_readonly() as conn:
             if conn is None:
                 return None
+            # An older in-flight full key maps to its exact migrated alias,
+            # never to the canonical sibling. Before migration, read the raw
+            # key as-is; this surface must not create or upgrade the store.
+            version = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            lookup = (
+                _contentless_delivery_key(str(message_id))
+                if version is not None and version[0] == str(SCHEMA_VERSION)
+                else str(message_id)
+            )
             row = conn.execute(
                 "SELECT hold_code, retry_at, created_at FROM screening_holds "
                 "WHERE owner_key = ? AND message_id = ?",
-                (_owner_key(owner), str(message_id)),
+                (_owner_key(owner), lookup),
             ).fetchone()
             if row is None:
                 return None
@@ -2009,7 +2136,7 @@ class Store:
             for ref in event_refs:
                 conn.execute(
                     "INSERT OR IGNORE INTO feed_refs (owner_key, ref, seq) VALUES (?,?,?)",
-                    (_owner_key(owner), str(ref), int(cursor)),
+                    (_owner_key(owner), _contentless_delivery_key(str(ref)), int(cursor)),
                 )
             if resync_required or pending:
                 # A fresh cursor may be LOWER than the stored one (the server
@@ -3781,7 +3908,13 @@ class Store:
             conn.execute(
                 "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, hold_code, "
                 "retry_at, created_at) VALUES (?,?,?,?,?)",
-                (_owner_key(owner), message_id, hold_code, retry_at, time.time()),
+                (
+                    _owner_key(owner),
+                    _contentless_delivery_key(message_id),
+                    hold_code,
+                    retry_at,
+                    time.time(),
+                ),
             )
 
     def screening_hold(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
@@ -3793,7 +3926,7 @@ class Store:
                 row = conn.execute(
                     "SELECT hold_code, retry_at, created_at FROM screening_holds "
                     "WHERE owner_key = ? AND message_id = ?",
-                    (_owner_key(owner), message_id),
+                    (_owner_key(owner), _contentless_delivery_key(message_id)),
                 ).fetchone()
                 if row is None:
                     return None
@@ -3858,7 +3991,7 @@ class Store:
             self._require_live(conn, owner)
             deleted = conn.execute(
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
-                (_owner_key(owner), message_id),
+                (_owner_key(owner), _contentless_delivery_key(message_id)),
             )
             return bool(deleted.rowcount)
 
@@ -3899,7 +4032,7 @@ class Store:
             self._require_live(conn, owner)
             updated = conn.execute(
                 "UPDATE screening_holds SET retry_at = ? " "WHERE owner_key = ? AND message_id = ?",
-                (float(retry_at), _owner_key(owner), message_id),
+                (float(retry_at), _owner_key(owner), _contentless_delivery_key(message_id)),
             )
             return bool(updated.rowcount)
 
@@ -4127,7 +4260,7 @@ class Store:
             for ref in refs:
                 cur = conn.execute(
                     "DELETE FROM feed_refs WHERE owner_key = ? AND ref = ?",
-                    (key, str(ref)),
+                    (key, _contentless_delivery_key(str(ref))),
                 )
                 deleted += int(cur.rowcount or 0)
             return deleted

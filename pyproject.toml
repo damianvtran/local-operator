@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.86.1"
+version = "0.88.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -55,6 +55,13 @@ dependencies = [
     # combination it has not published for.
     "pyyaml",
     "python-dotenv",
+    # Document attachments: PDF pages are extracted to page-marked text when
+    # the selected provider cannot take the file natively (the fallback arm of
+    # the attachment contract). Base rather than an extra because admission
+    # and every provider render may need it, and the desktop installer runs a
+    # bare `pip install local-operator`. Imported lazily so a conversation
+    # with no documents never pays the import.
+    "pypdf>=5.0",
     # Terminal UI. This is the default entry point of the `local-operator`
     # command, so it stays required rather than optional. Pure Python, no
     # compiled wheels — textual pulls rich, which pulls pygments and

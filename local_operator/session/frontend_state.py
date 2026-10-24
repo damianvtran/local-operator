@@ -1776,6 +1776,33 @@ class PendingAskState(BaseModel):
     #: to a reader built before the field: the UI row type is open-ended and an
     #: unknown key is ignored (``extra="allow"``).
     attachments: dict[str, list[dict[str, Any]]] | None = None
+    #: THE ASK CARD'S CONTEXT LINE (SA-D7, design §15): how many operator messages
+    #: were admitted after this ask was raised, and when the latest one was (ms).
+    #: The pair the card renders as "3 messages from you since this was asked (last
+    #: 19:36)", carried on the ROW because the desktop reads rows, not sessions.
+    #:
+    #: ``None`` means the writing runtime COULD NOT COUNT IT — an older runtime, an
+    #: ask older than its retained window, or a session that has admitted no
+    #: operator message — and every surface renders no line at all for it. That is
+    #: why these are nullable rather than defaulted to zero: a zero is a fact (the
+    #: ask is newer than every message), and absence must not be spelled as one.
+    #: The same added-key trade-off as ``attachments`` above: this model serialises
+    #: its ``None`` fields, so a snapshot carries ``null`` here where
+    #: ``pending_row`` and the phone's ``PendingAskWire`` simply omit the key.
+    user_messages_since: int | None = None
+    last_user_message_at: int | None = None
+    #: THE DISMISSAL'S OWN PAIR (SA-D8, design §17): when the ask was put away and
+    #: the operator's reason for it. ``None`` for every status but ``dismissed``,
+    #: and for a dismissal written by a build before the keys existed — which is
+    #: also the row the surfaces hide, so absence never reads as a reason.
+    #:
+    #: DOCUMENTATION PLUS TYPING rather than validation (``extra="allow"`` above),
+    #: but not optional bookkeeping: the phone's projection filters a row against
+    #: its own field list before the client ever sees it, and the two models are
+    #: the same frozen shape, so a key missing heading here is a key the phone
+    #: would have to grow a second vocabulary for.
+    dismissed_at: int | None = None
+    dismissed_reason: str | None = None
 
 
 class _FrozenSequence(tuple[Any, ...]):
@@ -4819,6 +4846,22 @@ def bound_ask_rows(
             # wire. Only rows the budget actually governs are charged.
             spent += charge
     return kept, dropped
+
+
+def bound_ask_snapshot_in_place(snapshot: dict[str, Any]) -> None:
+    """The wire's ask bound, for a caller that replaces the rows AFTER serialization.
+
+    The desktop's COLD override (``server/utils/desktop_sessions._cold_ask_rows``)
+    serves a facade's ask rows from the durable index, and it does so on the
+    already-serialized snapshot — i.e. after :func:`sync_wire_payload` bounded the
+    facade's OWN list. Re-binding here is what keeps one policy for both: a frame
+    must not carry rows past ``ASK_WIRE_TEXT_BUDGET_CHARS`` just because they came
+    from the index, and ``asks_truncated`` must describe the rows it ships beside.
+    A second spelling of this policy at the call site is the leak this module
+    records twice for jobs ("a bound placed only at the snapshot boundary holds
+    for the first frame and leaks on every one after it").
+    """
+    _bound_asks_in_place(snapshot)
 
 
 def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
