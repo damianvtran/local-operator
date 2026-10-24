@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import errno
 import os
-import threading
 import time
 from pathlib import Path
 
@@ -88,23 +87,6 @@ class WakeLockBusy(RuntimeError):
     why it can legitimately take seconds: on a very large conversation one write
     holds the lock for most of this bound.
     """
-
-
-#: Locks THIS thread already holds, keyed by lock path -> [fd, depth]. Scoped to
-#: the thread on purpose: another thread or process still waits on the file, so
-#: the cross-process mutex keeps its meaning. The inbox drain needs it because
-#: its reader holds both locks while parsing, and a recall marker recorded inside
-#: that window (a same-thread nested critical section) must not time out against
-#: the lock its own caller holds.
-_held_state = threading.local()
-
-
-def _held_locks() -> dict[str, list[int]]:
-    mapping = getattr(_held_state, "locks", None)
-    if mapping is None:
-        mapping = {}
-        _held_state.locks = mapping
-    return mapping
 
 
 class WakeLockUnavailable(RuntimeError):
@@ -200,7 +182,6 @@ class WakeWriteLock:
         timeout_s: float = LOCK_WAIT_S,
         name: str = WAKE_LOCK_NAME,
         busy_sentence: str = "",
-        reentrant: bool = False,
     ) -> None:
         # ``name`` is injectable for the other locks that reuse this class
         # rather than copying its platform handling: Aida's root-level
@@ -226,25 +207,8 @@ class WakeWriteLock:
             "scheduled checks. Try again in a moment."
         )
         self._fd: int | None = None
-        self._nested = False
-        #: Only the inbox transport locks opt in (see :data:`_held_state`). The
-        #: per-session transaction lock deliberately does NOT: a read taken while
-        #: this thread already holds that transaction must still answer "busy"
-        #: and withhold the CAS authority, which is what its callers render.
-        self.reentrant = reentrant
 
     def acquire(self) -> None:
-        key = str(self.path)
-        held = _held_locks() if self.reentrant else {}
-        if key in held:
-            # Same thread, same lock: the outermost holder already excludes
-            # everyone else, so a nested critical section proceeds and only
-            # increments the depth. This is NOT a bypass: another thread or
-            # process still waits on the file for its own acquire.
-            held[key][1] += 1
-            self._nested = True
-            return
-
         """Take the lock, or raise at the deadline / on an unusable lock file.
 
         Raises :class:`WakeLockBusy` when a peer holds it for the whole wait, and
@@ -270,8 +234,6 @@ class WakeWriteLock:
             while True:
                 if _try_lock(fd):
                     self._fd = fd
-                    if self.reentrant:
-                        _held_locks()[key] = [fd, 1]
                     return
                 if time.monotonic() >= deadline:
                     raise WakeLockBusy(self.busy_sentence)
@@ -286,18 +248,7 @@ class WakeWriteLock:
 
     def release(self) -> None:
         """Release the lock. Idempotent, and safe to call when never held."""
-        key = str(self.path)
-        entry = _held_locks().get(key) if self.reentrant else None
-        if entry is not None:
-            entry[1] -= 1
-            self._nested = False
-            if entry[1] > 0:
-                self._fd = None
-                return
-            del _held_locks()[key]
-            fd, self._fd = entry[0], None
-        else:
-            fd, self._fd = self._fd, None
+        fd, self._fd = self._fd, None
         if fd is None:
             return
         try:

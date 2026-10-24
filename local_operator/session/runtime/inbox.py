@@ -42,9 +42,10 @@ import secrets
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from local_operator.procstate import O_BINARY
 from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
@@ -419,7 +420,7 @@ class InboxReadBatch:
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
         self.key = str(self.directory.resolve())
-        self.reader = WakeWriteLock(self.directory, name=".inbox-reader.lock", reentrant=True)
+        self.reader = WakeWriteLock(self.directory, name=".inbox-reader.lock")
         self.acquired = False
         self.raw: bytes | None = None
         self.chunks: list[bytes] = []
@@ -677,7 +678,44 @@ def _journal_lock(session_dir: Path) -> WakeWriteLock:
     # EVERY cooperating append/recall/drain/purge, including rollback on Windows.
     # Updated writers must activate together; older unlocked binaries are outside
     # this contract. No inode replacement or unknown-file repair is attempted.
-    return WakeWriteLock(session_dir, name=".inbox-write.lock", reentrant=True)
+    return WakeWriteLock(session_dir, name=".inbox-write.lock")
+
+
+#: Session directories whose inbox transport locks THIS THREAD holds. The
+#: recall executed inside the drain's own critical section (the marker-during-
+#: parse interleave) runs its locked body directly instead of acquiring a second
+#: time: one acquisition per delivery, released exactly once, is the invariant.
+#: Scoped to the thread because the locked body is synchronous on that thread;
+#: a recall from anywhere else still waits on the file and answers False at the
+#: deadline, which is the documented refusal.
+_open_scopes = threading.local()
+
+
+def _holds_inbox_locks(session_dir: Path) -> bool:
+    held = getattr(_open_scopes, "dirs", None)
+    return bool(held) and str(Path(session_dir).resolve()) in held
+
+
+@contextmanager
+def _inbox_locks(session_dir: Path) -> Iterator[None]:
+    """Take reader -> journal once and mark this thread as the holder.
+
+    The mark is what lets a nested recall reuse the acquisition instead of
+    queueing behind it; it carries no descriptor, so there is nothing to release
+    from another thread and no lock can outlive its ``with`` statement.
+    """
+    key = str(Path(session_dir).resolve())
+    with WakeWriteLock(session_dir, name=".inbox-reader.lock"):
+        with _journal_lock(session_dir):
+            held = getattr(_open_scopes, "dirs", None)
+            if held is None:
+                held = set()
+                _open_scopes.dirs = held
+            held.add(key)
+            try:
+                yield
+            finally:
+                held.discard(key)
 
 
 def _append_payload(fd: int, payload: bytes) -> None:
@@ -996,9 +1034,10 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
     if not session_dir.is_dir():
         return False
     try:
-        with WakeWriteLock(session_dir, name=".inbox-reader.lock", reentrant=True):
-            with _journal_lock(session_dir):
-                return _withdraw_inbox_locked(session_dir, command_id)
+        if _holds_inbox_locks(session_dir):
+            return _withdraw_inbox_locked(session_dir, command_id)
+        with _inbox_locks(session_dir):
+            return _withdraw_inbox_locked(session_dir, command_id)
     except (WakeLockBusy, WakeLockUnavailable, OSError):
         return False
 
@@ -1104,9 +1143,8 @@ def remove_wake_rows(session_dir: Path, wake_id: str) -> int:
     if not session_dir.is_dir():
         return 0
     try:
-        with WakeWriteLock(session_dir, name=".inbox-reader.lock", reentrant=True):
-            with _journal_lock(session_dir):
-                return _remove_wake_rows_locked(session_dir, wake_id)
+        with _inbox_locks(session_dir):
+            return _remove_wake_rows_locked(session_dir, wake_id)
     except (WakeLockBusy, WakeLockUnavailable, OSError):
         return 0
 
@@ -1260,9 +1298,8 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
     if not session_dir.is_dir():
         return []
     try:
-        with WakeWriteLock(session_dir, name=".inbox-reader.lock", reentrant=True):
-            with _journal_lock(session_dir):
-                return _drain_inbox_locked(session_dir)
+        with _inbox_locks(session_dir):
+            return _drain_inbox_locked(session_dir)
     except (WakeLockBusy, WakeLockUnavailable, OSError):
         return []
 
