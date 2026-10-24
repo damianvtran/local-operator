@@ -1,0 +1,42 @@
+name: Owned no-App owner-thread graph quality 6911
+on:
+  push:
+    branches: [diag/owner-thread-profile-quality-6911]
+permissions:
+  contents: read
+jobs:
+  owner-thread:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        timeout-minutes: 1
+        with:
+          python-version: '3.12.15'
+      - name: Setup closure or STOP
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -B -c "import sys; assert sys.version_info[:3] == (3,12,15)"
+      - name: ONE standalone primitive child NO App
+        timeout-minutes: 2
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python -B scripts/run_bounded.py --timeout 60 --grace 5 --memory-mb 512 -- python -B -m scripts.diagnostics.owner_thread_graph_6911.controller "$RUNNER_TEMP/owner-thread-quality-6911"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        timeout-minutes: 1
+        with:
+          name: owner-thread-quality-6911-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/owner-thread-quality-6911/owner-graph.json
+          retention-days: 3
+          if-no-files-found: warn

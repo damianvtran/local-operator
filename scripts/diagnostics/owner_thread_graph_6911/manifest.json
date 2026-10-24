@@ -1,18 +1,15 @@
 {
-  "schema": "owner_thread_python_resumption_graph_v1",
-  "base": "df895e8f357bee2ea8902edcc54e85e256211cce",
+  "base": "f68958547d661fd428aefa7d81cd2fa09c613d44",
   "component_only": true,
+  "schema": "owner_thread_python_resumption_graph_v1",
   "sources": {
     "scripts/diagnostics/owner_thread_graph_6911/collector.py": "080e178d49c6fa4e71c6db4b94c2a4b5cbc5ff5e73edd6786ca81f407022015e",
-    "scripts/diagnostics/owner_thread_graph_6911/controls.py": "7181166fb8dba18e200f22db360f7562191fbbc91b6efafc6b0cb5da1621c5d3"
+    "scripts/diagnostics/owner_thread_graph_6911/producer.py": "e9a5a53c157c68ce0ecd092d6897cb71118ada5047f9e81dcfe26436995acd00",
+    "scripts/diagnostics/owner_thread_graph_6911/controller.py": "ef0f21df4f5cd06abd15bebd71a9af6b57a7aa812355e4e45a7083b2cdd69155",
+    "scripts/diagnostics/lfs_pair_6911/controller.py": "442db3695b3a6dc7f68cc541f4fd8dae97638231821a589b50cc82b18dd1d20e",
+    "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
+    "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60"
   },
-  "caps": {
-    "codes": 128,
-    "edges": 256,
-    "stack": 64,
-    "events": 20000
-  },
-  "unit": "instrumented_owner_thread_cpu_ns",
-  "native_verified": false,
-  "integration_remaining": "source-qualified 3.12 header/catalog; direct hook/root driver; existing canonical lifecycle/controller; four phases plus fixed-operation overhead control; independent reviews and explicit GO before native; no App authorization"
+  "application_authorized": false,
+  "remaining": "SOURCE integration frozen; 4-phase simulated engine/consumer controls pass. Main fake-Popen/R-barrier/FD composition still pending before allocation readiness; independent integration reviews and explicit GO required. No native hooks executed."
 }
