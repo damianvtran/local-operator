@@ -33,18 +33,22 @@ not seen is exactly the thing that must survive a sweep.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import secrets
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from local_operator.procstate import O_BINARY
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +408,350 @@ class _NonBlockingLock:
             pass
 
 
+# A live process-local seat also covers pre-existing command-queue tasks. A
+# ContextVar alone would miss boot prompt -> queued Session pipeline reentry.
+_ACTIVE_READS: dict[str, "InboxReadBatch"] = {}
+_ACTIVE_READS_LOCK = threading.Lock()
+
+
+class InboxReadBatch:
+    """Preallocated, nondestructive snapshot with raw ordinal delivery ownership."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = Path(directory)
+        self.key = str(self.directory.resolve())
+        self.reader = WakeWriteLock(self.directory, name=".inbox-reader.lock")
+        self.acquired = False
+        self.raw: bytes | None = None
+        self.chunks: list[bytes] = []
+        self.rows: list[tuple[int, InboxLine]] = []
+        self.handled: set[int] = set()
+        self.pending_after_commit = True
+        self.drop_after_release = False
+        self.published = False
+        self.durable = False
+        self.path_identity: tuple[int, int] | None = None
+
+    def delivery_rows(self) -> list[tuple[tuple[int, ...], InboxLine]]:
+        lines = [line for _, line in self.rows]
+        result = []
+        for line in coalesce_wake_rows(lines):
+            # The existing coalescer merges exactly one structural wake group;
+            # mapping its known inputs back to ordinals never matches raw text.
+            if line.wake and line.wake_id:
+                ordinals = tuple(
+                    i for i, old in self.rows if old.wake and old.wake_id == line.wake_id
+                )
+            else:
+                ordinals = tuple(i for i, old in self.rows if old is line)
+            if not ordinals:
+                raise OSError("ambiguous inbox coalescing map")
+            result.append((ordinals, line))
+        return result
+
+
+def try_enter_read_batch(directory: Path) -> InboxReadBatch | None:
+    batch = InboxReadBatch(directory)  # canonicalization occurs outside mutex
+    with _ACTIVE_READS_LOCK:
+        previous = _ACTIVE_READS.get(batch.key)
+        if previous is not None:
+            return None
+        _ACTIVE_READS[batch.key] = batch
+    return batch
+
+
+def leave_read_batch(batch: InboxReadBatch) -> None:
+    with _ACTIVE_READS_LOCK:
+        if _ACTIVE_READS.get(batch.key) is batch:
+            del _ACTIVE_READS[batch.key]
+
+
+def claim_inbox_batch(batch: InboxReadBatch) -> None:
+    """Reader -> journal; retain bytes on disk even if cancellation loses return."""
+    batch.reader.acquire()
+    batch.acquired = True
+    with _journal_lock(batch.directory):
+        path = inbox_path(batch.directory)
+        try:
+            raw = path.read_bytes()
+            stat = path.stat()
+        except FileNotFoundError:
+            raw = b""
+            batch.path_identity = None
+        else:
+            if path.is_symlink() or not path.is_file():
+                raise OSError("unsafe inbox path")
+            batch.path_identity = (stat.st_dev, stat.st_ino)
+        batch.raw = raw
+        # The one-shot consumer flag reads this even when there is nothing to
+        # commit: an EMPTY inbox is the common case and must latch "nothing
+        # left", or the session acquires a seat, locks and settles on every
+        # pipeline pass for its whole lifetime.
+        batch.pending_after_commit = bool(raw)
+        batch.chunks = raw.splitlines(keepends=True)
+        parsed: list[tuple[int, InboxLine]] = []
+        for ordinal, chunk in enumerate(batch.chunks):
+            values = _parse(chunk)
+            if len(values) == 1:
+                parsed.append((ordinal, values[0]))
+        deliverable = _deliverable([line for _, line in parsed])
+        batch.rows = [(i, line) for i, line in parsed if any(line is v for v in deliverable)]
+        # Only parsed recall/withheld rows are handled here. Malformed bytes
+        # have no mapping and must survive every commit byte-for-byte.
+        batch.handled.update(i for i, line in parsed if not any(line is v for v in deliverable))
+
+
+def commit_inbox_batch(batch: InboxReadBatch) -> None:
+    """Remove only known handled raw ranges; never consume pending sole copies."""
+    if not batch.acquired or batch.raw is None:
+        return
+    if not batch.handled:
+        return
+    with _journal_lock(batch.directory):
+        path = inbox_path(batch.directory)
+        if path.is_symlink() or not path.is_file():
+            raise OSError("inbox disappeared during claim")
+        stat = path.stat()
+        if batch.path_identity != (stat.st_dev, stat.st_ino):
+            raise OSError("inbox inode changed during claim")
+        current = path.read_bytes()
+        if not current.startswith(batch.raw):
+            raise OSError("inbox snapshot prefix changed")
+        if any(type(i) is not int or i < 0 or i >= len(batch.chunks) for i in batch.handled):
+            raise OSError("invalid handled inbox ordinal")
+        payload = (
+            b"".join(chunk for i, chunk in enumerate(batch.chunks) if i not in batch.handled)
+            + current[len(batch.raw) :]
+        )
+        temporary: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent, prefix=".inbox-commit-", delete=False
+            ) as handle:
+                temporary = handle.name
+                count = handle.write(payload)
+                if count != len(payload):
+                    raise OSError("short staged inbox commit")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            batch.published = True
+            temporary = None
+            # Windows has no portable directory fsync; elsewhere failure after
+            # replace is explicit uncertain durability, never rollback of tail.
+            if os.name != "nt":
+                fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            batch.durable = True
+            batch.pending_after_commit = bool(payload)
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+
+
+async def claim_read_batch_or_defer(batch: InboxReadBatch) -> bool:
+    """Claim, or defer to a delivery another runtime is already running.
+
+    A held reader lease is the DESIGNED handover, not a fault: the outgoing
+    runtime keeps it across its whole delivery (owner prompts here run 27-37 s,
+    past LOCK_WAIT_S), so the successor's boot or close would otherwise fail
+    before its own admission work. The destructive drain this replaces answered
+    exactly this with an empty batch (``WakeLockBusy``/``WakeLockUnavailable``/
+    ``OSError`` -> ``[]``), so the drain's documented best-effort contract is
+    unchanged. Cancellation is NOT contained: whoever entered the seat settles
+    it, and ``settle_read_batch`` releases the lease if the claim got that far.
+    """
+    from local_operator.wakes.spooled import await_spool_write
+
+    try:
+        await await_spool_write(claim_inbox_batch, batch)
+    except asyncio.CancelledError:
+        raise
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return False
+    return True
+
+
+def release_inbox_batch(batch: InboxReadBatch) -> None:
+    try:
+        batch.reader.release()
+    finally:
+        batch.acquired = False
+
+
+async def finish_read_batch(batch: InboxReadBatch) -> None:
+    """Commit/release complete before marker settlement or cancellation escapes."""
+    from local_operator.wakes.spooled import await_spool_write
+
+    if not batch.acquired:
+        # A deferred claim holds no lease and has no snapshot: release the seat
+        # and leave the live owner's journal and marker alone.
+        leave_read_batch(batch)
+        return
+    error: BaseException | None = None
+    try:
+        await await_spool_write(commit_inbox_batch, batch)
+    except BaseException as exc:
+        error = exc
+    try:
+        await await_spool_write(release_inbox_batch, batch)
+    except BaseException as exc:
+        if error is not None:
+            raise BaseExceptionGroup("inbox commit and release failed", [error, exc])
+        raise
+    finally:
+        leave_read_batch(batch)
+    if error is not None:
+        raise error
+
+
+async def admit_batch_row(batch: InboxReadBatch, ordinals: tuple[int, ...], admission) -> object:
+    """Join a submitted admission and remember acceptance even under cancellation."""
+    task = asyncio.ensure_future(admission)
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.wait((task,))
+            result = task.result()
+            batch.handled.update(ordinals)
+            break
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                if cancellation is not None:
+                    raise BaseExceptionGroup("admission cancelled twice", [cancellation, exc])
+                raise
+            if cancellation is None:
+                cancellation = exc
+        except BaseException as exc:
+            if cancellation is not None:
+                raise BaseExceptionGroup("cancelled admission failed", [cancellation, exc])
+            raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+async def settle_read_batch(
+    batch: InboxReadBatch, body_error: BaseException | None = None, *, cwd: str = ""
+) -> None:
+    """One owner joins commit/release before marker bookkeeping, retaining faults."""
+    from local_operator.wakes.spooled import await_spool_write
+
+    owned = batch.acquired
+    errors: list[BaseException] = [] if body_error is None else [body_error]
+    try:
+        await finish_read_batch(batch)
+    except BaseException as exc:
+        errors.append(exc)
+    else:
+        if not owned:
+            # Deferred to the runtime that owns the lease; its settle retires the
+            # marker. Settling here would clear an obligation we never served.
+            if errors:
+                raise (
+                    errors[0]
+                    if len(errors) == 1
+                    else BaseExceptionGroup("inbox delivery failed before a deferred claim", errors)
+                )
+            return
+        try:
+            if batch.drop_after_release:
+                await await_spool_write(drop_owed_turn, batch.directory)
+            else:
+                await await_spool_write(settle_owed_turn, batch.directory, cwd=cwd)
+        except BaseException as exc:
+            errors.append(exc)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("inbox delivery and settlement failed", errors)
+
+
+def _journal_lock(session_dir: Path) -> WakeWriteLock:
+    # Unlike the opportunistic inode flock, this persistent mutex serializes
+    # EVERY cooperating append/recall/drain/purge, including rollback on Windows.
+    # Updated writers must activate together; older unlocked binaries are outside
+    # this contract. No inode replacement or unknown-file repair is attempted.
+    return WakeWriteLock(session_dir, name=".inbox-write.lock")
+
+
+#: Session directories whose inbox transport locks THIS THREAD holds. The
+#: recall executed inside the drain's own critical section (the marker-during-
+#: parse interleave) runs its locked body directly instead of acquiring a second
+#: time: one acquisition per delivery, released exactly once, is the invariant.
+#: Scoped to the thread because the locked body is synchronous on that thread;
+#: a recall from anywhere else still waits on the file and answers False at the
+#: deadline, which is the documented refusal.
+_open_scopes = threading.local()
+
+
+def _holds_inbox_locks(session_dir: Path) -> bool:
+    held = getattr(_open_scopes, "dirs", None)
+    return bool(held) and str(Path(session_dir).resolve()) in held
+
+
+@contextmanager
+def _inbox_locks(session_dir: Path) -> Iterator[None]:
+    """Take reader -> journal once and mark this thread as the holder.
+
+    The mark is what lets a nested recall reuse the acquisition instead of
+    queueing behind it; it carries no descriptor, so there is nothing to release
+    from another thread and no lock can outlive its ``with`` statement.
+    """
+    key = str(Path(session_dir).resolve())
+    with WakeWriteLock(session_dir, name=".inbox-reader.lock"):
+        with _journal_lock(session_dir):
+            held = getattr(_open_scopes, "dirs", None)
+            if held is None:
+                held = set()
+                _open_scopes.dirs = held
+            held.add(key)
+            try:
+                yield
+            finally:
+                held.discard(key)
+
+
+def _append_payload(fd: int, payload: bytes) -> None:
+    """Roll back only this serialized writer's tail; refuse an existing torn tail.
+
+    A failed rollback leaves a non-newline tail, which the NEXT append refuses.
+    Full-row fsync failure is uncertain delivery, not exactly-once success.
+    """
+    end = os.lseek(fd, 0, os.SEEK_END)
+    if end:
+        os.lseek(fd, -1, os.SEEK_END)
+        if os.read(fd, 1) != b"\n":
+            raise OSError("inbox has an incomplete tail")
+    try:
+        count = os.write(fd, payload)
+        if count != len(payload):
+            raise OSError("short inbox append")
+        os.fsync(fd)
+    except OSError:
+        # All mutations share _journal_lock. Never roll back after unlocking or
+        # truncate another cooperating writer's acknowledged bytes.
+        os.ftruncate(fd, end)
+        os.fsync(fd)
+        raise
+
+
 def append_inbox(session_dir: Path, line: InboxLine) -> bool:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with _journal_lock(session_dir):
+            return _append_inbox_locked(session_dir, line)
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return False
+
+
+def _append_inbox_locked(session_dir: Path, line: InboxLine) -> bool:
     """Spool one message for a session that is not running. True if written.
 
     ``O_APPEND`` so concurrent writers interleave whole lines rather than
@@ -415,7 +762,7 @@ def append_inbox(session_dir: Path, line: InboxLine) -> bool:
     path = inbox_path(session_dir)
     payload = json.dumps(line.to_json(), separators=(",", ":")).encode() + b"\n"
     try:
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | O_BINARY, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND | O_BINARY, 0o600)
     except OSError:
         logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
         return False
@@ -431,7 +778,7 @@ def append_inbox(session_dir: Path, line: InboxLine) -> bool:
                     MAX_INBOX_ROWS,
                 )
                 return False
-            os.write(fd, payload)
+            _append_payload(fd, payload)
         return True
     except OSError:
         logger.warning("inbox append failed for %s", session_dir.name, exc_info=True)
@@ -462,99 +809,82 @@ def _parse(raw: bytes) -> list[InboxLine]:
     return lines
 
 
+def append_for_successor(root: Path, session_dir: Path, line: InboxLine, *, cwd: str = "") -> bool:
+    """Persist obligation BEFORE append under one mutex, and raise only after unlock.
+
+    An append failure retains its marker for reconciliation. Its receipt is a
+    refusal, never exactly-once delivery; existing message IDs remain authority.
+    """
+    from local_operator.wakes.spooled import (
+        SpoolWriteError,
+        _note_locked,
+        _raise_reader,
+        _session_lock,
+    )
+
+    owes = line.source == SOURCE_USER or line.wake
+    with _session_lock(root, session_dir.name):
+        if owes and not _note_locked(root, session_dir.name, cwd=cwd):
+            raise SpoolWriteError("could not persist successor obligation")
+        written = append_inbox(session_dir, line)
+    if owes:
+        _raise_reader(root, session_dir.name)
+    return written
+
+
 def settle_owed_turn(session_dir: Path, *, cwd: str = "") -> None:
-    """Make the owed-turn record agree with this session's spool, after a drain.
+    """Complete owed-turn bookkeeping after delivery, off-loop and awaited.
 
-    Called by both drains once they have finished with the spool, and it settles
-    in BOTH directions because the spool is the authority and the record is a
-    claim about it:
-
-    * the spool still holds a row that asks for a turn → the record must EXIST
-      (a raise is still owed). It usually does — the writer put it there — but a
-      supervisor that read the file while ``drain_inbox`` had it emptied (the
-      deferral path re-appends what it will not deliver) can have cleared it in
-      that window, and re-noting here is what closes that hole (review round 1,
-      R1-4).
-    * the spool no longer holds one → drop the record, judged against the value
-      this call read so a row that lands meanwhile re-arms it instead of being
-      deleted under (``clear_spooled_turn``'s compare-and-delete guard).
-
-    Best-effort: the drain's own delivery has already happened by the time this
-    runs, and a store that cannot be written (or a config dir this process cannot
-    see) must not turn a delivered message into a failed turn. The cost of
-    leaving a record behind is one engage the supervisor should not have made; the
-    cost of raising here is the turn.
+    A storage refusal is a settlement failure, not permission to redeliver the
+    already delivered row. Clear rechecks inbox authority under the admission
+    mutex; re-arm persists before returning.
     """
     from local_operator.paths import config_dir
     from local_operator.wakes.spooled import (
-        clear_spooled_turn,
-        note_spooled_turn,
+        SpoolWriteError,
+        _note_locked,
+        _raise_reader,
+        _session_lock,
+        clear_if_no_owed_turn,
         read_spooled_turn,
         spool_owes_turn,
     )
 
-    try:
-        root = config_dir()
-        session_id = session_dir.name
+    root = config_dir()
+    session_id = session_dir.name
+    raised = False
+    # Re-arm is a writer, so its whole decision/write is awaited off-loop by
+    # both drain owners. Clear separately reacquires NB and rechecks authority.
+    with _session_lock(root, session_id):
         if spool_owes_turn(session_dir):
-            if read_spooled_turn(root, session_id) is None:
-                note_spooled_turn(root, session_id, cwd=cwd)
-            return
-        record = read_spooled_turn(root, session_id)
-        if record is not None:
-            clear_spooled_turn(root, session_id, expected_updated_at_ms=record.get("updated_at_ms"))
-    except Exception:  # noqa: BLE001 — a bookkeeping failure is not a delivery failure
-        logger.debug("could not settle the owed turn for %s", session_dir, exc_info=True)
+            if not _note_locked(root, session_id, cwd=cwd):
+                raise SpoolWriteError("could not rearm owed turn")
+            raised = True
+    if raised:
+        _raise_reader(root, session_id)
+        return
+    record = read_spooled_turn(root, session_id)
+    if record is not None:
+        clear_if_no_owed_turn(
+            root, session_id, session_dir, expected_generation=record.get("generation")
+        )
 
 
 def drop_owed_turn(session_dir: Path) -> None:
-    """Drop this session's owed-turn record because NO raise can discharge it.
+    """Decline peer-only bootstrap without deleting a newly admitted owner row.
 
-    The one case that calls it is the boot drain's deferral: a session with no
-    durable history keeps its PEER rows until the owner's first turn
-    (``process._drain_inbox_into``'s ``requires_engagement`` branch), so every
-    runtime raised for that record would boot, defer the same rows and exit —
-    real work, hourly, that delivers nothing (review round 1, R1-10). The spool
-    row is untouched and the owner's first turn still drains it, which is the
-    deferral the sender's receipt actually describes.
-
-    TWO GUARDS, because this is the third unguarded unlink in the circuit and the
-    first two both took a fix in review (QA round 2, R2-Q2):
-
-    * IT REFUSES WHEN THE SPOOL HOLDS THE OWNER'S OWN WORDS. A ``SOURCE_USER`` row
-      is dischargeable by exactly the raise this function is declining — the
-      successor's boot drain RUNS it, durable history or not — so a record that
-      arrived for one must survive; the deferral judgement is about the peer rows
-      beside it. Without this guard the drop would delete a record the owner's own
-      prompt had just written, which is defect (B) once more, this time caused by
-      the fix for R1-10 rather than by the cap.
-    * AND IT PASSES ``expected_updated_at_ms``, the same compare-and-delete the
-      reconciler and :func:`settle_owed_turn` pass: the record is judged from the
-      read a moment earlier, so a record that has changed since is left for the
-      next pass rather than unlinked on a stale judgement. What the guard narrows
-      is the window, from the whole deferral to the unlink itself.
-
-    Best-effort, like every other write on this path.
+    Busy retains the marker. The no-owner authority is rechecked under the same
+    mutex as generation comparison; peer-deferral semantics stay unchanged.
     """
     from local_operator.paths import config_dir
-    from local_operator.wakes.spooled import (
-        clear_spooled_turn,
-        read_spooled_turn,
-        spool_has_owner_row,
-    )
+    from local_operator.wakes.spooled import clear_if_no_owner_row, read_spooled_turn
 
-    try:
-        if spool_has_owner_row(session_dir):
-            return
-        root = config_dir()
-        record = read_spooled_turn(root, session_dir.name)
-        if record is None:
-            return
-        clear_spooled_turn(
-            root, session_dir.name, expected_updated_at_ms=record.get("updated_at_ms")
+    root = config_dir()
+    record = read_spooled_turn(root, session_dir.name)
+    if record is not None:
+        clear_if_no_owner_row(
+            root, session_dir.name, session_dir, expected_generation=record.get("generation")
         )
-    except Exception:  # noqa: BLE001 — see settle_owed_turn
-        logger.debug("could not drop the owed turn for %s", session_dir, exc_info=True)
 
 
 def peek_inbox(session_dir: Path) -> list[InboxLine]:
@@ -701,6 +1031,18 @@ def _holds_owner_row(raw: bytes, command_id: str) -> bool:
 
 
 def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
+    if not session_dir.is_dir():
+        return False
+    try:
+        if _holds_inbox_locks(session_dir):
+            return _withdraw_inbox_locked(session_dir, command_id)
+        with _inbox_locks(session_dir):
+            return _withdraw_inbox_locked(session_dir, command_id)
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return False
+
+
+def _withdraw_inbox_locked(session_dir: Path, command_id: str) -> bool:
     """Record that the owner took a spooled message back. True if recorded.
 
     APPEND-ONLY, and that is a measured decision rather than a style one. The
@@ -782,7 +1124,7 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
                 return False
             marker = InboxLine(text="", sender={}, source=SOURCE_RECALL, command_id=command_id)
             payload = json.dumps(marker.to_json(), separators=(",", ":")).encode() + b"\n"
-            os.write(fd, payload)
+            _append_payload(fd, payload)
             if not _holds_owner_row(_read_all(fd), command_id):
                 logger.info(
                     "inbox recall for %s lost the race with a drain; the message will run",
@@ -798,6 +1140,16 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
 
 
 def remove_wake_rows(session_dir: Path, wake_id: str) -> int:
+    if not session_dir.is_dir():
+        return 0
+    try:
+        with _inbox_locks(session_dir):
+            return _remove_wake_rows_locked(session_dir, wake_id)
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return 0
+
+
+def _remove_wake_rows_locked(session_dir: Path, wake_id: str) -> int:
     """Drop every pending spooled fire of ONE wake. Returns how many went.
 
     **The defect half this closes.** Spooled rows outlive the schedule that wrote
@@ -943,6 +1295,16 @@ def _replace_remainder(path: Path, consumed: bytes) -> None:
 
 
 def drain_inbox(session_dir: Path) -> list[InboxLine]:
+    if not session_dir.is_dir():
+        return []
+    try:
+        with _inbox_locks(session_dir):
+            return _drain_inbox_locked(session_dir)
+    except (WakeLockBusy, WakeLockUnavailable, OSError):
+        return []
+
+
+def _drain_inbox_locked(session_dir: Path) -> list[InboxLine]:
     """Consume every spooled message, in write order. Called once, at open.
 
     Read and removal happen under one non-blocking lock so a concurrent
