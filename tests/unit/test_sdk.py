@@ -1500,7 +1500,7 @@ async def test_sdk4_execution_oracle_rejects_broken_consumers(
         ({"language": "auto"}, {"LANG": "hi_IN.UTF-8"}, "hi", "hi"),
         ({}, {}, "en", "en"),
         ({"language": "zh-CN"}, {}, "en", "en"),
-        ({"language": "ur"}, {}, "en", "en"),
+        ({"language": "ur"}, {}, "ur", "ur"),
         ({"language": "unknown"}, {}, "en", "en"),
         ({"language": "fr"}, {"LOP_LANG": "es"}, "fr", "fr"),
         ({"language": "fr"}, {"LOP_I18N": "0"}, "en", "en"),

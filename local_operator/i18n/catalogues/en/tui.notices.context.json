@@ -143,5 +143,10 @@
     "role": "TUI notice text",
     "tone": "terse, operator-facing status",
     "note": "EN-only context sidecar; boot-toast headline"
+  },
+  "tui.notices.fast_mode_refused": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the provider refused fast mode and the dial was reset. {selector} names the route that refused, {reason} is its own wording with any trailing full stop stripped — the sentence supplies the punctuation"
   }
 }

@@ -117,10 +117,14 @@ async def test_the_journal_row_keeps_the_choice_and_the_boot_selector(tmp_path):
 
     rows = _rows(session)
     assert rows, "a chosen level on the birth model must be journalled"
+    # The dial rides the same SNAPSHOT (``test_fast_survives_restart`` owns its
+    # own edges); ``False`` here is the birth spec's own state, recorded rather
+    # than omitted so a later OFF can never be read as "no opinion".
     assert rows[-1] == {
         "version": 2,
         "selector": "anthropic/claude-opus-5",
         "effort": "max",
+        "fast": False,
         "boot": "anthropic/claude-opus-5",
     }
     saved = read_model_selection(tmp_path / "sess")

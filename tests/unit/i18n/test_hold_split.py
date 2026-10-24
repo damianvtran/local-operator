@@ -47,8 +47,15 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # independently audited row makes it TWENTY-SEVEN. The S3e remote-compute
     # wave adds one row per carried namespace (`cli.exec_remote_help`,
     # `wire.remote_compute`) -- TWENTY-NINE. The pin stays cardinal so an
-    # unrelated held namespace cannot slip in.
-    assert len(hindi) == 29
+    # unrelated held namespace cannot slip in. The session-transcript-
+    # compression slice's independently audited 8-key `wire.settings` delta
+    # (0 blocker, 0 major; comments carried) makes it THIRTY. The R5 stale-ask
+    # wave's two independently audited namespaces (`tui.asks`, `relay.ask`)
+    # make it THIRTY-TWO, and the P5 command-palette slice's independently
+    # audited 7-key `tui.palette` row makes it THIRTY-THREE. The fast-mode
+    # fix's refusal notices add one audited row each for `tui.notices` and
+    # `wire.errors.desktop` -- THIRTY-FIVE (both newly carried, 30 and 84 keys).
+    assert len(hindi) == 35
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

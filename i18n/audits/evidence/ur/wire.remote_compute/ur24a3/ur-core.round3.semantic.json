@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "record_kind": "semantic_audit_summary",
+  "round": 3,
+  "revision": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "scoped_keys_read": 19,
+  "verdict": "clean_terminal",
+  "auditor_findings": 0,
+  "round_2_dispositions_resolved": 13,
+  "new_findings": 0,
+  "namespaces": [
+    {
+      "namespace": "wire.errors.settings",
+      "namespace_key_count": 12,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "e5a010a1dbe5698c96b92d35f616e7dfc557c801b5e1eca1a6c84a543b92c91e",
+      "context_sha256": null,
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "namespace_key_count": 43,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "836d3410761ea771d3201602418322a8577b98681dbc946d590f9a8d48c6e509",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.settings",
+      "namespace_key_count": 818,
+      "scoped_keys_read": 16,
+      "changed_keys": 16,
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "0bb60816444bcf86a6c2d93e9c6ee7211fd377dd080e8cb39ae7f7d39ec30840",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.slash",
+      "namespace_key_count": 52,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "e1897b69d355d05d44dd6761affb866749fa431630234421dfb31c65141c8cb1",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "hashes_rederived_and_matched": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    }
+  ]
+}

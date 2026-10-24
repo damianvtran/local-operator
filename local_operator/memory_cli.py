@@ -25,9 +25,11 @@ from typing import Any, NoReturn
 from local_operator.memory import (
     MAX_BULK_FORGET,
     SCOPES,
+    STORAGE_WARNING_PERCENT,
     MemoryError,
     MemoryIdentity,
     MemoryStore,
+    format_bytes,
     quota_relief,
 )
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
@@ -44,6 +46,7 @@ OPERATIONS = (
     "status",
     "inspect",
     "consolidate",
+    "compact",
 )
 #: Fields a flag-based edit may change; everything else is carried over from the
 #: revision being corrected, so a one-word fix never needs the whole record retyped.
@@ -65,6 +68,7 @@ _EDITABLE = (
 USAGE = (
     "Commands: list · show ID · search WORDS · move ID [ID…] --to SCOPE · status · "
     "inspect (read-only preview) · consolidate (read-only duplicate preview) · "
+    "compact (journal maintenance preview; apply with --yes --expect FINGERPRINT) · "
     "edit ID --revision REV (--title T | --body B | --tag T | --alias A | --verified) · "
     "forget ID --revision REV --yes · forget --scope S [--older-than D] [--unverified] "
     "[--tag T] [--title-matches RE] [--body-matches RE] (dry run; confirm with "
@@ -86,6 +90,8 @@ EPILOG = (
     "  lop memory forget --scope global --older-than 30d --unverified\n"
     "  lop memory forget --scope global --older-than 30d --unverified --yes --expect <fp>\n"
     "  lop memory consolidate --scope global --limit 10\n"
+    "  lop memory compact\n"
+    "  lop memory compact --yes --expect <fp>\n"
     "Session-scoped facts need the session: add --session ID (inside a session the /memory "
     "command binds it automatically)."
 )
@@ -163,7 +169,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="forget: confirm the removal (with filters: perform the previewed set)",
+        help="forget: confirm the removal (with filters: perform the previewed set) · "
+        "compact: apply the previewed journal compaction",
     )
     parser.add_argument(
         "--older-than",
@@ -195,7 +202,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "--expect",
         default="",
         metavar="FINGERPRINT",
-        help="forget filters: the fingerprint printed by the dry run being confirmed",
+        help="forget filters/compact: the fingerprint of the dry run being confirmed",
     )
     parser.add_argument(
         "--force",
@@ -593,6 +600,38 @@ def _consolidate(
     }
 
 
+def _compact(store: MemoryStore, prefix: str, *, confirm: bool, expect: str) -> dict[str, Any]:
+    """Journal compaction: a preview unless confirmed, then the previewed set only.
+
+    The store is the authority on the fingerprint — it recomputes the plan inside
+    its write transaction — so this function never compares a stale preview
+    itself. It only refuses the two combinations that cannot be meant and prints
+    the exact command that applies the preview, so the operator's confirmation
+    is a paste rather than a reconstruction.
+    """
+    if expect and not confirm:
+        raise MemoryError(
+            "--expect confirms a preview: pass it with --yes, or run the preview alone. "
+            "Nothing was deleted."
+        )
+    if not confirm:
+        plan = store.journal_plan()
+        applies = bool(plan["ops"]["dropped"] or plan["storage"]["freelist_pages"])
+        return {
+            **plan,
+            "action": "compact-preview",
+            "confirm": (
+                f"{prefix} compact --yes --expect {plan['fingerprint']}" if applies else ""
+            ),
+        }
+    if not expect:
+        raise MemoryError(
+            "Confirming a compaction needs the fingerprint from its preview. Nothing was "
+            f"deleted. Run: {prefix} compact"
+        )
+    return store.compact(expect=expect)
+
+
 def execute(
     args: argparse.Namespace,
     *,
@@ -622,7 +661,6 @@ def execute(
         "--unverified": bool(args.unverified),
         "--title-matches": bool(args.title_matches),
         "--body-matches": bool(args.body_matches),
-        "--expect": bool(args.expect),
         "--force": bool(args.force),
     }
     if args.operation != "forget":
@@ -635,6 +673,13 @@ def execute(
                 + ("applies" if len(stray) == 1 else "apply")
                 + " to a filter-based `forget` only (--tag also sets tags on `edit`)."
             )
+    if args.expect and args.operation not in ("forget", "compact"):
+        # ``--expect`` confirms a preview (a bulk forget, or a journal compaction).
+        # On any other verb a silently ignored confirmation is worse than a
+        # refusal: the operator believes a preview was honoured.
+        raise MemoryError(
+            "--expect confirms a preview: it applies to a filter-based `forget` or " "`compact`."
+        )
     if args.operation == "inspect":
         # Inspect lists; it never targets a row. A silently ignored target reads
         # as a filter that was applied (same argument as the --limit refusal
@@ -682,6 +727,26 @@ def execute(
                 "context": _context(args, store, prefix),
             },
         )
+    if args.operation == "compact":
+        # BEFORE import_session(): compaction must not first replay a session's
+        # portable log into the store it is about to shrink. The pass itself is
+        # store-wide maintenance, so a scope would be a filter that cannot apply.
+        if args.target:
+            raise MemoryError(
+                f"`{prefix} compact` reviews the whole journal; it never targets a row. "
+                f"Use `{prefix} show {args.target[0]}` for that fact."
+            )
+        if scope:
+            raise MemoryError(
+                "Compaction is a whole-store pass: --scope does not narrow it. "
+                "Nothing was deleted."
+            )
+        if args.revision:
+            raise MemoryError(
+                "--revision applies to one fact; compaction has no revision. "
+                "Nothing was deleted."
+            )
+        return _compact(store, prefix, confirm=args.yes, expect=args.expect)
     _bound(store, scope)
     store.import_session()
     words = list(args.target)
@@ -943,6 +1008,17 @@ _PEER_REMEDY: dict[str, str] = {
 }
 
 
+def _compact_command(usage: dict[str, Any]) -> str:
+    """The VACUUM remedy for a full store, pointing at THIS store's file.
+
+    The path comes from the status payload rather than the default location:
+    memory can live under a relocated config dir, and a VACUUM against the
+    wrong file is a silent no-op that reads as a failed remedy.
+    """
+    path = str(usage.get("database_path") or "")
+    return f"`sqlite3 {shlex.quote(path)} 'VACUUM'`" if path else "`VACUUM`"
+
+
 def _status_text(value: dict[str, Any]) -> str:
     policy_ = value["policy"]
     sync = value["sync"]
@@ -1024,10 +1100,43 @@ def _status_text(value: dict[str, Any]) -> str:
                 lines += _shaped(f"Remedy: {fallback}")
             lines += _shaped("Full peer text: `lop memory status --json`.")
     usage = value["usage"]
-    lines.append(
-        f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded · "
-        f"{usage.get('storage_bytes', 0)} bytes"
+    lines.append(f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded")
+    # Bytes and tokens are SEPARATE budgets with different failure modes: token
+    # headroom does not mean the store can grow, and a full page cap refuses
+    # writes while the token quota still reports plenty left. Both are always
+    # shown, so neither can hide the other.
+    used = int(usage.get("storage_bytes") or 0)
+    cap = int(usage.get("storage_cap_bytes") or 0)
+    percent = float(usage.get("storage_percent") or 0.0)
+    free_bytes = int(usage.get("storage_free_bytes") or 0)
+    storage = (
+        f"Storage: {format_bytes(used)} of {format_bytes(cap)} ({percent}% of the store cap)"
+        if cap
+        else f"Storage: {format_bytes(used)}"
     )
+    lines.append(storage)
+    if usage.get("storage_full"):
+        lines += _shaped(
+            "Store FULL: the memory database has reached its byte cap, so writes that "
+            "need a new page are refused until space is freed."
+        )
+        lines.append("Reclaim: `lop memory forget SCOPE/ID --revision REV --yes`.")
+        lines.append(f"Compact: {_compact_command(usage)}.")
+        lines.append("Run the Compact command first if the forget is also refused.")
+    elif cap and percent >= STORAGE_WARNING_PERCENT:
+        if free_bytes:
+            # Free pages are reused for any table, so this state still writes;
+            # claiming a refusal here was the round-2 MAJOR defect inverted.
+            lines += _shaped(
+                f"Reusing freed pages: {format_bytes(free_bytes)} is available at "
+                f"{percent}% of the store cap; a write uses it before the file must grow."
+            )
+        else:
+            lines += _shaped(
+                f"Near the storage cap: {percent}% of the {format_bytes(cap)} cap is in "
+                "use with no free pages left, so a write that needs more pages than "
+                "remain will be refused."
+            )
     quotas = usage.get("quotas") or []
     if quotas:
         # Wrapped at the repo's row bar: a NoticeBlock clips a longer line at the
@@ -1316,6 +1425,86 @@ def _bulk_receipt_text(value: dict[str, Any]) -> str:
     return "\n".join(lines + _quota_receipt(value))
 
 
+def _compact_text(value: dict[str, Any], prefix: str) -> str:
+    """Journal compaction preview or receipt.
+
+    The preview states an ESTIMATE and says so: only the applied pass knows the
+    file it left, and a preview that reads like a promise invites an operator to
+    plan a disk budget on a prediction.
+    """
+    if not value["exists"]:
+        return f"No memory store at {value['database_path']}; nothing to compact."
+    ops, entities = value["ops"], value["entities"]
+    kept, dropped, edges = value["retained"], value["dropped"], value["causal_edges"]
+    storage = value["storage"]
+    applied = value["action"] == "compact"
+    cap_bytes = storage["page_cap"] * storage["page_size"]
+    lines = [
+        f"Journal: {ops['before']:,} operations · "
+        f"{entities['live'] + entities['forgotten']:,} entities "
+        f"({entities['live']:,} live, {entities['forgotten']:,} forgotten)."
+    ]
+    if ops["dropped"]:
+        lines += _shaped(
+            f"{'Deleted' if applied else 'Would delete'} {ops['dropped']:,} operations "
+            f"({format_bytes(dropped['payload_bytes'])} of payload): "
+            f"{dropped['superseded']:,} superseded revisions and "
+            f"{dropped['under_forgotten']:,} under forgotten entities."
+        )
+        lines += _shaped(
+            f"Kept {kept['ops']:,} ({format_bytes(kept['payload_bytes'])}): "
+            f"{kept['tombstones']:,} tombstones, {kept['pinned']} cross-entity pin endpoints."
+        )
+        lines += _shaped(
+            f"{'Pruned' if applied else 'Would prune'} {edges['dropped']:,} inert causal "
+            f"edges ({edges['kept']:,} remain)."
+        )
+    else:
+        lines.append(
+            f"Nothing to delete: the journal already holds one row per entity "
+            f"({kept['ops']:,} operations, {kept['tombstones']:,} tombstones)."
+        )
+    if applied:
+        if value.get("vacuumed"):
+            lines += _shaped(
+                f"File: {format_bytes(storage['bytes_before'])} "
+                f"({storage['pages_before']:,} pages) → "
+                f"{format_bytes(storage['bytes_after'])} ({storage['pages_after']:,} pages); "
+                f"reclaimed {format_bytes(storage['reclaimed_bytes'])} · now "
+                f"{100.0 * storage['bytes_after'] / cap_bytes:.1f}% of the cap."
+            )
+        else:
+            lines.append(
+                f"File unchanged: {format_bytes(storage['bytes_before'])} · "
+                f"{100.0 * storage['bytes_before'] / cap_bytes:.1f}% of the cap."
+            )
+    else:
+        lines += _shaped(
+            f"File: {format_bytes(storage['bytes_before'])} "
+            f"({storage['pages_before']:,} pages) → about "
+            f"{format_bytes(storage['bytes_after_estimate'])} "
+            f"({storage['pages_after_estimate']:,} pages)."
+        )
+        if storage["estimate_basis"] == "dbstat":
+            lines.append("Estimate from per-table page usage; the pass reports what it measured.")
+        else:
+            lines.append(
+                "Estimate from dropped payload only (this SQLite build has no dbstat): the "
+                "real reclaim is larger."
+            )
+        if value.get("confirm"):
+            lines.append("Nothing was deleted. Apply with: " + value["confirm"])
+        else:
+            lines.append("Nothing was deleted; there is no superseded row or free page to reclaim.")
+    last = value.get("last_pass")
+    if last:
+        lines += _shaped(
+            f"Last pass: {_date(last['at'])} · {last['ops']:,} operations "
+            f"({format_bytes(last['bytes'])} of payload)."
+        )
+    return "\n".join(lines)
+
+
 def _consolidate_text(value: dict[str, Any], prefix: str) -> str:
     """Render the duplicate preview. The word "proposes" and the closing "nothing
     was changed" keep a review aid from reading as an applied merge."""
@@ -1403,6 +1592,8 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
         return _bulk_receipt_text(value)
     if value.get("action") == "consolidate":
         return _consolidate_text(value, prefix)
+    if value.get("action") in ("compact", "compact-preview"):
+        return _compact_text(value, prefix)
     if "entries" in value:
         return _inspect_text(value, prefix)
     if "results" in value:

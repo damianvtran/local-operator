@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Assemble the portable second-audit receipt from independently derived evidence."""
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import date
+from pathlib import Path
+
+OUT = Path('/Users/damian/.local-operator/sessions/3e0f499dc2ee/scratchpad/ur-core-second-audit')
+COMMIT = '2189b61739e08b5f219d317ead68b4a5f4cf709f'
+summary = json.loads((OUT / 'mechanical-summary.json').read_text())
+findings_doc = json.loads((OUT / 'findings.json').read_text())
+fit = json.loads((OUT / 'fit-rendered.json').read_text())
+plurals = json.loads((OUT / 'plurals-rendered.json').read_text())
+contract = json.loads((OUT / 'contract-checks.json').read_text())
+findings = findings_doc['findings']
+
+namespace_rows = []
+for namespace in summary['namespaces']:
+    ns = namespace['namespace']
+    related = [f for f in findings if ns in f['namespaces']]
+    major = [f for f in related if f['severity'] in {'BLOCKER', 'MAJOR'}]
+    minor = [f for f in related if f['severity'] in {'MINOR', 'NIT'}]
+    verdict = 'changes_requested' if major else 'clean_with_followups' if minor else 'clean'
+    namespace_rows.append({
+        'namespace': ns,
+        'keys_read': namespace['key_count'],
+        'en_sha256': namespace['en_sha256'],
+        'ur_sha256': namespace['ur_sha256'],
+        'context_sha256': namespace['context_sha256'],
+        'verdict': verdict,
+        'result': 'failed' if major else 'passed',
+        'unresolved_blocker_major_count': len(major),
+        'finding_ids': [f['id'] for f in related],
+        'accepted_minor_nit_ids': [f['id'] for f in minor] if not major else [],
+    })
+
+receipt = {
+    'schema': 1,
+    'record_kind': 'auditor_receipt',
+    'audit': {
+        'name': 'Audit core ur round 1 second',
+        'locale': 'ur',
+        'surface': 'core',
+        'round': 1,
+        'independent_audit_ordinal': 2,
+        'date': str(date.today()),
+        'commit': COMMIT,
+        'worktree': '/Users/damian/local-operator/.worktrees/i18n-ur-core',
+        'status': 'failed',
+        'result': 'changes_requested',
+        'overall_verdict': 'changes_requested',
+    },
+    'auditor': {
+        'agent': 'translation-auditor (lopdev team); independent second core auditor',
+        'session': '3e0f499dc2ee',
+        'model': 'openrouter/moonshotai/kimi-k3.1-pro',
+        'fallback': 'none observed; the served model recorded above performed this audit',
+        'date': str(date.today()),
+        'result': 'failed',
+        # Core contract: unresolved BLOCKER/MAJOR only, not total findings.
+        'findings': findings_doc['core_auditor_findings'],
+    },
+    'independence': {
+        'independent_of_all_translator_sessions': True,
+        'translator_sessions': contract['translator_sessions'],
+        'other_new_second_audit_receipt_read': False,
+        'source_used_for_independence_check': 'i18n/provenance/ur-core.translator.json',
+        'note': 'This audit read the English and Urdu catalogues directly. It did not read or reuse another new second-audit receipt.',
+    },
+    'source_set': {
+        'namespace_count': len(namespace_rows),
+        'nonempty_namespace_count': sum(n['keys_read'] > 0 for n in namespace_rows),
+        'empty_namespace_count': sum(n['keys_read'] == 0 for n in namespace_rows),
+        'empty_namespaces': [n['namespace'] for n in namespace_rows if n['keys_read'] == 0],
+        'key_count': sum(n['keys_read'] for n in namespace_rows),
+        'keys_read': sum(n['keys_read'] for n in namespace_rows),
+        'semantic_review': 'Every English and Urdu value was read side by side, namespace by namespace; relevant English context sidecars were consulted for UI role, safety meaning, placeholders, and width.',
+        'hash_algorithm': 'SHA-256 over exact UTF-8 file bytes; context_sha256 is null when English has no sidecar',
+        'translator_provenance_hash_mismatch_count': len(contract['translator_hash_mismatches']),
+    },
+    'verdicts': {
+        'changes_requested_namespaces': [n['namespace'] for n in namespace_rows if n['verdict'] == 'changes_requested'],
+        'clean_with_followups_namespaces': [n['namespace'] for n in namespace_rows if n['verdict'] == 'clean_with_followups'],
+        'clean_namespaces': [n['namespace'] for n in namespace_rows if n['verdict'] == 'clean'],
+        'namespace_count_by_verdict': {
+            verdict: sum(n['verdict'] == verdict for n in namespace_rows)
+            for verdict in ['changes_requested', 'clean_with_followups', 'clean']
+        },
+        'severity_counts': findings_doc['severity_counts'],
+        'unresolved_blocker_major_count': findings_doc['core_auditor_findings'],
+        'total_findings_including_minor_nit': len(findings),
+    },
+    'checks': {
+        'repository': {
+            'head_verified': COMMIT,
+            'worktree_clean_after_audit': True,
+            'generate_check': {
+                'command': "env -i HOME=<isolated> LOCAL_OPERATOR_CONFIG_DIR=<isolated> PATH=$PATH TERM=xterm-256color PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python scripts/i18n/generate.py --check",
+                'actual_output': 'generate.py --check: 91 artifact(s) byte-identical',
+                'exit_code': 0,
+            },
+            'catalogue_check': {
+                'command': "env -i HOME=<isolated> LOCAL_OPERATOR_CONFIG_DIR=<isolated> PATH=$PATH TERM=xterm-256color PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+                'actual_output': 'check.py: catalogue checks: 0 problem(s)',
+                'exit_code': 0,
+            },
+            'interpreter_note': 'The worktree had no local .venv; the existing primary-checkout interpreter ran the pinned worktree scripts with PYTHONPATH set to the pinned worktree. No dependency was installed.',
+        },
+        'mechanical': {
+            'key_set_mismatch_count': contract['key_set_mismatch_count'],
+            'icu_signature_mismatch_count': contract['icu_signature_mismatch_count'],
+            'literal_token_mismatch_count': contract['literal_token_mismatch_count'],
+            'number_date_time_skeleton_key_count': summary['number_date_time_key_count'],
+            'literal_redaction_artifact_count': contract['literal_redaction_artifact_count'],
+            'literal_redaction_artifact_keys': contract['literal_redaction_artifact_keys'],
+            'note': 'Mechanical parity is not semantic approval. The redaction artifact and English leakage required native review.',
+        },
+        'plurals': {
+            'plural_key_count': plurals['plural_key_count'],
+            'runtime_render_count': plurals['render_count'],
+            'counts': [0, 1, 2, 21, 1.5],
+            'render_error_count': plurals['render_error_count'],
+            'cldr_category_mismatch_count': plurals['category_mismatch_count'],
+            'missing_literal_count_count': plurals['missing_literal_count_count'],
+            'digit_policy': 'Latin digits confirmed in runtime renders; one/other branches reviewed for native Urdu grammar.',
+        },
+        'fit_and_pseudo': {
+            'explicit_maxCells_key_count': fit['key_count'],
+            'actual_rendered_overflow_count': fit['actual_overflow_count'],
+            'worst_case_key_overflow_count': fit['worst_case_key_overflow_count'],
+            'pseudo_probe': 'Independent deterministic stress probe, not an advertised repository workflow: ceil(actual rendered cells * 1.30).',
+            'pseudo_30pct_overflow_count': fit['pseudo_30pct_overflow_count'],
+            'pseudo_disposition': 'Fit-risk evidence for the separate rendered gate; pseudo overflow alone is not counted as a translation defect when the actual Urdu fits.',
+            'materially_longer_candidate_count': contract['materially_longer_candidate_count'],
+            'materially_longer_disposition': contract['materially_longer_disposition'],
+        },
+        'native_semantics_register_glossary': {
+            'formality': 'آپ and respectful imperatives are used; no تم address and no direct تو address were found in the complete read. تو occurs as the ordinary conjunction then.',
+            'glossary': 'Shared session/wake/agent/subagent/tool/transcript/workspace/approval/project/model/prompt/compaction/schedule/monitor terms were checked. Drift and unendorsed Latin prose are findings, not silently accepted.',
+            'allowed_english': 'Local Operator, lop/lo, omp/oh-my-pi, tool and command names, flags, config keys, paths, identifiers, URLs, event/machine tokens, official technology/product names, kept-Latin acronyms, enum/command syntax where the UI requires it, and the sidecar-required product noun Scratchpad.',
+            'english_leakage_result': 'Failed in wire.settings, wire.slash, tui.welcome, wire.remote_compute, and wire.errors.settings; narrower script drift is recorded in cli.exec_remote_help.',
+        },
+        'typography_rtl_static': {
+            'manual_bidi_control_key_count': len(contract['manual_bidi_control_keys']),
+            'urdu_digit_key_count': len(contract['urdu_digit_keys']),
+            'hindi_danda_key_count': len(contract['hindi_danda_keys']),
+            'informal_tum_key_count': len(contract['informal_tum_keys']),
+            'urdu_punctuation_counts': contract['urdu_punctuation_counts'],
+            'ascii_exclamation_keys': contract['ascii_exclamation_keys'],
+            'ascii_exclamation_disposition': contract['raw_probe_notes']['punctuation_disposition'],
+            'latin_runs': 'Reviewed in every value; allowed machine/product tokens were distinguished from untranslated prose.',
+            'rendered_rtl_evidence': 'NOT PERFORMED and NOT CLAIMED. Native bidi/shaping, RTL layout, punctuation rendering, and rendered fallback/long-text evidence remain a separate gate.',
+        },
+    },
+    'namespaces': namespace_rows,
+    'findings': findings,
+    'evidence': {
+        'portable_bundle': 'All paths below are sibling files in this receipt directory; .pairs files contain the complete 1,355-line English/Urdu review workbook.',
+        'findings_file': 'findings.json',
+        'contract_checks_file': 'contract-checks.json',
+        'mechanical_summary_file': 'mechanical-summary.json',
+        'plural_evidence_file': 'plurals-rendered.json',
+        'fit_evidence_file': 'fit-rendered.json',
+        'length_candidates_file': 'materially-longer.json',
+        'human_report_file': 'ur-core-round1-second-audit.md',
+        'reproduction_scripts': ['scripts/audit_ur_core.py', 'scripts/fit_ur_core.py', 'scripts/plural_ur_core.py'],
+    },
+    'not_claimed': [
+        'No catalogue, ledger, generated shipped.json, hold, source worktree, or PR was edited.',
+        'No native/rendered RTL or design sign-off is claimed.',
+        'No shipped eligibility or release approval is claimed.',
+        'No green mechanical check is presented as native semantic approval.',
+    ],
+}
+
+path = OUT / 'ur-core-round1-second-audit.receipt.json'
+path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(path)
+print(json.dumps({
+    'namespaces': len(namespace_rows),
+    'keys_read': receipt['source_set']['keys_read'],
+    'verdict': receipt['audit']['overall_verdict'],
+    'core_auditor_findings': receipt['auditor']['findings'],
+    'verdict_counts': receipt['verdicts']['namespace_count_by_verdict'],
+    'severity_counts': receipt['verdicts']['severity_counts'],
+}, ensure_ascii=False, indent=2))

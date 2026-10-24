@@ -194,7 +194,14 @@ def test_wire_bytes_are_unchanged_for_the_same_projection() -> None:
 #: client reads a missing key as "no video refs", the historical
 #: behaviour — which is what makes a re-pin the honest record here rather
 #: than a format break.
-_EXPECTED_DEGRADED_FRAME_DIGEST = "4ae1f9c38d645170ba7bc948cbe9abebb490e43d12760900a2f0822f018cd8f7"
+#: Re-pinned again, for the approval-policy fields on ``PendingRequest`` (the
+#: inline auto-mode feature): the pending card gained exactly three defaulted
+#: keys — ``approval_mode``, ``approval_provenance`` and
+#: ``approval_global_mode`` — all empty on this ask fixture, +76 bytes.
+#: Verified the same way: dropping those three keys from the new frame
+#: reproduces ``4ae1f9c3...`` byte for byte, so the frame is otherwise
+#: unchanged and the re-pin is cost-only, not a format change.
+_EXPECTED_DEGRADED_FRAME_DIGEST = "cd56998ba77c103af1772132b21307fa461d19c22ef3ec224a15bc76a2c28e10"
 
 
 # ---------------------------------------------------------------------------

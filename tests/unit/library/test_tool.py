@@ -4,8 +4,9 @@ import json
 
 import pytest
 
-from local_operator.library import index
+from local_operator.library import indexer, service
 from local_operator.library.metadata import MetadataStore
+from local_operator.library.store import LibraryStore
 from local_operator.tools.library_tool import build_library_tool, execute_library
 from local_operator.tools.registry import TOOL_BUILDERS
 
@@ -26,8 +27,9 @@ def library(tmp_path, monkeypatch):
     path = tmp_path / "notes.txt"
     path.write_text("hi")
     session(root, "abcdef123456", write_rows("w1", 1, path))
-    catalog = index.build_catalog(root, budget_s=None)
-    return root, catalog.assets[0].id
+    indexer.rebuild_now(root)
+    asset_id = LibraryStore(root).query_page(service.Query(), limit=1)[0][0].id
+    return root, asset_id
 
 
 @pytest.mark.asyncio

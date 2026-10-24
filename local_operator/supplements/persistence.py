@@ -23,6 +23,14 @@ generator is attached (lane C1b), through the same builders.
 PATHS IN THE ROW ARE NEVER ABSOLUTE (memo S-R14): ``Candidate.path`` is cwd- or ``~/``-relative
 already, and ``more[]`` carries the same form, capped at :data:`MORE_MAX`, behind the same
 denylist because only candidates that survived the pre-filter can reach this module.
+
+SOUNDS ARE ARTIFACTS, NOT DECORATION. Every sound a turn generated is written to the row,
+for the same reason a file callout is: the user made it, so it exists. The only truncation
+is :data:`SOUNDS_MAX` -- one bound for a pathological looping turn -- and it is DISCLOSED
+as ``sounds_more`` rather than applied silently. That distinction is the whole defect this
+module's sound handling was fixed for: an earlier ``sounds[:3]`` made a 14-item batch look
+like three sounds with no sign that eleven more existed, which is a selector wearing a
+bound's clothes.
 """
 
 import time
@@ -32,6 +40,7 @@ from typing import Any, Final, Mapping, Sequence
 from local_operator.supplements.candidates import Candidate
 from local_operator.supplements.contract import (
     MORE_MAX,
+    SOUNDS_MAX,
     SUPERSEDED_ERROR,
     SUPPLEMENT_CUSTOM_TYPE,
     SupplementDecision,
@@ -104,7 +113,12 @@ def build_details(
         "at": time.time() if at is None else at,
     }
     if sounds:
-        details["sounds"] = [dict(sound) for sound in sounds[:3]]
+        # EVERY sound, in generation order; only the pathological bound truncates, and
+        # it says so in ``sounds_more`` (the ``files_more`` precedent) so a reader can
+        # disclose the cut instead of the row quietly ending the list.
+        details["sounds"] = [dict(sound) for sound in sounds[:SOUNDS_MAX]]
+        if len(sounds) > SOUNDS_MAX:
+            details["sounds_more"] = len(sounds) - SOUNDS_MAX
     if decision.more:
         details["files_more"] = len(decision.more)
         details["more"] = [c.path for c in decision.more[:MORE_MAX]]

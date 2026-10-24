@@ -1,0 +1,9 @@
+{
+  "tui.palette.kind_agent": "एजेंट",
+  "tui.palette.kind_command": "कमांड",
+  "tui.palette.kind_session": "सत्र",
+  "tui.palette.kind_setting": "सेटिंग",
+  "tui.palette.kind_team": "टीम",
+  "tui.palette.no_matches": "कोई मिलान नहीं मिला",
+  "tui.palette.placeholder": "कमांड, सेटिंग, सत्र, एजेंट खोजें…"
+}
