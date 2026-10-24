@@ -232,26 +232,43 @@ async def _wire_for(owner: Any, config_dir: Path, auth_store: Any) -> Any:
 #: carries a code an operator can act on.
 RESERVATION_RECORDED = "recorded"
 
+#: A replay of an admission whose reservation already exists. NOT an error:
+#: the hub re-delivers after a crash, and the second pass must consume the
+#: message WITHOUT posting a second card.
+RESERVATION_ALREADY_RECORDED = "already_recorded"
 
-def _screening_fingerprint(receipt_row: Mapping[str, Any]) -> str:
-    """The digest ``consume_screening_receipt`` keys on, over the SAME columns.
 
-    WHY these five and not a smaller tuple: hydration re-reads the receipt and
-    must be able to reproduce this value. ``body_sha256`` alone is not enough
-    (the same bytes under a new template/model snapshots a different
-    admission), so the fingerprint carries the policy identity too.
+def _screening_fingerprint(owner: Any, receipt_row: Mapping[str, Any]) -> str:
+    """The digest hydration recomputes, over the SAME tuple the store keys on.
+
+    WHY the OWNER is in the pre-image: ``consume_screening_receipt`` scopes its
+    read by owner namespace first (store.py:3970-4010), so a digest that omits
+    it would match a different owner's identical receipt fields — every
+    reservation would then fail its admission check AFTER the card was already
+    posted, and the body would never hydrate. Two owners with byte-identical
+    receipts must therefore produce different fingerprints, which is exactly
+    what the test asserts.
+
+    WHY the other five: ``body_sha256`` alone is not enough (the same bytes
+    under a new template/model snapshot a different admission), so the
+    fingerprint carries the policy identity with it.
     """
+
+    from local_operator.team_bridge.store import _owner_key
 
     return hashlib.sha256(
         "\x1f".join(
-            str(receipt_row.get(field) or "")
-            for field in (
-                "body_sha256",
-                "template_sha256",
-                "model",
-                "admission_revision",
-                "envelope_digest",
-            )
+            [_owner_key(owner)]
+            + [
+                str(receipt_row.get(field) or "")
+                for field in (
+                    "body_sha256",
+                    "template_sha256",
+                    "model",
+                    "admission_revision",
+                    "envelope_digest",
+                )
+            ]
         ).encode("utf-8")
     ).hexdigest()
 
@@ -295,7 +312,7 @@ def _record_body_reservation(
             conversation_seq=ref.conversation_seq,
             mention=ref.mention,
             body_sha256=body_hash,
-            screening_fingerprint=_screening_fingerprint(receipt_row),
+            screening_fingerprint=_screening_fingerprint(owner, receipt_row),
             policy_epoch=int(receipt_row.get("policy_epoch") or 0),
             consent_version=consent.get("consent_version"),
             designated_session=designation,
@@ -308,7 +325,7 @@ def _record_body_reservation(
     # logging — a duplicate emit is normal after a crash, and no id or hash
     # belongs in a log line about it.
     logger.info("bridge: body reservation created=%s", created)
-    return RESERVATION_RECORDED
+    return RESERVATION_RECORDED if created else RESERVATION_ALREADY_RECORDED
 
 
 async def _deliver_card(
@@ -500,6 +517,20 @@ async def handle_conversation_available(
             body_hash=body_hash,
             designation=designation,
         )
+        if recorded == RESERVATION_ALREADY_RECORDED:
+            # A replay (crash-after-record, or a hub re-delivery) must not post
+            # a SECOND card: the row is the dedupe witness, and a duplicate
+            # wake costs the agent a turn for a message it already answered.
+            # RESIDUAL, stated rather than hidden: a crash in the window
+            # between recording and the card leaves a pending row with no
+            # wake; the row survives and stays claimable, and closing that
+            # window needs a card-delivery marker the claiming slice owns.
+            return {
+                "action": "duplicate",
+                "message_id": message_id,
+                "conversation_id": ref.conversation_id,
+                "reservation": "already_recorded",
+            }
         if recorded != RESERVATION_RECORDED:
             return {"action": "hold", "message_id": message_id, "code": recorded}
         detail = await _deliver_card(
