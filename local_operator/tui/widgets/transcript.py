@@ -69,7 +69,7 @@ from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.harness.peer_cycles import PeerCycleCertificate
 from local_operator.i18n.format import format_number
 from local_operator.i18n.keys import tui_transcript
-from local_operator.i18n.text import active_locale, tr
+from local_operator.i18n.text import active_locale, register_refresh, tr
 from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.composer_focus import (
@@ -77,6 +77,7 @@ from local_operator.tui.composer_focus import (
     focus_is_claimed,
     return_focus_to_composer,
 )
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.internal_work_membership import (
     WorkGroupIdentity,
     WorkGroupSnapshot,
@@ -1396,7 +1397,11 @@ class ExpandableActionBlock(TranscriptBlock):
 #: Resolved through the i18n runtime (T3, RFC §3.1): the marker strings are the
 #: en catalogue's ``tui.transcript.queued.*`` values — the leading middle dot and
 #: every word — so a wave moves them like every other extracted area.
-_t = tr("tui.transcript")
+_raw_t = tr("tui.transcript")
+
+
+_t = display_tr("tui.transcript", technical_params=("pid",))
+
 
 QUEUED_ROW_TEXT = _t(tui_transcript.queued_newest())
 #: The same state WITHOUT the offer, for every queued message but the newest.
@@ -1405,6 +1410,16 @@ QUEUED_ROW_TEXT = _t(tui_transcript.queued_newest())
 #: the same key promises a recall that press will decline — measured: two rows
 #: offering, one honouring (UX round 2, U4).
 QUEUED_ROW_TEXT_OLDER = _t(tui_transcript.queued_older())
+
+
+def _reload_copy() -> None:
+    """Remove old-locale isolates from import-time rows on every live switch."""
+    global QUEUED_ROW_TEXT, QUEUED_ROW_TEXT_OLDER
+    QUEUED_ROW_TEXT = _t(tui_transcript.queued_newest())
+    QUEUED_ROW_TEXT_OLDER = _t(tui_transcript.queued_older())
+
+
+register_refresh(_reload_copy)
 
 
 class UserBlock(TranscriptBlock):
@@ -2559,7 +2574,9 @@ class WakeBlock(ExpandableActionBlock):
                 if stripped.startswith("- "):
                     ids.append(stripped[2:].split(" ", 1)[0].split("(", 1)[0].strip())
             count = len(ids)
-            label = _t(tui_transcript.catchup_missed(count=count))
+            # Nest RAW localized prose: painting the inner label first would
+            # inject controls into the outer message and double-isolate it.
+            label = _raw_t(tui_transcript.catchup_missed(count=count))
             headline = _t(tui_transcript.catchup_headline(label=label))
             if ids:
                 # The same label treatment the single-delivery fold applies

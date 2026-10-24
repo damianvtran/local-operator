@@ -45,7 +45,7 @@ from local_operator.harness.jobs import (
 )
 from local_operator.herdr.reporter import HerdrReporter, state_from_title
 from local_operator.i18n.keys import tui_status
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import register_refresh
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.session.frontend_state import (
     format_context_tokens as _format_context_tokens,
@@ -53,6 +53,7 @@ from local_operator.session.frontend_state import (
 from local_operator.session.frontend_state import format_window as _format_window
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.terminal_title import SPINNER_FRAMES as _SPINNER_FRAMES
 from local_operator.tui.terminal_title import SPINNER_INTERVAL_S as _SPINNER_INTERVAL_S
 from local_operator.tui.terminal_title import TerminalTitle, TitleState, cwd_label
@@ -180,6 +181,7 @@ ICON_APPROVALS = "!"
 #: and this band's segment icons stay the only other marks on the row.
 ICON_TUNNEL = ICON_APPROVALS
 
+
 #: What the parked-connector rung says.
 #:
 #: The CONSEQUENCE, not the mechanism, and one word for all three park reasons.
@@ -204,7 +206,8 @@ ICON_TUNNEL = ICON_APPROVALS
 #: Resolved through the i18n runtime (T2): the en catalogue's tui.status.tunnel.parked
 #: is the one source for this word, so a translation wave moves it like every
 #: other band string and this constant never drifts from the catalogued copy.
-_t = tr("tui.status")
+_t = display_tr("tui.status")
+
 
 TUNNEL_PARKED_TEXT = _t(tui_status.tunnel_parked())
 

@@ -90,10 +90,11 @@ from local_operator import keymap as keymap_mod
 from local_operator import terminals
 from local_operator.i18n.keys import tui_status, tui_welcome
 from local_operator.i18n.messages import Msg
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import register_refresh
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
+from local_operator.tui.i18n_status import display_tr, technical_display
 from local_operator.tui.link_targets import _URL_START_RE, _body_end, _trim
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.status_line import format_model_label
@@ -123,11 +124,14 @@ from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 # from the resolved strings, so every cell-length claim in this file is
 # measured on exactly the text a user reads; the en-only context sidecar
 # (`tui.welcome.context.json`) carries the per-entry maxCells contract.
-_t = tr("tui.welcome")
+_t = display_tr("tui.welcome", technical_params=("version",))
+
+
 #: The status namespace (T2): the model row's state words are catalogued with the
 #: band's, because the two surfaces MUST agree on them (D1) — a single key
 #: resolved here and by ``status_line`` is how they cannot drift.
-_s = tr("tui.status")
+_s = display_tr("tui.status")
+
 
 #: The real local-operator mark, downsampled from the shipped raster asset
 #: (``static/local-operator-icon-2-light-clear.png``, also the app icon in
@@ -1209,7 +1213,7 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     rows.append((_PRIORITY_MODEL, Text(label, style=muted, no_wrap=True)))
     if info.cwd:
         shown = _fit_tail(_shorten_home(info.cwd), width)
-        rows.append((_PRIORITY_CWD, Text(shown, style=dim, no_wrap=True)))
+        rows.append((_PRIORITY_CWD, Text(technical_display(shown).plain, style=dim, no_wrap=True)))
     if info.update_available:
         # Same glyph/tint as the other ``!`` rows. The command is dropped
         # WHOLE when it does not fit — a half-printed ``/upd…`` is an
@@ -1329,12 +1333,14 @@ def _hint_lines(width: int, *, setup: bool = False, aida_name: str | None = None
     # the same ragged-edge effect that was removed from inside the status stack,
     # surviving one level up.
     if not key_column:
-        return steps + [Text(key, style=key_style, no_wrap=True) for key, _ in hints]
+        return steps + [
+            Text(technical_display(key).plain, style=key_style, no_wrap=True) for key, _ in hints
+        ]
 
     lines: list[Text] = list(steps)
     for key, desc in hints:
         line = Text(no_wrap=True)
-        line.append(key.ljust(key_column), style=key_style)
+        line.append(technical_display(key.ljust(key_column)).plain, style=key_style)
         line.append(desc, style=desc_style)
         lines.append(line)
     return lines
