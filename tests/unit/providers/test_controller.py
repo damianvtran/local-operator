@@ -4147,6 +4147,10 @@ class TestProviderView:
         assert active_row.state_detail is None
         assert sibling_row.state_detail == "shared Kimi login"
         logout = controller.logout_rows()
+        # ``logout_rows`` is ``list | None``: ``None`` is the documented
+        # "store unreadable" answer, not an empty result, so narrow it here
+        # instead of iterating the optional.
+        assert logout is not None
         assert [
             (row.definition.id, row.definition.name, row.credential_types, row.identity)
             for row in logout

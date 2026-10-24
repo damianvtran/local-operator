@@ -634,7 +634,10 @@ class ProviderController:
                 # (and every other provider) keeps its ordinary state; choosing
                 # by raw provider id here would hide this distinction behind a
                 # presentation special case rather than the stored credential.
-                from local_operator.providers.oauth.kimi import AUTH_HOST_KEY, DEFAULT_AUTH_HOST
+                from local_operator.providers.oauth.kimi import (
+                    AUTH_HOST_KEY,
+                    DEFAULT_AUTH_HOST,
+                )
 
                 oauth_rows = [row for row in mine if row.credential_type == "oauth"]
                 if len(oauth_rows) == 1:
