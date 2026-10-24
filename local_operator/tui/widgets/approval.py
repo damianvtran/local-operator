@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -945,8 +945,15 @@ class ApprovalBlock(TranscriptBlock):
 #: Each row carries the CONSEQUENCE as its description, because that is what
 #: the user is actually deciding between, and the letter it answers to, so the
 #: keys stay discoverable now that they are no longer the only way in.
+#: The Allow consequence under a gate that will prompt again. Also the string
+#: :meth:`ApprovalPrompt._row_description` swaps for the auto wording below.
+ALLOW_ASK_CONSEQUENCE = "run this call and ask again next time"
+#: The same consequence once the gate is auto: telling the reader to expect a
+#: prompt that will not come is the stale-copy defect this pair removes.
+ALLOW_AUTO_CONSEQUENCE = "run this call; later calls are auto"
+
 APPROVAL_CHOICES: tuple[tuple[str, str, str], ...] = (
-    ("Allow", "y", "run this call and ask again next time"),
+    ("Allow", "y", ALLOW_ASK_CONSEQUENCE),
     ("Deny", "n", "refuse this call; the turn continues"),
     ("Allow all", "A", "stop asking for this session"),
 )
@@ -1003,6 +1010,62 @@ def approval_question(tool_name: str, description: str) -> "AskQuestion":
             for label, _key, consequence in APPROVAL_CHOICES
         ],
     )
+
+
+#: What the card says about the approval mode in force, and where it came from.
+#:
+#: The card is the one place a user decides whether to loosen the gate, so it
+#: has to state the CURRENT rule as well as offer the two destinations — a
+#: destination with no statement of where the user stands is a switch they
+#: cannot read before pressing it. ``provenance`` is ``"global"`` (the file),
+#: ``"session"`` (this conversation's own recorded choice) or ``"pin"`` (a
+#: ``--yolo``/``--no-yolo`` flag on this run).
+#:
+#: ``saving`` and ``status`` share ONE rendering slot: the callout's state row
+#: is reserved from mount through the saved and refused states, so a save
+#: acknowledgement replaces a sentence instead of adding a row (the row budget
+#: is what keeps the conversation on screen — see ApprovalPrompt.set_note).
+@dataclass(frozen=True)
+class ApprovalPolicy:
+    mode: str = "ask"
+    provenance: str = "global"
+    #: The machine default in force, so a session override can name the thing
+    #: it overrides without inventing it. ``""`` = not known (no watcher, an
+    #: embed); the renderer then drops the "global X" clause rather than
+    #: guessing (UX round 2, U4).
+    global_mode: str = ""
+    saving: str = ""
+    status: str = ""
+    detail: str = ""
+
+
+#: The result of one setting gesture, returned to the card so it can acknowledge
+#: INLINE. ``kind`` separates the three outcomes the copy distinguishes:
+#: ``ok`` (the mode moved and was recorded), ``refused`` (this window holds no
+#: authority to loosen — nothing was written) and ``error`` (the write failed;
+#: the mode may or may not have moved). The reason is already safe to paint: it
+#: names a failure class, never a credential or a stack.
+@dataclass(frozen=True)
+class ApprovalSettingOutcome:
+    kind: str = "ok"
+    mode: str = "ask"
+    provenance: str = "global"
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.kind == "ok"
+
+
+#: The two secondary destinations, as data: the key that reaches each one and
+#: the scope word the app layer receives. Held here rather than spelled inline
+#: in the key handler and the renderer, so the letter printed beside a target
+#: and the callback it invokes cannot disagree.
+SETTING_KEYS: dict[str, str] = {"S": "session", "G": "global"}
+
+#: The mode words as a human reads them. ``auto`` in the command vocabulary is
+#: "Auto" in prose; the same capitalisation the band and the receipts use.
+_MODE_WORD = {"ask": "Ask", "auto": "Auto"}
 
 
 class ApprovalPrompt(AskPickerScreen):
@@ -1087,6 +1150,10 @@ class ApprovalPrompt(AskPickerScreen):
         tool_name: str,
         description: str,
         on_answer: Callable[[str], None] | None = None,
+        *,
+        policy: ApprovalPolicy | None = None,
+        on_set_session_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
+        on_set_global_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
     ) -> None:
         super().__init__(
             [approval_question(tool_name, description)],
@@ -1117,6 +1184,677 @@ class ApprovalPrompt(AskPickerScreen):
         # a future nobody resolves. (3.14 removes the implicit-loop fallback.)
         self._future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._on_answer = on_answer
+        self._policy = policy or ApprovalPolicy()
+        self._on_set_session_auto = on_set_session_auto
+        self._on_set_global_auto = on_set_global_auto
+        #: Painted spans, in BODY-LINE coordinates: ``(row, start, end, scope)``
+        #: for the callout, and ``(row, start, end, answer_index)`` for the
+        #: compact rail. Both are re-recorded on every paint from the same plan
+        #: that drew them; a stale span would make a target activate something
+        #: other than what it shows.
+        self._callout_spans: list[tuple[int, int, int, str]] = []
+        self._rail_spans: list[tuple[int, int, int, int]] = []
+        #: Where the injected chrome starts and how many rows it owns. Read by
+        #: the hit-test so a click on it never falls through to the base list's
+        #: row map (which only covers the lines the BASE drew).
+        self._chrome_start = 0
+        self._chrome_rows = 0
+        #: Whether the dense padding is currently applied. Assigning padding is
+        #: a layout invalidation, so the resize handler compares first.
+        self._dense_padded: bool | None = None
+
+    # -- the mode callout ----------------------------------------------------
+    #
+    # WHY THIS IS ON THE CARD AND NOT A POPUP: the two handles only make sense
+    # beside the decision they govern. A user deciding whether to allow a call
+    # is the one moment they can judge "asking me every time is noise" or "I
+    # want this session gated"; another screen would lose the context that
+    # motivated the choice. They are NOT answer rows — an answer settles this
+    # request, a setting changes the rule for the NEXT one — so they are painted
+    # below the choices, with their own callbacks, and never touch the future.
+
+    #: Full-width copy thresholds. The handle forms are whole units rather than
+    #: truncated fragments: "sess…" teaches nothing, and a destination the
+    #: reader cannot name is one they will not press.
+    _HANDLES_FULL_MIN = 63
+    _HANDLES_MEDIUM_MIN = 53
+    _HANDLES_SHORT_MIN = 40
+    #: The combined row's roomier form is 55 cells at its longest (a locked
+    #: `Auto(session):locked` prefix), so it needs that much content width.
+    _COMBINED_FULL_MIN = 55
+    #: The dense card: the measured 24x16 geometry, where the content width is
+    #: 20 cells. This is the ONLY size at which the card reclaims its vertical
+    #: padding — the spec's single padding exception, derived from measured
+    #: frames rather than promised for every crowded dock.
+    _DENSE_WIDTH = 20
+
+    def set_policy(self, policy: ApprovalPolicy) -> None:
+        """Replace the effective state the callout paints.
+
+        Used when the app learns the mode moved for a reason the card did not
+        initiate (a config write, an owner's acknowledgement). It repaints an
+        existing statement instead of appending a transcript notice, which is
+        what keeps one event to one sentence.
+        """
+        self._policy = policy
+        # The Allow consequence is policy-dependent (`run this call; later
+        # calls will not ask`), and the per-row wrap cache keys only on
+        # (index, width) — a mode move that kept the cache would repaint the
+        # new status above the old consequence.
+        self._invalidate_description_wraps()
+        self._repaint()
+
+    def show_setting_outcome(self, scope: str, outcome: ApprovalSettingOutcome) -> None:
+        """Acknowledge a setting gesture in the callout's reserved slot.
+
+        ``scope`` is the destination the USER pressed, not the scope the app
+        settled on: a global write that moved this conversation from its own
+        override clears the override, and the acknowledgement should still read
+        as the gesture the reader made ("global default"). The effective state
+        painted beside it comes from the outcome, never from the gesture.
+
+        A reply that arrives after the card was ANSWERED is discarded: the card
+        is a receipt by then, and the spec explicitly forbids resurrecting it.
+        """
+        if self._answer is not None:
+            return
+        if outcome.kind == "error":
+            status = "error"
+        elif outcome.kind == "refused":
+            status = "refused"
+        elif outcome.kind == "applied-unsaved":
+            # The live mode moved but the record did not. Neither "saved" nor
+            # "unchanged" is true, so it gets its own sentence.
+            status = "applied-unsaved"
+        else:
+            status = "saved-session" if scope == "session" else "saved-global"
+        self._policy = ApprovalPolicy(
+            mode=outcome.mode,
+            provenance=outcome.provenance,
+            status=status,
+            detail=outcome.reason,
+        )
+        self._invalidate_description_wraps()
+        self._repaint()
+
+    def _request_setting(self, scope: str) -> None:
+        """Run one destination's callback, then paint its outcome.
+
+        Deliberately NOT through :meth:`_answer_with`: the base's resolve path
+        completes the future, and a setting change must leave this request
+        parked (the operator's brief: a mode change must NEVER answer a pending
+        prompt). The in-flight guard is the widget's own because the callbacks
+        can write a file; a second press while the first is running would be
+        two writes of one gesture.
+        """
+        if self._answer is not None or self._policy.saving:
+            return
+        callback = self._on_set_session_auto if scope == "session" else self._on_set_global_auto
+        if callback is None:
+            return
+        self._policy = replace(self._policy, saving=scope, status="", detail="")
+        self._repaint()
+        try:
+            outcome = callback()
+        except Exception as error:  # noqa: BLE001 — a write must not take the card down
+            outcome = ApprovalSettingOutcome(
+                kind="error",
+                mode=self._policy.mode,
+                provenance=self._policy.provenance,
+                reason=error.__class__.__name__,
+            )
+        if outcome is None:
+            # Routed to the process that owns the gate. The card keeps its
+            # "Saving…" state until that process acknowledges; optimistic copy
+            # here would claim a mode nobody has confirmed.
+            return
+        self.show_setting_outcome(scope, outcome)
+
+    # -- layout and paint ----------------------------------------------------
+
+    def _dense(self, width: int) -> bool:
+        """The measured 24x16 geometry, where the card reclaims its padding."""
+        return width <= self._DENSE_WIDTH
+
+    def _body_rows(self, question_lines: int) -> int:
+        """Reclaim the two vertical padding rows at the dense geometry.
+
+        The spec's ONE padding exception: at 24x16 the card's content region is
+        three rows with one padding row above and below, and the five things
+        that must be visible there (question, two rail rows, two callout rows)
+        need five. Without this the card would have to shed a destination or an
+        answer label, which the spec forbids. Bounded to the measured shape: a
+        shorter dock keeps the base budget and sheds by the ordinary order
+        rather than overdrawing a region it cannot paint.
+        """
+        budget = super()._body_rows(question_lines)
+        if self._dense(self._card_width()) and 3 <= budget < 5:
+            # No terminal-height guard here: at a 16-row terminal the SCREEN
+            # CONTENT box is 14, so a `height >= 16` test never engaged the
+            # dense plan the spec derives for that exact frame — the rail then
+            # painted 30 cells into 20 and `A.Allow all` clipped to a bare `A`
+            # that still answered (agent/QA/design round 1, M2/Q2/D1). The
+            # budget already encodes the physical room; removing the two
+            # padding rows is what makes the two extra rows affordable.
+            budget = 5
+        # Remembered for `_layout`: the plan has to know how many rows it may
+        # spend before it decides whether this frame can afford the callout at
+        # all. `_layout` is the only caller, so this is a parameter passed
+        # through an attribute rather than a second, drifting calculation.
+        self._last_body_budget = budget
+        return budget
+
+    def _apply_dense_padding(self) -> None:
+        """Give the dense card back the two rows its slot spends on padding.
+
+        Only at :attr:`_DENSE_WIDTH`. Assigned here rather than in the sheet
+        because the exception is a fact about this card at one width, not about
+        every ask picker at that width; compared before assigning because each
+        assignment invalidates layout and the resize handler runs on every
+        frame the dock moves.
+        """
+        if not self.size.width:
+            # Not laid out yet: `_card_width` would answer from a fallback and
+            # could flash the unpadded shape before the first real resize.
+            return
+        dense = self._dense(self._card_width())
+        if dense == self._dense_padded:
+            return
+        self._dense_padded = dense
+        self.styles.padding = (0, 1) if dense else (1, 1)
+
+    def on_mount(self) -> None:
+        self._apply_dense_padding()
+        super().on_mount()
+
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._apply_dense_padding()
+        super().on_resize(event)
+
+    def _layout(self, *, reveal: bool | None = None):  # type: ignore[no-untyped-def]
+        """The base plan, with the callout and compact rail bought from it.
+
+        The allocator's shape is reused rather than re-derived: the callout
+        spends exactly the two blank spacer rows when the frame can afford both
+        (so a roomy frame's total height does not move), and the compact rail
+        replaces the option viewport and the footer when the frame cannot show
+        all three labels as rows. One plan feeds the painter and the hit-test,
+        which is the spec's constraint 6.
+        """
+        plan = super()._layout(reveal=reveal)
+        width = plan.width
+        budget = getattr(self, "_last_body_budget", plan.body_line_budget + 3)
+        dense = self._dense(width) and budget >= 5
+        base_compact = plan.body_line_budget < self.row_count
+        two_row = bool(plan.space_above and plan.space_below)
+        spacers = int(plan.space_above) + int(plan.space_below)
+        callout_rows = 2 if two_row else 1
+        compact = dense or base_compact
+        if not compact and plan.body_line_budget + spacers - callout_rows < self.row_count:
+            # Spending the callout's rows would push an answer LABEL out of the
+            # viewport. The compact rail shows all three in one row, so it is
+            # the honest rendering rather than a card that answers with a choice
+            # the reader cannot see.
+            compact = True
+        if compact:
+            rail_rows = 2 if dense else 1
+            if budget < 1 + rail_rows + 1:
+                # The frame cannot pay for the question, the rail and the
+                # callout TOGETHER. Falling back to the base plan keeps the
+                # card's own collapse rule (question alone, or nothing at all),
+                # and `_shape` stays non-compact so `y`/`A` are refused exactly
+                # as they were before this feature: an affirmative answer must
+                # never come from a frame that shows no answer label (D9). The
+                # alternative — painting three rows into a one-row budget — is
+                # how the card would both overdraw and authorise from a clipped
+                # frame.
+                self._chrome_off = True
+                self._shape = (False, False, False)
+                return plan
+            self._chrome_off = False
+            self._shape = (dense, True, dense or two_row)
+            # The rail takes the option row's place and the callout takes the
+            # footer's: both are rows the base already paid for, plus (dense)
+            # the two padding rows reclaimed in `_body_rows`.
+            return replace(
+                plan,
+                show_title=False,
+                space_above=False,
+                space_below=False,
+                show_position=False,
+                show_footer=False,
+                body_line_budget=0,
+                description_rows={},
+                show_descriptions=False,
+            )
+        self._chrome_off = False
+        self._shape = (False, False, two_row)
+        return replace(
+            plan,
+            space_above=False,
+            space_below=False,
+            body_line_budget=max(0, plan.body_line_budget + spacers - callout_rows),
+        )
+
+    # -- callout copy --------------------------------------------------------
+
+    @staticmethod
+    def _scope_word(provenance: str) -> str:
+        return {"session": "session", "pin": "run"}.get(provenance, "global")
+
+    def _compact_prefix(self) -> str:
+        word = _MODE_WORD.get(self._policy.mode, "Ask")
+        return f"{word}({self._scope_word(self._policy.provenance)})"
+
+    def _state_text(self, width: int) -> str:
+        """The callout's first row: what is in force, or how a save went.
+
+        Full/short/compact by CONTENT width, not terminal columns — the callout
+        lives inside the card's padding, and a form chosen from the outer width
+        is two cells too optimistic. The compact form is a prefix because it has
+        to share a row with the handles at the tight sizes.
+        """
+        policy = self._policy
+        if policy.saving:
+            what = "session" if policy.saving == "session" else "global"
+            if width < 40:
+                return "Saving…"
+            return f"Saving {what} auto…"
+        if policy.status == "saved-session":
+            # The MODE word rather than a fixed "Auto": the same slot carries
+            # the ask direction, and a sentence that called a hardened session
+            # "Auto saved" would be the exact class of false statement this
+            # callout exists to remove.
+            word = _MODE_WORD.get(policy.mode, "Auto")
+            # The full sentence is 73 cells; a 63-cell content box clipped its
+            # last words ("...Answer this r"), so the threshold is its own
+            # length. The short form is 32 and fits the 40-cell box exactly.
+            if width >= 73:
+                return (
+                    f"{word} saved for this session, with this conversation. "
+                    "Answer this request."
+                )
+            if width >= 40:
+                return f"{word} saved; answer this request."
+            return f"{word}(session) saved"
+        if policy.status == "saved-global":
+            word = _MODE_WORD.get(policy.mode, "Auto")
+            # Full form: 74 cells. Short form: 38 ("Global auto saved; answer
+            # this request."), inside the 40-cell box that used to clip at
+            # "...Answer this r".
+            if width >= 74:
+                return (
+                    f"{word} set as global default; this session inherits it. "
+                    "Answer this request."
+                )
+            if width >= 40:
+                return f"Global {word.lower()} saved; answer this request."
+            return f"{word}(global) saved"
+        if policy.status == "refused":
+            mode = _MODE_WORD.get(policy.mode, "Ask")
+            scope = self._scope_word(policy.provenance)
+            if width < 40:
+                return f"{mode}({scope}):locked"
+            if width < 63:
+                return f"This window cannot authorise auto. {mode} ({scope})."
+            where = "session override" if scope == "session" else "global default"
+            return f"Unchanged: {mode} ({where}). This window cannot authorise auto."
+        if policy.status == "applied-unsaved":
+            word = _MODE_WORD.get(policy.mode, "Auto")
+            if width < 40:
+                # 20-cell frame: the mode plus the failure, no room for a verb.
+                return f"{word}, not saved"
+            if width < 63:
+                return f"{word} applied; NOT saved for resume."
+            reason = policy.detail or "storage error"
+            return f"{word} applied — NOT saved for resume ({reason}). " "Answer this request."
+        if policy.status == "error":
+            if width < 40:
+                return "Not saved"
+            reason = policy.detail or "storage error"
+            return f"Not saved: {reason}. Approvals unchanged."
+        # The plain effective state, by provenance. The AUTO/global case is the
+        # one that has to say the request still needs an answer: the gate is
+        # loose, the card is not a stale artefact.
+        mode = _MODE_WORD.get(policy.mode, "Ask")
+        if policy.provenance == "session":
+            other = _MODE_WORD.get(policy.global_mode, "")
+            if width >= 63:
+                if other:
+                    return f"Approvals: {mode} — this session overrides global {other}."
+                return f"Approvals: {mode} — this session override."
+            if width >= 40:
+                if other:
+                    return f"{mode} — session override; global {other}."
+                return f"{mode} — session override."
+            return self._compact_prefix()
+        if policy.provenance == "pin":
+            if width >= 63:
+                return f"Approvals: {mode} — fixed for this run."
+            if width >= 40:
+                return f"{mode} — fixed for this run."
+            return self._compact_prefix()
+        if policy.mode == "auto":
+            if width >= 63:
+                return "Approvals: Auto — global default; answer this pending request."
+            if width >= 40:
+                return "Auto — global default; this request needs an answer."
+            return self._compact_prefix()
+        if width >= 63:
+            return "Approvals: Ask — global default."
+        if width >= 40:
+            return "Ask — global default."
+        return self._compact_prefix()
+
+    def _handles(self, width: int) -> tuple[list[tuple[str, str]], list[tuple[int, int, str]]]:
+        """The two destinations as whole forms, with their clickable spans.
+
+        Returned as SEGMENTS rather than one string: only the scope phrases are
+        interactive, so only they may carry the underline and the fg ink. The
+        separator is descriptive punctuation and stays muted; a row underlined
+        end to end paints the punctuation as a target and makes one link out of
+        two destinations.
+
+        Spans cover the visible scope phrase INCLUDING its key hint, and nothing
+        else: a click on the separator or the gap must not activate a
+        destination (the spec's "no overlapping padding" rule).
+        """
+        if width >= self._HANDLES_FULL_MIN:
+            parts = [
+                ("Set auto for this session [S]", "handle"),
+                ("  ·  ", "state"),
+                ("Set auto for all sessions [G]", "handle"),
+            ]
+        elif width >= self._HANDLES_MEDIUM_MIN:
+            parts = [
+                ("[S] Auto for this session", "handle"),
+                (" · ", "state"),
+                ("[G] Auto for all sessions", "handle"),
+            ]
+        elif width >= self._HANDLES_SHORT_MIN:
+            parts = [
+                ("[S] Session auto", "handle"),
+                (" · ", "state"),
+                ("[G] All-session auto", "handle"),
+            ]
+        else:
+            parts = [
+                ("auto ", "state"),
+                ("S:session", "handle"),
+                (" ", "state"),
+                ("G:all", "handle"),
+            ]
+        spans: list[tuple[int, int, str]] = []
+        spent = 0
+        for text, kind in parts:
+            if kind == "handle":
+                # `[S]`/`S:session` are the SESSION forms; "sessions" also
+                # contains "session", so a substring test on the bare word
+                # mislabels the global destination.
+                scope = "session" if ("[S]" in text or text == "S:session") else "global"
+                spans.append((spent, spent + cell_len(text), scope))
+            spent += cell_len(text)
+        return parts, spans
+
+    def _styled(self, parts: tuple[tuple[str, str], ...], *, overflow: bool = True) -> Text:
+        """One row from ``(text, kind)`` parts; ``kind`` is state or handle."""
+        row = Text(no_wrap=True, overflow="ellipsis" if overflow else "fold")
+        state = Style(color=theme_mod.semantic_color("muted"))
+        handle = Style(color=theme_mod.semantic_color("fg"), underline=True)
+        if self._policy.status == "refused":
+            # A refused destination keeps its text and underline (it stays an
+            # identifiable target that repeats the explanation) but loses the
+            # fg ink: the frame must not offer a loosening it cannot perform.
+            # `muted`, not `dim`: dim measures 2.72:1 light / 3.43:1 dark on
+            # this ground, below the 4.5 floor, and the refusal is exactly the
+            # sentence the reader must be able to read (design round 1, D4).
+            handle = Style(color=theme_mod.semantic_color("muted"), underline=True)
+        for text, kind in parts:
+            row.append(text, style=state if kind == "state" else handle)
+        return row
+
+    def _callout_rows(
+        self, width: int, *, two_row: bool
+    ) -> tuple[list[Text], list[tuple[int, int, int, str]]]:
+        """The callout as painted rows plus their hit spans."""
+        state = self._state_text(width)
+        if two_row:
+            parts, spans = self._handles(width)
+            return (
+                [self._styled(((state, "state"),)), self._styled(tuple(parts))],
+                [(1, start, end, scope) for start, end, scope in spans],
+            )
+        # The combined row uses the COMPACT state in every form: it is the only
+        # one that fits beside two destinations at these sizes, and the compact
+        # vocabulary is already a complete statement (`Auto(session) saved`).
+        prefix = self._state_text(min(width, self._HANDLES_SHORT_MIN - 1))
+        if width >= self._COMBINED_FULL_MIN:
+            parts = [
+                (f"{prefix} · auto: ", "state"),
+                ("[S]session", "handle"),
+                (" ", "state"),
+                ("[G]all sessions", "handle"),
+            ]
+        else:
+            parts = [
+                (f"{prefix} auto ", "state"),
+                ("S:session", "handle"),
+                (" ", "state"),
+                ("G:all", "handle"),
+            ]
+        spans = []
+        spent = 0
+        for text, kind in parts:
+            if kind == "handle":
+                scope = "session" if ("[S]" in text or text == "S:session") else "global"
+                spans.append((spent, spent + cell_len(text), scope))
+            spent += cell_len(text)
+        if spent > width:
+            # The locked-state prefix is the longest case and the one the spec
+            # budgets a second row for; a destination is never clipped off to
+            # keep one row.
+            handle_parts, handle_spans = self._handles(width)
+            return (
+                [self._styled(((state, "state"),)), self._styled(tuple(handle_parts))],
+                [(1, start, end, scope) for start, end, scope in handle_spans],
+            )
+        return [self._styled(tuple(parts))], [(0, start, end, scope) for start, end, scope in spans]
+
+    def _row_description(self, index: int) -> str:
+        """The description under one option, in the mode that is actually in force.
+
+        A parked card can outlive the mode it was raised under: pressing `S`/`G`
+        makes the NEXT gate auto while this one still asks, and leaving "ask
+        again next time" under Allow states the opposite of the saved policy the
+        callout above just announced (UX/design round 1, U3/D3). Only the Allow
+        row changes; its replacement is shorter at every authored width, so no
+        row moves and no budget changes.
+        """
+        text = super()._row_description(index)
+        if self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
+            return ALLOW_AUTO_CONSEQUENCE
+        return text
+
+    def _rail_rows(
+        self, width: int, *, two_row_rail: bool
+    ) -> tuple[list[Text], list[tuple[int, int, int, int]]]:
+        """The compact answer rail: every label on the choice row.
+
+        This is a compact RENDERING of the existing list, not a second
+        interaction: the order is unchanged, the selected row keeps its accent
+        and caret, and a click maps to the exact label span. The alternative —
+        the ordinary viewport at a 1-row budget — showed only the selected
+        label, which hid the existence of Deny and Allow all at the sizes where
+        the card is most constrained.
+        """
+        # The ACCENT stays on the caret only: as a LABEL colour it measures
+        # 3.49:1 in the light theme (below 4.5), while fg+bold keeps the
+        # selected choice unmistakable and legible (design round 1, D2).
+        accent = Style(color=theme_mod.semantic_color("accent"))
+        ordinary = Style(color=theme_mod.semantic_color("fg"))
+        selected_ink = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        items: list[Text] = []
+        for index in range(self.row_count):
+            label = f"{self.row_key(index)}.{self.question.options[index].label}"
+            selected = index == self.state.selected and not self.passive and not self._read_only
+            item = Text(no_wrap=True, overflow="ellipsis")
+            if selected:
+                item.append("❯ ", style=accent)
+                item.append(label, style=selected_ink)
+            else:
+                item.append(label, style=ordinary)
+            items.append(item)
+
+        def spans_for(item: Text, start: int, index: int) -> tuple[int, int, int, int]:
+            # The caret is not part of the target: clicking the space before a
+            # label should not answer the request.
+            offset = 2 if item.plain.startswith("❯ ") else 0
+            return (0, start + offset, start + cell_len(item.plain), index)
+
+        # The two-row form exists for the three approval choices; guard the
+        # indexing so a future question with fewer options falls back to the
+        # one-row rail instead of raising IndexError on a resize.
+        if not two_row_rail or len(items) < 3:
+            row = Text(no_wrap=True, overflow="ellipsis")
+            spans: list[tuple[int, int, int, int]] = []
+            for position, item in enumerate(items):
+                if position:
+                    row.append("  ")
+                start = cell_len(row.plain)
+                row.append_text(item)
+                spans.append(spans_for(item, start, position))
+            return [row], spans
+        first = Text(no_wrap=True, overflow="ellipsis")
+        spans = []
+        start = 0
+        first.append_text(items[0])
+        spans.append(spans_for(items[0], 0, 0))
+        first.append("  ")
+        start = cell_len(first.plain)
+        first.append_text(items[1])
+        spans.append(spans_for(items[1], start, 1))
+        second = Text(no_wrap=True, overflow="ellipsis")
+        second.append("  ")
+        second.append_text(items[2])
+        spans.append((1,) + spans_for(items[2], 2, 2)[1:])
+        return [first, second], spans
+
+    def _injected_rows(
+        self, width: int
+    ) -> tuple[list[Text], list[tuple[int, int, int, str]], list[tuple[int, int, int, int]]]:
+        if getattr(self, "_chrome_off", False):
+            # The frame could not pay for the compact card; the base plan's
+            # collapse is the whole frame (see `_layout`).
+            return [], [], []
+        dense, compact, two_row = getattr(self, "_shape", (False, False, False))
+        callout: list[Text]
+        callout_spans: list[tuple[int, int, int, str]]
+        if compact:
+            rail, rail_spans = self._rail_rows(width, two_row_rail=dense)
+            callout, callout_spans = self._callout_rows(width, two_row=dense)
+            # The rail's rows precede the callout; the caller's spans are
+            # shifted by that count when the whole block is spliced in.
+            return rail + callout, callout_spans, rail_spans
+        callout, callout_spans = self._callout_rows(width, two_row=two_row)
+        return callout, callout_spans, []
+
+    def _card_text(self) -> Text:
+        """The base card, with the mode callout spliced into its own rows.
+
+        Spliced rather than re-composed: the header, question, option viewport
+        and footer are the base's, and a second full renderer here would be a
+        second implementation of the clipping rules this card is most sensitive
+        to. The injected rows come from ONE plan (:meth:`_layout`), and the
+        line map is repaired at the same offset so a click on the callout can
+        never fall through to an option row that is no longer on that line.
+        """
+        base = super()._card_text()
+        layout = self._layout()
+        width = layout.width
+        injected, callout_spans, rail_spans = self._injected_rows(width)
+        lines = list(base.split("\n"))
+        insert_at = len(lines) - (1 if layout.show_footer else 0)
+        if not injected:
+            self._chrome_start = 0
+            self._chrome_rows = 0
+            self._callout_spans = []
+            self._rail_spans = []
+            return base
+        out = Text()
+        for position, line in enumerate(lines[:insert_at] + injected + lines[insert_at:]):
+            if position:
+                out.append("\n")
+            out.append_text(line)
+        self._chrome_start = insert_at
+        self._chrome_rows = len(injected)
+        # The rail is injected FIRST, so the callout's own row offsets start
+        # after it. Counted from the rail's rows rather than guessed from the
+        # number of spans (two destinations can share a row).
+        rail_count = (
+            len(self._rail_rows(width, two_row_rail=self._shape[0])[0]) if rail_spans else 0
+        )
+        self._rail_spans = [
+            (insert_at + row, start, end, index) for row, start, end, index in rail_spans
+        ]
+        self._callout_spans = [
+            (insert_at + rail_count + row, start, end, scope)
+            for row, start, end, scope in callout_spans
+        ]
+        row_map = getattr(self, "_line_rows", None)
+        if row_map is not None:
+            row_map = list(row_map)
+            self._line_rows = row_map[:insert_at] + [None] * len(injected) + row_map[insert_at:]
+        return out
+
+    # -- hit-testing ---------------------------------------------------------
+
+    def _setting_at(self, line: int, column: int) -> str | None:
+        """The setting destination painted under a body-relative point."""
+        for row, start, end, scope in self._callout_spans:
+            if row == line and start <= column < end:
+                return scope
+        return None
+
+    def _answer_at(self, line: int, column: int) -> int | None:
+        """The compact rail's option under a body-relative point."""
+        for row, start, end, index in self._rail_spans:
+            if row == line and start <= column < end:
+                return index
+        return None
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A handle changes a SETTING; a rail label ANSWERS; anything else falls through.
+
+        The base hit-test only knows the option lines IT painted. The injected
+        rows are resolved FIRST and the event is stopped, so a handle click can
+        never also select whatever option line the same offset would have named
+        — the false-positive class the base's own docstring calls a defect that
+        answers the agent's question on the user's behalf.
+        """
+        if getattr(event, "button", 1) != 1:
+            return
+        body = getattr(self, "_body", None)
+        if body is None or not body.is_mounted:
+            return
+        region = body.region
+        if not region.contains(event.screen_x, event.screen_y):
+            return
+        line = event.screen_y - region.y
+        column = event.screen_x - region.x
+        scope = self._setting_at(line, column)
+        if scope is not None:
+            event.stop()
+            self.engage()
+            self._request_setting(scope)
+            return
+        index = self._answer_at(line, column)
+        if index is not None:
+            event.stop()
+            self.engage()
+            self._move_to(index)
+            self._answer_with(self.row_key(index))
+            return
+        super().on_click(event)
 
     # -- the awaited half ----------------------------------------------------
     def wait(self) -> asyncio.Future[bool]:
@@ -1295,6 +2033,17 @@ class ApprovalPrompt(AskPickerScreen):
         character = event.character
         if character is None:
             return
+        # The two SETTING destinations are taken before the answer letters and
+        # never through `_answer_with`: they change the rule for the NEXT
+        # request, so consuming them as an answer would authorise THIS one on a
+        # keystroke the user pressed to stop being asked. Consumed here so they
+        # cannot reach the composer either — the card holds focus.
+        scope = SETTING_KEYS.get(character)
+        if scope is not None and self._answer is None and not self._read_only:
+            event.stop()
+            event.prevent_default()
+            self._request_setting(scope)
+            return
         if character not in self._ANSWER_KEYS:
             return
         event.stop()
@@ -1313,6 +2062,19 @@ class ApprovalPrompt(AskPickerScreen):
         # DENIAL is still allowed, because it is the safe direction and because
         # Escape means stop everywhere in this app regardless of what any card
         # shows. Only the permissive answers are withheld.
-        if not self.visible_rows and character != "n":
+        # The compact rail is the same exception in the other direction: it IS
+        # the options (all three labels, one row), so it is what `visible_rows`
+        # would have said had the base viewport been used. Without this, every
+        # answer but `n` would be refused on the one frame that shows all three.
+        if not self.visible_rows and not self._rail_painted() and character != "n":
             return
         self._answer_with(character)
+
+    def _rail_painted(self) -> bool:
+        """Whether this frame draws the compact answer rail.
+
+        Read from the last plan (:meth:`_layout`), the same value the painter
+        used, rather than from the spans: a click-only span table can be empty
+        on a frame whose rail is drawn but not yet clicked.
+        """
+        return bool(getattr(self, "_shape", (False, False, False))[1])

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable, Literal, Mapping, Sequence, TypeVar
@@ -42,7 +43,7 @@ from local_operator.hub_sync.check import Link, list_links
 from local_operator.hub_sync.identity import LinkPolicy
 from local_operator.hub_sync.outbox import Outbox
 from local_operator.hub_sync.report import ItemMergeReport
-from local_operator.hub_sync.settings import HubSyncSettings
+from local_operator.hub_sync.settings import DEFAULT_CHECK_INTERVAL_MIN, HubSyncSettings
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,16 @@ CHECK_CONCURRENCY = 2
 CHECK_PHASE_TIMEOUT_S = 300.0
 #: Interval jitter, +-10 %.
 INTERVAL_JITTER = 0.10
+#: A desktop SESSION START may ask for one check, but not more often than this.
+#:
+#: The trigger is a freshness nicety, not the schedule: a conversation opening is
+#: the moment the operator is most likely to look at the sidebar, so it is worth a
+#: check -- but two conversations opened back to back are one moment, and a
+#: session-per-tab UI must not turn every create into a network pass. Two minutes
+#: is long enough to coalesce a burst of creates, short enough that opening one
+#: conversation after a coffee still gets a fresh answer. Nothing here is a
+#: correctness gate: a skipped trigger only means the regular tick answers instead.
+SESSION_START_CHECK_THROTTLE_S = 120.0
 #: First tick after an upgrade marks items available but applies nothing
 #: (``first_run_grace``, B9 risk 3): an org-agent burst must not auto-merge blind.
 GRACE_FILE = ".first_run_done"
@@ -103,12 +114,16 @@ class HubSyncRunner:
         env_config: Any | None = None,
         build_ctx: Callable[[], Any] | None = None,
         startup_delay: float | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._cm = config_manager
         self._auth_store = auth_store
         self._auth_store_provider = auth_store_provider
         self._env = env_config
         self._build_ctx = build_ctx
+        #: Monotonic seconds, injectable so a test can elapse the session-start
+        #: throttle exactly instead of sleeping through it.
+        self._clock = clock or time.monotonic
         self._startup_delay = (
             STARTUP_DELAY_S + random.uniform(0, STARTUP_JITTER_S)
             if startup_delay is None
@@ -125,6 +140,15 @@ class HubSyncRunner:
         self._live_values: dict[str, Any] | None = None
         self._policies_trusted = True
         self.last_tick: TickReport | None = None
+        # The clock reading of the last check this runner STARTED, by any route:
+        # a timer tick, ``check_now``, or a session start. ``None`` means none has
+        # started yet, so the first session start always checks. Read only by the
+        # session-start throttle; the schedule itself is ``interval_min``.
+        self._last_check_started: float | None = None
+        # The in-flight session-start check. Held for two reasons: a second
+        # session start must not queue a second check, and a reference keeps the
+        # fire-and-forget task from being garbage-collected mid-flight.
+        self._session_check_task: asyncio.Task[None] | None = None
         # A cancelled HTTP waiter or timed-out check does NOT stop a worker
         # thread. Private shielded futures remain owned until actual completion,
         # independently of the runner lock's state; reload never infers idle
@@ -214,7 +238,7 @@ class HubSyncRunner:
             try:
                 minutes = HubSyncSettings.read_fresh(self._cm).interval_min
             except Exception:  # noqa: BLE001
-                minutes = 60
+                minutes = DEFAULT_CHECK_INTERVAL_MIN
             delay = minutes * 60 * random.uniform(1 - INTERVAL_JITTER, 1 + INTERVAL_JITTER)
             if await self._sleep(delay):
                 return
@@ -245,6 +269,9 @@ class HubSyncRunner:
 
     async def tick(self, *, reason: Literal["timer", "startup", "manual"] = "timer") -> TickReport:
         await self._reload_admission.wait()
+        # A tick IS a check, so it starts the session-start window too: a
+        # conversation opened right after a tick has nothing new to learn.
+        self._last_check_started = self._clock()
         return await self._dispatch(lambda: self._tick_locked(reason))
 
     async def _tick_locked(self, reason: str) -> TickReport:
@@ -556,56 +583,9 @@ class HubSyncRunner:
     def _push_transport(
         self, ctx: svc.HubSyncContext, record: Any
     ) -> tuple[Any | None, str | None]:
-        """A per-LINK push transport, or ``(None, named reason)`` when unavailable.
+        """The ONE per-link transport builder (see ``service.push_transport``)."""
 
-        The destination is the link's own identity, not a global default: the
-        client comes from the SAME per-tenant selector the check/pull path uses
-        (publishing is a person's act, so even a public link needs the signed-in
-        client), the base is that client's configured base, and the base is
-        POSITIVELY verified against the link's recorded ``hub_source`` before any
-        credential could leave -- a mismatch is refused, never followed.
-        """
-
-        from local_operator.hub_sync.identity import LinkError, normalize_source
-
-        if record is None or record.identity is None:
-            return None, "baseline-unknown"
-        identity = record.identity
-        try:
-            # A non-None tenant selects the signed-in client from the shared
-            # selector (its docstring blesses any string, even ""); a public link
-            # publishes unauthored only if there is no login at all, in which
-            # case the selector answers None and the push is skipped.
-            client = ctx.client_for_tenant(identity.tenant_id if identity.tenant_id else "")
-        except Exception:  # noqa: BLE001 - a selector failure is simply no transport
-            return None, "no-credential"
-        if client is None:
-            return None, "no-credential"
-        try:
-            base = str(client.base_url).rstrip("/")
-            headers = dict(client.bearer_headers())
-        except Exception:  # noqa: BLE001 - an unauthorized client cannot publish
-            return None, "no-credential"
-        try:
-            if normalize_source(base) != identity.hub_source:
-                return None, "origin-conflict"
-        except LinkError:
-            return None, "origin-conflict"
-        from local_operator.hub_sync.outbox import AsyncDispatcher
-        from local_operator.hub_sync.push import HttpPushTransport
-
-        return (
-            HttpPushTransport(
-                AsyncDispatcher(),
-                kind=identity.kind,
-                hub_id=record.hub_id,
-                base_url=base,
-                headers=headers,
-                visibility=identity.visibility,
-                tenant_id=identity.tenant_id,
-            ),
-            None,
-        )
+        return svc.push_transport(ctx, record)
 
     async def _push_one(
         self,
@@ -635,6 +615,20 @@ class HubSyncRunner:
         assert outbound is not None  # narrowed once; the calls below re-widen the attribute
         expected = c.remote_revision or outbound.remote_revision
         budget = OperationBudget.start("automatic", self._operation_id(c), 1)
+        # A bundle push is gated on the SAME per-source attestation the inventory
+        # reports: no advertised ``skill_bundles`` means the manifest would land
+        # with no blob behind it, so the refusal happens before the commit.
+        bundle_attested = record.identity is not None and svc._capability_bundle(
+            ctx.store().load(), record.identity
+        )
+        # A bundle republish must store the archive BEFORE the commit: the
+        # server opens the blob for the manifest's new hash. Documents have no
+        # blob, so the hook is built only for the bundle form.
+        bundle_upload = (
+            svc.bundle_upload_hook(ctx, record.identity, record)
+            if record.identity is not None and "bundle" in (record.fields or {})
+            else None
+        )
         outcome = await push_item(
             kind=c.kind,
             local_id=c.local_id,
@@ -648,6 +642,8 @@ class HubSyncRunner:
             operation_id=self._operation_id(c),
             budget=budget,
             document_builder=self._document_builder(ctx, c),
+            bundle_attested=bundle_attested,
+            bundle_upload=bundle_upload,
         )
         report.skipped = None
         await self._offload(self._record_push, ctx, c, outcome)
@@ -679,40 +675,9 @@ class HubSyncRunner:
         ctx.store().mutate(fold)
 
     def _record_push(self, ctx: svc.HubSyncContext, c: Any, outcome: Any) -> None:
-        """Stamp ``last_pushed_at`` on an accepted push; persist a skip otherwise.
+        """Persist the outcome through the ONE shared recorder (receipt + skip)."""
 
-        On success the outbound RECEIPT is advanced first (A = the local input
-        that was sent, P = the server-returned canonical document, revision =
-        the accepted opaques ETag): without that, every later attempt would
-        derive from a stale pair and the QA-observed "receipt stayed r1 while the
-        server moved to r2" class of bug returns.
-        """
-
-        key = st.item_key(c.kind, c.local_id)
-        if outcome.state == "pushed":
-            result = outcome.accepted
-            accepted_doc = result.get("accepted_document") if isinstance(result, Mapping) else None
-            if isinstance(accepted_doc, Mapping):
-                svc.record_outbound_receipt(
-                    ctx,
-                    c.kind,
-                    c.local_id,
-                    accepted=accepted_doc,
-                    current_local=c.local or {},
-                    revision=outcome.revision,
-                    operation_id=str(result.get("operation_id") or "") or None,
-                )
-
-            def fold(doc: dict[str, Any]) -> None:
-                item = doc.get("items", {}).get(key)
-                if item is not None:
-                    item["last_pushed_at"] = st.now_iso()
-                    st.clear_push_skipped(item)
-
-            ctx.store().mutate(fold)
-            return
-        if outcome.reason:
-            self._mark_push_skipped(ctx, c, str(outcome.reason))
+        svc.record_push_outcome(ctx, c, outcome)
 
     def _first_run_grace(self, ctx: svc.HubSyncContext) -> bool:
         """True exactly once per config root: the first tick after upgrade never auto-applies."""
@@ -776,10 +741,77 @@ class HubSyncRunner:
         kind: Literal["agent", "team", "skill", "all"] = "all",
         names: Sequence[str] | None = None,
     ) -> list[Any]:
-        """A user-requested check: applies nothing, ignores the schedule (B5.1)."""
+        """A user-requested check: applies nothing, ignores the schedule (B5.1).
+
+        Also what the session-start trigger runs (``note_session_start``): a check
+        is a check, and neither caller may merge.
+        """
 
         kinds = ("agent", "team", "skill") if kind == "all" else (kind,)
+        self._last_check_started = self._clock()
         return await self.run_exclusive(lambda ctx: svc.check_items(ctx, kinds=kinds, names=names))
+
+    # -- session start -------------------------------------------------------------------
+
+    def note_session_start(self) -> asyncio.Task[None] | None:
+        """Ask for ONE background hub check because a desktop session just began.
+
+        FIRE AND FORGET, AND THAT IS THE CONTRACT. The call schedules and returns;
+        it never awaits the network, so a create whose hub is unreachable is
+        never slowed by it, and ``_session_check_once`` swallows every failure so
+        it can never surface as the create's own error. The returned task exists
+        only for a caller or a test that WANTS to await it; the route ignores it.
+
+        THROTTLED IN TWO DIMENSIONS, both checked before the task is created:
+
+        * one check in flight at a time -- a second session start while one is
+          running is coalesced into it rather than queued behind it;
+        * ``SESSION_START_CHECK_THROTTLE_S`` since the last check STARTED by any
+          route (timer tick, ``check_now``, or an earlier session start). The
+          slot is claimed HERE, synchronously, before the check runs: claiming it
+          on completion instead would let two creates in the same event-loop
+          burst both see a stale stamp and both check.
+
+        Nothing is scheduled after ``stop()`` (the daemon is going away) or with
+        no running loop to own the task. ``None`` therefore means "nothing was
+        scheduled", never "the check failed".
+
+        The check deliberately runs ``check_now`` and not ``tick``: a session
+        start must not merge anything. Auto-apply belongs to the scheduled tick,
+        where ``first_run_grace`` and the per-link policy gates are evaluated;
+        borrowing a user action to write files would be a second, quieter apply
+        path. Recording the check does NOT delay the tick's apply either: the
+        due-time rules key on ``last_pulled_at`` and ``next_retry_at``, not on
+        ``last_checked_at`` (``store.check_due`` / ``pull_due`` / ``auto_apply_due``).
+        """
+
+        if self._stop.is_set():
+            return None
+        pending = self._session_check_task
+        if pending is not None and not pending.done():
+            return None
+        now = self._clock()
+        last = self._last_check_started
+        if last is not None and now - last < SESSION_START_CHECK_THROTTLE_S:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # no loop to own the task: nothing to schedule on
+            return None
+        self._last_check_started = now
+        task = loop.create_task(self._session_check_once())
+        self._session_check_task = task
+        return task
+
+    async def _session_check_once(self) -> None:
+        """The session-start check's whole body: never raises but cancellation."""
+
+        try:
+            await self.check_now()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a session start never fails on the hub
+            logger.debug("hub check for a session start failed", exc_info=True)
 
     async def context(self) -> svc.HubSyncContext:
         return await self._context()

@@ -159,7 +159,7 @@ class _Conversation(SidebarRemote):
         self.declined.append(ask_id)
         return {"ok": True}
 
-    def dismiss_ask(self, ask_id, *, by="unknown"):
+    def dismiss_ask(self, ask_id, *, by="unknown", reason=None):
         self.dismissed.append(ask_id)
         return {"ok": True}
 

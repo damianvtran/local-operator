@@ -73,6 +73,14 @@ from local_operator.resume import (
     write_goal_record,
 )
 
+#: The conversation's recorded ``/approvals`` choice, imported rather than
+#: spelled again for the reason :data:`MESH_STAMP_NAME` is: the string the
+#: deny-list excludes and the string the reader opens must be one string.
+#: ``approval_policy`` is stdlib-only, so this keeps the module's discipline.
+from local_operator.session.approval_policy import (
+    OVERRIDE_FILENAME as APPROVALS_SIDECAR_NAME,
+)
+
 #: The ownership stamp's name, imported rather than spelled again: the file this
 #: deny-list excludes and the file the resolver reads must be the same string, and
 #: a second literal here is how they would come apart (§1.2). ``placement`` is
@@ -174,6 +182,15 @@ COPIED_SIDECARS: tuple[str, ...] = (
 #:   conversation whose UI did not ask for it, or fail the revision guard against
 #:   a row it does not own. Intent is per-fork and re-recorded only when a new
 #:   fork request carries ``auto_tag``.
+#: - ``approvals.json``: the parent's recorded ``/approvals`` choice
+#:   (``session/approval_policy.py``; 2026-10-23). A fork is a NEW conversation
+#:   that happens to share history, so it starts with no choice of its own and
+#:   follows the config default — the same rule a fresh session gets. Copying
+#:   the parent's record would EXPAND consent silently in the loosening
+#:   direction: a user who typed ``/approvals auto`` for one long run would have
+#:   every fork of it open ungated too, with nothing in the fork's own history
+#:   saying anyone chose that here. (The narrowing direction is merely
+#:   unhelpful; the pair is why the file is excluded rather than inherited.)
 EXCLUDED_SIDECARS: tuple[str, ...] = (
     ".session.pid",
     "subagent-roster.v1.json",
@@ -181,6 +198,7 @@ EXCLUDED_SIDECARS: tuple[str, ...] = (
     "title-scan.json",
     MESH_STAMP_NAME,
     "auto-tag.json",
+    APPROVALS_SIDECAR_NAME,
 )
 
 #: Ceiling on the conversation-scoped definitions a fork will copy.
@@ -259,9 +277,13 @@ def fork_session(
     Raises :class:`ForkError` when the clone cannot be made (a read-only volume,
     ENOSPC, a parent that does not exist). Nothing is created in that case.
     """
+    from local_operator.session import compression
+
     parent_dir = config_dir / "sessions" / parent_id
-    parent_transcript = parent_dir / TRANSCRIPT_NAME
-    if not parent_transcript.is_file():
+    # Both forms: a compressed parent HAS a transcript, and the plain-name
+    # probe refused to fork exactly the old conversations it is most useful to
+    # fork from.
+    if not compression.has_transcript(parent_dir):
         raise ForkError(f"session {parent_id} has no transcript to fork")
 
     new_id = new_session_id()
@@ -289,7 +311,13 @@ def fork_session(
 
     try:
         for name in COPIED_SIDECARS:
-            source = parent_dir / name
+            # The transcript's physical source is resolved (plain, or the
+            # archive) while every other sidecar keeps its plain name.
+            source, codec = (
+                compression.transcript_source(parent_dir)
+                if name == TRANSCRIPT_NAME
+                else (parent_dir / name, None)
+            )
             if not source.is_file():
                 # Only the transcript is mandatory (checked above); the identity
                 # sidecars are absent for any session that was never named and
@@ -300,13 +328,30 @@ def fork_session(
             # reproduce the parent's cached prefix byte-for-byte, and a
             # re-serialisation would reorder JSON keys — changing nothing
             # semantically while changing every byte the replay derives from.
-            if name == TRANSCRIPT_NAME and exclude_entry_ids:
+            if name == TRANSCRIPT_NAME and codec is not None and not exclude_entry_ids:
+                # WHOLE-DIRECTORY FORK: copy the archive AS-IS, under its own
+                # name. The fork's first ``Transcript`` restores it in place,
+                # so the copy costs a compressed file's bytes and never a
+                # decompression here; re-writing it as plain would inflate a
+                # fork of an old conversation by its full ratio.
+                shutil.copyfile(source, fork_dir / source.name)
+            elif name == TRANSCRIPT_NAME and exclude_entry_ids:
                 # Only rows the owner has already validated as omissible may be
                 # omitted: the live suffix that is not yet durably committed, or
                 # every conversation row after a named cut point. Keep every
                 # OTHER retained byte and journal row, rather than rebuilding
                 # history and losing compaction/prune metadata or attachment refs.
-                with source.open("rb") as incoming, (fork_dir / name).open("wb") as outgoing:
+                #
+                # FILTERED FORK: the filter is about ROWS, so an archive is
+                # resolved (into the bounded cache) and the fork is written as a
+                # PLAIN journal — there is no way to filter compressed bytes.
+                resolved = compression.transcript_for_read(parent_dir) if codec else source
+                if resolved is None:
+                    raise ForkError(f"session {parent_id}'s transcript could not be read")
+                with (
+                    resolved.open("rb") as incoming,
+                    (fork_dir / TRANSCRIPT_NAME).open("wb") as outgoing,
+                ):
                     for line in incoming:
                         try:
                             row = json.loads(line)

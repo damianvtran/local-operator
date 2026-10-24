@@ -87,9 +87,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from local_operator.session import open_trace
+from local_operator.session import compression, open_trace
 from local_operator.session.transcript import (
-    TRANSCRIPT_FILENAME,
     TranscriptPage,
     read_transcript_page,
     validate_page_request,
@@ -226,7 +225,11 @@ def page_key(
     uncached read, so the caller still gets the reader's own ``FileNotFoundError``
     rather than a second, differently-worded one from this module.
     """
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    # The PHYSICAL source, archive included: a cache keyed on a stat of the
+    # plain name answers ``None`` for every compressed session, which turns
+    # every page read into an uncached one rather than a wrong one — but the
+    # archive carries the same inode/size identity the key needs.
+    path, _codec = compression.transcript_source(Path(directory))
     try:
         stat = path.stat()
     except OSError:

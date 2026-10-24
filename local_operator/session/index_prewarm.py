@@ -244,6 +244,8 @@ def sessions_needing_warm(root: str | Path, *, limit: int = PREWARM_JOURNALS) ->
         return []
     journals: list[tuple[float, str]] = []
     for entry in entries:
+        if _is_archived(entry):
+            continue
         try:
             stat = (entry / TRANSCRIPT_FILENAME).stat()
         except OSError:
@@ -295,6 +297,8 @@ def sessions_needing_replay(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         return []
     journals: list[tuple[float, str]] = []
     for entry in entries:
+        if _is_archived(entry):
+            continue
         try:
             stat = (entry / TRANSCRIPT_FILENAME).stat()
         except OSError:
@@ -386,6 +390,19 @@ async def _write_anchor(root: str | Path, session_id: str) -> None:
         logger.debug("tail anchor not written for %s", session_id, exc_info=True)
 
 
+def _is_archived(directory: Path) -> bool:
+    """Whether this session's transcript is stored compressed.
+
+    Both prewarm selectors walk the store to find journals a READER will scan:
+    a tail anchor names a plain inode, and a warmed index/replay is materialised
+    from plain bytes. An archive is skipped here and restored by the reader that
+    actually opens the session, so the pass never decompresses the store.
+    """
+    from local_operator.session import compression
+
+    return compression.archive_path(directory) is not None
+
+
 def _anchor_current(directory: Path) -> bool:
     """Whether this journal's tail anchor already describes its current version.
 
@@ -396,8 +413,14 @@ def _anchor_current(directory: Path) -> bool:
     every core start: a journal the selector wrongly calls current is simply
     re-checked by ``write_tail_anchor``, which does validate before writing.
     """
-    from local_operator.session.tail_anchor import read_anchor
+    from local_operator.session.tail_anchor import drop_anchor, read_anchor
 
+    if _is_archived(directory):
+        # An anchor cannot describe an archive. Drop a stale one and settle the
+        # question as "nothing to do", or the selector reports this journal as
+        # needing a warm on every pass.
+        drop_anchor(directory)
+        return True
     try:
         stat = (directory / TRANSCRIPT_FILENAME).stat()
     except OSError:

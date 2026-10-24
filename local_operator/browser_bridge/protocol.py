@@ -84,7 +84,18 @@ def proto_supported(
 #: both read `0.1.19`. Nothing shipped under it, so the repair is a renumber —
 #: see `docs/store/release-record.md`, v0.1.20. 0.1.21 is the first tree that
 #: serves the structured read actions (`styles`/`hit_test`/`ancestors`).
-EXPECTED_EXTENSION_VERSION = "0.1.21"
+#: 0.1.22 is the first tree whose `snapshot` takes a CSS scope and a line
+#: window (`selector`/`start`/`limit`/`search`), so an agent can ask for one
+#: section of a real settings form instead of a tree it cannot page.
+#: 0.1.23 is the first tree whose `click`/`type` resolve accessibility
+#: locators (`role=`, `label=`, `text=`) against the a11y tree, so a target
+#: can be named by what it IS rather than by a framework-generated id.
+#: 0.1.24 is the first tree that serves `query` (CSS in, element descriptors
+#: out) — the read-only answer to "what is the id of this checkbox?".
+#: 0.1.25 is the first tree whose `element_not_found` carries
+#: `data.candidates` (role/name/locator) on a CSS miss as well as a locator
+#: miss, so the tool can name the closest real elements instead of a bare miss.
+EXPECTED_EXTENSION_VERSION = "0.1.25"
 
 #: The first extension version that serves each capability-gated method.
 #:
@@ -113,6 +124,7 @@ CAPABILITY_MIN_EXTENSION_VERSION: dict[str, str] = {
     "styles": "0.1.21",
     "hit_test": "0.1.21",
     "ancestors": "0.1.21",
+    "query": "0.1.24",
 }
 
 #: The two switches the OPERATOR owns, and the ONE spelling of each label.
@@ -164,7 +176,7 @@ CAPABILITY_SWITCH_LOCATION = (
 #: which the tool can only render as "the bridge broke"; the gate turns the same
 #: peer into a typed, actionable `capability_unsupported` instead.
 CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
-    {"download", "upload", "styles", "hit_test", "ancestors"}
+    {"download", "upload", "styles", "hit_test", "ancestors", "query"}
 )
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
@@ -287,6 +299,14 @@ METHODS = (
     "styles",
     "hit_test",
     "ancestors",
+    # The read-only DOM query: CSS in, bounded descriptors out (tag, id, name,
+    # role, aria-label, rendered text, visibility, checked/disabled, rect). It
+    # exists because the one question that would have unblocked the measured
+    # incident — "what is the id of this checkbox?" — had no route: `read`
+    # returns no attributes, `snapshot` returns an AX tree, and `eval` is not
+    # safe to expose. It never writes, navigates or evaluates caller code, so
+    # it is a READ by construction rather than by promise.
+    "query",
     # Site-permission flow (agent-legible approvals). ``request_access`` raises
     # the pending approval in the extension and returns immediately;
     # ``await_access`` blocks for a BOUNDED slice (the extension caps it well
@@ -392,6 +412,9 @@ COMMAND_TIMEOUTS = {
     "styles": 20.0,
     "hit_test": 20.0,
     "ancestors": 20.0,
+    # query runs the same one-shot `executeScript` class as the reads above and
+    # walks at most 50 elements, so it shares their budget.
+    "query": 20.0,
     # request_access only writes the pending record and raises the prompt
     # surfaces — it returns immediately, never waiting on the human.
     "request_access": 20.0,

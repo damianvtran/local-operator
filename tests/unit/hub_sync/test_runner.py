@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,16 +12,36 @@ import pytest
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
+from local_operator.hub_sync import runner as runner_mod
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
 from local_operator.hub_sync.identity import LinkPolicy
-from local_operator.hub_sync.runner import HubSyncRunner, TickReport
+from local_operator.hub_sync.runner import (
+    SESSION_START_CHECK_THROTTLE_S,
+    HubSyncRunner,
+    TickReport,
+)
 from local_operator.hub_sync.settings import HubSyncSettings
 from tests.unit.hub_sync.test_service import BASE, Hub, _pull_agent
 
 
+class Clock:
+    """A monotonic clock a test can move, injected as the runner's ``clock``.
+
+    The session-start throttle is a time window, and a test that has to sleep
+    through 120 real seconds (or patch the stdlib globally) is either slow or
+    lying. The runner takes the clock as a constructor argument for exactly this.
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
 @pytest.fixture
-def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     root = tmp_path / ".local-operator"
     hub = Hub()
     monkeypatch.setattr(
@@ -43,7 +64,14 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             resolver=None,
         )
 
-    runner = HubSyncRunner(config_manager=cm, build_ctx=build, startup_delay=0)
+    # An indirect ``rig`` param is the CLOCK these tests move; the default rig
+    # keeps the real monotonic clock.
+    runner = HubSyncRunner(
+        config_manager=cm,
+        build_ctx=build,
+        startup_delay=0,
+        clock=getattr(request, "param", None),
+    )
     return runner, hub, agents, root, cm, state
 
 
@@ -1120,3 +1148,212 @@ async def test_a_resolved_link_publishes_after_a_local_edit_from_the_seeded_rece
     after = prov_mod.read_baseline(root, "agent", row.id)
     assert after is not None and after.outbound is not None
     assert after.outbound.remote_revision == fake.revision
+
+
+# -- session-start trigger ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_session_start_checks_once_and_the_next_is_coalesced(rig) -> None:
+    """Opening two conversations back to back is ONE check, not two.
+
+    The real path, not a counter: the linked agent's ``last_checked_at`` is only
+    written by a check that actually ran, so this fails if the trigger schedules
+    nothing at all as well as if it schedules a second pass.
+    """
+
+    runner, hub, agents, root, *_ = rig
+    row = _pull_agent(agents, hub, root)
+    key = f"agent:{row.id}"
+
+    first = runner.note_session_start()
+    assert isinstance(first, asyncio.Task)
+    await first
+    assert st.StatusStore(root).load()["items"][key]["last_checked_at"]
+
+    # Back to back: the window the FIRST check claimed still covers this one.
+    assert runner.note_session_start() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rig", [Clock()], indirect=True)
+async def test_the_window_expires_and_the_next_session_start_checks_again(rig, monkeypatch) -> None:
+    """The throttle is a window, not a one-shot latch: after it, a start checks.
+
+    ``check_items`` is counted rather than timed, so the assertion is about the
+    trigger and not about how long the fake hub takes.
+    """
+
+    runner, hub, agents, root, *_ = rig
+    clock: Clock = runner._clock  # type: ignore[assignment]
+    _pull_agent(agents, hub, root)
+    calls: list[str] = []
+    real = svc.check_items
+
+    def counting(ctx: Any, **kw: Any) -> Any:
+        calls.append("check")
+        return real(ctx, **kw)
+
+    monkeypatch.setattr(svc, "check_items", counting)
+
+    await runner.note_session_start()
+    assert len(calls) == 1
+    assert runner.note_session_start() is None  # inside the window
+    assert len(calls) == 1
+
+    clock.now += SESSION_START_CHECK_THROTTLE_S
+    later = runner.note_session_start()
+    assert later is not None
+    await later
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_tick_starts_the_session_window_too(rig) -> None:
+    """A check is a check: the timer having just looked is enough to skip one."""
+
+    runner, *_ = rig
+    await runner.tick(reason="startup")
+    assert runner.note_session_start() is None
+
+
+@pytest.mark.asyncio
+async def test_a_session_start_is_fire_and_forget_and_never_raises(rig, monkeypatch) -> None:
+    """A hub that is down costs the create nothing: nothing runs inline, nothing raises.
+
+    The check runs in an executor thread behind the runner's lock, so a broken
+    hub surface is the realistic failure -- and the task must absorb it. The
+    assertion that ``calls`` is empty the instant ``note_session_start`` returns
+    is what proves the work was SCHEDULED rather than awaited: ``create_task``
+    never runs the coroutine before control returns to the loop.
+    """
+
+    runner, *_ = rig
+    calls: list[str] = []
+
+    def boom(*_a: Any, **_kw: Any) -> Any:
+        calls.append("check")
+        raise RuntimeError("hub unreachable")
+
+    monkeypatch.setattr(svc, "check_items", boom)
+
+    task = runner.note_session_start()
+    assert task is not None
+    assert calls == [], "the check must not run on the caller's stack"
+    await task  # would raise if the trigger did not swallow the failure
+    assert task.exception() is None
+    assert calls == ["check"]
+
+    # The failed attempt still claims the window: a hub that is down must not
+    # turn every subsequent session start into another attempt.
+    assert runner.note_session_start() is None
+
+
+# -- the interval delay the loop actually sleeps ------------------------------------------
+
+
+async def _capture_interval_sleep(
+    runner: HubSyncRunner, monkeypatch: pytest.MonkeyPatch
+) -> list[float]:
+    """Drive ``run_forever`` to its interval sleep and report the delays it was handed.
+
+    The loop's observable scheduling contract is the seconds it passes to
+    ``_sleep``. Sleeping a real interval would park the test for a quarter of an
+    hour, so ``_sleep`` is replaced with a recorder: the FIRST call is the
+    startup delay (the rig pins it to 0), and the SECOND -- the interval delay
+    under test -- records the value and stops the runner, so the loop computes
+    no further one and returns.
+
+    Callers assert the EXACT seconds. A range assertion would stay green through
+    the defect these tests exist for: a delay derived from the wrong number of
+    minutes is off by a factor, not by the jitter.
+    """
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> bool:
+        sleeps.append(float(seconds))
+        if len(sleeps) == 1:
+            return False  # the startup delay elapsed: let the first tick run
+        runner.stop()
+        return True
+
+    monkeypatch.setattr(runner, "_sleep", fake_sleep)
+    await asyncio.wait_for(runner.run_forever(), timeout=5.0)
+    assert len(sleeps) == 2, f"expected a startup and one interval sleep, got {sleeps!r}"
+    return sleeps
+
+
+@pytest.mark.asyncio
+async def test_the_interval_sleep_is_the_default_fifteen_minutes(rig, monkeypatch) -> None:
+    """The default 15-minute interval reaches ``_sleep`` as exactly 900 seconds.
+
+    ``random.uniform`` is pinned to its neutral multiplier, 1.0, so the only
+    arithmetic left is ``minutes * 60``: an interval changed to an hour reds at
+    3600, and a minutes/seconds mix-up reds too. The CALL's bounds are asserted
+    as literals as well, so a loop that stopped applying the documented +-10 %
+    jitter (or moved its band) fails here rather than silently sleeping a fixed
+    interval.
+    """
+
+    runner, *_ = rig
+    bounds: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        bounds.append((low, high))
+        return 1.0
+
+    monkeypatch.setattr(runner_mod, "random", SimpleNamespace(uniform=uniform))
+
+    sleeps = await _capture_interval_sleep(runner, monkeypatch)
+
+    assert sleeps == [0.0, 900.0]
+    assert bounds == [(0.9, 1.1)]
+
+
+@pytest.mark.asyncio
+async def test_the_interval_sleep_follows_the_configured_interval(rig, monkeypatch) -> None:
+    """A configured 30 minutes is 1800 seconds: the loop reads the setting, not a default."""
+
+    runner, *_ = rig
+    runner._cm.set_config_value("hub", {"check_interval_min": 30})
+    monkeypatch.setattr(runner_mod, "random", SimpleNamespace(uniform=lambda low, high: 1.0))
+
+    sleeps = await _capture_interval_sleep(runner, monkeypatch)
+
+    assert sleeps == [0.0, 1800.0]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_settings_read_falls_back_to_the_module_default(
+    rig, monkeypatch
+) -> None:
+    """The failure path uses ``DEFAULT_CHECK_INTERVAL_MIN``, not a hardcoded 15.
+
+    The constant is patched to an arbitrary 7 minutes before the failing read,
+    so the exact 420 seconds below can only come from the runner reading the
+    module constant. A hardcoded 15 would produce 900 and fail.
+
+    The first read -- the tick's own -- succeeds, so the runner reaches the
+    delay computation through the loop's normal path; only the second read, the
+    one that computes the interval, raises.
+    """
+
+    runner, *_ = rig
+    real = HubSyncSettings.read_fresh
+    reads: list[str] = []
+
+    def flaky(cm: Any) -> HubSyncSettings:
+        reads.append("read")
+        if len(reads) == 1:
+            return real(cm)
+        raise RuntimeError("config.yml is unreadable")
+
+    monkeypatch.setattr(HubSyncSettings, "read_fresh", staticmethod(flaky))
+    monkeypatch.setattr(runner_mod, "DEFAULT_CHECK_INTERVAL_MIN", 7)
+    monkeypatch.setattr(runner_mod, "random", SimpleNamespace(uniform=lambda low, high: 1.0))
+
+    sleeps = await _capture_interval_sleep(runner, monkeypatch)
+
+    assert len(reads) == 2, "expected the tick's read to succeed and the delay's to fail"
+    assert sleeps == [0.0, 420.0]

@@ -366,6 +366,31 @@ async def test_a_missing_host_hook_is_an_error_not_a_user_refusal() -> None:
     assert "exec" not in result.text
 
 
+@pytest.mark.asyncio
+async def test_a_host_that_cannot_present_a_question_refuses_in_words() -> None:
+    """MINOR-1 / QA Q1 on #2834: a refusal must not arrive as a traceback.
+
+    The queued-only ask surface a resumed worker can install raises
+    ``AskUnavailableError`` if anything ever awaits it. Left to ``_guard`` that
+    reached the model as ``Tool 'ask' failed unexpectedly:`` plus a stack trace
+    of our own paths — the register reserved for defects, not for a host stating
+    that nobody can be asked. ``execute_ask`` catches it and returns the
+    sentence, the way the ``ApprovalUnavailableError`` sites do.
+    """
+    from local_operator.session.runtime.serving import AskUnavailableError
+
+    async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
+        raise AskUnavailableError("the queued-ask engine is off for this process")
+
+    result = await _call(_context(hook), {"questions": _questions()})
+
+    assert result.is_error is True
+    assert result.text.startswith("No one can be asked on this run")
+    assert "the queued-ask engine is off for this process" in result.text
+    assert "failed unexpectedly" not in result.text
+    assert "Traceback" not in result.text
+
+
 def test_no_test_still_pins_the_retired_refusal_sentence() -> None:
     """A guard, not documentation: the retired claim must not survive in here.
 

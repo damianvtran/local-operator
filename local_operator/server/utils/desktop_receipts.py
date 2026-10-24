@@ -223,6 +223,36 @@ class DesktopReceipts:
         with closing(self._db()) as db, db:
             db.execute("UPDATE receipts SET result = ? WHERE id = ?", (json.dumps(result), key))
 
+    def _replace(self, key: str, result: dict[str, Any]) -> None:
+        """Supersede a RECORDED outcome for ``key`` with a later one.
+
+        THE INVARIANT, stated where the write happens: at-most-once exists to
+        stop a lost response from duplicating a LIVE side effect. When a recorded
+        outcome names something that is provably gone by the time the retry
+        arrives — the draft id a mint journalled, dropped from the registry on
+        expiry or materialised into a conversation since deleted — replaying it
+        hands the caller a name this daemon cannot serve, and re-running the
+        operation is NOT a second effect: the first one has nothing left to
+        duplicate. The CALLER proves that before asking for this, through
+        ``run``'s ``replay_guard``; the journal never infers it.
+
+        ``result IS NOT NULL`` keeps this to FINAL outcomes. A pending claim is
+        :meth:`_release`'s business, and rewriting one here would be
+        indistinguishable from recording an attempt that never completed.
+
+        ACROSS PROCESSES the claim's transaction serialises only the READ: two
+        daemons sharing one store can both see the same dead row and both mint.
+        Accepted rather than fixed, because the at-most-once guarantee this
+        journal exists for — a LIVE side effect run twice — is untouched (both
+        re-ran an operation with nothing left to duplicate), and a draft mint
+        starts nothing: the loser's id is one registry entry that ages out.
+        """
+        with closing(self._db()) as db, db:
+            db.execute(
+                "UPDATE receipts SET result = ? WHERE id = ? AND result IS NOT NULL",
+                (json.dumps(result), key),
+            )
+
     async def run(
         self,
         key: str,
@@ -230,7 +260,19 @@ class DesktopReceipts:
         operation: Callable[[], Awaitable[dict[str, Any]]],
         *,
         retry_safe: bool = False,
+        replay_guard: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any]:
+        """Run ``operation`` once per ``key``, replaying its recorded outcome.
+
+        ``replay_guard`` makes the replay CONDITIONAL: it is asked, inside the
+        per-key lock and only for a recorded outcome, whether that outcome may
+        still be served. A recorded success can name a resource that has since
+        ceased to exist (a mint's draft id — see :meth:`_replace`), and replaying
+        it is the defect rather than the protection. Answering ``False`` runs
+        the operation again and supersedes the row, under the SAME lock and
+        fingerprint check, so a same-id retry still coalesces and a different
+        body still raises :class:`ReceiptConflict`.
+        """
         fingerprint = hashlib.sha256(
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -242,8 +284,16 @@ class DesktopReceipts:
         try:
             async with lock:
                 cached = await asyncio.to_thread(self._claim, key, fingerprint, retry_safe)
+                superseding = False
                 if cached is not None:
-                    return {**cached, "replayed": True}
+                    # The guard runs HERE, under the per-key lock, so two
+                    # requests for this id in THIS process cannot both decide to
+                    # re-run: the second waits, then judges the row the first
+                    # wrote. (Across processes the claim serialises the read
+                    # only — see ``_replace``.)
+                    if replay_guard is None or replay_guard(cached):
+                        return {**cached, "replayed": True}
+                    superseding = True
                 try:
                     result = await operation()
                 except Unclaimed as unclaimed:
@@ -253,7 +303,10 @@ class DesktopReceipts:
                     # :class:`Unclaimed` for why this is not an ``_finish``.
                     await asyncio.to_thread(self._release, key)
                     return unclaimed.result
-                await asyncio.to_thread(self._finish, key, result)
+                if superseding:
+                    await asyncio.to_thread(self._replace, key, result)
+                else:
+                    await asyncio.to_thread(self._finish, key, result)
                 return result
         finally:
             # Include waiters in the count so removing an entry can never admit

@@ -204,6 +204,13 @@ GET    /v1/desktop/library/assets/{asset_id}/content
        Range supported; inline disposition (attachment with ?download=1);
        nosniff; no absolute path input
 GET    /v1/desktop/library/assets/{asset_id}/thumbnail?w=480
+GET    /v1/desktop/library/assets/{asset_id}/waveform
+       {version:1, bars:240, peaks:[0..1 × 240]}; digest assets read the
+       <digest>.peaks.json sidecar (bounded legacy repair), path assets
+       decode ONCE on first request and cache under
+       cache/library/peaks/<asset-id>-<mtime>.json; one child decoder at a
+       time (8 MiB cap, 10 s deadline); 404 = no waveform, never a flat
+       line; nosniff + no-store
 PUT    /v1/desktop/library/assets/{asset_id}/chat  {session_id}
 DELETE /v1/desktop/library/assets/{asset_id}/chat
 GET    /v1/desktop/library/tags

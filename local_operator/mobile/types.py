@@ -870,6 +870,16 @@ class PendingAskWire:
     answers: dict[str, list[str]] | None = None
     answered_by: dict[str, Any] | None = None
     answered_at: int | None = None
+    #: WHY and WHEN an ask was dismissed (SA-D8, design §17), carried on the ROW
+    #: because the desktop and the phone read rows, not sessions. ``dismissed_at``
+    #: is the stamp the shared visibility rule reads (``asks.store.dismissed_hidden``:
+    #: before the deadline keeps a settled receipt, at or after it leaves), and
+    #: ``dismissed_reason`` is the operator's own word (``moot`` |
+    #: ``answered_in_chat``). Absent on every other status, and ``to_json`` drops
+    #: ``None``, so a non-dismissed row is byte-identical to what every build
+    #: before these fields sent.
+    dismissed_at: int | None = None
+    dismissed_reason: str | None = None
     #: Refs to the images attached to the answer (``{qid: [{"attachment",
     #: "mime_type", "bytes"}]}``); never bytes. Absent for a text-only ask --
     #: ``to_json`` drops ``None`` -- so the phone wire is unchanged for them.
@@ -880,6 +890,15 @@ class PendingAskWire:
     #: they exist so the mirrored card advances to the next question between an
     #: old client's taps. Absent on every ask answered the atomic way.
     draft_question_ids: list[str] | None = None
+    #: THE ASK CARD'S CONTEXT LINE (SA-D7, design §15): operator messages admitted
+    #: since this ask was raised, and the latest one's time (ms). ``None`` when the
+    #: writing runtime could not count them (an older runtime, an ask older than
+    #: its window, a session with no operator message yet), and ``to_json`` drops
+    #: ``None`` — so an uncountable ask's wire row is byte-identical to what every
+    #: build before this field sent. A zero IS sent: it states that the ask is
+    #: newer than every message, and the card draws no line for it either way.
+    user_messages_since: int | None = None
+    last_user_message_at: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}
@@ -929,6 +948,21 @@ class PendingRequest:
     # memory. The flag rides; the credential VALUE never does, same rule as
     # ``secret``. Defaulted for the same version-skew reason as ``recommended``.
     persist: bool = False
+    # The approval rule in force when this gate was raised, and where it came
+    # from (``session`` = the conversation's own record, ``global`` = the file,
+    # ``pin`` = a --yolo start). The phone and desktop need BOTH halves to show
+    # "Ask — session override; global Auto": the mode alone cannot say which
+    # precedence rung won, and a surface that re-derives it from config.yml is
+    # wrong exactly when the operator set a per-conversation mode. Empty on an
+    # ask card, and on a payload from an older runtime — defaulted for the same
+    # version-skew reason as ``recommended``.
+    approval_mode: str = ""
+    approval_provenance: str = ""
+    #: The machine default the mode outranks (``ask``/``auto``), or ``""`` when
+    #: the publisher cannot state it. Kept separate from ``approval_mode``
+    #: because a session override and the file can hold the same word, and a
+    #: viewer that derives "the other one" is wrong exactly then (U4).
+    approval_global_mode: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
