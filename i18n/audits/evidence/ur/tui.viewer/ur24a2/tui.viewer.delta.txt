@@ -1,0 +1,4 @@
+tui.viewer.unreadable
+EN Cannot read this file — missing, unreadable, or outside permitted roots
+OLD یہ فائل پڑھی نہیں جا سکتی — موجود نہیں، ناقابلِ قرأت ہے، یا اجازت شدہ روٹ ڈائریکٹریوں سے باہر ہے
+NEW یہ فائل موجود نہیں، پڑھنے کے قابل نہیں، یا اجازت شدہ روٹ ڈائریکٹریوں سے باہر ہے

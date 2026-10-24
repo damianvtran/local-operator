@@ -1,0 +1,112 @@
+[
+  {
+    "finding_id": "UR-R2-001",
+    "severity": "major",
+    "key": "wire.settings.wakes_triggers_project_staleness_enabled.help",
+    "round2_current": "ان پروجیکٹس پر رابطے کے لیے بیدار ہوں جن کی پیش رفت پرانی ہو۔ مکمل (done/paused/archived) پروجیکٹس کی نگرانی کبھی نہیں۔",
+    "round2_proposed": "ان پروجیکٹس پر رابطے کے لیے بیدار ہوں جن کی پیش رفت پرانی ہو۔ حتمی حالت والے (done/paused/archived) پروجیکٹس کی نگرانی کبھی نہیں۔",
+    "round3_current": "ان پروجیکٹس پر رابطے کے لیے بیدار ہوں جن کی پیش رفت پرانی ہو۔ حتمی حالت والے (done/paused/archived) پروجیکٹس کی نگرانی کبھی نہیں۔",
+    "changed": true,
+    "exact_proposed_match": true
+  },
+  {
+    "finding_id": "UR-R2-002",
+    "severity": "major",
+    "key": "wire.settings.supplements_denyprefixes.help",
+    "round2_current": "نمایاں حصے آن ہوں۔ کاما سے الگ فولڈرز جن کی فائلیں کبھی فہرست میں شامل یا فیصلہ ماڈل کو نہیں بھیجتیں؛ گاہکوں کے ڈیٹا والی مشین پر استعمال کریں۔",
+    "round2_proposed": "نمایاں حصے آن ہوں۔ کاما سے الگ فولڈرز جن کی فائلیں کبھی فہرست میں نہیں آتیں اور فیصلہ کرنے والے ماڈل کو نہیں بھیجی جاتیں؛ گاہکوں کے ڈیٹا والی مشین پر استعمال کریں۔",
+    "round3_current": "نمایاں حصے آن ہوں۔ کاما سے الگ فولڈرز جن کی فائلیں کبھی فہرست میں نہیں آتیں اور فیصلہ کرنے والے ماڈل کو نہیں بھیجی جاتیں؛ گاہکوں کے ڈیٹا والی مشین پر استعمال کریں۔",
+    "changed": true,
+    "exact_proposed_match": true
+  },
+  {
+    "finding_id": "UR-R2-003",
+    "severity": "minor",
+    "key": "wire.settings.subagents_model_choice.help",
+    "round2_current": "ذیلی ایجنٹ کا درجہ کون منتخب کرے؛ operator پروفائل میں مقرر کرتا ہے۔",
+    "round2_proposed": "ذیلی ایجنٹ کا درجہ کون منتخب کرے؛ آپریٹر پروفائل میں مقرر کرتا ہے۔",
+    "round3_current": "ذیلی ایجنٹ کا درجہ کون منتخب کرے؛ آپریٹر پروفائل میں مقرر کرتا ہے۔",
+    "changed": true,
+    "exact_proposed_match": true
+  },
+  {
+    "finding_id": "UR-R2-003",
+    "severity": "minor",
+    "key": "wire.settings.subagents_max_running.label",
+    "round2_current": "زیادہ سے زیادہ پس منظر کام",
+    "round2_proposed": "زیادہ سے زیادہ پس منظر جاب",
+    "round3_current": "زیادہ سے زیادہ پس منظر جاب",
+    "changed": true,
+    "exact_proposed_match": true
+  },
+  {
+    "finding_id": "UR-R2-003",
+    "severity": "minor",
+    "key": "wire.settings.supplements_maxcostusd.help",
+    "round2_current": "گرافکس آن ہوں۔ ایک کام کے خرچ کی نرم حد۔",
+    "round2_proposed": "گرافکس آن ہوں۔ ایک جاب کے خرچ کی نرم حد۔",
+    "round3_current": "گرافکس آن ہوں۔ ایک جاب کے خرچ کی نرم حد۔",
+    "changed": true,
+    "exact_proposed_match": true
+  },
+  {
+    "finding_id": "UR-R2-003",
+    "severity": "minor",
+    "key": "wire.settings.supplements_timeouts.help",
+    "round2_current": "نمایاں حصے آن ہوں۔ اتنی دیر بعد پورا کام چھوڑ دیں۔",
+    "round2_proposed": "نمایاں حصے آن ہوں۔ اتنی دیر بعد پوری جاب چھوڑ دیں۔",
+    "round3_current": "نمایاں حصے آن ہوں۔ اتنی دیر بعد پوری جاب چھوڑ دیں۔",
+    "changed": true,
+    "exact_proposed_match": true
+  },
+  {
+    "finding_id": "UR-R2-004",
+    "severity": "minor",
+    "key": "wire.slash.hub",
+    "round2_current": "Hub روابط کھولیں — فی ربط رکنیت اور خودکار push پالیسی",
+    "round2_proposed": "Hub روابط کھولیں — فی ربط سبسکرپشن اور خودکار push پالیسی",
+    "round3_current": "Hub روابط کھولیں — فی ربط سبسکرپشن اور خودکار push پالیسی",
+    "changed": true,
+    "exact_proposed_match": true
+  },
+  {
+    "finding_id": "UR-R2-005",
+    "severity": "minor",
+    "key": "wire.settings.remote_compute.description",
+    "round2_current": "پیش نظارہ: ایجنٹ کا کام Radient کے ہوسٹ کیے کمپیوٹ پر چلائیں، آپ کے ایک میش نیٹ ورک سے منسلک۔",
+    "round2_proposed": "پری ویو: ایجنٹ کا کام Radient کے ہوسٹ کیے کمپیوٹ پر چلائیں، آپ کے ایک میش نیٹ ورک سے منسلک۔",
+    "round3_current": "تجرباتی: ایجنٹ کا کام Radient کے ہوسٹ کیے کمپیوٹ پر چلائیں، آپ کے ایک میش نیٹ ورک سے منسلک۔",
+    "changed": true,
+    "exact_proposed_match": false
+  },
+  {
+    "finding_id": "UR-R2-005",
+    "severity": "minor",
+    "key": "wire.settings.remote_compute_enabled.help",
+    "round2_current": "پیش نظارہ: کام Radient کمپیوٹ کو بھیجے، ایک میش نیٹ ورک سے منسلک۔",
+    "round2_proposed": "پری ویو: کام Radient کمپیوٹ کو بھیجے، ایک میش نیٹ ورک سے منسلک۔",
+    "round3_current": "تجرباتی: کام Radient کمپیوٹ کو بھیجے، ایک میش نیٹ ورک سے منسلک۔",
+    "changed": true,
+    "exact_proposed_match": false
+  },
+  {
+    "finding_id": "UR-R2-006",
+    "severity": "minor",
+    "key": "wire.remote_compute.finished_exit_code",
+    "round2_current": "خروجی کوڈ: {exit_code}",
+    "round2_proposed": "ایگزٹ کوڈ: {exit_code}",
+    "round3_current": "ایگزٹ کوڈ: {exit_code}",
+    "changed": true,
+    "exact_proposed_match": true
+  },
+  {
+    "finding_id": "UR-R2-007",
+    "severity": "minor",
+    "key": "wire.settings.display_rail.help",
+    "round2_current": "ایک لکیر ANSWER کو نشان زد کرے: ٹرن ختم کرنے والا پیغام۔ ٹرن کے دوران کے بیان پر ریل نہیں۔",
+    "round2_proposed": "ایک لکیر ANSWER کو نشان زد کرتی ہے: ٹرن ختم کرنے والا پیغام۔ ٹرن کے دوران کے بیان پر ریل نہیں۔",
+    "round3_current": "ایک لکیر ANSWER کو نشان زد کرتی ہے: ٹرن ختم کرنے والا پیغام۔ ٹرن کے دوران کے بیان پر ریل نہیں۔",
+    "changed": true,
+    "exact_proposed_match": true
+  }
+]

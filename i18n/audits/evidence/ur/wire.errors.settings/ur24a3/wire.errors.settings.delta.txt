@@ -1,0 +1,4 @@
+wire.errors.settings.inline_credentials
+EN Use an endpoint without inline credentials or query parameters.
+OLD ایسا اینڈ پوائنٹ استعمال کریں جس میں ان لائن [redacted]ز یا کوئری پیرامیٹرز نہ ہوں۔
+NEW ایسا اینڈ پوائنٹ استعمال کریں جس میں ان لائن کریڈینشلز یا کوئری پیرامیٹرز نہ ہوں۔

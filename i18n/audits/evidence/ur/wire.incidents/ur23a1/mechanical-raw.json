@@ -1,0 +1,1250 @@
+{
+  "checks": {
+    "key_parity": [],
+    "non_nfc": [],
+    "bidi_controls": [],
+    "latin_digit_nonascii": [],
+    "width": [
+      {
+        "key": "relay.ask.context.messages",
+        "maxCells": 60,
+        "ur_cells": 118,
+        "en_cells": 139,
+        "over": 58,
+        "note": "The line under an OPEN ask's state line on the phone, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the card draws no line at all for 0 or when an older runtime sends no count) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. It wraps onto more than one line on a narrow phone, so short words and a natural break after 'asked' are welcome.",
+        "ur": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}"
+      },
+      {
+        "key": "tui.asks.context.messages",
+        "maxCells": 78,
+        "ur_cells": 134,
+        "en_cells": 139,
+        "over": 56,
+        "note": "The line under an OPEN ask in the terminal's ask list, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the caller draws no line at all for 0 or for an uncountable ask) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. This line is CLIPPED to the list's width with an ellipsis, so keep the opening words (the count and 'from you') first: the tail may be cut. The list paints one line per ask plus this line on stale open rows only, so the string must never contain a newline.",
+        "ur": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}"
+      },
+      {
+        "key": "tui.welcome.tip.key_new_session",
+        "maxCells": 32,
+        "ur_cells": 33,
+        "en_cells": 33,
+        "over": 1,
+        "note": "reserves {key} for a REMAPPABLE chord; the 32-cell budget excludes the substitution, which is measured at a 25-cell worst-case key (KEY_BUDGET_CELLS), keeping the painted row within the pool's 59",
+        "ur": "'{key}' سے نئی گفتگو شروع ہوتی ہے"
+      }
+    ],
+    "exact_english": [
+      "tui.review.error_detail",
+      "tui.review.lane_qa",
+      "tui.review.lane_ux",
+      "tui.schedule.fired_detail",
+      "tui.schedule.form_ends_placeholder",
+      "tui.schedule.form_repeat_placeholder",
+      "tui.schedule.form_when_placeholder",
+      "tui.team_authoring.footer",
+      "tui.transcript.sender.pid",
+      "tui.viewer.header",
+      "wire.errors.settings.invalid_value",
+      "wire.remote_compute.finished_exit_code",
+      "wire.settings.aida.title",
+      "wire.settings.aida_cadence_at.placeholder",
+      "wire.settings.aida_name.placeholder",
+      "wire.settings.bash_memory_mode.choice.auto.label",
+      "wire.settings.bash_memory_mode.choice.manual.label",
+      "wire.settings.bash_query_budget_enabled.label",
+      "wire.settings.bash_shell.label",
+      "wire.settings.classification.title",
+      "wire.settings.classification_auto.label",
+      "wire.settings.classification_notice.label",
+      "wire.settings.classification_vendor.choice.auto.label",
+      "wire.settings.classification_vendor.choice.openrouter.label",
+      "wire.settings.classification_vendor.choice.radient.label",
+      "wire.settings.classification_vendor.choice.typesafe.label",
+      "wire.settings.classification_vendor.label",
+      "wire.settings.compaction_strategy.choice.auto.label",
+      "wire.settings.compaction_strategy.choice.context_full.label",
+      "wire.settings.compaction_strategy.choice.snapcompact.label",
+      "wire.settings.desktop.title",
+      "wire.settings.desktop_launch_command.label",
+      "wire.settings.desktop_launch_command.placeholder",
+      "wire.settings.display_composer_band.label",
+      "wire.settings.display_composer_chevron.label",
+      "wire.settings.display_composer_context.label",
+      "wire.settings.display_composer_cwd.label",
+      "wire.settings.display_composer_rate.label",
+      "wire.settings.display_heading_markers.label",
+      "wire.settings.display_narration.label",
+      "wire.settings.display_nerd_icons.choice.none.label",
+      "wire.settings.display_nerd_icons.label",
+      "wire.settings.display_notifications.label",
+      "wire.settings.display_rail.label",
+      "wire.settings.display_shimmer.label",
+      "wire.settings.display_terminal_title.label",
+      "wire.settings.display_time_format.choice.12h.description",
+      "wire.settings.display_time_format.choice.12h.label",
+      "wire.settings.display_time_format.choice.24h.description",
+      "wire.settings.display_time_format.choice.24h.label",
+      "wire.settings.fork.title",
+      "wire.settings.fork_cmux_placement.choice.surface.label",
+      "wire.settings.fork_mode.choice.window.label",
+      "wire.settings.hooks.title",
+      "wire.settings.hooks_native.label",
+      "wire.settings.hosting.label",
+      "wire.settings.hub.title",
+      "wire.settings.keymap.title",
+      "wire.settings.librarian.title",
+      "wire.settings.librarian_cadence_at.placeholder",
+      "wire.settings.librarian_name.placeholder",
+      "wire.settings.local_providers.title",
+      "wire.settings.mesh_updates.title",
+      "wire.settings.model_effort.choice.unset.label",
+      "wire.settings.model_effort.label",
+      "wire.settings.monitor_classifymaxchars.label",
+      "wire.settings.monitor_deltamaxchars.label",
+      "wire.settings.monitor_runtimeoutms.label",
+      "wire.settings.network.title",
+      "wire.settings.network_advertise_hosts.label",
+      "wire.settings.network_advertise_hosts.placeholder",
+      "wire.settings.network_credentials_github_repositories.label",
+      "wire.settings.network_credentials_github_repositories.placeholder",
+      "wire.settings.network_listen_address.label",
+      "wire.settings.network_max_handshakes.label",
+      "wire.settings.network_port.label",
+      "wire.settings.network_rollout_on_update.choice.auto.label",
+      "wire.settings.openrouter.title",
+      "wire.settings.proactive.title",
+      "wire.settings.proactive_patience_backoff.label",
+      "wire.settings.proactive_patience_default_ms.label",
+      "wire.settings.proactive_patience_episode_ttl_ms.label",
+      "wire.settings.providers.title",
+      "wire.settings.providers_openai_api.choice.chat_completions.label",
+      "wire.settings.providers_openai_api.choice.responses.label",
+      "wire.settings.providers_openai_api.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.label",
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "wire.settings.providers_openrouter_data_collection.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.label",
+      "wire.settings.providers_openrouter_ignore.placeholder",
+      "wire.settings.providers_openrouter_max_price.label",
+      "wire.settings.providers_openrouter_max_price.placeholder",
+      "wire.settings.providers_openrouter_only.placeholder",
+      "wire.settings.providers_openrouter_order.placeholder",
+      "wire.settings.providers_openrouter_preferred_max_latency.label",
+      "wire.settings.providers_openrouter_preferred_min_throughput.label",
+      "wire.settings.providers_openrouter_provider_affinity.label",
+      "wire.settings.providers_openrouter_quantizations.label",
+      "wire.settings.providers_openrouter_quantizations.placeholder",
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "wire.settings.providers_openrouter_require_parameters.label",
+      "wire.settings.providers_openrouter_sort.choice.latency.label",
+      "wire.settings.providers_openrouter_sort.choice.price.label",
+      "wire.settings.providers_openrouter_sort.choice.throughput.label",
+      "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "wire.settings.providers_openrouter_sort.label",
+      "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "wire.settings.providers_openrouter_zdr.label",
+      "wire.settings.query_budget.title",
+      "wire.settings.remote_compute.title",
+      "wire.settings.remote_compute_enabled.label",
+      "wire.settings.retry_basedelayms.label",
+      "wire.settings.retry_connectivitymaxretries.label",
+      "wire.settings.retry_fallbackchains.label",
+      "wire.settings.retry_modelfallback.label",
+      "wire.settings.retry_pinnedfallback.label",
+      "wire.settings.retry_usageawarefallback.label",
+      "wire.settings.retry_usagereservepercent.label",
+      "wire.settings.runtime.title",
+      "wire.settings.session_cleanup_delegated_enabled.label",
+      "wire.settings.session_scratchpad.title",
+      "wire.settings.shell_environment_exclude.placeholder",
+      "wire.settings.shell_environment_inherit.placeholder",
+      "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "wire.settings.shell_environment_mode.choice.inherit.label",
+      "wire.settings.speech.title",
+      "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "wire.settings.speech_voice_expressiveness.choice.high.label",
+      "wire.settings.speech_voice_expressiveness.choice.low.label",
+      "wire.settings.speech_voice_expressiveness.choice.medium.label",
+      "wire.settings.speech_voice_expressiveness.label",
+      "wire.settings.speech_voice_gender.choice.auto.label",
+      "wire.settings.speech_voice_gender.choice.female.label",
+      "wire.settings.speech_voice_gender.choice.male.label",
+      "wire.settings.speech_voice_gender.label",
+      "wire.settings.speech_voice_instructions.label",
+      "wire.settings.speech_voice_tone.choice.authoritative.label",
+      "wire.settings.speech_voice_tone.choice.bright.label",
+      "wire.settings.speech_voice_tone.choice.calm.label",
+      "wire.settings.speech_voice_tone.choice.neutral.label",
+      "wire.settings.speech_voice_tone.choice.warm.label",
+      "wire.settings.static_roots.placeholder",
+      "wire.settings.supplements.title",
+      "wire.settings.supplements_denyprefixes.placeholder",
+      "wire.settings.supplements_enabled.label",
+      "wire.settings.supplements_graphics.label",
+      "wire.settings.tool_approval_mode.choice.ask.label",
+      "wire.settings.tool_approval_mode.choice.auto.label",
+      "wire.settings.tui_theme.label",
+      "wire.settings.web_fetch.title",
+      "wire.settings.web_fetch_blocked_retry.label",
+      "wire.settings.web_fetch_cache_ttl_seconds.label",
+      "wire.settings.web_fetch_enabled.label",
+      "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+      "wire.settings.web_fetch_render_backend.label",
+      "wire.settings.web_fetch_timeout_seconds.label",
+      "wire.settings.web_search.title",
+      "wire.settings.web_search_deepseek_evidence.label",
+      "wire.settings.web_search_enabled.label",
+      "wire.settings.web_search_providers.label",
+      "wire.settings.web_search_strategy.choice.ordered.label",
+      "wire.settings.web_search_strategy.choice.round_robin.label",
+      "wire.settings.web_search_strategy.label",
+      "wire.settings.web_search_timeout_seconds.label"
+    ],
+    "source_hashes": [
+      {
+        "namespace": "cli.exec_remote_help",
+        "kind": "en",
+        "expected": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+        "actual": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+        "match": true
+      },
+      {
+        "namespace": "cli.exec_remote_help",
+        "kind": "ur",
+        "expected": "6fe867390d79bd9c59172ffd17cfc0a3db6016df45b426b6a945fcbf74662cf6",
+        "actual": "6fe867390d79bd9c59172ffd17cfc0a3db6016df45b426b6a945fcbf74662cf6",
+        "match": true
+      },
+      {
+        "namespace": "cli.exec_remote_help",
+        "kind": "context",
+        "expected": "fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f",
+        "actual": "fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f",
+        "match": true
+      },
+      {
+        "namespace": "relay.ask",
+        "kind": "en",
+        "expected": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+        "actual": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+        "match": true
+      },
+      {
+        "namespace": "relay.ask",
+        "kind": "ur",
+        "expected": "960c074ad43959e9fb01d09768d0ccdb4ced21f2b14db5a64713e998d0b78248",
+        "actual": "960c074ad43959e9fb01d09768d0ccdb4ced21f2b14db5a64713e998d0b78248",
+        "match": true
+      },
+      {
+        "namespace": "relay.ask",
+        "kind": "context",
+        "expected": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42",
+        "actual": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42",
+        "match": true
+      },
+      {
+        "namespace": "relay.session.tags",
+        "kind": "en",
+        "expected": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+        "actual": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+        "match": true
+      },
+      {
+        "namespace": "relay.session.tags",
+        "kind": "ur",
+        "expected": "4f0fab7f40bacc152b1cabba0244372b8d8dec40213c778ef8c417ac6be242aa",
+        "actual": "4f0fab7f40bacc152b1cabba0244372b8d8dec40213c778ef8c417ac6be242aa",
+        "match": true
+      },
+      {
+        "namespace": "relay.session.tags",
+        "kind": "context",
+        "expected": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7",
+        "actual": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7",
+        "match": true
+      },
+      {
+        "namespace": "tui.asks",
+        "kind": "en",
+        "expected": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+        "actual": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+        "match": true
+      },
+      {
+        "namespace": "tui.asks",
+        "kind": "ur",
+        "expected": "a6b23ec177d56c65c3d7bb22c950f7e202a67ed2dd19467d847015a246a29a1f",
+        "actual": "a6b23ec177d56c65c3d7bb22c950f7e202a67ed2dd19467d847015a246a29a1f",
+        "match": true
+      },
+      {
+        "namespace": "tui.asks",
+        "kind": "context",
+        "expected": "e09cd8e796359ab8c4d8de2fd5a59bb990c76f8488c28846cfb1623610507362",
+        "actual": "e09cd8e796359ab8c4d8de2fd5a59bb990c76f8488c28846cfb1623610507362",
+        "match": true
+      },
+      {
+        "namespace": "tui.authoring",
+        "kind": "en",
+        "expected": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+        "actual": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+        "match": true
+      },
+      {
+        "namespace": "tui.authoring",
+        "kind": "ur",
+        "expected": "81bb894f733b2ce4362b3c32d6e3054e8f0d167319ab5d6f2cf28a9f6a0fb61c",
+        "actual": "81bb894f733b2ce4362b3c32d6e3054e8f0d167319ab5d6f2cf28a9f6a0fb61c",
+        "match": true
+      },
+      {
+        "namespace": "tui.authoring",
+        "kind": "context",
+        "expected": "df98bba4457c1080b3941e9a24a04a52e360d11d2a07bdda992861c6cb54928c",
+        "actual": "df98bba4457c1080b3941e9a24a04a52e360d11d2a07bdda992861c6cb54928c",
+        "match": true
+      },
+      {
+        "namespace": "tui.palette",
+        "kind": "en",
+        "expected": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+        "actual": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+        "match": true
+      },
+      {
+        "namespace": "tui.palette",
+        "kind": "ur",
+        "expected": "1e320792eb96004d220e0ead013b628b749b9eb5f904421d00c6532f4513ccea",
+        "actual": "1e320792eb96004d220e0ead013b628b749b9eb5f904421d00c6532f4513ccea",
+        "match": true
+      },
+      {
+        "namespace": "tui.palette",
+        "kind": "context",
+        "expected": "edd5a12c66ec852e65e9afb4eee92f1b9436a3a148683b8d756a002b68ff06f7",
+        "actual": "edd5a12c66ec852e65e9afb4eee92f1b9436a3a148683b8d756a002b68ff06f7",
+        "match": true
+      },
+      {
+        "namespace": "tui.projects_edit",
+        "kind": "en",
+        "expected": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+        "actual": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+        "match": true
+      },
+      {
+        "namespace": "tui.projects_edit",
+        "kind": "ur",
+        "expected": "971f60ecf5722347088e73ca36d881b2d143c3bcd9e1d0e3bb0bb0a615e0b477",
+        "actual": "971f60ecf5722347088e73ca36d881b2d143c3bcd9e1d0e3bb0bb0a615e0b477",
+        "match": true
+      },
+      {
+        "namespace": "tui.projects_edit",
+        "kind": "context",
+        "expected": "db995023c6489ee9313403c2f463c36ea65162ceea52a572c3da26db02fbd01c",
+        "actual": "db995023c6489ee9313403c2f463c36ea65162ceea52a572c3da26db02fbd01c",
+        "match": true
+      },
+      {
+        "namespace": "tui.review",
+        "kind": "en",
+        "expected": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+        "actual": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+        "match": true
+      },
+      {
+        "namespace": "tui.review",
+        "kind": "ur",
+        "expected": "683847761d616f3145caaaabd733f57af5c1e749c7c640403cd92f22e54bd868",
+        "actual": "683847761d616f3145caaaabd733f57af5c1e749c7c640403cd92f22e54bd868",
+        "match": true
+      },
+      {
+        "namespace": "tui.review",
+        "kind": "context",
+        "expected": "b879498a3ba2debfac6ec65a640a75b8d53e71073a1d32676dc41f7325dbc202",
+        "actual": "b879498a3ba2debfac6ec65a640a75b8d53e71073a1d32676dc41f7325dbc202",
+        "match": true
+      },
+      {
+        "namespace": "tui.schedule",
+        "kind": "en",
+        "expected": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+        "actual": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+        "match": true
+      },
+      {
+        "namespace": "tui.schedule",
+        "kind": "ur",
+        "expected": "3d3dc64afa2a4cb1a486daae2d7b446e6ad13608e0131c26100d1fe3e43f0f0f",
+        "actual": "3d3dc64afa2a4cb1a486daae2d7b446e6ad13608e0131c26100d1fe3e43f0f0f",
+        "match": true
+      },
+      {
+        "namespace": "tui.schedule",
+        "kind": "context",
+        "expected": "829e18450b21ca836cc047813b9d18770414f1fd23f14c18b794c1f45648afb4",
+        "actual": "829e18450b21ca836cc047813b9d18770414f1fd23f14c18b794c1f45648afb4",
+        "match": true
+      },
+      {
+        "namespace": "tui.status",
+        "kind": "en",
+        "expected": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+        "actual": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+        "match": true
+      },
+      {
+        "namespace": "tui.status",
+        "kind": "ur",
+        "expected": "183a01fdfec59548bab675db30c675170e71ef20bb4d97c943f4fa211acf68f8",
+        "actual": "183a01fdfec59548bab675db30c675170e71ef20bb4d97c943f4fa211acf68f8",
+        "match": true
+      },
+      {
+        "namespace": "tui.status",
+        "kind": "context",
+        "expected": "3bab032efffea4adb669aa1f3c8d7a489f7b3b630b19b52636d70bd2b09bdfbc",
+        "actual": "3bab032efffea4adb669aa1f3c8d7a489f7b3b630b19b52636d70bd2b09bdfbc",
+        "match": true
+      },
+      {
+        "namespace": "tui.tags",
+        "kind": "en",
+        "expected": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+        "actual": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+        "match": true
+      },
+      {
+        "namespace": "tui.tags",
+        "kind": "ur",
+        "expected": "7a2e08723312b513b5af38691134ec2fdc381f120e913b691588b777d4265821",
+        "actual": "7a2e08723312b513b5af38691134ec2fdc381f120e913b691588b777d4265821",
+        "match": true
+      },
+      {
+        "namespace": "tui.team_authoring",
+        "kind": "en",
+        "expected": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+        "actual": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+        "match": true
+      },
+      {
+        "namespace": "tui.team_authoring",
+        "kind": "ur",
+        "expected": "50437b6e50c25040937f9863550a9cfea0afe159987f8dd5f942e38f772ccb80",
+        "actual": "50437b6e50c25040937f9863550a9cfea0afe159987f8dd5f942e38f772ccb80",
+        "match": true
+      },
+      {
+        "namespace": "tui.team_authoring",
+        "kind": "context",
+        "expected": "40e81d7469be5fb0da215e96d77189b218ed6a9879b13e4d4dc9f7b5f6c188ce",
+        "actual": "40e81d7469be5fb0da215e96d77189b218ed6a9879b13e4d4dc9f7b5f6c188ce",
+        "match": true
+      },
+      {
+        "namespace": "tui.transcript",
+        "kind": "en",
+        "expected": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+        "actual": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+        "match": true
+      },
+      {
+        "namespace": "tui.transcript",
+        "kind": "ur",
+        "expected": "3772f0bc1cb8f893e261445180c69ac7cc77874a590e48be8aa909fb3116db86",
+        "actual": "3772f0bc1cb8f893e261445180c69ac7cc77874a590e48be8aa909fb3116db86",
+        "match": true
+      },
+      {
+        "namespace": "tui.transcript",
+        "kind": "context",
+        "expected": "3c2252debbbc33c2fab2061a5dcdc9dfa036e07ab5793ba4dabdf889ac7113fc",
+        "actual": "3c2252debbbc33c2fab2061a5dcdc9dfa036e07ab5793ba4dabdf889ac7113fc",
+        "match": true
+      },
+      {
+        "namespace": "tui.viewer",
+        "kind": "en",
+        "expected": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+        "actual": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+        "match": true
+      },
+      {
+        "namespace": "tui.viewer",
+        "kind": "ur",
+        "expected": "7a4f8d943e17fe8e706b1f1b567323bea822d51784b7778ec6b43032e849b743",
+        "actual": "7a4f8d943e17fe8e706b1f1b567323bea822d51784b7778ec6b43032e849b743",
+        "match": true
+      },
+      {
+        "namespace": "tui.viewer",
+        "kind": "context",
+        "expected": "ed4535ceb6e3119c8a3b35f0aa0570ed0398d61c212a43f35bc6d2aa9ac389ae",
+        "actual": "ed4535ceb6e3119c8a3b35f0aa0570ed0398d61c212a43f35bc6d2aa9ac389ae",
+        "match": true
+      },
+      {
+        "namespace": "tui.welcome",
+        "kind": "en",
+        "expected": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+        "actual": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+        "match": true
+      },
+      {
+        "namespace": "tui.welcome",
+        "kind": "ur",
+        "expected": "8c931ffd4d9284216d113daa043b99bda068acc1b34b3600e87011496333dacc",
+        "actual": "8c931ffd4d9284216d113daa043b99bda068acc1b34b3600e87011496333dacc",
+        "match": true
+      },
+      {
+        "namespace": "tui.welcome",
+        "kind": "context",
+        "expected": "bfd46d9dbcc5c4dfbee6a3fd93e47264f17f123e01ddf84a7aae99869c41debd",
+        "actual": "bfd46d9dbcc5c4dfbee6a3fd93e47264f17f123e01ddf84a7aae99869c41debd",
+        "match": true
+      },
+      {
+        "namespace": "wire.errors",
+        "kind": "en",
+        "expected": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "actual": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "match": true
+      },
+      {
+        "namespace": "wire.errors",
+        "kind": "ur",
+        "expected": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "actual": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "match": true
+      },
+      {
+        "namespace": "wire.errors.settings",
+        "kind": "en",
+        "expected": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+        "actual": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+        "match": true
+      },
+      {
+        "namespace": "wire.errors.settings",
+        "kind": "ur",
+        "expected": "7da3d38e00605b0ce286e1c1aa02dddd8766e5d483d517ed026966b02b0e4c0c",
+        "actual": "7da3d38e00605b0ce286e1c1aa02dddd8766e5d483d517ed026966b02b0e4c0c",
+        "match": true
+      },
+      {
+        "namespace": "wire.incidents",
+        "kind": "en",
+        "expected": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "actual": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "match": true
+      },
+      {
+        "namespace": "wire.incidents",
+        "kind": "ur",
+        "expected": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "actual": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "match": true
+      },
+      {
+        "namespace": "wire.memory",
+        "kind": "en",
+        "expected": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+        "actual": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+        "match": true
+      },
+      {
+        "namespace": "wire.memory",
+        "kind": "ur",
+        "expected": "672982af74dc2436980566f94fcda01ac60e60dd2f588de1151a4176ac337a98",
+        "actual": "672982af74dc2436980566f94fcda01ac60e60dd2f588de1151a4176ac337a98",
+        "match": true
+      },
+      {
+        "namespace": "wire.memory",
+        "kind": "context",
+        "expected": "852518b5d2bd41f4b8b72d6d89d961d35b1bafaf341726e0406973d12b1c5e7d",
+        "actual": "852518b5d2bd41f4b8b72d6d89d961d35b1bafaf341726e0406973d12b1c5e7d",
+        "match": true
+      },
+      {
+        "namespace": "wire.notices",
+        "kind": "en",
+        "expected": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "actual": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "match": true
+      },
+      {
+        "namespace": "wire.notices",
+        "kind": "ur",
+        "expected": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "actual": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "match": true
+      },
+      {
+        "namespace": "wire.remote_compute",
+        "kind": "en",
+        "expected": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+        "actual": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+        "match": true
+      },
+      {
+        "namespace": "wire.remote_compute",
+        "kind": "ur",
+        "expected": "50991b04b030ff3851190fe1c7ef71d7b9306a712ca5af264b8edbfe7d4bb826",
+        "actual": "50991b04b030ff3851190fe1c7ef71d7b9306a712ca5af264b8edbfe7d4bb826",
+        "match": true
+      },
+      {
+        "namespace": "wire.remote_compute",
+        "kind": "context",
+        "expected": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+        "actual": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+        "match": true
+      },
+      {
+        "namespace": "wire.settings",
+        "kind": "en",
+        "expected": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+        "actual": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+        "match": true
+      },
+      {
+        "namespace": "wire.settings",
+        "kind": "ur",
+        "expected": "a9df8aff733066dc9786c40098bd1f4c992f645143991e503e5c8d57b683a942",
+        "actual": "a9df8aff733066dc9786c40098bd1f4c992f645143991e503e5c8d57b683a942",
+        "match": true
+      },
+      {
+        "namespace": "wire.settings",
+        "kind": "context",
+        "expected": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+        "actual": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+        "match": true
+      },
+      {
+        "namespace": "wire.slash",
+        "kind": "en",
+        "expected": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "actual": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "match": true
+      },
+      {
+        "namespace": "wire.slash",
+        "kind": "ur",
+        "expected": "35ebd056ec897ded1cba799498ab2c67ba9fdff4636dcf1ca6a1cc1a2bec421a",
+        "actual": "35ebd056ec897ded1cba799498ab2c67ba9fdff4636dcf1ca6a1cc1a2bec421a",
+        "match": true
+      },
+      {
+        "namespace": "wire.slash",
+        "kind": "context",
+        "expected": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+        "actual": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+        "match": true
+      }
+    ],
+    "plural_values": [
+      {
+        "key": "relay.ask.context.messages",
+        "en": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+        "ur": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}"
+      },
+      {
+        "key": "relay.session.tags.more",
+        "en": "{count, plural, one {# more tag} other {# more tags}}",
+        "ur": "{count, plural, one {# مزید ٹیگ} other {# مزید ٹیگز}}"
+      },
+      {
+        "key": "tui.asks.context.messages",
+        "en": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+        "ur": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}"
+      },
+      {
+        "key": "tui.review.age_days",
+        "en": "{amount, plural, one {updated # d ago} other {updated # d ago}}",
+        "ur": "{amount, plural, one {# d پہلے اپ ڈیٹ ہوا} other {# d پہلے اپ ڈیٹ ہوا}}"
+      },
+      {
+        "key": "tui.review.age_hours",
+        "en": "{amount, plural, one {updated # h ago} other {updated # h ago}}",
+        "ur": "{amount, plural, one {# h پہلے اپ ڈیٹ ہوا} other {# h پہلے اپ ڈیٹ ہوا}}"
+      },
+      {
+        "key": "tui.review.age_minutes",
+        "en": "{amount, plural, one {updated # min ago} other {updated # min ago}}",
+        "ur": "{amount, plural, one {# min پہلے اپ ڈیٹ ہوا} other {# min پہلے اپ ڈیٹ ہوا}}"
+      },
+      {
+        "key": "tui.review.ci_failing",
+        "en": "{count, plural, one {# failing} other {# failing}}",
+        "ur": "{count, plural, one {# ناکام} other {# ناکام}}"
+      },
+      {
+        "key": "tui.review.comments_count",
+        "en": "{count, plural, one {# comment} other {# comments}}",
+        "ur": "{count, plural, one {# تبصرہ} other {# تبصرے}}"
+      },
+      {
+        "key": "tui.schedule.ends_left",
+        "en": "{count, plural, one {# left} other {# left}}",
+        "ur": "{count, plural, one {# باقی} other {# باقی}}"
+      },
+      {
+        "key": "tui.schedule.fired",
+        "en": "{count, plural, one {# fired} other {# fired}}",
+        "ur": "{count, plural, one {# بار چلی} other {# بار چلی}}"
+      },
+      {
+        "key": "tui.schedule.fired_of",
+        "en": "{count, plural, one {# of {limit} fired} other {# of {limit} fired}}",
+        "ur": "{count, plural, one {# / {limit} چلی} other {# / {limit} چلی}}"
+      },
+      {
+        "key": "tui.schedule.subtitle",
+        "en": "{count, plural, one {# wake in this conversation} other {# wakes in this conversation}}",
+        "ur": "{count, plural, one {# بیداری اس گفتگو میں} other {# بیداریاں اس گفتگو میں}}"
+      },
+      {
+        "key": "tui.status.agents",
+        "en": "{count, plural, one {# agent} other {# agents}}",
+        "ur": "{count, plural, one {# ایجنٹ} other {# ایجنٹس}}"
+      },
+      {
+        "key": "tui.status.jobs",
+        "en": "{count, plural, one {# job} other {# jobs}}",
+        "ur": "{count, plural, one {# جاب} other {# جاب}}"
+      },
+      {
+        "key": "tui.transcript.attach.receipt",
+        "en": "↑ {count, plural, one {# image} other {# images}} attached",
+        "ur": "↑ {count, plural, one {# تصویر} other {# تصویریں}} منسلک"
+      },
+      {
+        "key": "tui.transcript.catchup.missed",
+        "en": "{count, plural, one {# missed wake} other {# missed wakes}}",
+        "ur": "{count, plural, one {# چھوٹی ہوئی بیداری} other {# چھوٹی ہوئی بیداریاں}}"
+      },
+      {
+        "key": "tui.transcript.group.actions",
+        "en": "{count, plural, one {{label} action} other {{label} actions}}",
+        "ur": "{count, plural, one {{label} کارروائی} other {{label} کارروائیاں}}"
+      },
+      {
+        "key": "tui.transcript.group.reply_requested",
+        "en": "{count, plural, one {{label} reply requested} other {{label} reply requested}}",
+        "ur": "{count, plural, one {{label} جواب کی درخواست} other {{label} جواب کی درخواستیں}}"
+      },
+      {
+        "key": "tui.transcript.group.steered",
+        "en": "{count, plural, one {{label} steered} other {{label} steered}}",
+        "ur": "{count, plural, one {{label} رخ بدلنے والا پیغام} other {{label} رخ بدلنے والے پیغامات}}"
+      }
+    ]
+  },
+  "width_rows": [
+    {
+      "key": "relay.ask.context.messages",
+      "maxCells": 60,
+      "ur_cells": 118,
+      "en_cells": 139,
+      "over": 58,
+      "note": "The line under an OPEN ask's state line on the phone, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the card draws no line at all for 0 or when an older runtime sends no count) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. It wraps onto more than one line on a narrow phone, so short words and a natural break after 'asked' are welcome.",
+      "ur": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}"
+    },
+    {
+      "key": "relay.ask.dismiss.answered_in_chat",
+      "maxCells": 34,
+      "ur_cells": 21,
+      "en_cells": 16,
+      "over": -13,
+      "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the operator already answered the question by typing in the conversation, so the agent should read their messages and treat the ask as settled (sent as reason=answered_in_chat). A reason, not a command; no exclamation mark. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "ur": "گفتگو میں جواب دے دیا"
+    },
+    {
+      "key": "relay.ask.dismiss.answered_in_chat_note",
+      "maxCells": 44,
+      "ur_cells": 36,
+      "en_cells": 39,
+      "over": -8,
+      "note": "The one-line explanation drawn UNDER the 'Answered in chat' reason button on the phone, in a smaller dim register. It names what the operator already did, so they can recognise their own case and cannot mistake the button for 'send my answer'. No trailing punctuation, no em dash (the layout puts it on its own line).",
+      "ur": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں"
+    },
+    {
+      "key": "relay.ask.dismiss.cancel",
+      "maxCells": 12,
+      "ur_cells": 10,
+      "en_cells": 6,
+      "over": -2,
+      "note": "The quiet button that puts the reason buttons away again on an OPEN ask's card, sending nothing. Lower-case like the card's other quiet controls; no exclamation mark.",
+      "ur": "منسوخ کریں"
+    },
+    {
+      "key": "relay.ask.dismiss.moot",
+      "maxCells": 34,
+      "ur_cells": 13,
+      "en_cells": 16,
+      "over": -21,
+      "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the question no longer matters to the operator (the work moved on, someone else decided), so the agent should drop it (sent as reason=moot). A reason, not a command, and it must not read as an approval or a refusal of the question. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "ur": "اب ضرورت نہیں"
+    },
+    {
+      "key": "relay.ask.dismiss.moot_note",
+      "maxCells": 44,
+      "ur_cells": 27,
+      "en_cells": 18,
+      "over": -17,
+      "note": "The one-line explanation drawn UNDER the 'No longer needed' reason button on the phone, in a smaller dim register. It says what happens to the waiting: the agent stops expecting an answer. No trailing punctuation, no em dash (the layout puts it on its own line), and it must not read as an approval or a refusal of the question itself.",
+      "ur": "اب جواب کا انتظار نہیں ہوگا"
+    },
+    {
+      "key": "relay.ask.dismiss.open",
+      "maxCells": 12,
+      "ur_cells": 9,
+      "en_cells": 8,
+      "over": -3,
+      "note": "The quiet control on an OPEN ask's card on the phone that reveals the two reasons for putting the question away. It closes the QUESTION, not the screen: keep the trailing ellipsis glyph (…), which is the card's own convention for 'this opens a choice', and keep it lower-case and brief. Use the same verb the terminal uses for this act (dismiss) rather than a second word for it. Nothing is sent until a reason is chosen.",
+      "ur": "ختم کریں…"
+    },
+    {
+      "key": "relay.ask.dismiss.receipt",
+      "maxCells": 44,
+      "ur_cells": 37,
+      "en_cells": 25,
+      "over": -7,
+      "note": "The line the asks sheet shows in place of its empty state after a TIMED-OUT ask was dismissed with the card's one-tap control, which carries no reason. Say that the dismissal was recorded and that no reply was sent to the agent — the lapsed door's own promise. Past tense, no exclamation mark. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.",
+      "ur": "ختم کر دیا گیا — کوئی جواب نہیں بھیجا"
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "maxCells": 44,
+      "ur_cells": 42,
+      "en_cells": 28,
+      "over": -2,
+      "note": "The line the asks sheet shows in place of its empty state after the operator dismissed this conversation's last open ask with the 'Answered in chat' reason. Past tense, no exclamation mark. It must not read as 'your answer was sent': nothing was sent, and that distinction is the point of the two reasons. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.",
+      "ur": "ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا"
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_moot",
+      "maxCells": 44,
+      "ur_cells": 30,
+      "en_cells": 28,
+      "over": -14,
+      "note": "The line the asks sheet shows in place of its empty state after the operator dismissed this conversation's last open ask with the 'No longer needed' reason: a receipt for the act, not an absence. Past tense, no exclamation mark, no checkmark wording. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.",
+      "ur": "ختم کر دیا گیا — اب ضرورت نہیں"
+    },
+    {
+      "key": "relay.ask.dismiss.title",
+      "maxCells": 24,
+      "ur_cells": 16,
+      "en_cells": 16,
+      "over": -8,
+      "note": "The heading above the two reason buttons on an OPEN ask's card, shown after the operator taps 'dismiss…'. It names the act so the two reasons below read as one choice rather than two more card actions. Same words as the terminal's chooser heading where the language allows; no punctuation at the end, no exclamation mark.",
+      "ur": "یہ سوال ختم کریں"
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "maxCells": 78,
+      "ur_cells": 134,
+      "en_cells": 139,
+      "over": 56,
+      "note": "The line under an OPEN ask in the terminal's ask list, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the caller draws no line at all for 0 or for an uncountable ask) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. This line is CLIPPED to the list's width with an ellipsis, so keep the opening words (the count and 'from you') first: the tail may be cut. The list paints one line per ask plus this line on stale open rows only, so the string must never contain a newline.",
+      "ur": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}"
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "maxCells": 34,
+      "ur_cells": 19,
+      "en_cells": 16,
+      "over": -15,
+      "note": "The second of two reasons the operator can give for closing an open ask, chosen with the arrow keys and Enter in the ask list's dismiss chooser. It means the operator already answered the question by typing in the conversation, so the agent should read their messages and treat the ask as settled (it is sent as reason=answered_in_chat). It is a reason, not a command: do not add a verb like 'send' or an exclamation mark. Keep it short — the label shares one painted row with its note. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "ur": "گفتگو میں جواب دیدہ"
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat_note",
+      "maxCells": 44,
+      "ur_cells": 36,
+      "en_cells": 39,
+      "over": -8,
+      "note": "The clause after an em dash that explains the 'Answered in chat' reason in the ask list's dismiss chooser, e.g. 'Answered in chat — you already replied in the conversation'. It names what the operator did, in the second person, so they can recognise their own case. The em dash separator is drawn by the code, not part of this value; no trailing punctuation. Clipped with the label on a narrow terminal. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "ur": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں"
+    },
+    {
+      "key": "tui.asks.dismiss.fleet_gone",
+      "maxCells": 60,
+      "ur_cells": 46,
+      "en_cells": 48,
+      "over": -14,
+      "note": "The refusal shown in the all-conversations ask list when a dismissal finds the ask missing from THAT other conversation's log (a swept or reset store). The list's rows belong to other conversations by design, so this sentence must not claim the ask is absent from 'this session' — it is absent from the conversation the row named. It is a TOAST FRAGMENT like the queue's other refusals: lower-case opening, no trailing recovery clause (the row stays on screen and the key can be pressed again, so the surface already shows the way back).",
+      "ur": "یہ سوال متعلقہ گفتگو کے لاگ میں اب موجود نہیں۔"
+    },
+    {
+      "key": "tui.asks.dismiss.hint",
+      "maxCells": 40,
+      "ur_cells": 32,
+      "en_cells": 26,
+      "over": -8,
+      "note": "The key-hint row at the foot of the ask list's dismiss chooser: Enter sends the highlighted reason, Esc goes back to the list without dismissing. Key names (enter, esc) are kept as the terminal spells them and joined with the middle dot separator the terminal's other hint rows use; keep that separator. Esc is named 'cancel' rather than 'back' because the key closes the chooser in place (elsewhere Esc collapses the whole surface), so one word must not name two exits. This row is dropped whole on a terminal too narrow for it, so it must stay one short line.",
+      "ur": "enter خارج کریں · esc منسوخ کریں"
+    },
+    {
+      "key": "tui.asks.dismiss.moot",
+      "maxCells": 34,
+      "ur_cells": 13,
+      "en_cells": 16,
+      "over": -21,
+      "note": "The first of two reasons the operator can give for closing an open ask, chosen with the arrow keys and Enter in the ask list's dismiss chooser. It means the question no longer matters to them (the work moved on, someone else decided), so the agent should drop it (it is sent as reason=moot). It is a reason, not a command, and it must not read as an approval or a refusal of the question itself. Keep it short — the label shares one painted row with its note. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "ur": "اب ضروری نہیں"
+    },
+    {
+      "key": "tui.asks.dismiss.moot_note",
+      "maxCells": 44,
+      "ur_cells": 27,
+      "en_cells": 18,
+      "over": -17,
+      "note": "The clause after an em dash that explains the 'No longer needed' reason in the ask list's dismiss chooser, e.g. 'No longer needed — stop waiting on it'. It says what happens to the waiting: the agent stops expecting an answer. The em dash separator is drawn by the code, not part of this value; no trailing punctuation. Clipped with the label on a narrow terminal. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "ur": "اب جواب کا انتظار نہیں ہوگا"
+    },
+    {
+      "key": "tui.asks.dismiss.notice_answered_in_chat",
+      "maxCells": 44,
+      "ur_cells": 38,
+      "en_cells": 28,
+      "over": -6,
+      "note": "The one-line acknowledgement shown after the operator dismisses an open ask with the 'Answered in chat' reason. It reports what the queue recorded: the ask is gone and the agent was told the answer is already in the conversation. It must not read as 'your answer was sent' — nothing was sent, and that distinction is the whole point of the two reasons. WIDTH: 44 cells, the widest receipt any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole line on its own, not a label.",
+      "ur": "خارج کیا گیا — گفتگو میں جواب موجود ہے"
+    },
+    {
+      "key": "tui.asks.dismiss.notice_moot",
+      "maxCells": 44,
+      "ur_cells": 28,
+      "en_cells": 28,
+      "over": -16,
+      "note": "The one-line acknowledgement shown after the operator dismisses an open ask with the 'No longer needed' reason. It reports what the queue recorded, in the past tense: the ask is gone from the list and the agent was told it no longer matters. No exclamation mark, no 'success' or checkmark wording; it is a receipt, not praise. WIDTH: 44 cells, the widest receipt any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole line on its own, not a label.",
+      "ur": "خارج کیا گیا — اب ضرورت نہیں"
+    },
+    {
+      "key": "tui.asks.dismiss.notice_no_reply",
+      "maxCells": 44,
+      "ur_cells": 39,
+      "en_cells": 25,
+      "over": -5,
+      "note": "The one-line acknowledgement shown after the operator dismisses a TIMED-OUT ask with the list's one-key control, which carries no reason. It must state the same fact the phone states for the same act (both surfaces read 'Dismissed — no reply sent' in English): the ask is gone and nothing was sent to the agent. It must NOT name 'no longer needed' or any other reason — the queue records its own default reason for this door, and that is a record, not a word the operator chose. Past tense, no exclamation mark.",
+      "ur": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا"
+    },
+    {
+      "key": "tui.asks.dismiss.title",
+      "maxCells": 60,
+      "ur_cells": 17,
+      "en_cells": 16,
+      "over": -43,
+      "note": "The heading of the ask list's dismiss chooser: a line the operator reaches by pressing x on an OPEN ask, asking them to pick why the ask is going away. The code then joins the ask's own question after this heading with a middle dot separator (drawn by the code, not part of this value), so do not end the heading with punctuation or a separator. No exclamation mark; it names the act, it does not celebrate it.",
+      "ur": "یہ سوال خارج کریں"
+    },
+    {
+      "key": "tui.palette.kind_agent",
+      "maxCells": 12,
+      "ur_cells": 5,
+      "en_cells": 5,
+      "over": -7,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.",
+      "ur": "ایجنٹ"
+    },
+    {
+      "key": "tui.palette.kind_command",
+      "maxCells": 12,
+      "ur_cells": 5,
+      "en_cells": 7,
+      "over": -7,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.",
+      "ur": "کمانڈ"
+    },
+    {
+      "key": "tui.palette.kind_session",
+      "maxCells": 12,
+      "ur_cells": 4,
+      "en_cells": 7,
+      "over": -8,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.",
+      "ur": "سیشن"
+    },
+    {
+      "key": "tui.palette.kind_setting",
+      "maxCells": 12,
+      "ur_cells": 5,
+      "en_cells": 7,
+      "over": -7,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.",
+      "ur": "ترتیب"
+    },
+    {
+      "key": "tui.palette.kind_team",
+      "maxCells": 12,
+      "ur_cells": 3,
+      "en_cells": 4,
+      "over": -9,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments. If 'command' and 'team' would share one word, qualify the team tag rather than the command tag.",
+      "ur": "ٹیم"
+    },
+    {
+      "key": "tui.palette.no_matches",
+      "maxCells": 24,
+      "ur_cells": 20,
+      "en_cells": 16,
+      "over": -4,
+      "note": "Shown centred in the palette's list when the typed query matches nothing. A complete standalone sentence fragment in the framework's own phrasing, not an instruction: it states the result, it does not tell the user to retry. Zero ICU arguments.",
+      "ur": "کوئی مماثلت نہیں ملی"
+    },
+    {
+      "key": "tui.palette.placeholder",
+      "maxCells": 48,
+      "ur_cells": 41,
+      "en_cells": 44,
+      "over": -7,
+      "note": "Grey placeholder inside the palette's search field, naming what a query can reach: slash commands, settings sections, past conversations, and the names of agents and teams. The ellipsis is a single character, not three dots. Must fit the field at a 60-column terminal, so keep it as one short clause; do not add the key that opens the palette. Zero ICU arguments.",
+      "ur": "کمانڈز، ترتیبات، سیشنز، ایجنٹس تلاش کریں…"
+    },
+    {
+      "key": "tui.welcome.tip.approvals",
+      "maxCells": 57,
+      "ur_cells": 42,
+      "en_cells": 50,
+      "over": -15,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "ٹولز کا پہلے پوچھنا: /approvals <ask|auto>"
+    },
+    {
+      "key": "tui.welcome.tip.classification_login",
+      "maxCells": 57,
+      "ur_cells": 52,
+      "en_cells": 53,
+      "over": -5,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "اشارے چالو — lop login <radient|typesafe|openrouter>"
+    },
+    {
+      "key": "tui.welcome.tip.classification_off",
+      "maxCells": 57,
+      "ur_cells": 53,
+      "en_cells": 57,
+      "over": -4,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "اشارے بند — lop config edit classification.auto false"
+    },
+    {
+      "key": "tui.welcome.tip.cmux",
+      "maxCells": 57,
+      "ur_cells": 55,
+      "en_cells": 52,
+      "over": -2,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "cmux میں “کہاں کھلے” سے ورک اسپیس یا سرفیس مقرر ہوتا ہے"
+    },
+    {
+      "key": "tui.welcome.tip.esc",
+      "maxCells": 57,
+      "ur_cells": 37,
+      "en_cells": 46,
+      "over": -20,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "esc ایجنٹ روکتا ہے، سیشن ختم کیے بغیر"
+    },
+    {
+      "key": "tui.welcome.tip.fork",
+      "maxCells": 57,
+      "ur_cells": 56,
+      "en_cells": 53,
+      "over": -1,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "/fork شاخ بناتا ہے؛ /fork <message> الگ کام شروع کرتا ہے"
+    },
+    {
+      "key": "tui.welcome.tip.fork_placement",
+      "maxCells": 57,
+      "ur_cells": 54,
+      "en_cells": 52,
+      "over": -3,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "/settings → Fork → “فورک کہاں کھلے” سے مقام طے ہوتا ہے"
+    },
+    {
+      "key": "tui.welcome.tip.hotkeys",
+      "maxCells": 57,
+      "ur_cells": 38,
+      "en_cells": 37,
+      "over": -19,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "/settings → Hotkeys سے یہ کلیدیں بدلیں"
+    },
+    {
+      "key": "tui.welcome.tip.key_new_session",
+      "maxCells": 32,
+      "ur_cells": 33,
+      "en_cells": 33,
+      "over": 1,
+      "note": "reserves {key} for a REMAPPABLE chord; the 32-cell budget excludes the substitution, which is measured at a 25-cell worst-case key (KEY_BUDGET_CELLS), keeping the painted row within the pool's 59",
+      "ur": "'{key}' سے نئی گفتگو شروع ہوتی ہے"
+    },
+    {
+      "key": "tui.welcome.tip.key_resume",
+      "maxCells": 32,
+      "ur_cells": 29,
+      "en_cells": 37,
+      "over": -3,
+      "note": "reserves {key} for a REMAPPABLE chord; the 32-cell budget excludes the substitution, which is measured at a 25-cell worst-case key (KEY_BUDGET_CELLS), keeping the painted row within the pool's 59",
+      "ur": "'{key}' سے حالیہ گفتگو کھولیں"
+    },
+    {
+      "key": "tui.welcome.tip.mesh",
+      "maxCells": 57,
+      "ur_cells": 50,
+      "en_cells": 55,
+      "over": -7,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "/network new <name> سے دوسرے ڈیوائسز کا میش بنائیں"
+    },
+    {
+      "key": "tui.welcome.tip.model",
+      "maxCells": 57,
+      "ur_cells": 51,
+      "en_cells": 49,
+      "over": -6,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "/model <provider>/<id> صرف اسی سیشن پر لاگو ہوتا ہے"
+    },
+    {
+      "key": "tui.welcome.tip.paste",
+      "maxCells": 57,
+      "ur_cells": 43,
+      "en_cells": 50,
+      "over": -14,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "ctrl+v سسٹم کلپ بورڈ سے تصویر منسلک کرتا ہے"
+    },
+    {
+      "key": "tui.welcome.tip.resume",
+      "maxCells": 57,
+      "ur_cells": 40,
+      "en_cells": 52,
+      "over": -17,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "/resume سے حالیہ سیشن وہیں سے جاری رکھیں"
+    },
+    {
+      "key": "tui.welcome.tip.setup",
+      "maxCells": 57,
+      "ur_cells": 55,
+      "en_cells": 57,
+      "over": -2,
+      "note": "first-run opening frame, in place of TIPS[0]: same 59-cell painted budget as the pool (TIP_MIN_WIDTH measures it)",
+      "ur": "نئے ہیں؟ {login} براؤزر سائن ان ہے؛ کلید پیسٹ نہیں کرنی"
+    },
+    {
+      "key": "tui.welcome.tip.shell",
+      "maxCells": 57,
+      "ur_cells": 36,
+      "en_cells": 43,
+      "over": -21,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "خالی کمپوزر میں ! شیل کمانڈ چلاتا ہے"
+    },
+    {
+      "key": "tui.welcome.tip.subagents",
+      "maxCells": 57,
+      "ur_cells": 55,
+      "en_cells": 54,
+      "over": -2,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "متوازی کام کہیں؛ ایجنٹ کام ذیلی ایجنٹس میں بانٹ دیتا ہے"
+    },
+    {
+      "key": "tui.welcome.tip.team",
+      "maxCells": 57,
+      "ur_cells": 46,
+      "en_cells": 48,
+      "over": -11,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "ur": "/team <name> <message> مینیجر کو کام بھیجتا ہے"
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.help",
+      "maxCells": 58,
+      "ur_cells": 48,
+      "en_cells": 57,
+      "over": -10,
+      "note": "Shown as '<help> · default: 7d' on the settings page's 74-cell detail line at 80 columns; keep the help within 58 cells so the default clause fits. Display only: hiding never answers or deletes the ask.",
+      "ur": "بلا جواب سوال آخری مہلت کے بعد کتنی دیر نظر آئے۔"
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "maxCells": 29,
+      "ur_cells": 22,
+      "en_cells": 23,
+      "over": -7,
+      "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). 'Timed-out' = the ask's deadline passed with no answer. The row only changes how long such an ask stays SHOWN; it does not change whether the agent hears a late answer.",
+      "ur": "وقت ختم سوالات دکھائیں"
+    },
+    {
+      "key": "wire.settings.session_compression.title",
+      "maxCells": 34,
+      "ur_cells": 17,
+      "en_cells": 22,
+      "over": -17,
+      "note": "Section heading for transcript compression, a third storage control beside the two cleanup sections. Keep it short enough for the settings header's 34-cell value column.",
+      "ur": "ٹرانسکرپٹ کمپریشن"
+    },
+    {
+      "key": "wire.settings.session_compression_after_days.label",
+      "maxCells": 29,
+      "ur_cells": 25,
+      "en_cells": 23,
+      "over": -4,
+      "note": "Sub-row label with the page's '↳' prefix, within the 29-cell budget. Names the threshold in DAYS; the stored value is always days.",
+      "ur": "↳ اتنے دن بعد کمپریس کریں"
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.label",
+      "maxCells": 29,
+      "ur_cells": 28,
+      "en_cells": 24,
+      "over": -1,
+      "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET). Boolean master switch: ON compresses transcripts older than the age row below.",
+      "ur": "پرانے ٹرانسکرپٹس کمپریس کریں"
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "maxCells": 12,
+      "ur_cells": 10,
+      "en_cells": 10,
+      "over": -2,
+      "note": "Section heading for the scratchpad size cap. 'Scratchpad' is the product noun for a session's own scratch area (scratchpad://); keep it one word.",
+      "ur": "Scratchpad"
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "maxCells": 29,
+      "ur_cells": 21,
+      "en_cells": 27,
+      "over": -8,
+      "note": "Row label; 29 cells is the settings page's label budget. It names the MAXIMUM bytes one session's scratchpad may hold (not the current size) and carries the unit because the desktop collapses help behind a disclosure (design D1). Every locale must fit the same 29-cell budget.",
+      "ur": "Scratchpad حد (bytes)"
+    }
+  ]
+}

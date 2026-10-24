@@ -1,0 +1,196 @@
+tui.authoring.action_class
+EN "class"
+UR "قسم"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Autonomy class, not a school class. Reactive requires a request; proactive can initiate."}
+tui.authoring.class_hint
+EN "proactive may initiate work without a request"
+UR "پیش قدم ایجنٹ بغیر درخواست کے کام شروع کر سکتا ہے"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Security-relevant proactive consequence; may initiate without a request."}
+tui.authoring.create
+EN "new agent"
+UR "نیا ایجنٹ"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.delegate
+EN "delegate"
+UR "سونپنا"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.description
+EN "when to use"
+UR "کب استعمال کریں"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.description_clear_unsupported
+EN "This form cannot clear an existing description yet."
+UR "یہ فارم ابھی موجودہ تفصیل صاف نہیں کر سکتا۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Refusal for deleting an existing description; draft remains. Not a general edit refusal."}
+tui.authoring.discard
+EN "Discard changes? y discard · n keep editing"
+UR "تبدیلیاں چھوڑیں؟ y چھوڑیں · n ترمیم جاری رکھیں"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Inline y/n confirmation. Keep literal keyboard y and n and the direction of each answer."}
+tui.authoring.edit
+EN "edit agent · {name}"
+UR "ایجنٹ میں ترمیم · {name}"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.effort
+EN "effort tier"
+UR "ماڈل درجہ"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Backend model tier, not reasoning effort; tier identifiers remain literal."}
+tui.authoring.footer
+EN "/agent new · /agent edit <name> · /agent clear detaches"
+UR "/agent new · /agent edit <name> · /agent clear الگ کرتا ہے"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Slash commands and <name> are literal grammar; only surrounding prose is translated."}
+tui.authoring.inherit
+EN "inherit"
+UR "وراثت"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.instructions
+EN "instructions"
+UR "ہدایات"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.instructions_hint
+EN "standing guidance · Tab moves to the next field"
+UR "مستقل رہنمائی · Tab سے اگلا خانہ"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.invalid_effort
+EN "That effort tier is not configured."
+UR "یہ ماڈل درجہ ترتیب میں موجود نہیں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.invalid_name
+EN "Use a name without spaces or path separators."
+UR "ایسا نام رکھیں جس میں اسپیس یا پاتھ کے جداکار نہ ہوں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.invalid_tools
+EN "Use comma-separated tool names; no empty entries."
+UR "کاما سے الگ ٹول نام رکھیں؛ کوئی خالی اندراج نہ ہو۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.kind
+EN "kind"
+UR "نوعیت"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Role or specialist. Those backend identifiers are not changed by translation."}
+tui.authoring.label
+EN "label"
+UR "لیبل"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.legend
+EN "ctrl+s save · tab move · esc cancel"
+UR "ctrl+s محفوظ · tab منتقلی · esc منسوخ"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.missing
+EN "No installed role or specialist named {name}."
+UR "{name} نام کا کوئی کردار یا ماہر انسٹال نہیں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.name
+EN "name"
+UR "نام"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.no
+EN "no"
+UR "نہیں"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.no_change
+EN "no changes to save"
+UR "محفوظ کرنے کے لیے کوئی تبدیلی نہیں"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.notice_read_only
+EN "Read-only: this conversation's runtime is on another device, so profile changes are not available here."
+UR "صرف پڑھنے کے لیے: اس گفتگو کا رن ٹائم دوسرے ڈیوائس پر ہے، اس لیے یہاں پروفائل کی تبدیلیاں دستیاب نہیں۔"
+CX {"role": "read-only refusal", "tone": "direct, calm", "note": "Agent profile changes, not project changes. Follower session cannot open/save the local editor."}
+tui.authoring.proactive
+EN "proactive"
+UR "پیش قدم"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.promote_failed
+EN "could not promote: {reason}"
+UR "اکاؤنٹ میں کاپی نہیں ہو سکی: {reason}"
+CX {"role": "refusal wrapper", "tone": "direct, no blame", "note": "{reason} is the registry's own English sentence (collision, missing name, rollback remainder); the wrapper is the only translated part."}
+tui.authoring.promote_mixed_plan
+EN "Replace existing account definitions: {replaced} with this conversation's copy. This also copies {created}. Add `yes` to replace and copy — nothing has changed yet."
+UR "اکاؤنٹ کی موجودہ تعریفات کو اس گفتگو کی کاپی سے بدلیں: {replaced}۔ {created} بھی کاپی ہوں گی۔ تبدیلی اور کاپی کے لیے `yes` شامل کریں — ابھی کچھ نہیں بدلا۔"
+CX {"role": "rehearsal line when one plan both overwrites and copies", "tone": "plain, direct, destructive clause first", "note": "{replaced} names the account definitions that would be overwritten; {created} names the new copies. The overwrite comes first in the sentence and the notice is `warning` for the same reason as promote_replace_plan. `yes` stays literal."}
+tui.authoring.promote_plan
+EN "Add `yes` to copy {names} into your account — nothing has changed yet."
+UR "{names} کو اپنے اکاؤنٹ میں کاپی کرنے کے لیے `yes` شامل کریں — ابھی کچھ نہیں بدلا۔"
+CX {"role": "rehearsal line before a confirmed copy", "tone": "plain, calm, explicit that nothing changed", "note": "{names} is a comma-joined list of the definitions a confirmed call would copy into the account. `yes` stays a literal token. Never reads as a warning: copying is a normal, reversible-in-effect act."}
+tui.authoring.promote_receipt_created
+EN "Copied {names} to your account."
+UR "{names} کو آپ کے اکاؤنٹ میں کاپی کیا گیا۔"
+CX {"role": "completion receipt, copy half", "tone": "past tense, plain", "note": "{names} is the comma-joined list of definitions newly COPIED into the account. Never includes a replaced row: a replacement needs its own sentence (design round 1, D2)."}
+tui.authoring.promote_receipt_keeps
+EN "This conversation keeps its own copy."
+UR "یہ گفتگو اپنی کاپی ہی استعمال کرتی رہے گی۔"
+CX {"role": "completion receipt, closing fact", "tone": "plain statement of fact", "note": "The clause users get wrong (the origin conversation keeps launching its own row), split out so it survives whatever precedes it. Never dropped."}
+tui.authoring.promote_receipt_replaced
+EN "Replaced in your account: {names}."
+UR "آپ کے اکاؤنٹ میں بدل دیے گئے: {names}۔"
+CX {"role": "completion receipt, replacement half", "tone": "past tense, plain, unambiguous", "note": "{names} is the comma-joined list of EXISTING account definitions this call overwrote. Printed only when something was replaced, so a copy-only receipt never implies a loss (design round 1, D2 / UX U1)."}
+tui.authoring.promote_replace_plan
+EN "Replace existing account definitions: {names} with this conversation's copy. Add `yes` to replace — nothing has changed yet."
+UR "اکاؤنٹ کی موجودہ تعریفات کو اس گفتگو کی کاپی سے بدلیں: {names}۔ تبدیلی کے لیے `yes` شامل کریں — ابھی کچھ نہیں بدلا۔"
+CX {"role": "rehearsal line before a confirmed overwrite", "tone": "plain, direct, names what will be lost; leads the notice", "note": "{names} is a comma-joined list of the account definitions the confirmed call would OVERWRITE. This sentence is printed FIRST and as a `warning` notice (design round 1, D1): the destructive half must never read as an afterthought to the copies. `yes` stays literal."}
+tui.authoring.promote_usage
+EN "Use {command} <name> [replace] [yes] [as <new name>]."
+UR "استعمال کریں: {command} <name> [replace] [yes] [as <new name>]۔"
+CX {"role": "usage refusal for a reserved verb", "tone": "brief, keyboard-first", "note": "Printed when /agent promote or /team promote is typed wrong. {command} is a literal command path ('/agent promote'); the bracketed flags are the grammar, kept literal, including `as <new name>` — the rename spelling the collision refusal offers (review round 1, NIT-1 / UX U2)."}
+tui.authoring.reactive
+EN "reactive"
+UR "ردِ عمل"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.registry_missing
+EN "No agent registry is attached to this session."
+UR "اس سیشن سے کوئی ایجنٹ رجسٹری منسلک نہیں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.required_instructions
+EN "Instructions are required."
+UR "ہدایات ضروری ہیں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.revision_changed
+EN "Someone else changed this profile; reopen to edit."
+UR "کسی اور نے یہ پروفائل بدل دیا ہے؛ ترمیم کے لیے دوبارہ کھولیں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "CAS conflict. No save occurred; reopen before trying again."}
+tui.authoring.role
+EN "role"
+UR "کردار"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.save_error
+EN "Could not save: {reason}"
+UR "محفوظ نہیں ہو سکا: {reason}"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.saved
+EN "saved agent {name}"
+UR "ایجنٹ {name} محفوظ ہو گیا"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.scope_conversation
+EN "this conversation"
+UR "اس گفتگو میں"
+CX {"role": "facts badge in the agent/team picker", "tone": "plain, lowercase, no jargon", "note": "Marks a role or team that exists only in the current conversation. It rides a 27-cell facts line after the class token, so keep it short and concrete; it is never a warning and never uses error ink."}
+tui.authoring.seed_not_installed
+EN "Install this packaged starter before editing it."
+UR "ترمیم سے پہلے یہ پیکج شدہ آغازی پروفائل انسٹال کریں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Packaged starter is not an installed profile. Do not imply the editor installs it."}
+tui.authoring.specialist
+EN "specialist"
+UR "ماہر"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.specialist_fields
+EN "Specialists carry no tools, effort or delegate fields."
+UR "ماہر ایجنٹ کے ساتھ ٹولز، ماڈل درجہ یا سونپنے کے خانے نہیں ہوتے۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.tools
+EN "tools"
+UR "ٹولز"
+CX {"role": "form field label", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.tools_hint
+EN "comma-separated · empty = all tools"
+UR "کاما سے الگ · خالی = تمام ٹولز"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Empty is unrestricted access, not no tools. Keep that direction explicit."}
+tui.authoring.usage_edit
+EN "Use /agent edit <name>."
+UR "/agent edit <name> استعمال کریں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.usage_new
+EN "Use /agent new with no extra arguments."
+UR "/agent new بغیر اضافی دلائل کے استعمال کریں۔"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
+tui.authoring.yes
+EN "yes"
+UR "ہاں"
+CX {"role": "form guidance or receipt", "tone": "brief, direct, keyboard-first", "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."}
