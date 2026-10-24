@@ -475,6 +475,11 @@ LOCAL_OPS: tuple[str, ...] = (
     # a peer may do HERE is a write to this device's row and nothing else — a
     # local act with a local name, never a wire op.
     "net_member_caps",
+    # THE OTHER LOCAL HALF of a member row (naming design §3.1): a device renaming
+    # ITSELF. One row, this device's own, and no peer's agreement is needed — so it
+    # is the same local-op boundary as the line above, never a wire op. The peer
+    # side is Rule N1 in ``relay.adopt_members``, which needs no op of its own.
+    "net_identity_name",
     # The three verbs the later slices serve (§1.3). Declared here, in P0, so the
     # totality rule ("a LOCAL_OPS name never appears in OP_CAPABILITY") already
     # holds for them and no slice has to edit this tuple: the names are this

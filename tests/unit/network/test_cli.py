@@ -3050,3 +3050,31 @@ def test_install_receipt_carries_durability_and_warns_when_it_is_missing(
     assert result["persistent"] is persistent and result["linger"] is persistent
     assert net_cli._cmd_install(Namespace(json=False)) == 0
     assert ("durability:" in capsys.readouterr().out) is (not persistent)
+
+
+def test_set_name_reaches_its_handler_with_the_parsed_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The design names this exact failure mode (review round 1, F5).
+
+    `_guard_identity_subcommand` ends in ``return _cmd_identity_show(args)``, so a
+    verb added to the parser without its own arm answers the device's id and exits
+    0 — a rename that silently does nothing. The handler is replaced with a
+    recorder, so this proves DISPATCH and argument passing and nothing else: no
+    relay, no socket, no store write.
+    """
+    seen: list[tuple[str, bool]] = []
+
+    def record(args: argparse.Namespace) -> int:
+        seen.append((args.name, bool(args.json)))
+        return 0
+
+    monkeypatch.setattr(net_cli, "_cmd_identity_set_name", record)
+    args = _parser().parse_args(["network", "identity", "set-name", "build-box", "--json"])
+    assert net_cli._guard_identity_subcommand(args) == 0  # noqa: SLF001
+    assert seen == [("build-box", True)]
+    # Bare ``network identity`` still shows the device; it must not reach the verb.
+    bare = _parser().parse_args(["network", "identity"])
+    net_cli._guard_identity_subcommand(bare)  # noqa: SLF001
+    capsys.readouterr()
+    assert len(seen) == 1
