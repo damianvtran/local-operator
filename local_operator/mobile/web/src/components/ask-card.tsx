@@ -48,7 +48,7 @@ import {
 	isLapsed,
 	unansweredQuestions,
 } from "../lib/asks";
-import { clearAskDraft, useAskDraft } from "../store";
+import { clearAskDraft, messageRuntime, useAskDraft } from "../store";
 import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
 
@@ -63,6 +63,34 @@ function refusalText(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
 	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
 	return message;
+}
+
+/** The stale-ask context line (SA-D7 / R5), or `null` when there is none.
+ *
+ *  "3 messages from you since this was asked (last 19:36)": operator messages
+ *  admitted since the ask was raised, and when the latest one was. It is the one
+ *  line on this card that says a question may ALREADY have been answered in
+ *  chat — the reason the card can be closed with `answered_in_chat`.
+ *
+ *  ABSENCE IS THE CONTRACT, exactly as `asks/store.pending_row` writes it: an
+ *  older runtime sends no field, and that draws NOTHING rather than a zero the
+ *  reader would have to disbelieve. A zero is a fact (the ask is newer than every
+ *  message) and draws nothing either — there is no staleness to report. An OPEN
+ *  ask only: a settled one has no wait left to be stale.
+ *
+ *  The clock is formatted HERE rather than through ICU: it is a wall-clock time,
+ *  not prose, and every locale's catalogue carries the finished string inside the
+ *  sentence it belongs to. Latin digits in 24-hour form, matching the terminal's
+ *  own rendering of the same pair (`tui.widgets.ask_queue.context_text`). */
+function contextLine(row: PendingAsk): string | null {
+	if (String(row.status || "open") !== "open") return null;
+	const count = row.user_messages_since;
+	if (typeof count !== "number" || count <= 0) return null;
+	const last = row.last_user_message_at;
+	if (typeof last !== "number" || last <= 0) return null;
+	const at = new Date(last);
+	const time = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+	return messageRuntime.t("relay.ask.context.messages", { count, time });
 }
 
 /** The sentence a row shows when the aggregate ALREADY reports its conversation
@@ -190,6 +218,7 @@ export function AskCard({
 	sessionId,
 	nowMs,
 	onSettled,
+	onDismissed,
 }: {
 	row: PendingAsk;
 	sessionId: string;
@@ -197,8 +226,16 @@ export function AskCard({
 	    from `expires_at` locally, never from a server-computed at-push string). */
 	nowMs: number;
 	/** Called after this surface settles, declines or dismisses the ask, so an
-	    aggregate list can re-read the index rather than guess the new state. */
-	onSettled?: () => void;
+	    aggregate list can re-read the index rather than guess the new state. It
+	    names the OP: a sheet holding a dismissal receipt must retire it when the
+	    operator's next act was an answer, not keep describing the old one
+	    (agent review round 2, M1 = UX round 2, U9). */
+	onSettled?: (kind: "respond" | "decline" | "dismiss") => void;
+	/** Called after a DISMISSAL is accepted, with the ask it was about and the
+	    reason that was sent. The sheet needs both: the reason for the receipt's
+	    words, and the id so a later dismissal replaces this one instead of being
+	    confused with it (M1). */
+	onDismissed?: (askId: string, reason: "moot" | "answered_in_chat" | undefined) => void;
 }) {
 	/* The draft map: question id → the labels (or the typed string) the user has
 	   chosen but not yet sent. IT LIVES IN THE STORE, not in this component
@@ -217,6 +254,20 @@ export function AskCard({
 	/** The conversation is GONE (`ask_session_gone`): terminal, so no control may
 	    stay live (design round 1, D3). */
 	const [gone, setGone] = useState(false);
+	/** The two reason buttons are showing (`close…` pressed on an open ask).
+	    A separate state from `busy`: revealing the choice sends NOTHING, so a
+	    card that showed the in-flight mark here would claim a dismissal the
+	    operator has not made. */
+	const [closing, setClosing] = useState(false);
+	/** Which reason was SENT, so the button that carries it keeps its label while
+	    the dismissal is in flight (UX round 1, U3). Both buttons used to collapse
+	    to `…`, which erased the only on-screen statement of what the operator
+	    chose. */
+	const [sentReason, setSentReason] = useState<"moot" | "answered_in_chat" | undefined>(
+		undefined,
+	);
+	/** A dismiss refusal has been read: the reasons stay visible, inert (U8). */
+	const [dismissRefused, setDismissRefused] = useState(false);
 
 	/* THE COLD CASE, and only the known one (design round 1, D1/D4 = UX U1/U3/U4):
 	   `runtime_live === false` means the relay will have to bring the conversation
@@ -256,12 +307,17 @@ export function AskCard({
 	   not a dead end, and must keep its receipt. */
 	const goneFromWire = isDeadConversation(row) && answerable;
 	const terminal = gone || goneFromWire;
-	/* DISMISS IS `timed_out`-ONLY, and the queue is the authority: `AskQueue.dismiss`
-	   accepts no other status (`asks/queue.py`), and the design states the rule twice
-	   (§2.2's table and `:115`). Offering it on an open or answered ask collected a
-	   refusal whose sentence — "only a timed-out ask can be dismissed; it is still
-	   open." — is FALSE about the row it sat under (agent review round 1, R1). */
+	/* A LAPSED ASK KEEPS ITS ONE-TAP DISMISS (D11, §14), and an OPEN one now has a
+	   door of its own (R5 / SA-D4): `AskQueue.dismiss` accepts `open` on every live
+	   session (the live refusal was retired — see the design's amended §15 D6), so
+	   the refusal this comment used to record ("only a timed-out ask can be
+	   dismissed; it is still open.") no longer exists to collect. The two doors
+	   differ in what they ASK the operator, not in whether they are allowed: a
+	   lapsed ask was already walked past by the agent, so it goes at once; an open
+	   one is still owed an answer, so the card asks WHY first and sends nothing
+	   until a reason is chosen. */
 	const dismissible = status === "timed_out";
+	const reason_needed = status === "open";
 	const questions = useMemo(() => (Array.isArray(row.questions) ? row.questions : []), [row]);
 	const open_questions = useMemo(
 		() => (offered ? unansweredQuestions(row) : []),
@@ -297,19 +353,24 @@ export function AskCard({
 	};
 	const complete = open_questions.length > 0 && open_questions.every((q) => filled(String(q.id)));
 
-	async function run(kind: "respond" | "decline" | "dismiss", send: () => Promise<unknown>) {
+	async function run(
+		kind: "respond" | "decline" | "dismiss",
+		send: () => Promise<unknown>,
+		onAccepted?: () => void,
+	) {
 		if (busy) return;
 		setBusy(kind);
 		setError("");
 		setErrorOp("");
 		try {
 			await send();
+			onAccepted?.();
 			/* THE DRAFT IS SPENT ONCE THE ASK SETTLES. Cleared here rather than left
 			   for the next mount: the sheet re-reads the aggregate, so a settled card
 			   can come back in the list, and a re-filled card the user already
 			   answered reads as if their answer never landed. */
 			clearAskDraft(row.ask_id);
-			onSettled?.();
+			onSettled?.(kind);
 		} catch (failure) {
 			setError(refusalText(failure));
 			setErrorOp(kind);
@@ -321,6 +382,14 @@ export function AskCard({
 			if (failure instanceof HttpError && failure.code === "ask_session_gone") {
 				setGone(true);
 			}
+			/* A REFUSED DISMISSAL STOPS INVITING ANOTHER (UX round 1, U8). The
+			   daemon's most common sentence here is "you already dismissed this":
+			   the ask is settled and every further tap is a guaranteed repeat. The
+			   reasons stay on screen — the sentence belongs beside the control that
+			   produced it (design D5) — but they go inert, and `cancel` is the way
+			   back to a fresh attempt if the refusal was momentary (a dead
+			   connection rather than a settled ask). */
+			if (kind === "dismiss") setDismissRefused(true);
 			/* The controls come back: a refusal is a state the user can act on
 			   (answer again, or read who beat them to it), and a card left inert
 			   by its own error is the greyed-out-buttons defect the blocking card
@@ -362,10 +431,26 @@ export function AskCard({
 			sendCommand(sessionId, { op: "ask_decline", ask_id: row.ask_id }),
 		);
 
-	const dismiss = () =>
-		run("dismiss", () =>
-			sendCommand(sessionId, { op: "ask_dismiss", ask_id: row.ask_id }),
+	const dismiss = (reason?: "moot" | "answered_in_chat") => {
+		setSentReason(reason);
+		return run(
+			"dismiss",
+			() =>
+			/* The reason rides only when there is one: a lapsed ask's door is the
+			   one-key dismissal the queue has always taken, whose body must stay the
+			   shape every older daemon accepts. An OPEN ask's reason is the whole
+			   point of the two-choice row — `moot` closes the question, and
+			   `answered_in_chat` tells the agent the answer is already in the
+			   conversation, so it stops waiting and reads what was typed. */
+				sendCommand(
+					sessionId,
+					reason
+						? { op: "ask_dismiss", ask_id: row.ask_id, reason }
+						: { op: "ask_dismiss", ask_id: row.ask_id },
+				),
+			() => onDismissed?.(row.ask_id, reason),
 		);
+	};
 
 	const settledPairs = answeredPairs(row.questions, row.answers);
 	/* INK FOLLOWS THE PROMISE, not the mood (design round 1, D2). An open ask's
@@ -445,7 +530,10 @@ export function AskCard({
 								type="button"
 								disabled={busy !== ""}
 								aria-busy={busy === "dismiss" || undefined}
-								onClick={dismiss}
+								/* No reason: a lapsed ask's door is the one-key dismissal, and
+								   the queue records its own default (the agent already walked past
+								   that deadline, so nothing turns on the operator naming one). */
+								onClick={() => dismiss()}
 								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
 							>
 								{/* D1 (design round 1): the label IS the width, so it stays put while
@@ -540,13 +628,37 @@ export function AskCard({
 						</p>
 					) : null}
 
+					{/* THE STALE-ASK CONTEXT LINE (SA-D7 / R5), UNDER the question it
+					    refers to (design round 1, D3): it used to sit above the question,
+					    so "this was asked" pointed at a sentence the reader had not read
+					    yet — and the terminal paints the same line under its row. It is
+					    the card's one statement that the question may already be settled
+					    in chat, which is exactly the case the `answered_in_chat` reason
+					    exists for. No line at all when the runtime sent no count (an older
+					    runtime), when the count is zero, or on a settled card — see
+					    `contextLine`. */}
+					{(() => {
+						const context = terminal ? null : contextLine(row);
+						return context ? (
+							<p className="text-meta text-ink-dim" data-testid="ask-context">
+								{context}
+							</p>
+						) : null;
+					})()}
+
 					{/* THE COLD ANSWER'S CLOCK, STATED (design round 1, D1 = UX U1). A cold
 					    answer is an engage plus a dial plus an ack in ONE call — ~30 s
 					    measured, against the 1–3 s a warm answer pays — and until this line
 					    existed the whole in-flight affordance was a bare `…` with the state
 					    line still reading "Queued — the agent is continuing". Saying nothing
 					    is also a claim, and it was the wrong one. */}
-					{busy !== "" && cold ? (
+					{busy !== "" && busy !== "dismiss" && cold ? (
+						/* NOT FOR A DISMISSAL (agent review round 1, M1): the engine takes
+						   the no-boot door on every surface (`dismiss_cold`, §14/fork A),
+						   so the dismissal this card offers is one append whether the
+						   conversation is live or cold — the ~30 s bring-up belongs to the
+						   ANSWER and DECLINE below, which really do engage. The gate is
+						   the op, not the row: `cold` says what an answer would cost. */
 						<p className="text-body-sm text-ink-muted">
 							bringing the session up — this can take up to ~30 s
 						</p>
@@ -583,6 +695,108 @@ export function AskCard({
 							{busy === "decline" ? "…" : "decline"}
 						</button>
 					</div>
+
+					{/* THE OPEN ASK'S OWN DOOR (R5, §15's amended D6): `close…` puts the
+					    QUESTION away without answering anybody, which is the act a stale
+					    ask needs and the one the card never offered on an open row. It
+					    asks WHY first — the two reasons are what the agent acts on — and
+					    a tap on `close…` sends nothing: the reason row is a choice, not a
+					    dismissal.
+
+					    IT IS NOT A SECOND `decline`. Declining ANSWERS the agent ("no"),
+					    buys nothing and is irreversible; closing says the question stopped
+					    mattering and asks the agent for nothing at all, and on a live
+					    conversation it need not even start a turn (a dismissal is held
+					    durably until the agent's next turn). */}
+					{reason_needed ? (
+						<div className="flex flex-col gap-2">
+							{closing ? (
+								/* THE REASONS ARE FULL-WIDTH ROWS WITH THEIR OWN NOTES (design
+								   round 1, D1 = UX U6). They used to be three controls on one
+								   flex-wrap line — no heading, no explanation, `cancel` orphaned
+								   onto a second line in Urdu — and "Answered in chat" sat 8.5 px
+								   under a live `decline`, so a reader with a drafted answer could
+								   read it as "send my answer". The heading names the act (the
+								   same words the terminal uses), and each row states what the
+								   agent will be told, in the same shape the answer options above
+								   already use. */
+								<div className="flex flex-col gap-2">
+									{/* THE QUIET CONTROLS SIT ON THE CARD'S TEXT AXIS (design round
+									    2, D10): `cancel` and the `dismiss…` reveal are borderless, and
+									    their `px-2` box put their words 7.5 px inside the heading and
+									    the question, which the eye reads as a misalignment. `px-0`
+									    aligns the words to the box's own edge; `min-h-11` keeps the
+									    44 px target and the label's width keeps it above the 24 px
+									    floor. */}
+									<span className="text-meta text-ink-dim">
+										{messageRuntime.t("relay.ask.dismiss.title")}
+									</span>
+									{(["moot", "answered_in_chat"] as const).map((reason) => (
+										<button
+											key={reason}
+											type="button"
+											disabled={busy !== "" || dismissRefused}
+											aria-busy={
+												(busy === "dismiss" && sentReason === reason) || undefined
+											}
+											onClick={() => dismiss(reason)}
+											className={cn(
+												"flex w-full flex-col items-start gap-0.5 rounded-sm border border-control px-3 py-2 text-left active:bg-elevated disabled:opacity-50",
+												sentReason === reason && busy === "dismiss"
+													? "text-ink"
+													: "text-ink-muted",
+											)}
+										>
+											{/* THE PRESSED LABEL STAYS PUT (UX round 1, U3). Both buttons
+											    used to collapse to `…`, erasing the only statement of
+											    which reason had been sent; the pressed row keeps its
+											    words and gains the in-flight mark, the sibling dims. */}
+											<span className="text-body-sm">
+												{messageRuntime.t(`relay.ask.dismiss.${reason}`)}
+												{busy === "dismiss" && sentReason === reason ? " …" : ""}
+											</span>
+											<span className="text-meta text-ink-dim">
+												{messageRuntime.t(`relay.ask.dismiss.${reason}_note`)}
+											</span>
+										</button>
+									))}
+									<button
+										type="button"
+										disabled={busy !== ""}
+										onClick={() => {
+											/* THE REFUSAL GOES WITH THE BLOCK IT EXPLAINED (UX round 2,
+											   U10 = agent review round 2, m1): the sentence renders
+											   outside the `closing` ternary, so leaving it behind put
+											   an old refusal under a fresh-looking `dismiss…`. */
+											setClosing(false);
+											setDismissRefused(false);
+											setError("");
+											setErrorOp("");
+										}}
+										className="flex min-h-11 self-start items-center rounded-sm px-0 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
+									>
+										{messageRuntime.t("relay.ask.dismiss.cancel")}
+									</button>
+								</div>
+							) : (
+								<button
+									type="button"
+									disabled={busy !== "" || dismissRefused}
+									onClick={() => setClosing(true)}
+										className="flex min-h-11 self-start items-center rounded-sm px-0 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
+								>
+									{messageRuntime.t("relay.ask.dismiss.open")}
+								</button>
+							)}
+							{/* THE REFUSAL SITS WITH THE CONTROL THAT PRODUCED IT (design
+							    round 1, D5): a relay or bridge ask refuses the dismissal in
+							    the queue's own words, and that sentence belongs beside the
+							    reason the operator pressed, not 60 px above it. */}
+							{error && errorOp === "dismiss" ? (
+								<p className="text-body-sm text-danger">{error}</p>
+							) : null}
+						</div>
+					) : null}
 				</>
 			) : (
 				<>
