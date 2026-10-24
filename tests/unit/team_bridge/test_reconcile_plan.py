@@ -14,6 +14,7 @@ from local_operator.team_bridge import reconcile_plan as planner
 from local_operator.team_bridge.reconcile_plan import (
     AccountSnapshot,
     Binding,
+    Intent,
     IntentKind,
     Offer,
     OwnerKey,
@@ -54,6 +55,10 @@ def _snapshot(**changes) -> AccountSnapshot:
             tenants=(_tenant(),),
             offer=Offer(V2, "sha256:validated-consent-identity", True, True),
             accepted_receipt_versions=(V1, V2),
+            # The helper captures the generation it expects, matching
+            # ``_binding()``; an attach therefore has a real comparison. Tests
+            # for the \"not captured\" hold pass generation=None explicitly.
+            generation=3,
             receiver=ReceiverBinding(HUB, "acc_a", "dev_1", "receiver_a"),
         ),
         **changes,
@@ -208,12 +213,12 @@ def test_an_endpoint_only_difference_is_a_hold_not_an_attachment() -> None:
     assert intent.owner is None and intent.generation is None
 
 
-def test_generation_mismatch_is_a_hold_and_absent_generation_is_capture_only() -> None:
-    """Generation is compared when captured, carried when not.
+def test_generation_is_required_to_attach_and_compared_when_supplied() -> None:
+    """There is no "unknown generation" attachment.
 
-    ``None`` is the documented "not captured" boundary: the adapter must
-    compare the carried generation against the store's active one before
-    acting. A supplied expected generation is authoritative here.
+    A contract enforces its own boundary: an absent expected generation is a
+    coded hold, never ATTACH_CURRENT with the comparison delegated to the
+    adapter. A supplied generation is compared, so a stale one cannot attach.
     """
     captured = _tenant(binding=_binding())
     (stale,) = plan_reconciliation(_snapshot(generation=2, tenants=(captured,)))
@@ -225,10 +230,37 @@ def test_generation_mismatch_is_a_hold_and_absent_generation_is_capture_only() -
     assert exact.kind is IntentKind.ATTACH_CURRENT
     assert exact.generation == 3
 
-    # Not captured -> carried through, not silently blessed as equal.
-    (carried,) = plan_reconciliation(_snapshot(tenants=(captured,)))
-    assert carried.kind is IntentKind.ATTACH_CURRENT
-    assert carried.generation == 3
+    (missing,) = plan_reconciliation(_snapshot(generation=None, tenants=(captured,)))
+    assert missing.kind is IntentKind.HOLD
+    assert missing.reason is Reason.GENERATION_NOT_CAPTURED
+    assert missing.owner is None and missing.generation is None
+
+
+def test_only_a_removal_intent_may_carry_a_missing_membership_revision() -> None:
+    """The invariant is enforced at construction, not by convention.
+
+    Every non-removal decision is about a tenant the snapshot still contains and
+    therefore has a membership revision. Expressing "unknown" on an intent that
+    might attach is the same class of hole as an uncaptured generation, so the
+    type itself refuses it.
+    """
+    fields = dict(
+        kind=IntentKind.HOLD,
+        hub=HUB,
+        account_id="acc_a",
+        device_id="dev_1",
+        snapshot_id="snapshot-10",
+        tenant_id="tnt_1",
+        receiver=None,
+        owner=None,
+        generation=None,
+        pre_enable_head=None,
+        receipt_version=None,
+    )
+    with pytest.raises(ValueError):
+        Intent(reason=Reason.CURRENT_BINDING, membership_revision=None, **fields)
+    removed = Intent(reason=Reason.TENANT_REMOVED, membership_revision=None, **fields)
+    assert removed.membership_revision is None
 
 
 def test_a_locally_bound_tenant_removed_from_the_org_is_a_visible_hold() -> None:

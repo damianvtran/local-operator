@@ -61,9 +61,9 @@ its captured `owner.endpoint_id` equals the snapshot's `endpoint_id` — the fou
 field is compared, not assumed, and a snapshot differing only there is an
 `endpoint_mismatch` hold (the same tenant on a different endpoint is a different
 owner). A supplied `AccountSnapshot.generation` is compared and a mismatch is a
-`generation_mismatch` hold; `None` means the caller did not capture one, so the
-binding's generation is carried through and the adapter must compare it against
-the store's active generation before acting. Binding proposals capture the namespace,
+`generation_mismatch` hold; absence is a `generation_not_captured` hold — the
+pure function never attaches on an unknown generation, and the adapter must
+capture the expected generation to reach ATTACH_CURRENT. Binding proposals capture the namespace,
 generation, receipt version, initial replay fence, membership revision, receiver
 binding, and account/device/snapshot identity. Executors must recheck all of
 these at consumption time, including account switching and membership removal;
@@ -194,10 +194,15 @@ The primary repository interpreter is reused with explicit worktree PYTHONPATH,
 an asserted exact module source path, isolated scratch HOME/config/cache/temp,
 no bytecode output, and no dependency installation. Each scoped command has a
 90-second / 1536-MiB process-group watchdog and a >=5-GiB disk pre/post check.
-The 24 test functions collect 66 parameterized cases. Flake8 and pyright target
+The 25 test functions collect 67 parameterized cases. Flake8 and pyright target
 only the two new Python files; formatting uses existing cached Black 26.1.0 and
 isort 5.13.2. Actual frozen-head results and resource measurements belong in the
 PR evidence, not a promise that broader gates passed.
+
+A non-removal intent always carries a membership revision; the `Intent` type
+refuses construction with `membership_revision=None` unless the reason is
+`tenant_removed`. The removed-tenant hold is the only shape without a fresh
+revision, and that invariant is construction-time, not a caller convention.
 
 No reconciliation worker, enrollment I/O, account receiver factory, service
 ensure/autoconfiguration, native compiler path, or end-to-end integration is
