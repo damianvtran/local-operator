@@ -5,7 +5,7 @@
   "wire.errors.settings.credential_key_empty": "کریڈینشل کی کلید خالی نہیں ہو سکتی",
   "wire.errors.settings.credential_retrieve_failed": "کریڈینشلز حاصل کرنے میں خرابی: {error}",
   "wire.errors.settings.credential_update_failed": "کریڈینشل اپڈیٹ کرنے میں خرابی: {error}",
-  "wire.errors.settings.inline_credentials": "ایسا اینڈ پوائنٹ استعمال کریں جس میں ان لائن [redacted]ز یا کوئری پیرامیٹرز نہ ہوں۔",
+  "wire.errors.settings.inline_credentials": "ایسا اینڈ پوائنٹ استعمال کریں جس میں ان لائن کریڈینشلز یا کوئری پیرامیٹرز نہ ہوں۔",
   "wire.errors.settings.invalid_value": "{error}",
   "wire.errors.settings.no_update_fields": "اپڈیٹ کے لیے کوئی درست فیلڈ نہیں دی گئی",
   "wire.errors.settings.not_registered": "یہ ترتیب رجسٹرڈ نہیں ہے۔",
