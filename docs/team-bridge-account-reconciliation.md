@@ -8,10 +8,9 @@ are unchanged. No new feature flags are claimed or introduced. Tests were
 written first under the LIGHT-only allocation, then exercised in a separately
 granted serial planner-only validation slot; see the scoped evidence below.
 
-The stacked branch is `feat/bridge-account-reconcile-contract`, based on
-`feat/team-bridge-default-on` at `424561faa9`. Its stacked PR targets that base,
-not `main`. Only the contract branch is published by this slice; #2790's remote
-is unchanged.
+The branch is `feat/bridge-account-reconcile-contract`, retargeted to `main`.
+It now merges `origin/main` at `435d3a84a0` (#2790 has landed); against main
+only this slice's three files differ. #2790's remote is untouched by this slice.
 
 ## Immutable inputs and proposed decisions
 
@@ -57,13 +56,29 @@ provenance or using a success marker as reenrollment authority.
 The exact owner namespace remains compact JSON
 `[canonical_hub, account_id, tenant_id, endpoint_id]`, matching
 `local_operator/team_bridge/store.py:_owner_key` (around line 839). Generation is
-specific to that namespace, not global. Binding proposals capture the namespace,
+specific to that namespace, not global. A binding attaches as current only when
+its captured `owner.endpoint_id` equals the snapshot's `endpoint_id` — the fourth
+field is compared, not assumed, and a snapshot differing only there is an
+`endpoint_mismatch` hold (the same tenant on a different endpoint is a different
+owner). A supplied `AccountSnapshot.generation` is compared and a mismatch is a
+`generation_mismatch` hold; `None` means the caller did not capture one, so the
+binding's generation is carried through and the adapter must compare it against
+the store's active generation before acting. Binding proposals capture the namespace,
 generation, receipt version, initial replay fence, membership revision, receiver
 binding, and account/device/snapshot identity. Executors must recheck all of
 these at consumption time, including account switching and membership removal;
 this planner provides no lock, CAS, authorization proof, or owner-row writer.
 Other tenants, accounts, hubs, and generations must never be clobbered. The
 existing global `Store.active_owner` ambiguity guard remains intact.
+
+A local binding whose tenant is absent from an authoritative snapshot is an
+account removed from that org: a `tenant_removed` HOLD carrying the captured
+owner, generation, receipt version and replay fence for preservation, with
+`membership_revision=None` because no fresh revision exists. It is never an
+empty result and never an attachment. A non-authoritative snapshot proves no
+absence and therefore emits no removal hold; adapters must supply every local
+binding in `local_bindings`, and a local binding that duplicates a tenant
+present in `tenants` is a malformed capture, not a second fact.
 
 ### Existing-current attachment and replay are separate contracts
 
@@ -179,7 +194,7 @@ The primary repository interpreter is reused with explicit worktree PYTHONPATH,
 an asserted exact module source path, isolated scratch HOME/config/cache/temp,
 no bytecode output, and no dependency installation. Each scoped command has a
 90-second / 1536-MiB process-group watchdog and a >=5-GiB disk pre/post check.
-The 21 test functions collect 58 parameterized cases. Flake8 and pyright target
+The 24 test functions collect 66 parameterized cases. Flake8 and pyright target
 only the two new Python files; formatting uses existing cached Black 26.1.0 and
 isort 5.13.2. Actual frozen-head results and resource measurements belong in the
 PR evidence, not a promise that broader gates passed.
