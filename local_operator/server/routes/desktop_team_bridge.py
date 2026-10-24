@@ -1951,20 +1951,33 @@ def _status_with_attachments(payload: Any, read_capability: Any) -> Any:
     return out
 
 
-def _attachment_tenant(request: Request) -> str | None:
-    """The attachment routes' ONE accepted query name, refused when repeated.
+def _attachment_query(request: Request) -> tuple[str | None, str | None]:
+    """The attachment routes' accepted query names, refused when repeated.
 
     Closed-table like every route here: ``scope`` (and anything else) is
-    refused rather than dropped, and a duplicated ``tenant_id`` would let the
-    URL parser pick an organization differently from the hub.
+    refused rather than dropped, and a duplicated name would let the URL parser
+    pick a value differently from the hub.
+
+    ``expected_account_id`` is the CAPTURED-ACCOUNT receipt every mutating
+    desktop call already carries. The attachment routes were the hole: they
+    forwarded only the already-resolved ``access`` snapshot, so a chip uploaded
+    under account A could be discarded while the machine was signed in as B.
+    Returned as ``(tenant_id, expected_account_id)`` and passed to the client,
+    where the mismatch is refused BEFORE any dispatch.
     """
 
-    if set(request.query_params) - {"tenant_id"}:
+    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
         _raise_read("invalid_request")
-    values = request.query_params.getlist("tenant_id")
-    if len(values) > 1 or (values and (not values[0].strip() or len(values[0]) > 128)):
+    out: list[str | None] = []
+    for name in ("tenant_id", "expected_account_id"):
+        values = request.query_params.getlist(name)
+        if len(values) > 1 or (values and (not values[0].strip() or len(values[0]) > 128)):
+            _raise_read("invalid_request")
+        out.append(values[0] if values else None)
+    tenant_id, expected = out
+    if expected is not None and not is_account_id(expected):
         _raise_read("invalid_request")
-    return values[0] if values else None
+    return tenant_id, expected
 
 
 def _require_attachment_id(attachment_id: str) -> None:
@@ -2023,11 +2036,16 @@ async def upload_conversation_attachment(
     """
 
     _require_conversation_id(conversation_id)
-    tenant_id = _attachment_tenant(request)
+    tenant_id, expected_account_id = _attachment_query(request)
     data = await _bounded_upload(request)
     client = _conversation_client(config_manager)
     result = await _conversation_reply(
-        client.upload_attachment(conversation_id, data, tenant_id=tenant_id)
+        client.upload_attachment(
+            conversation_id,
+            data,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
     )
     return CRUDResponse(status=201, message="Attachment staged.", result=result)
 
@@ -2046,10 +2064,15 @@ async def delete_conversation_attachment(
 
     _require_conversation_id(conversation_id)
     _require_attachment_id(attachment_id)
-    tenant_id = _attachment_tenant(request)
+    tenant_id, expected_account_id = _attachment_query(request)
     client = _conversation_client(config_manager)
     await _conversation_reply(
-        client.delete_attachment(conversation_id, attachment_id, tenant_id=tenant_id)
+        client.delete_attachment(
+            conversation_id,
+            attachment_id,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
     )
     return Response(status_code=204)
 
@@ -2079,10 +2102,16 @@ async def get_conversation_attachment(
     _require_conversation_id(conversation_id)
     _require_message_id(message_id)
     _require_attachment_id(attachment_id)
-    tenant_id = _attachment_tenant(request)
+    tenant_id, expected_account_id = _attachment_query(request)
     client = _conversation_client(config_manager)
     data, mime = await _conversation_reply(
-        client.fetch_attachment(conversation_id, message_id, attachment_id, tenant_id=tenant_id)
+        client.fetch_attachment(
+            conversation_id,
+            message_id,
+            attachment_id,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
     )
     if mime not in _ATTACHMENT_SERVABLE:  # the client refuses first; defence in depth
         _raise_read("malformed_page")
