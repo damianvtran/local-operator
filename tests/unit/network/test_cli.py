@@ -569,6 +569,108 @@ def test_resolve_device_refuses_a_name_that_is_another_devices_id(tmp_path: Path
 # ---------------------------------------------------------------------------
 
 
+def _show_with_members(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    members: list[types.MemberRecord],
+    *,
+    json_output: bool = False,
+) -> str:
+    """Run ``show`` against real stored member rows, with no live relay to contact."""
+    record = _save_network(root, NETWORK, "home")
+    record.members.extend(members)
+    store.save(record, root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    # Only the unavailable transport is stubbed: the command still resolves and
+    # loads the real NetworkRecord through store.load before rendering its rows.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: None)
+    args = Namespace(network=record.network_id, json=json_output)
+    assert net_cli._cmd_show(args) == 0  # noqa: SLF001
+    return capsys.readouterr().out
+
+
+def test_show_renders_a_member_name_after_its_full_device_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    device_id = "d_" + "1" * 32
+    name = "laptop-" + "x" * 180
+    out = _show_with_members(
+        root,
+        monkeypatch,
+        capsys,
+        [types.MemberRecord(device_id=device_id, name=name)],
+    )
+
+    row = next(line for line in out.splitlines() if device_id in line)
+    # A name longer than a terminal must not displace or abbreviate the identity.
+    assert f"{device_id}  {name}" in row, row
+    assert row.index(device_id) < row.index(name), row
+
+
+def test_show_marks_a_nameless_member_without_borrowing_another_members_name(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    named_id = "d_" + "1" * 32
+    nameless_id = "d_" + "2" * 32
+    out = _show_with_members(
+        root,
+        monkeypatch,
+        capsys,
+        [
+            types.MemberRecord(device_id=named_id, name="laptop"),
+            types.MemberRecord(device_id=nameless_id, name=""),
+        ],
+    )
+
+    row = next(line for line in out.splitlines() if nameless_id in line)
+    assert f"{nameless_id}  {resume.UNNAMED_DEVICE}" in row, row
+    assert "laptop" not in row, row
+
+
+def test_show_keeps_same_named_members_distinguishable_by_full_device_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first_id = "d_" + "1" * 32
+    second_id = "d_" + "2" * 32
+    out = _show_with_members(
+        root,
+        monkeypatch,
+        capsys,
+        [
+            types.MemberRecord(device_id=first_id, name="shared-laptop"),
+            types.MemberRecord(device_id=second_id, name="shared-laptop"),
+        ],
+    )
+
+    rows = [line for line in out.splitlines() if "shared-laptop" in line]
+    assert len(rows) == 2, out
+    # This is the anti-spoof contract: the label may collide, the identity may not.
+    assert {row.split()[1] for row in rows} == {first_id, second_id}, rows
+    assert all(row.split()[2] == "shared-laptop" for row in rows), rows
+
+
+def test_show_json_carries_each_member_name_and_device_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    named_id = "d_" + "1" * 32
+    nameless_id = "d_" + "2" * 32
+    out = _show_with_members(
+        root,
+        monkeypatch,
+        capsys,
+        [
+            types.MemberRecord(device_id=named_id, name="laptop"),
+            types.MemberRecord(device_id=nameless_id, name=""),
+        ],
+        json_output=True,
+    )
+
+    members = {row["device_id"]: row for row in json.loads(out)["members_detail"]}
+    assert members[named_id]["name"] == "laptop"
+    assert members[nameless_id]["name"] == ""
+
+
 def test_json_output_is_json_and_nothing_else(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
