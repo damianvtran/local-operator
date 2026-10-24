@@ -1,0 +1,9 @@
+{
+  "tui.palette.kind_agent": "agent",
+  "tui.palette.kind_command": "command",
+  "tui.palette.kind_session": "session",
+  "tui.palette.kind_setting": "setting",
+  "tui.palette.kind_team": "team",
+  "tui.palette.no_matches": "No matches found",
+  "tui.palette.placeholder": "Search commands, settings, sessions, agents…"
+}

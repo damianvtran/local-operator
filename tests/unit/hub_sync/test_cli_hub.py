@@ -463,3 +463,84 @@ def test_cli_second_write_after_the_grant_uses_the_served_revision(rig, capsys) 
     assert "changed" not in out, out
     values = _policy_values(root, link_id)
     assert values["subscribe"] is False and values["auto_push"] is True
+
+
+# -- ``lop skills``: the bundle-aware CLI surface --------------------------------------
+
+
+def test_skills_publish_parses_the_bundle_form_and_flags(parser) -> None:
+    a = parser.parse_args(
+        [
+            "skills",
+            "publish",
+            "pdf-forms",
+            "--public",
+            "--bundle",
+            "--alias",
+            "pdf-forms",
+            "--no-subscribe",
+            "--yes",
+            "--json",
+        ]
+    )
+    assert a.subcommand == "skills" and a.skills_command == "publish"
+    assert (a.name, a.public, a.bundle, a.alias) == ("pdf-forms", True, True, "pdf-forms")
+    assert (a.no_subscribe, a.yes, a.json) == (True, True, True)
+
+
+def test_skills_pull_parses_the_publisher_confirmation(parser) -> None:
+    a = parser.parse_args(
+        [
+            "skills",
+            "pull",
+            "sk-1",
+            "--org",
+            "org-1",
+            "--confirm-publisher",
+            "acct-9",
+            "--confirm-hash",
+            "a" * 64,
+        ]
+    )
+    assert (a.skills_command, a.hub_id, a.org) == ("pull", "sk-1", "org-1")
+    assert a.confirm_publisher == "acct-9"
+    assert a.confirm_hash == "a" * 64
+
+
+def test_skills_sync_parses_check_and_all(parser) -> None:
+    a = parser.parse_args(["skills", "sync", "--name", "pdf-forms", "--check", "--json"])
+    assert (a.skills_command, a.name, a.check, a.json) == ("sync", "pdf-forms", True, True)
+
+
+def test_skills_status_reads_the_empty_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Dispatch smoke through the REAL service: an isolated root has no links."""
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    root = tmp_path / ".local-operator"
+    rc = cli.skills_command(argparse.Namespace(skills_command="status", json=True), root)
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["links"] == []
+
+
+def test_skills_push_parses(parser) -> None:
+    a = parser.parse_args(["skills", "push", "pdf-forms", "--yes", "--json"])
+    assert (a.skills_command, a.name, a.yes, a.json) == ("push", "pdf-forms", True, True)
+
+
+def test_skills_push_without_a_link_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    root = tmp_path / ".local-operator"
+
+    rc = cli.skills_command(
+        argparse.Namespace(skills_command="push", name="no-such-skill", yes=True, json=True),
+        root,
+    )
+
+    assert rc == 1
+    assert "no linked skill named" in capsys.readouterr().out

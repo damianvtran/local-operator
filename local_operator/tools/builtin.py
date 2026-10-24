@@ -15864,6 +15864,10 @@ def _sessions_tool_description() -> str:
         # The per-op INPUTS above stay: they are the incident fix.
         " `spawn` is for USER-requested work. Address exactly one of `session`"
         " (id), `target` (name/cwd) or `pid`. What each op does: op='help'."
+        # The self-identity sentence: list renders the caller's own row, and
+        # without the marker a model read it as a peer on the same topic.
+        " `list` marks your own row `(this session)` — that row is you, not a"
+        " duplicate."
     )
 
 
@@ -16763,7 +16767,6 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     ``resume.session_origin``; the name follows it.
     """
     from local_operator.resume import (
-        TRANSCRIPT_NAME,
         is_user_session,
         session_origin,
         workstream_opened_by,
@@ -16801,7 +16804,13 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     extras["primary"] = assignment["primary"]
 
     try:
-        transcript = directory / TRANSCRIPT_NAME
+        # The PHYSICAL file, not the plain name: a compressed session's bytes are
+        # in the archive, and reporting a path that does not exist to a caller
+        # asking where the conversation lives is the "empty session" reading this
+        # whole module's resolver exists to prevent.
+        from local_operator.session import compression
+
+        transcript, _codec = compression.transcript_source(directory)
         if transcript.is_file():
             extras["transcript_path"] = str(transcript)
     except OSError:
@@ -16853,12 +16862,24 @@ def _sessions_wait_phrase(row: Mapping[str, Any]) -> str:
     return f"waiting on {count} {'job' if count == 1 else 'jobs'}" if count > 0 else ""
 
 
-def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = None) -> str:
+def _session_row_brief(
+    row: Mapping[str, Any], context: ToolContext | None = None, own_session_id: str = ""
+) -> str:
     """One lean listing line: the fields a caller acts on. The full published
     row rides in ``details``, which costs no prompt tokens.
 
     Identifier fields: the conversation title and session id are marked as
     spans so redaction leaves them readable; neither is a credential.
+
+    ``own_session_id`` is the CALLER's id, and when a row matches it the row
+    is tagged ``(this session)``. The incident this answers: an agent read its
+    own row as a different session working on the same topic, then spawned a
+    duplicate or spent turns on a conflict with itself. The marker rides the
+    name segment — the first thing the eye lands on — rather than a trailing
+    field, because a suffix on a long line is what got skimmed past. The tag
+    applies to LOCAL rows only: ids are minted per device, so a peer's row
+    that happens to share this id is a different session (``locality ==
+    'remote'``).
     """
     block = row.get("peer") or {}
     unreachable = block.get("reachable") is False
@@ -16868,7 +16889,12 @@ def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = Non
         else str(row.get("state") or "?")
     )
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
-    bits = [f"[{state}] {name}"]
+    own = bool(
+        own_session_id
+        and str(row.get("session_id") or "") == own_session_id
+        and row.get("locality") != "remote"
+    )
+    bits = [f"[{state}] {name}{' (this session)' if own else ''}"]
     if row.get("session_id"):
         bits.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
@@ -17020,7 +17046,13 @@ async def _sessions_list(
     }
     if notes:
         details["notes"] = notes
-    lines: list[str] = [_session_row_brief(row, context) for row in shown]
+    lines: list[str] = [
+        # The CALLER's id, so the caller's own row says so (see
+        # ``_session_row_brief``). ``details['rows']`` above stays the
+        # published shape byte-for-byte: the marker is text only.
+        _session_row_brief(row, context, str(getattr(context, "session_id", "") or ""))
+        for row in shown
+    ]
     if len(deduped) > len(shown):
         if scope == "local":
             lines.append(
@@ -17068,6 +17100,10 @@ async def _sessions_list_query(
     )
     scanned = await asyncio.to_thread(registry.scan)
     live = {rec.session_id: (rec, state) for rec, state in scanned if state in ("live", "wedged")}
+    # ``query`` searches THIS device's store, so every match here is local: no
+    # ``locality`` guard is needed, but the id comparison is the same bytes-on-
+    # bytes rule the listing uses (see ``_session_row_brief``).
+    own_session_id = str(getattr(context, "session_id", "") or "")
     rows: list[dict[str, Any]] = []
     lines: list[str] = []
     for match in matches:
@@ -17086,6 +17122,11 @@ async def _sessions_list_query(
         # Identifier fields: the title and id this search row prints are names
         # a caller quotes back; both are marked spans, not credentials.
         name = identifier_text(context, session_row.name or "(unnamed)")
+        if own_session_id and session_row.id == own_session_id:
+            # Same marker, same position as the listing's (agent self-identity):
+            # a query result must not be the one view where the caller's own
+            # session is unrecognisable.
+            name += " (this session)"
         session_id = identifier_text(context, session_row.id)
         if entry:
             lines.append(f"- [live] {name}, session {session_id}, pid {entry[0].pid}")
@@ -17143,8 +17184,17 @@ def _sessions_facts_line(extras: Mapping[str, Any], context: ToolContext | None 
     return "; ".join(second)
 
 
+#: The one sentence that says "this row IS the caller". A constant, because two
+#: renderers print it (the row-backed and the disk-only ``info`` bodies) and two
+#: spellings of one identity claim is the drift this change exists to prevent.
+_OWN_SESSION_SENTENCE = "This is YOUR session — the one you are running in. It is not a duplicate."
+
+
 def _sessions_disk_only_body(
-    facts: _SessionsDiskFacts, extras: Mapping[str, Any], context: ToolContext | None = None
+    facts: _SessionsDiskFacts,
+    extras: Mapping[str, Any],
+    context: ToolContext | None = None,
+    is_own: bool = False,
 ) -> str:
     """The ``info`` text when no listing row describes the session.
 
@@ -17158,6 +17208,12 @@ def _sessions_disk_only_body(
     ``sidebar_visibility``, ``archived_ids``, ``session_activity_path``), so
     the sentence and the scan cannot disagree. The per-row reads need only
     the id, which is why the answer can be composed here at all.
+
+    ``is_own`` carries the same self sentence the row-backed body prints (QA
+    round 1, Q1): an ``agent-shell`` session never appears in a listing scan at
+    any limit, so this is the ONLY way it can be told ``info`` is describing
+    itself. Ids still come from the local store — a peer's row never reaches
+    this body.
     """
     # Identifier field: the stored title is a name the caller reads; it is
     # marked as a span so redaction leaves it readable.
@@ -17184,16 +17240,28 @@ def _sessions_disk_only_body(
     first = f'"{name}" — stored, {why}'
     if resumable:
         first += "; it can still be resumed by its exact session id"
-    return first + "\n" + _sessions_facts_line(extras, context)
+    text = first + "\n" + _sessions_facts_line(extras, context)
+    if is_own:
+        text += "\n" + _OWN_SESSION_SENTENCE
+    return text
 
 
 def _sessions_info_body(
-    row: Mapping[str, Any], extras: Mapping[str, Any], context: ToolContext | None = None
+    row: Mapping[str, Any],
+    extras: Mapping[str, Any],
+    context: ToolContext | None = None,
+    is_own: bool = False,
 ) -> str:
     """Two lines: the live-state row, then the durable facts about it.
 
     Identifier fields: the conversation title and session id are marked spans;
     both are names the caller quotes back, not credentials.
+
+    ``is_own`` adds one plain sentence saying this row IS the caller. The
+    wording is deliberately blunt: the failure it answers is a model reading a
+    correct id and a matching title as a *different* session doing the same
+    work, so "same topic, same title" must not be left to inference. Only the
+    local path passes it — a peer's row can share an id and is never us.
     """
     state = (
         _sessions_peer_status(row)
@@ -17220,7 +17288,10 @@ def _sessions_info_body(
         parts.append(waiting)
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
-    return ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
+    text = ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
+    if is_own:
+        text += "\n" + _OWN_SESSION_SENTENCE
+    return text
 
 
 async def _sessions_info_mesh(
@@ -17325,6 +17396,13 @@ async def _sessions_info(
     if not target.session_id:
         return _error(tool_call_id, "sessions", target.error)
     stored = target.record is None
+    # The caller's own id, computed BEFORE the branches below: a hidden-origin
+    # session (``agent-shell``) never reaches the row-backed path — it is
+    # excluded from every listing scan — so the disk-only body is the ONLY place
+    # it can be told ``info`` is describing itself (QA round 1, Q1). The mesh
+    # path returned above, so a peer's row — which can share an id, ids are
+    # minted per device — never claims to be us.
+    is_own = bool(context and context.session_id and target.session_id == context.session_id)
     row = await _session_row_for_id(
         target.session_id,
         include_stored=stored,
@@ -17353,7 +17431,9 @@ async def _sessions_info(
                     "listed": False,
                     **extras,
                 }
-                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras, context)
+                text = await asyncio.to_thread(
+                    _sessions_disk_only_body, facts, extras, context, is_own
+                )
                 text, spill = spill_truncate(text, "sessions", context)
                 if spill:
                     details.update(spill)
@@ -17374,7 +17454,7 @@ async def _sessions_info(
         )
     extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
     details: dict[str, Any] = {"op": "info", **row, **extras}
-    text = _sessions_info_body(row, extras, context)
+    text = _sessions_info_body(row, extras, context, is_own=is_own)
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
@@ -17740,13 +17820,18 @@ def _peek_head(directory: Path, *, need: int) -> _PeekWindow:
     ``has_newer`` the way the anchored page's lookahead answers it.
     """
 
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
         _iter_complete_lines_forward,
     )
 
-    path = directory / TRANSCRIPT_NAME
+    # A seekable, whole transcript whichever form it is on disk in: the plain
+    # journal, or the archive decompressed into compression's bounded cache. A
+    # peek is a READ, so it must never be answered from the plain name alone.
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
     entries: list[TranscriptEntry] = []
     scanned = 0
     capped = False
@@ -17837,13 +17922,16 @@ def _peek_search(
     read (a compaction between the two reads, reported as the miss it is).
     """
 
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
         _iter_complete_lines_backward,
     )
 
-    path = directory / TRANSCRIPT_NAME
+    # Same resolution as ``_peek_head``: the seekable source, archive included.
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
     scanned = 0
     hit_id = ""
     budget_stop = False
@@ -18165,7 +18253,7 @@ async def _sessions_peek(
     session_id = target.session_id
     directory = config_dir() / "sessions" / session_id
 
-    from local_operator.resume import TRANSCRIPT_NAME, session_name
+    from local_operator.resume import session_name
 
     def _peek_name() -> str:
         """The header's name: the live record's, else the stored title, else the id."""
@@ -18247,9 +18335,11 @@ async def _sessions_peek(
         return _error(
             tool_call_id,
             "sessions",
+            # Naming the DIRECTORY, not the plain file: this error now means
+            # "neither form exists", and printing a path that was legitimately
+            # absent would keep asserting the old, plain-only layout.
             f"session {session_id!r} has no transcript to peek at "
-            f"({directory / TRANSCRIPT_NAME}) — it may not have written a first "
-            "turn yet.",
+            f"({directory}) — it may not have written a first turn yet.",
         )
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
@@ -19823,6 +19913,13 @@ BROWSER_ACTIONS = (
     "styles",
     "hit_test",
     "ancestors",
+    # The read-only DOM query: CSS in, element descriptors out (tag, id, name,
+    # role, aria-label, rendered text, visibility, checked/disabled, rect). It
+    # exists because the one question that unblocked nothing in the measured
+    # incident — "what is the id of this checkbox?" — had no answer: `read`
+    # returns no attributes, `snapshot` returns an AX tree, and `eval` is not a
+    # surface to expose. It never mutates, so it is safe where eval is not.
+    "query",
     # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
@@ -19891,6 +19988,7 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "styles",
         "hit_test",
         "ancestors",
+        "query",
     }
 )
 
@@ -19899,6 +19997,15 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
 #: surfaces. Every one of them used to fall through to the screenshot tail when
 #: the lane was skipped — a silent wrong action rather than a refusal.
 OWNERSHIP_BROWSER_ACTIONS = frozenset({"recover", "retain", "release"})
+
+#: The three accessibility-locator prefixes `click`/`type` accept in `selector`.
+#:
+#: Recognised here so the tool can (a) refuse one where only CSS makes sense
+#: and (b) explain a cryptic host failure when an OLD host treats `role=…` as
+#: CSS. The grammar itself is matched host-side (`driver/ax-locator.ts`): this
+#: is a recogniser, not a second parser, because two parsers is how
+#: `role=checkbox[name="Active"]` starts meaning two things.
+_LOCATOR_PREFIX_RE = re.compile(r"^(role|label|text)(\*?)=", re.IGNORECASE)
 
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
 #: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
@@ -19923,6 +20030,20 @@ _STYLE_PROPERTY_RE = re.compile(r"^[-_A-Za-z0-9]+$")
 #: list is REFUSED with copy rather than silently clipped into a result that
 #: looks complete.
 _MAX_STYLE_PROPERTIES = 20
+
+#: The most lines one `snapshot` page may ask for. A caller that wants the whole
+#: tree omits `limit` and gets it, unchanged from before; this bounds a NUMBER,
+#: so `limit=10**9` cannot make a host build a payload nobody will read.
+SNAPSHOT_MAX_LINES = 5000
+
+#: The most element descriptors one `query` may return. The page function caps
+#: at 50 too; this is the caller-facing bound so an absurd number is REFUSED
+#: with copy rather than silently clipped into a result that looks complete.
+QUERY_MAX_ELEMENTS = 50
+
+#: A search term names a control, not a page. The cap keeps a pasted document
+#: from becoming a scan over every rendered line on every call.
+SNAPSHOT_MAX_SEARCH_CHARS = 120
 
 #: The hosts an explicit ``backend`` hint on `open` may name, beside "" (the
 #: default availability order). Spellings are the COPY spellings: the paired
@@ -20039,9 +20160,32 @@ class BrowserParams(BaseModel):
     path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
-        description="CSS selector or a snapshot ref (e5): the click/type "
-        "target, the read scope (default: body), the scroll element, or the "
+        description="CSS selector, a snapshot ref (e5), or an accessibility "
+        'locator for the click/type target: role=checkbox[name="Active"], '
+        'label="Homepage URL", text="Create GitHub App" — resolved '
+        "against the page's a11y tree, so it survives framework ids. Also the "
+        "read/snapshot scope, the query CSS, the scroll element, or the "
         "download/upload control.",
+    )
+    # The snapshot window. Three fields rather than a page token, because the
+    # three questions an agent asks a cut tree are different: "give me the next
+    # page" (start), "do not spend my context on all of it" (limit), and "where
+    # is the checkbox called Active" (search). All three act on the rendered
+    # lines, so a ref keeps its name across pages — see `windowSnapshot` in
+    # extension/src/driver/ax-compact.ts.
+    start: int | None = Field(
+        default=None,
+        description=("'snapshot': 1-based first line to return; the footer names the next."),
+    )
+    limit: int | None = Field(
+        default=None,
+        description="'snapshot': the most lines to return in one page.",
+    )
+    search: str = Field(
+        default="",
+        description=(
+            "'snapshot': keep lines whose role or name contains this text, e.g. " "search='Active'."
+        ),
     )
     text: str = Field(
         default="",
@@ -20050,10 +20194,9 @@ class BrowserParams(BaseModel):
     )
     secret_ref: str = Field(
         default="",
-        description="'type': the NAME of a secret to enter instead of 'text' (e.g. "
-        "'SUDO_PASSWORD'); resolved session-first (the `ask` answer, /credential), then "
-        "the encrypted store; never shown in results, traces or logs, and registered "
-        "for redaction.",
+        description="'type': a stored secret's NAME instead of 'text' (e.g. "
+        "'SUDO_PASSWORD'); resolved session-first, then the encrypted store, never "
+        "shown or logged.",
     )
     # One new field for the whole feature (the tool-surface ladder's rung 1):
     # `download` needs no destination (the harness chooses it), so a comma-split
@@ -20063,9 +20206,8 @@ class BrowserParams(BaseModel):
     paths: list[str] = Field(
         default_factory=list,
         description=(
-            "'upload': the local files to attach, one or more (credential files "
-            "and the harness's own config dir are refused; relative paths "
-            "resolve against the session's cwd)."
+            "'upload': local files to attach (credential files and this "
+            "harness's config dir are refused; relative = session cwd)."
         ),
     )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
@@ -20073,13 +20215,11 @@ class BrowserParams(BaseModel):
     # extension/src/commands/scroll.ts).
     x: float | None = Field(
         default=None,
-        description="'scroll': horizontal pixel delta (positive = right); "
-        "with 'y', a precise scrollBy; for 'hit_test', the viewport x to probe.",
+        description="'scroll': x delta (right positive); for 'hit_test', the viewport x.",
     )
     y: float | None = Field(
         default=None,
-        description="'scroll': vertical pixel delta (positive = down); for "
-        "'hit_test', the viewport y to probe.",
+        description="'scroll': y delta (down positive); for 'hit_test', the viewport y.",
     )
     direction: str = Field(
         default="",
@@ -20093,16 +20233,14 @@ class BrowserParams(BaseModel):
     )
     limit: int | None = Field(
         default=None,
-        description="'logs' max entries to return (most recent kept); 'scroll' "
-        "ignores it. Omit for no cap.",
+        description="'snapshot'/'logs' max lines or entries; omit for no cap.",
     )
     # Read-action params (styles/hit_test/ancestors). Per-op semantics live in
     # the tool:// doc's ops table; these two descriptions carry only what the
     # caller must know to shape the value.
     properties: list[str] = Field(
         default_factory=list,
-        description="'styles': extra computed properties on top of the defaults "
-        "(max 20; letters, digits, dashes and underscores).",
+        description="'styles': extra computed properties (max 20).",
     )
     depth: int | None = Field(
         default=None,
@@ -20526,6 +20664,273 @@ def _validate_browser_backend(action: str, params: BrowserParams) -> str:
     return ""
 
 
+def _validate_window_fields(action: str, params: BrowserParams) -> str:
+    """The snapshot window's refusals, and the actions that may not use it.
+
+    Refusing a field an action ignores is this tool's house rule (`tab`,
+    `backend` and `secret_ref` all do it): a model that passed `search` to
+    `click` would otherwise believe it had filtered what the click targeted.
+    """
+    # `limit` is shared with `query` (how many descriptors to return); `start`
+    # and `search` are the snapshot window's own coordinates. An action outside
+    # this table takes NONE of the three — and an action inside it takes only
+    # the ones its row names, which is what stops `start` riding a `query`.
+    allowed = {"snapshot": {"start", "limit", "search"}, "query": {"limit"}}.get(action, set())
+    unused = [
+        name
+        for name, value in (
+            ("start", params.start),
+            ("limit", params.limit),
+            ("search", params.search),
+        )
+        if name not in allowed and value not in (None, "")
+    ]
+    if unused:
+        # Name the actions that ACCEPT each field, not the row they came from:
+        # `search` is snapshot-only while `limit` is shared with `query`, and a
+        # refusal that blurs the two sends the caller to a parameter that will
+        # be refused again.
+        actions_for = {"start": "snapshot", "search": "snapshot", "limit": "snapshot or query"}
+        if len(unused) == 1:
+            name = unused[0]
+            return (
+                f"{name!r} only valid for {actions_for[name]!r} (got it on '{action}'): "
+                "it pages or filters the accessibility tree"
+            )
+        parts = "; ".join(f"{name!r} only valid for {actions_for[name]!r}" for name in unused)
+        return f"{parts} (got them on '{action}')"
+    if action == "query":
+        return _validate_query_limit(params)
+    return _validate_snapshot_window(params)
+
+
+def _validate_query_limit(params: BrowserParams) -> str:
+    if params.limit is None:
+        return ""
+    if params.limit < 1:
+        return f"'limit' must be at least 1 element (got {params.limit})"
+    if params.limit > QUERY_MAX_ELEMENTS:
+        return (
+            f"'limit' takes at most {QUERY_MAX_ELEMENTS} elements (got {params.limit}); "
+            "narrow the selector instead of asking for more"
+        )
+    return ""
+
+
+def _validate_snapshot_window(params: BrowserParams) -> str:
+    if params.start is not None and params.start < 1:
+        return f"'start' is 1-based (got {params.start})"
+    if params.limit is not None and params.limit < 1:
+        return f"'limit' must be at least 1 line (got {params.limit})"
+    if params.limit is not None and params.limit > SNAPSHOT_MAX_LINES:
+        return (
+            f"'limit' takes at most {SNAPSHOT_MAX_LINES} lines (got {params.limit}); "
+            "omit it for the whole tree"
+        )
+    if len(params.search) > SNAPSHOT_MAX_SEARCH_CHARS:
+        return (
+            f"'search' takes at most {SNAPSHOT_MAX_SEARCH_CHARS} characters "
+            f"(got {len(params.search)}); name the control, not the page"
+        )
+    return ""
+
+
+def _window_snapshot_lines(
+    text: str, *, search: str, start: int, limit: int
+) -> tuple[str, int, int, int]:
+    """Narrow a snapshot the TOOL already holds: ``(text, total, matched, returned)``.
+
+    Both browser hosts window at the source (`windowSnapshot` in
+    extension/src/driver/ax-compact.ts) and report the numbers back, because a
+    host that can avoid building the payload should. This is the path for the
+    hosts that cannot say anything about the window: cmux, which has no such
+    flags, and an older desktop app or extension, which ignores the params. It
+    is deliberately the SAME semantics — 1-based lines, case-insensitive
+    substring over the rendered line, refs keep their names because only whole
+    text lines are dropped — so an agent cannot tell which host served the page
+    from the footer's arithmetic.
+
+    A blank search is "no filter", never "match nothing": `search=""` is what a
+    caller sends when it means the whole tree, and zero lines would read as an
+    empty section.
+    """
+    lines = [line for line in text.split("\n") if line] if text else []
+    total = len(lines)
+    term = search.strip().lower()
+    matched_lines = [line for line in lines if term in line.lower()] if term else lines
+    matched = len(matched_lines)
+    first = max(start, 1)
+    end = first - 1 + limit if limit > 0 else matched
+    page = matched_lines[first - 1 : end]
+    return "\n".join(page), total, matched, len(page)
+
+
+def _snapshot_footer(
+    *,
+    total: int,
+    matched: int,
+    returned: int,
+    start: int,
+    search: str,
+    scope: str,
+    scoped: bool,
+    host_ignored_scope: bool,
+    truncated: bool = False,
+) -> str:
+    """The one line that makes a narrowed tree recoverable.
+
+    The measured failure this exists for: a snapshot was cut mid-tree by the
+    model-facing character ceiling and said nothing usable about how to get the
+    rest, so every ref below the cut was unobtainable and the agent guessed CSS
+    instead. A footer that names the next `start`, the match count, or the fact
+    that the host ignored the scope turns that into one follow-up call.
+
+    Silent when there is nothing to say (a complete, unscoped tree): a footer on
+    every call would be noise an agent learns to skip.
+    """
+    notes: list[str] = []
+    if scope and host_ignored_scope:
+        # Honest about WHO is behind: the params are additive on the wire, so a
+        # host that predates them accepts and ignores them, and an agent that
+        # believed the tree was scoped would read the whole page as the section.
+        notes.append(
+            f"this host ignored selector={scope!r}: update the desktop app (or the "
+            "browser extension) to scope a snapshot to a subtree"
+        )
+    elif scope and scoped:
+        notes.append(f"scoped to {scope!r}")
+    if matched == 0:
+        # Zero matches is a RESULT, not a cut: there is no next page to name,
+        # and saying "lines 1-0 of 0" would read as paging trouble rather than
+        # as "this term is not in the tree".
+        notes.append(
+            f"0 of {total} lines matched {search.strip()!r}"
+            if search.strip()
+            else "the accessibility tree is empty"
+        )
+    elif matched < total or returned < matched:
+        if returned == 0:
+            # `lines 500-499 of 203` is an inverted range dressed as arithmetic
+            # (agent review round 1, R1-5): the clause was honest, the numbers
+            # were not. Say only what is true.
+            notes.append(
+                f"start={start} is past the end of {matched} line"
+                f"{'' if matched == 1 else 's'}"
+                + (f" matching {search.strip()!r}" if search.strip() else "")
+                + "; re-run with a smaller start"
+            )
+        else:
+            shown_end = start + returned - 1
+            where = f"lines {start}-{shown_end} of {matched}"
+            if search.strip():
+                where += f" matching {search.strip()!r}"
+            elif matched < total:
+                where += f" ({total} in the tree)"
+            if not truncated and start + returned <= matched:
+                where += (
+                    f"; pass start={start + returned} for the next page, or narrow with "
+                    "selector= or search="
+                )
+            notes.append(where)
+    elif search.strip():
+        notes.append(f"{matched} of {total} lines matched {search.strip()!r}")
+    if truncated and matched:
+        # The page was cut by the model-facing character ceiling AFTER the line
+        # window was applied, so the line numbers above describe a page whose
+        # tail is missing. Name the remedy rather than letting the cut look like
+        # the end of the tree — and never name a next `start` in this case
+        # (agent review round 1, R1-6): the lines the cut removed are whole
+        # lines, so following `start + returned` would skip them.
+        notes.append(
+            "this page was also cut to fit the context; pass a smaller limit= " "to get whole lines"
+        )
+    return f"[snapshot: {'; '.join(notes)}]" if notes else ""
+
+
+def _locator_kind(selector: str) -> str:
+    """``"role"``/``"label"``/``"text"`` for a locator, else "".
+
+    ``label*=``/``text*=`` are the documented substring spellings and are
+    recognised as locators here too: the recogniser's job is "is this a locator,
+    so the action rules apply", and a spelling it cannot see would bypass the
+    refusal for non-target actions (agent review round 1, R1-4).
+    """
+    match = _LOCATOR_PREFIX_RE.match(selector.strip())
+    return match.group(1).lower() if match else ""
+
+
+def _locator_shape_problem(selector: str) -> str:
+    """A malformed locator, or "" when it has the shape the hosts parse.
+
+    Deliberately a SHAPE check (balanced quotes and brackets), not a second
+    parser: it exists so a caller's typo — `role=checkbox[name="Active` — is not
+    reported as "this host predates accessibility locators" (agent review round
+    1, R1-3). Anything it accepts is still validated by the host.
+    """
+    kind = _locator_kind(selector)
+    if not kind:
+        return ""
+    rest = selector.strip().split("=", 1)[1] if "=" in selector else ""
+    # Scan QUOTE-AWARE: a delimiter inside a quoted value is content, not
+    # structure — `text="Array [1]"` is a well-formed locator (agent review
+    # round 2 residual).
+    quote = ""
+    depth = 0
+    closed_at = -1
+    for index, char in enumerate(rest):
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in ('"', "'"):
+            quote = char
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                return f"the {kind}= locator has an unbalanced [ ]"
+            if depth == 0:
+                closed_at = index
+    if quote:
+        return f"the {kind}= locator has an unterminated {quote} quote"
+    if depth != 0:
+        return f"the {kind}= locator has an unbalanced [ ]"
+    if closed_at >= 0 and rest[closed_at + 1 :].strip():
+        return f"the {kind}= locator has trailing content after its [ ]"
+    return ""
+
+
+def _validate_locator_target(action: str, params: BrowserParams) -> str:
+    """Locators belong to the actions that RESOLVE a target: click and type.
+
+    `snapshot`'s selector scopes the tree walk, which is a DOM query — a locator
+    there would be passed to `DOM.querySelector` and fail as invalid CSS. `read`
+    takes page text, where an accessible name is the wrong handle entirely.
+    Refused with copy rather than silently treated as CSS, the same house rule
+    `tab`/`backend`/`secret_ref` follow.
+    """
+    kind = _locator_kind(params.selector)
+    if not kind:
+        return ""
+    if action in ("click", "type", "upload"):
+        # `upload` resolves its input through the same ref/CSS/locator path in
+        # both hosts, so `label="Choose file"` names a file input there too
+        # (agent review round 1, R1-5).
+        return ""
+    if action == "snapshot":
+        return (
+            f"snapshot takes a CSS selector for its scope, not a {kind}= locator: "
+            "scope the section with CSS, then use search= (or a locator on the click) "
+            "to find the control inside it"
+        )
+    return (
+        f"{kind}= locators resolve a click/type TARGET; '{action}' takes a CSS "
+        "selector (or a snapshot ref)"
+    )
+
+
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
     """Refuse an unusable argument, or "" when the call may proceed.
 
@@ -20543,6 +20948,12 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     backend = _validate_browser_backend(action, params)
     if backend:
         return backend
+    window = _validate_window_fields(action, params)
+    if window:
+        return window
+    locator = _validate_locator_target(action, params)
+    if locator:
+        return locator
     if action != "type" and params.secret_ref.strip():
         # Refused rather than silently ignored, the same house rule `tab` and
         # `backend` follow: a caller that passed a ref to an action which never
@@ -20575,10 +20986,10 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             # read-back comparison in the lane still catches a failed fill.
             return ""
         return _validate_typed_text(params.text)
-    if action == "snapshot" and params.selector.strip():
+    if action == "snapshot":
         # Optional here — an absent selector snapshots the whole document —
         # which is why this is not the same shape as click/type.
-        return _validate_selector(params.selector, "snapshot")
+        return _validate_selector(params.selector, "snapshot") if params.selector.strip() else ""
     if action == "scroll":
         # Every scroll param is optional (no params = one viewport down), so the
         # only refusals are a malformed value: a flag-shaped selector (same argv
@@ -20620,6 +21031,12 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"(expected one of {', '.join(sorted(_LOG_LEVELS))})"
             )
         return ""
+    if action == "query":
+        # CSS only, mandatory: a query with no selector is a whole-page dump,
+        # which is what `snapshot` is for. `_validate_locator_target` above
+        # already refused a locator here, because a locator resolves a TARGET
+        # while a query asks the DOM a question.
+        return _validate_selector(params.selector, "query")
     if action in ("styles", "ancestors"):
         # Both name one element, so the selector is mandatory and the same
         # refusal click/type use keeps the copy consistent. The flag-shaped
@@ -22185,11 +22602,29 @@ async def _bridge_call(
     try:
         return await selected.call(action, params), None
     except BridgeError as exc:
-        problem = _error(
-            tool_call_id,
-            "browser",
-            format_error(exc, action=action, surface=surface, host=host),
-        )
+        message = format_error(exc, action=action, surface=surface, host=host)
+        kind = _locator_kind(str(params.get("selector") or ""))
+        if kind and exc.code.value == "internal":
+            # A `role=…` selector that reaches CSS is either a MALFORMED locator
+            # on a current host or a well-formed one on a host that predates
+            # locators. Saying the second alone sent a caller with a typo to
+            # update their app (agent review round 1, R1-3): name the malformed
+            # case first when the shape says so, and never assert one cause.
+            malformed = _locator_shape_problem(str(params.get("selector") or ""))
+            if malformed:
+                message += (
+                    f"\n{malformed}. A locator is role=<role>[name=…], label=… or "
+                    "text=…; fix the quotes/brackets and retry."
+                )
+            else:
+                message += (
+                    f"\nThe {kind}= locator was treated as CSS. Either this browser host "
+                    "predates accessibility locators, or the locator is malformed. If the "
+                    "host is current, check the locator; otherwise update the desktop app "
+                    "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
+                    "them) / a CSS selector instead."
+                )
+        problem = _error(tool_call_id, "browser", message)
         # Carry the TYPED wire code so callers can branch on it (dead-pin
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
@@ -22958,6 +23393,59 @@ def _geometry_entry_list(result: dict[str, Any], key: str) -> list[dict[str, Any
     return [entry for entry in raw if isinstance(entry, dict)]
 
 
+def _query_entry_list(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """The descriptor list, tolerant of a host that answered something else.
+
+    Malformed entries are dropped rather than rendered as `None`: this is model
+    input, and one bad row must not make the whole answer unreadable.
+    """
+    raw = result.get("matches")
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def _query_entries_text(matches: list[dict[str, Any]]) -> str:
+    """One block per element: the identity an agent asked for, then its state.
+
+    The layout is deliberately grep-able and stable: `tag#id[name="…"]` on the
+    first line answers the measured question ("what is the id of this
+    checkbox?"), and the state line carries the three facts that decide whether
+    a click will do anything — visibility, checked, disabled.
+    """
+    lines: list[str] = []
+    for index, entry in enumerate(matches, 1):
+        ident = str(entry.get("tag") or "")
+        if entry.get("id"):
+            ident += f"#{entry['id']}"
+        if entry.get("name"):
+            ident += f"[name={json.dumps(entry['name'], ensure_ascii=False)}]"
+        bits = [ident]
+        for key, label in (("type", "type"), ("role", "role")):
+            if entry.get(key):
+                bits.append(f"{label}={entry[key]}")
+        if entry.get("ariaLabel"):
+            bits.append(f"aria-label={json.dumps(entry['ariaLabel'], ensure_ascii=False)}")
+        lines.append(f"{index}. {' '.join(bits)}")
+        state = ["visible" if entry.get("visible") else "NOT visible"]
+        if entry.get("inView"):
+            state.append("in view")
+        if entry.get("checked") is True:
+            state.append("checked")
+        elif entry.get("checked") is False:
+            state.append("unchecked")
+        if entry.get("disabled"):
+            state.append("disabled")
+        if entry.get("value"):
+            state.append(f"value={json.dumps(entry['value'], ensure_ascii=False)}")
+        detail = "   " + ", ".join(state)
+        text = str(entry.get("text") or "")
+        if text:
+            detail += f" — text: {json.dumps(text, ensure_ascii=False)}"
+        lines.append(detail)
+    return "\n".join(lines)
+
+
 def _bridge_geometry_result(
     tool_call_id: str,
     action: str,
@@ -23014,6 +23502,35 @@ def _bridge_geometry_result(
             tool_call_id,
             "browser",
             f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+            details=details,
+        )
+    if action == "query":
+        # A read-only answer describes ELEMENTS, so the header names the count
+        # the page really had (a selector can match hundreds); `truncated` is
+        # the page function's statement that the caller asked for fewer than
+        # exist, and the remedy is a narrower selector, not a bigger limit.
+        matches = _query_entry_list(result)
+        # `count` is model input: a host that answers `{}` or "abc" must not turn
+        # a readable answer into a tool-level error (agent review round 1, R1-1).
+        raw_count = result.get("count")
+        page_count = raw_count if isinstance(raw_count, int) else len(matches)
+        details.update(
+            selector=selector,
+            count=page_count,
+            returned=len(matches),
+            truncated=bool(result.get("truncated")),
+            matches=matches,
+        )
+        head = f"{len(matches)} match{'' if len(matches) == 1 else 'es'} for {selector!r}"
+        if page_count > len(matches):
+            head += f" (the page has {page_count}); narrow the selector to see the rest"
+        elif not matches:
+            head += " — nothing in the document matches this selector"
+        body = _query_entries_text(matches)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}" if body else head,
             details=details,
         )
     chain = _geometry_entry_list(result, "chain")
@@ -24034,6 +24551,29 @@ def _unique_name(directory: Path, name: str) -> str:
     return candidate
 
 
+def _target_phrase(selector: str, result: dict[str, Any]) -> str:
+    """What was clicked, in the terms the caller used AND what the host found.
+
+    A locator answer that reads back only as `role=checkbox[name="Active"]`
+    cannot be checked by the caller; one that reads as
+    `role=checkbox "Active" (2 matched, first used)` says exactly which element
+    the click landed on and whether the name was ambiguous. A ref or a CSS
+    selector keeps its historical copy byte for byte — existing tests pin it,
+    and an unchanged message is not worth churning.
+    """
+    resolved = result.get("resolved")
+    if not isinstance(resolved, dict) or resolved.get("by") != "locator":
+        return selector
+    role = str(resolved.get("role") or "")
+    name = str(resolved.get("name") or "")
+    matched = int(resolved.get("matched") or 1)
+    shown_name = json.dumps(name, ensure_ascii=False)
+    phrase = f"{role} {shown_name}" if role else shown_name
+    if matched > 1:
+        phrase += f" ({matched} matched, first used)"
+    return f"{selector} → {phrase}"
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -24068,6 +24608,20 @@ async def _bridge_action(
     elif action in ("read", "snapshot"):
         if params.selector.strip():
             wire["selector"] = params.selector.strip()
+        if action == "snapshot":
+            # Only what the caller asked for: an absent param must stay absent,
+            # because the host's own default is the pre-existing whole tree and
+            # sending start=1/limit=0 would be this tool inventing a window.
+            if params.start is not None:
+                wire["start"] = params.start
+            if params.limit is not None:
+                wire["limit"] = params.limit
+            if params.search.strip():
+                wire["search"] = params.search.strip()
+    elif action == "query":
+        wire["selector"] = params.selector.strip()
+        if params.limit is not None:
+            wire["limit"] = params.limit
     elif action in ("click", "type"):
         wire["selector"] = params.selector.strip()
         if action == "type":
@@ -24140,13 +24694,61 @@ async def _bridge_action(
             details=details,
         )
     if action == "snapshot":
-        return _text(
-            tool_call_id,
-            "browser",
-            truncate_output(str(result.get("snapshot", "")), BROWSER_TEXT_LIMIT_CHARS)
-            or "(empty snapshot)",
-            details=details,
+        raw = str(result.get("snapshot", ""))
+        reported = result.get("total_lines")
+        if isinstance(reported, int):
+            # A host that windows at the source reports what it narrowed; its
+            # text is already the requested page and must not be windowed twice.
+            total = reported
+            # Explicit None checks, not `or`: a host reporting matched_lines=0
+            # means "the term is not in the tree", and `0 or total` would
+            # silently turn that into "every line matched" — the exact
+            # confidently-wrong footer this helper exists to prevent.
+            raw_matched = result.get("matched_lines")
+            matched = total if raw_matched is None else int(raw_matched)
+            raw_returned = result.get("returned_lines")
+            returned = 0 if raw_returned is None else int(raw_returned)
+            raw_start = result.get("start")
+            start = int(raw_start) if raw_start is not None else (params.start or 1)
+            scoped = bool(result.get("scoped"))
+            body = raw
+        else:
+            # cmux, or a host older than the window params: narrow locally so
+            # paging works everywhere the tool runs.
+            body, total, matched, returned = _window_snapshot_lines(
+                raw,
+                search=params.search,
+                start=params.start or 1,
+                limit=params.limit or 0,
+            )
+            scoped = False
+            start = params.start or 1
+        scope = params.selector.strip()
+        # A scope was asked for and this host cannot say it honoured it. The
+        # params are additive, so an old host accepts and ignores them; the
+        # footer names that rather than letting the agent read a whole page as
+        # "the section".
+        host_ignored_scope = bool(scope) and not scoped
+        page_text = body
+        body = truncate_output(page_text, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)"
+        footer = _snapshot_footer(
+            total=total,
+            matched=matched,
+            returned=returned,
+            start=start,
+            search=params.search,
+            scope=scope,
+            scoped=scoped,
+            host_ignored_scope=host_ignored_scope,
+            truncated=len(page_text) > BROWSER_TEXT_LIMIT_CHARS,
         )
+        if footer:
+            body = f"{body}\n\n{footer}"
+            details["total_lines"] = total
+            details["returned_lines"] = returned
+        if scoped:
+            details["scoped"] = True
+        return _text(tool_call_id, "browser", body, details=details)
     if action == "scroll":
         x = int(result.get("scrollX", 0) or 0)
         y = int(result.get("scrollY", 0) or 0)
@@ -24169,14 +24771,15 @@ async def _bridge_action(
         )
     if action == "logs":
         return _bridge_logs_result(tool_call_id, params, result, details, title, href)
-    if action in ("styles", "hit_test", "ancestors"):
+    if action in ("styles", "hit_test", "ancestors", "query"):
         return _bridge_geometry_result(tool_call_id, action, params, result, details)
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
         return _text(
             tool_call_id,
             "browser",
-            f"Clicked {params.selector.strip()}{navigation}. Page: {_page_line(title, href)}",
+            f"Clicked {_target_phrase(params.selector.strip(), result)}{navigation}. "
+            f"Page: {_page_line(title, href)}",
             details=details,
         )
     if action == "type":
@@ -25090,11 +25693,40 @@ async def _execute_browser(
         code, out = await _run_cmux(argv)
         if code != 0:
             return _error(tool_call_id, "browser", f"cmux snapshot failed: {out}")
+        # cmux has no window of its own, so the SAME start/limit/search the
+        # bridge path forwards must be applied here, or the claim "cmux degrades
+        # to local windowing with the same semantics" is false and `start=51`
+        # silently re-returns page one forever (agent review round 1, R1-1).
+        text, total, matched, returned = _window_snapshot_lines(
+            out,
+            search=params.search or "",
+            start=params.start or 1,
+            limit=params.limit or 0,
+        )
+        body = truncate_output(text, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)"
+        # Measured against the PRE-truncation text, like the bridge branch: at
+        # exactly the ceiling `truncate_output` returns the text unchanged, so
+        # `>=` reported a cut that never happened and (since R1-6) dropped the
+        # next-page hint for a page that was whole.
+        truncated = len(text) > BROWSER_TEXT_LIMIT_CHARS
+        footer = _snapshot_footer(
+            total=total,
+            matched=matched,
+            returned=returned,
+            start=params.start or 1,
+            search=params.search or "",
+            scope=params.selector.strip(),
+            # cmux has no scope flag of its own; `--selector` narrows the tree
+            # the CLI walks, so a scoped cmux read is scoped in the host.
+            scoped=bool(params.selector.strip()),
+            host_ignored_scope=False,
+            truncated=truncated,
+        )
         return _text(
             tool_call_id,
             "browser",
-            truncate_output(out, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)",
-            details={"surface_id": surface},
+            f"{body}\n\n{footer}" if footer else body,
+            details={"surface_id": surface, "total_lines": total},
         )
     if action == "click":
         return await _browser_click(tool_call_id, surface, params.selector)
@@ -25298,19 +25930,16 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             # correctly. The context-budget guard measures the whole surface; the
             # slimming wave (audit item 2) moved the lifecycle/file-transfer clauses
             # to `read tool://browser`.
-            "Drive the user's REAL browser — the desktop app's tab by default, their "
-            "paired extension, or a cmux panel ('backend' names a host for a fresh "
-            "'open'; actions: `read tool://browser`). Cookies and logins persist "
-            "across calls and sessions, and the user can sign in by hand when you ask "
-            "them to, so this reaches authenticated pages a throwaway browser cannot. "
-            "A fresh 'open' creates one NEW tab owned by this session; reuse it because "
-            "later opens navigate it. "
-            "Before your final response, call 'close' unless the user needs it left "
-            "open for a pending interaction; 'tabs' lists every agent-driven tab "
-            "(handles are redacted: awareness-only), and 'close' ends only your own tab. "
-            "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: call 'request_access', NOTIFY the operator to approve "
-            "it, and 'await_access' before navigating again. "
+            "Drive the user's REAL browser — the app's tab, their paired extension or a "
+            "cmux panel ('backend' picks a host; actions: `read tool://browser`). "
+            "Cookies and logins persist across calls and sessions and the user can sign "
+            "in by hand, so this reaches authenticated pages no throwaway browser can. "
+            "A fresh 'open' creates one NEW session-owned tab; reuse it, later opens "
+            "navigate it. Call 'close' before your final response unless a pending "
+            "interaction needs it; 'tabs' lists every tab (redacted handles) and 'close' "
+            "ends only your own tab. "
+            "An unapproved site fails with origin_not_allowed: call 'request_access', "
+            "NOTIFY the operator, then 'await_access' before retrying. "
             "Never install or script a browser engine instead. Playbook: `guide://browser`."
         ),
         parameters=BrowserParams.model_json_schema(),
@@ -30434,6 +31063,7 @@ _ASK_DESCRIPTION_QUEUED = (
     "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
     "(floor 2 min); on a timeout notice take your own recommendation and say what "
     "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "Settle one with `ask_withdraw` the moment it stops mattering. "
     "To re-raise another session's pending ask instead, pass that one ask's "
     "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "
     "Credentials: secret=true on that question (see `read tool://ask`)."
@@ -30679,7 +31309,21 @@ async def execute_ask(
             str(outcome.get("text") or ""),
             details=dict(outcome.get("details") or {}),
         )
-    answers = await ask_user(questions)
+    # A HOST THAT KNOWS IT CANNOT ASK REFUSES IN WORDS (review round 1,
+    # MINOR-1 / QA Q1). ``AskUnavailableError`` is raised only by the
+    # queued-only ask surface when something awaits it with the engine off;
+    # left to ``_guard`` it reached the model as "Tool 'ask' failed
+    # unexpectedly" plus a traceback of our own paths, which is the register
+    # ``_guard`` reserves for defects, not for a host stating a fact. Same
+    # reasoning as ``ApprovalUnavailableError``'s call sites. Imported here
+    # rather than at module scope for the reason every engine import in this
+    # function is: the runtime package is not on the tool module's path.
+    from local_operator.session.runtime.serving import AskUnavailableError
+
+    try:
+        answers = await ask_user(questions)
+    except AskUnavailableError as exc:
+        return _error(tool_call_id, "ask", str(exc))
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):
         # One outcome, whether the host answered None (escaped) or handed back
         # a mapping with nothing in it (confirmed an empty multi-select): the
@@ -30753,7 +31397,10 @@ class AskWithdrawParams(BaseModel):
         description=(
             "answered_in_chat only: the user's words verbatim, one cell per "
             "question the message answers and an empty list for a question it "
-            "does not cover. Every question id must appear."
+            "does not cover — an empty list closes that question unanswered in "
+            "the same write, so re-ask any you still need. Every question id "
+            "must appear, spelled exactly as it was asked; a key that is not a "
+            "question id is refused."
         ),
     )
 
@@ -30766,13 +31413,19 @@ class AskWithdrawParams(BaseModel):
 _ASK_WITHDRAW_DESCRIPTION = (
     "Close a queued ask you no longer need answered — the asker's own settle. "
     "reason='moot': the question stopped mattering (you found the answer "
-    "yourself, the work moved on); it settles as withdrawn and nothing more is "
-    "delivered for it. reason='answered_in_chat': the user's latest chat "
-    "message IS the answer — record their words VERBATIM in `answers`; the "
-    "standard response arrives as usual. If the user's message answers a "
-    "queued ask, settle it with this tool rather than leaving the ask reading "
-    "as waiting. A secret question cannot be settled from chat — its card is "
-    "the only path. A settled ask is refused with its own words; do not retry."
+    "yourself, the work moved on, or the user dropped or handed off the work "
+    "the question was about); it settles as withdrawn and nothing more is "
+    "delivered for it. reason='answered_in_chat': the user's chat message that "
+    "answered it (latest or earlier) IS the answer — an answer is "
+    "`answered_in_chat`, never `moot`, even if they used their own words "
+    "rather than the options: record their words VERBATIM in `answers`; the "
+    "standard response arrives as usual. To settle only some of its questions, "
+    "put the user's words in their cells and an empty list on the rest — those "
+    "close unanswered; re-ask any you still need. Every cell empty is refused "
+    "(that is a `moot`, not an answer). If the user's message answers a queued "
+    "ask, settle it with this tool rather than leaving the ask reading as "
+    "waiting. A secret question cannot be settled from chat — its card is the "
+    "only path. A settled ask is refused with its own words; do not retry."
 )
 
 

@@ -216,6 +216,21 @@ def _last_complete_row(path: Path, end: int) -> bytes:
         window = min(end, window * 4)
 
 
+def drop_anchor(directory: str | Path) -> None:
+    """Remove this session's anchor sidecar, if any. Best-effort by contract.
+
+    An anchor describes a PLAIN journal (an inode, a size, the digest of the row
+    ending there). The moment that journal is stored compressed the record can
+    never validate again, so keeping it only misleads the prewarm selector into
+    calling the journal warm. Called by the compression pass's after-care, by
+    :func:`build_anchor` when it meets an archive, and by the prewarm selector.
+    """
+    try:
+        (Path(directory) / ANCHOR_FILENAME).unlink()
+    except OSError:
+        pass
+
+
 def build_anchor(directory: str | Path) -> TailAnchor | None:
     """The anchor for this journal, or ``None`` when none is needed.
 
@@ -225,6 +240,14 @@ def build_anchor(directory: str | Path) -> TailAnchor | None:
     and proving that costs a whole-file scan — is the one that gets a record, and it
     is paid here rather than on a reader's first paint.
     """
+    from local_operator.session import compression
+
+    if compression.archive_path(Path(directory)) is not None:
+        # Nothing to anchor: the reader validates a plain inode and offsets, and
+        # an archive has neither. Drop any stale record so the prewarm selector
+        # does not read it as "this journal is warm".
+        drop_anchor(directory)
+        return None
     path = Path(directory) / TRANSCRIPT_FILENAME
     try:
         stat = os.stat(path)

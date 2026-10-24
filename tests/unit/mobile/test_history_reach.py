@@ -1130,3 +1130,44 @@ def test_a_bounded_window_says_so_and_a_whole_file_says_so(
     asyncio.run(small())
     whole = DurableFoldCache().load(plain)
     assert whole.scan_from_bof is True, "a whole-file fold should report the file as its own"
+
+
+def test_a_damaged_archive_is_reported_as_unavailable_not_as_the_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """m-3: a transcript this build cannot decode must not look like an empty one.
+
+    Both phone handlers are best effort by contract — a damaged archive may not take
+    the daemon down — but they used to answer a plain ``[]``/``None``: the history
+    route served an empty page that reads as the TOP of the conversation, and the
+    projection route served no frame, with nothing said anywhere. The typed
+    ``compression.ArchiveError`` is now caught before the blanket handler, logged at
+    WARNING with the archive+codec the message carries, and the history page is an
+    ``_UnavailablePage`` — still empty, but carrying ``unavailable``, which the route
+    puts on the wire.
+    """
+    import logging
+
+    from local_operator.session import compression
+
+    config = tmp_path / "config"
+    _build(config, early_turns=2, kept_turns=1, mid_heavy_calls=1, tool_calls=1)
+    directory = config / "sessions" / SESSION_ID
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+
+    assert compression.compress_session(directory).status == "compressed"
+    archive = compression.archive_path(directory)
+    assert archive is not None
+    archive.write_bytes(archive.read_bytes()[: len(archive.read_bytes()) // 2])
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.mobile.daemon"):
+        page, has_more = _history_page(SESSION_ID, None, PAGE)
+        projection = _durable_projection(SESSION_ID)
+
+    assert page == [] and has_more is False
+    reason = getattr(page, "unavailable", "")
+    assert reason and archive.name in reason, reason
+    assert projection is None
+    warnings = [record.getMessage() for record in caplog.records]
+    assert any("unavailable rather than empty" in line for line in warnings), warnings
+    assert any("could not be decoded" in line for line in warnings), warnings

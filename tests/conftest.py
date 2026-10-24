@@ -170,6 +170,13 @@ _AMBIENT_VARS = (
     # a bound nobody runs (CI round 1 on PR #2575, 2026-10-17). Cells that mean
     # to exercise a bound set it through ``monkeypatch`` explicitly.
     "LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS",
+    # The Radient publish-preview budget (``clients/radient.PREVIEW_TIMEOUT_ENV``). The
+    # same ESCAPE-HATCH class as the bound above: the value MOVES how long a preview may
+    # take, so an inherited export would silently rewrite what every preview cell
+    # measures -- and the resolver reads it per call, which is exactly why nothing but a
+    # scrub can keep an operator's shell out of the reading. Cells that exercise a budget
+    # set it through ``monkeypatch`` explicitly, as ``test_radient_preview.py`` does.
+    "LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
@@ -320,6 +327,15 @@ _AMBIENT_VARS = (
     # ``session/runtime/process.py``; the ambient-env test is what holds this
     # entry to that (QA round 1 of #1110).
     "LOP_MOBILE_CHILD_EFFORT",
+    # The SPEED dial the desktop plane pins for a draft born on a chosen model
+    # (ui#1265), read beside the level above and for the same reason: every
+    # child the test process spawns would otherwise construct its spec at a
+    # stranger's tier, so a provider-call or journal assertion measures the
+    # operator's shell rather than the fixture -- and fails nothing by itself,
+    # the same silent shape as RESUME and EFFORT (the fix for ui#1266 is what
+    # gave this name a reader; the ambient-env test is what caught it missing
+    # here). It is read by ``session/runtime/process.py``.
+    "LOP_MOBILE_CHILD_FAST",
     "LOP_MODEL_SELECTION_OVERRIDE",
     # The eval worker's scrub-channel transport (R1). The parent sets it per
     # spawn, but a worker that inherited a STALE value from the operator's own

@@ -88,6 +88,11 @@ from local_operator.stt.clients import (
     OpenAiSttClient,
 )
 from local_operator.stt.errors import failure_status_and_detail
+from local_operator.stt.radient_cleanup import (
+    normalize_radient_cleanup,
+    radient_cleanup_options,
+    stt_cleanup_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -384,13 +389,13 @@ async def _run_radient_rung(
         client.create_transcription,
         file_path=str(audio_path),
         model=None,  # Radient's own configured default governs (legacy rule)
-        prompt=prompt,
         response_format="json",
         temperature=0.0,
         language=normalize_language_hint(language),
         provider=None,
         session_id=str(correlation_session_id or "") or None,
         client_request_id=new_correlation_id(),
+        **radient_cleanup_options(cleanup, prompt, language),
     )
     cost = None
     try:
@@ -398,34 +403,16 @@ async def _run_radient_rung(
     except Exception:  # noqa: BLE001 — a cost parse must not fail a transcript
         cost = None
     provider = str(getattr(result, "provider", "") or "")
-    # Radient's response is an extra-allow model: a provider that reports the
-    # detected language puts it in ``language`` or ``language_code``. Reading
-    # both through the dump keeps this seam independent of the vendor's
-    # spelling without widening the typed response model.
-    payload = result.model_dump() if hasattr(result, "model_dump") else {}
-    detected = payload.get("language") or payload.get("language_code")
-    probability = payload.get("language_probability")
-    text = result.text or ""
-    # Radient has no native cleanup switch. ``auto`` and ``client`` both mean
-    # the deterministic rules here; ``provider``/``off`` leave the text alone.
-    cleaned = None
-    if cleanup in ("auto", "client"):
-        cleaned = apply_client_rules(
-            text,
-            language=choose_cleanup_language(
-                language,
-                detected if isinstance(detected, str) else None,
-                float(probability) if isinstance(probability, (int, float)) else None,
-            ),
-        )
+    normalized = normalize_radient_cleanup(result, cleanup, caller_language=language)
     return _RungResult(
-        text=cleaned.text if cleaned else text,
+        text=normalized.text,
         cost=cost,
         provider=provider,
-        raw_text=text,
-        language=detected if isinstance(detected, str) else None,
-        cleanup=CLIENT_RULES_PROVENANCE if cleaned else "none",
-        removed=cleaned.removed if cleaned else (),
+        raw_text=normalized.raw_text,
+        raw_unavailable=normalized.raw_unavailable,
+        language=normalized.language,
+        cleanup=normalized.cleanup,
+        removed=normalized.removed,
     )
 
 
@@ -515,7 +502,7 @@ async def _run_openai_rung(
         audio,
         mime=mime,
         language=normalize_language_hint(language),
-        prompt=prompt,
+        prompt=stt_cleanup_prompt(cleanup, prompt, language),
         timeout_s=timeout_s,
     )
     # See the ElevenLabs rung: no cost object for a BYO leg, and no provider

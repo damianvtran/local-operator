@@ -149,7 +149,6 @@ from local_operator.session.runtime.types import (
     PEER_JOURNAL_SOURCE_FLAG,
     PROTOCOL_VERSION,
 )
-from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -8468,7 +8467,12 @@ class RelayServer:
         a memo must not pin it.
         """
         try:
-            st = (self.root / "sessions" / session_id / TRANSCRIPT_FILENAME).stat()
+            # The PHYSICAL source is the memo key: for a compressed session that
+            # is the archive, stamped with the journal's own mtime, so the memo
+            # still misses exactly when the journal was appended to.
+            from local_operator.session import compression
+
+            st = compression.transcript_source(self.root / "sessions" / session_id)[0].stat()
         except OSError:
             return None
         return (session_id, before_id or "", limit, st.st_ino, st.st_size, st.st_mtime)
@@ -8831,7 +8835,9 @@ class RelayServer:
         as an authority to install.
         """
         directory = self.root / "sessions" / session_id
-        if not (directory / TRANSCRIPT_FILENAME).exists():
+        from local_operator.session import compression
+
+        if not compression.has_transcript(directory):
             # No journal on this disk: there is no source to read, and that is
             # an ANSWER (the page arm's own empty page), not a build in
             # flight. Nothing claims ready — a ready state promises a coherent
@@ -14006,6 +14012,9 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
                 "is expected. The relay can run in the foreground instead."
             ),
         }
+    # systemd opens append-log targets before Python starts, so a fresh HOME
+    # needs this parent before enable --now; the daemon cannot create it in time.
+    log_path().parent.mkdir(parents=True, exist_ok=True)
     # Lingering BEFORE enable --now (mobile's ordering): without a user manager
     # the enable itself fails with the bus error, and enabling linger is what
     # spawns one. Best-effort — a refusal must not fail the install.

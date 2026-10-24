@@ -979,6 +979,19 @@ jobs:
 
       - name: Run test shard with coverage
         id: shard_pytest
+        # `LOCAL_OPERATOR_SHARD_MEMORY_DIR` is where `tests/shard_memory_dump.py`
+        # writes an ENOMEM snapshot when a cell dies of `OSError: [Errno 12]`.
+        # It is set HERE, on the pytest step, because the `runner` context is not
+        # available at job-level `env`; the serial-controls step and the upload
+        # step spell the same path again and all three must stay in step. Under
+        # `runner.temp` on
+        # purpose: the dump must never land in the checkout (a test run writing
+        # into the repo tree is its own defect), and an absolute path is what
+        # `upload-artifact` documents as supported. The shard and attempt are in
+        # the directory name so a later attempt cannot mix evidence with an
+        # earlier one.
+        env:
+          LOCAL_OPERATOR_SHARD_MEMORY_DIR: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
         # The six serial controls are deselected here (see SERIAL_CONTROLS above).
         # The `.coverage` rename is NOT done here any more: shard 0 appends the
         # serial run's data to this file first, so the rename moved to the
@@ -1031,6 +1044,11 @@ jobs:
         # empty report keep the gate where it already is (the combine job).
         if: matrix.shard == 0
         timeout-minutes: 7
+        # Same dump directory as the ordinary shard run, so an ENOMEM in this
+        # -n0 stage lands in the one artifact the shard job uploads. `runner` is
+        # not available at job-level `env`, hence the repetition.
+        env:
+          LOCAL_OPERATOR_SHARD_MEMORY_DIR: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
         run: |
           python scripts/run_bounded.py --timeout 400 --grace 10 --memory-mb 0 -- \
             python -m pytest $SERIAL_CONTROLS -n0 -q \
@@ -1106,6 +1124,25 @@ jobs:
             test-artifacts/tui-proof/manifest.json
           # 7 days, not 1: post-hoc flake/review evidence reads must survive past
           # the next day (PR #2470: XML expired at ~24.5 h, forced a re-run).
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload shard memory dumps
+        # WHY `always()`: the dump exists only on the run where a cell died of
+        # ENOMEM, and that run is a FAILED job -- a default `success()` condition
+        # would upload exactly when there is nothing to see. A healthy shard
+        # writes no file, so `if-no-files-found: ignore` keeps this step green.
+        #
+        # The path and name repeat the shard step's `LOCAL_OPERATOR_SHARD_MEMORY_DIR`
+        # (the `runner` context cannot be used in job-level `env`). The attempt
+        # number is in both: a re-run must be distinguishable from the run it
+        # replaces, because the memory reading of one attempt is not evidence
+        # about another.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-memory-${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}/**
           retention-days: 7
           if-no-files-found: ignore
 

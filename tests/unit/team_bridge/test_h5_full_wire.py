@@ -574,7 +574,7 @@ async def test_cold_errand_consumer_and_spool_drain_reach_the_same_queue(
     # exactly the state `test_h5_wire_chain` drains from on a never-turned session.
     assert session._peer_inbox_drained is True
     session._peer_inbox_drained = False
-    await session._drain_spooled_peer_inbox_rows()
+    await session._drain_spooled_peer_inbox()
     assert peek_inbox(session.transcript.directory) == []
     await wait_for(
         lambda: len(_asks_for(session, MESSAGE_ID_2)) == 1 and not _tasks_pending(session), 5.0

@@ -153,6 +153,35 @@ def _move(
 # ---------------------------------------------------------------------------
 
 
+def test_a_move_is_allowed_and_does_not_carry_the_approval_choice(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The approvals sidecar is excluded, not unlisted.
+
+    Round-4 review found a real blocker: `approvals.json` was absent from the
+    sync vocabulary, so moving a conversation that had used the approvals
+    feature refused with `unlisted_content` and told the user to delete their
+    saved choice. The move must succeed and the destination copy must NOT
+    contain the source's choice — a copy is a new conversation, the same rule
+    `fork` applies.
+    """
+    from local_operator.session.approval_policy import OVERRIDE_FILENAME, write_override
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    write_override(source, "auto")
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    destination = server_b.root / "sessions" / SESSION
+    assert destination.is_dir(), result
+    assert not (
+        destination / OVERRIDE_FILENAME
+    ).exists(), "the copy inherited the source conversation's approval choice"
+
+
 def test_a_recall_moves_the_session_and_leaves_a_tombstone(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1569,3 +1598,59 @@ class TestViewedIsTheViewerBlocker:
         self._stub(monkeypatch, "kept: busy")
         outcome = mobility._retire_local_runtime(tmp_path, SESSION)  # noqa: SLF001
         assert outcome["result"] == "busy", outcome
+
+
+def test_a_compressed_session_moves_and_is_not_refused_as_unlisted(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session whose transcript is an ARCHIVE moves like any other (M-1 / Q-3).
+
+    THE FAILURE THIS PINS. ``assert_complete`` runs in ``_source_prepare`` BEFORE
+    anything restores the transcript, so it judges the directory as it is on disk —
+    and a compressed session's body is ``transcript.jsonl.gz``/``.zst``, not
+    ``transcript.jsonl``. Nothing named the archive, so every session past
+    ``after_days`` was refused with ``unlisted_content`` and a sentence whose remedy
+    ("move or remove it") meant deleting the only copy of the conversation.
+    Compression is on by default, so this was not a corner.
+
+    The fix has two halves and this test exercises both on the REAL path: the archive
+    names are copy-set names (so the completeness question can be answered), and the
+    prepare restores the transcript before it digests the copy set (so the stamps it
+    takes describe the bytes the wire will carry). Two relays, real loopback, driven
+    the way the CLI drives it.
+    """
+    from local_operator.session import compression
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+
+    outcome = compression.compress_session(source)
+    assert outcome.status == "compressed", outcome
+    archive = source / f"transcript.jsonl{compression.ARCHIVE_SUFFIXES[outcome.codec]}"
+    assert archive.is_file() and not (source / "transcript.jsonl").exists()
+
+    # THE COMPLETENESS GUARD THAT REFUSED IT, asked the way the prepare asks it.
+    assert sync.assert_complete(source) is None
+
+    # THE ARCHIVE IS THE TRANSCRIPT, COUNTED ONCE, WITH ITS OWN DIGEST AND CLOCK: the
+    # plain name is absent, so it is a single member, and the digest is of the archive
+    # bytes rather than a second name for the same bytes.
+    names = sync.copy_set(server_a.root, SESSION)
+    transcript_members = [name for name in names if name.startswith("transcript.jsonl")]
+    assert transcript_members == [archive.name], transcript_members
+    stamp = sync.member_stamps(
+        server_a.root, SESSION, attachments_dir=server_a.root / "attachments"
+    )[archive.name]
+    info = archive.stat()
+    assert (stamp.stat_bytes, stamp.mtime_ns) == (info.st_size, info.st_mtime_ns)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    assert result["phases"][0]["phase"] == "prepared", result["phases"]
+    assert result["phase"] == "done"
+    assert not source.exists()
+    # THE CONVERSATION ARRIVED WHOLE, as the plain journal the protocol speaks.
+    assert _transcript(server_b.root, SESSION) == before

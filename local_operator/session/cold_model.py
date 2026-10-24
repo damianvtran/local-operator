@@ -36,6 +36,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.model_selection import (
     StoredModelSelection,
+    fast_dial_from_row,
     read_model_selection,
 )
 from local_operator.session.usage_seed import denominator_window
@@ -330,6 +331,17 @@ def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> Fronte
                     )
                 }
             )
+        # THE DIAL, through the SAME rule the owner's restore uses
+        # (``model_selection.fast_dial_from_row``), against the spec that will
+        # actually serve. The row's pair and level have been resolved onto this
+        # spec; the dial is the third field of the same snapshot, and leaving it
+        # out is what painted ``fast_mode: false`` on the first frame of a
+        # conversation that recorded ``true`` — the reopen in ui#1266, before a
+        # ``Session`` exists to restore it. ``None`` (a row older than the field)
+        # is no evidence: the resolved spec's own answer stands.
+        dial = fast_dial_from_row(saved.fast, resolved)
+        if dial is not None:
+            resolved = resolved.model_copy(update={"fast_mode": dial})
     except Exception:  # noqa: BLE001 — metadata is best-effort; the pair is still an answer
         logger.debug("saved model metadata could not be resolved", exc_info=True)
         return bare

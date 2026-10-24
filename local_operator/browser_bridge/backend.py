@@ -394,6 +394,62 @@ _HOST_SUBJECT = {
 }
 
 
+#: How many candidates a miss may name. Five fits one screen and one line each;
+#: the point is a correction, not a listing.
+MAX_MISS_CANDIDATES = 5
+
+
+def _element_not_found_copy(error: BridgeError) -> str:
+    """The miss, plus the nearest real elements when the host could name them.
+
+    THE MEASURED FAILURE this exists for: nine CSS guesses on GitHub's "Create
+    GitHub App" form, each one a whole tool call, each answering only "element
+    not found" — so the agent learned nothing and guessed again. A host that can
+    see the accessibility tree answers with the elements that DO exist and the
+    locator that names each one, which turns the same failure into one
+    correction.
+
+    Three shapes, in order of usefulness:
+    1. the host named candidates → list them with their locators;
+    2. the selector was not valid CSS (the host says so) → say that, and point at
+       the locator forms, because "take a new snapshot" is the wrong advice for a
+       syntax mistake;
+    3. a plain miss → the historical sentence, unchanged.
+    """
+    message = f"element not found: {error.message}"
+    raw = error.data.get("candidates")
+    candidates = (
+        [entry for entry in raw if isinstance(entry, dict)] if isinstance(raw, list) else []
+    )
+    lines: list[str] = []
+    for entry in candidates[:MAX_MISS_CANDIDATES]:
+        role = str(entry.get("role") or "")
+        name = str(entry.get("name") or "")
+        locator = str(entry.get("locator") or "")
+        if not (role or name or locator):
+            continue
+        label = (
+            f"{role} {json.dumps(name, ensure_ascii=False)}".strip()
+            if role
+            else json.dumps(name, ensure_ascii=False)
+        )
+        lines.append(f"  - {label}" + (f"  →  {locator}" if locator else ""))
+    if lines:
+        return (
+            f"{message}. Closest matches in the accessibility tree:\n"
+            + "\n".join(lines)
+            + "\nRetry with one of those locators (they take a role/label/text and "
+            "survive framework-generated ids), or take a snapshot for refs."
+        )
+    if "not valid" in error.message:
+        return (
+            f"{message}. Fix the selector — or name the element by what it IS: "
+            'role=checkbox[name="Active"], label="Homepage URL", '
+            'text="Create GitHub App".'
+        )
+    return f"{message}. Take a new snapshot and retry with a fresh ref."
+
+
 def format_error(
     error: BridgeError, *, action: str = "", surface: str = "", host: str = HOST_EXTENSION
 ) -> str:
@@ -459,9 +515,7 @@ def format_error(
     if error.code == ErrorCode.NAV_FAILED:
         return f"navigation failed: {error.message}"
     if error.code == ErrorCode.ELEMENT_NOT_FOUND:
-        return (
-            f"element not found: {error.message}. Take a new snapshot and retry with a fresh ref."
-        )
+        return _element_not_found_copy(error)
     if error.code == ErrorCode.ORIGIN_PROMPT_PENDING:
         return pending_copy
     if error.code == ErrorCode.TAB_LIMIT:

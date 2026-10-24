@@ -810,6 +810,23 @@ class SettingsViewDismissed(Message):
     """
 
 
+class SettingsGateRoute(Message):
+    """The owner's answer to a routed approval-default change.
+
+    Posted back to the settings page rather than painted by the app because the
+    page HIDES the transcript the owner's receipt lands in (`_open_settings_view`)
+    — a success or refusal the user cannot see is the two-truths split this
+    message exists to close (UX round 1, U1). ``ok`` is the owner's own verdict
+    (`tool approvals: auto` at the head of its receipt), never the local write's
+    success, so a refusal can never be painted as a save.
+    """
+
+    def __init__(self, ok: bool, text: str) -> None:
+        super().__init__()
+        self.ok = ok
+        self.text = text
+
+
 class SettingsChanged(Message):
     """A setting was written. Carries the key so the app can react live.
 
@@ -918,7 +935,7 @@ class SettingsView(Vertical):
         Binding("escape", "leave", "Back", show=False),
     ]
 
-    def __init__(self, manager: Any) -> None:
+    def __init__(self, manager: Any, *, section: str | None = None) -> None:
         super().__init__(classes="settings-view")
         #: The ConfigManager every read and write goes through. Held rather
         #: than re-derived per row: a fresh manager per read would re-parse
@@ -933,6 +950,11 @@ class SettingsView(Vertical):
         #: (review round 1, B1). Do not add a write path that bypasses
         #: ``settings_io``.
         self._manager = manager
+        #: The ``settings_io.SECTIONS`` name the palette asked the page to open
+        #: on, applied in ``on_mount`` once the rows exist. Consumed once: a
+        #: later repaint (a write, a resize) must not drag the cursor back to a
+        #: section the user has since left.
+        self._initial_section = section
         #: ``(policy, would-remove count)`` for the cleanup master row's detail
         #: clause; see ``_cleanup_preview_count``.
         self._cleanup_preview_cache: tuple[Any, int] | None = None
@@ -1150,6 +1172,26 @@ class SettingsView(Vertical):
             self.focus()
         except Exception:
             pass
+        if self._initial_section is not None:
+            # LAST, so the landing is what the first painted frame shows: a jump
+            # before the repaint would be undone by the repaint's own scroll.
+            self.focus_section(self._initial_section)
+            self._initial_section = None
+
+    def focus_section(self, name: str) -> bool:
+        """Put the cursor on the first row of the section called ``name``.
+
+        The palette's landing seam, and the same landing ``pagedown`` uses: the
+        section's HEADER index, then the first selectable row at or after it.
+        Returning ``False`` for an unknown (or currently hidden) section lets
+        the caller open the page at its own position instead of pretending the
+        jump happened.
+        """
+        for index, row in enumerate(self._rows):
+            if row.kind == "header" and row.section is not None and row.section.name == name:
+                self._select_after_index(index)
+                return True
+        return False
 
     def on_resize(self) -> None:
         # Drop every elision key BEFORE the repaint. `update_if_changed` and
@@ -2227,6 +2269,40 @@ class SettingsView(Vertical):
             return
         self.post_message(SettingsChanged(setting.key, value))
         self._notice_alert = self._take_gate_kept_notice(setting.key)
+        # A `tool_approval_mode: auto` write is a DEFAULT for new sessions. When
+        # an attached runtime owns the live gate, the file write alone would
+        # leave the session the user is looking at prompting while this page
+        # reported success — the same two-truths split the `/approvals` handler
+        # documents. The platform's existing authority-bearing route is
+        # `default auto`; asking the app to send it is what turns the write into
+        # the operator's own instruction to the process that holds the gate.
+        # The answer arrives as :class:`SettingsGateRoute`, because the route is
+        # a socket round-trip and this page must report the ACTUAL outcome.
+        route = getattr(self.app, "route_approvals_default_from_page", None)
+        if (
+            setting.key == "tool_approval_mode"
+            and str(value).strip().lower() == "auto"
+            and callable(route)
+        ):
+            route(self)
+        self._repaint()
+
+    def on_settings_gate_route(self, message: SettingsGateRoute) -> None:
+        """Paint the gate owner's verdict where the page can be read.
+
+        Refusals keep the page's existing refusal alert (`_notice_alert`), so
+        the row looks like every other failed write on this page rather than
+        inventing a second error vocabulary; a success replaces the provisional
+        "saved" line with the owner's own receipt.
+        """
+        if message.ok:
+            self._notice = message.text
+            self._error = ""
+            self._notice_alert = False
+        else:
+            self._error = message.text
+            self._notice = ""
+            self._notice_alert = True
         self._repaint()
 
     def _take_gate_kept_notice(self, key: str) -> bool:

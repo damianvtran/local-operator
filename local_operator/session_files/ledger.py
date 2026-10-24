@@ -110,7 +110,21 @@ class Snapshot:
 
 
 def transcript_path(session_dir: Path) -> Path:
-    return Path(session_dir) / TRANSCRIPT_FILENAME
+    """The journal this scanner reads, materialised when it is compressed.
+
+    THE one answer for this module and its callers (the desktop route's
+    "missing/ready" probe, the library index's signature). A compressed session
+    resolves to its decompressed cache copy — byte-identical to the journal — so
+    the scanner's offsets and signatures keep their meaning. When the cache copy
+    is re-made its inode changes, which costs one full rescan and never a wrong
+    answer. ``None`` from the resolver means no journal at all, so the plain
+    path is returned and the caller's stat raises the same ENOENT it always did.
+    """
+    from local_operator.session import compression
+
+    return compression.transcript_for_read(Path(session_dir)) or (
+        Path(session_dir) / TRANSCRIPT_FILENAME
+    )
 
 
 def cache_dir(config_dir: str | Path) -> Path:

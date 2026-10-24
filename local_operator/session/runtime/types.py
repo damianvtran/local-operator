@@ -210,6 +210,16 @@ OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
 #: that may send one may send the other.
 INPUT_MODE_CAPABILITY = "input-mode-v1"
 
+#: Additive attach capability: this owner's ``prompt``/``steer`` take the
+#: ``files`` keyword and resolve ``Prompt.files`` references against its own
+#: attachment store. Advertised only by a handle that does, because the send
+#: it gates must be REFUSED rather than silently stripped: an owner that
+#: ignored the key would admit the text of a send whose file chip the user
+#: watched leave, and the model would answer without the document (contract
+#: amendment 1). One string for both ops, like ``input-mode-v1``: a client
+#: that may send a file on a prompt may send one on a steer.
+DOCUMENT_ATTACHMENTS_CAPABILITY = "document-attachments-v1"
+
 #: Additive attach capability: this owner's ``ask_respond`` accepts IMAGES on a
 #: queued-ask answer (``images`` on the frame: a flat list of
 #: ``{question_id, data_b64, mime_type}``; design
