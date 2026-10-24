@@ -68,6 +68,7 @@ import logging
 import re
 import time
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
@@ -1993,6 +1994,7 @@ class TeamBridgeClient:
         agent_label: str | None = None,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        thread_root_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
@@ -2002,7 +2004,10 @@ class TeamBridgeClient:
         message with ``origin=agent`` and the member's display label. It
         refuses ``agent_label`` on this path (provenance is the member row, not
         a request field), so the two are never combined here. ``origin_session_id``
-        rides only as opaque provenance and is never logged.
+        rides only as opaque provenance and is never logged. ``thread_root_id``
+        makes the send a reply in that root message's thread; the server validates
+        it (same conversation, root not itself a reply) and the key is omitted
+        when unset so an older server never sees an unknown field.
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
@@ -2014,12 +2019,48 @@ class TeamBridgeClient:
             body["actor_endpoint_id"] = actor_endpoint_id
         if origin_session_id:
             body["origin_session_id"] = origin_session_id
+        if thread_root_id:
+            body["thread_root_id"] = thread_root_id
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/messages",
             body=body,
             access=access,
             expected_account_id=expected_account_id,
+        )
+
+    async def conversation_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        after_seq: int | None = None,
+        endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+
+        Same membership gate and body rule as history: for an agent member a
+        reply's body is present only after that endpoint admitted it, so a
+        thread is never a side door around screening.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        if endpoint_id:
+            params["endpoint_id"] = endpoint_id
+        return await self._send(
+            "GET",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}/replies",
+            params=params or None,
+            access=access,
         )
 
     async def conversation_body(
@@ -2071,6 +2112,44 @@ class TeamBridgeClient:
             access=access,
             expected_account_id=expected_account_id,
         )
+
+    async def conversation_react(
+        self,
+        conversation_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        active: bool,
+        tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Set (``active=True`` -> PUT) or clear (DELETE) one emoji reaction.
+
+        Both verbs are idempotent on the hub and answer the message's full
+        reaction summary for the caller, ``{"message_id", "reactions": [...]}``.
+        The emoji is a path segment, so it is percent-encoded with NO safe
+        characters: an emoji is never allowed to contribute a ``/`` or ``?`` to
+        the upstream path. The hub alone decides whether it is one RGI emoji.
+
+        ``actor_endpoint_id`` reacts AS that agent member (the hub requires an
+        ``allow`` admission for the message first). It rides in the body for
+        PUT and in the query for DELETE, because a DELETE body is not reliably
+        forwarded by every proxy between here and the hub.
+        """
+
+        path = (
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}"
+            f"/reactions/{urllib.parse.quote(emoji, safe='')}"
+        )
+        fields: dict[str, Any] = {}
+        if tenant_id:
+            fields["tenant_id"] = tenant_id
+        if actor_endpoint_id:
+            fields["actor_endpoint_id"] = actor_endpoint_id
+        if active:
+            return await self._send("PUT", path, body=fields, access=access)
+        return await self._send("DELETE", path, params=fields or None, access=access)
 
     async def conversation_read(
         self,

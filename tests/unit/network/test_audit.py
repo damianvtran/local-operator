@@ -441,3 +441,50 @@ def test_tail_filters_by_network_and_time(root: Path) -> None:
     assert len(log.tail(10, network_id="n_one")) == 1
     assert len(log.tail(10, since=1500.0)) == 1
     assert log.tail(1)[0]["network_id"] == "n_two"
+
+
+def test_a_device_actor_is_recorded_as_a_device(root: Path) -> None:
+    """QA on the naming change: seven emitters pass ``actor_kind="device"`` and every
+    such row rendered ``unknown``, because the value was not in the closed set. The
+    audit recorded that something happened and lost that a DEVICE did it."""
+    log = AuditLog(root)
+    log.record(
+        AuditEvent(
+            event="device_renamed",
+            network_id=NETWORK,
+            actor="d_" + "a" * 32,
+            actor_kind="device",
+            detail={"previous": "old-box", "name": "build-box", "networks": [], "failed": []},
+        )
+    )
+    # BOTH ROTATION-FAMILY EMITTERS, because the omission the review caught was the
+    # rotation one: it passed no kind at all while the prose said rotation did.
+    log.record(
+        AuditEvent(
+            event="device_rotated",
+            network_id=NETWORK,
+            actor="d_" + "b" * 32,
+            actor_kind="device",
+            detail={"old_device": "d_" + "b" * 32, "new_device": "d_" + "c" * 32},
+        )
+    )
+    log.close()
+    records = _lines(root)
+    by_event = {record["event"]: record for record in records}
+    assert by_event["device_renamed"]["actor_kind"] == "device"
+    assert by_event["device_rotated"]["actor_kind"] == "device"
+
+
+def test_the_closed_set_still_coerces_an_unknown_actor_kind(root: Path) -> None:
+    """Widening by one value must not open the field: a caller inventing a kind gets
+    ``unknown``, which is why ``ACTOR_KINDS`` stays the single gate rather than each
+    emitter's spelling being trusted."""
+    assert "device" in audit_mod.ACTOR_KINDS
+    log = AuditLog(root)
+    log.record(
+        AuditEvent(
+            event="link_closed", network_id=NETWORK, actor_kind="robot", detail={"cause": "x"}
+        )
+    )
+    log.close()
+    assert _lines(root)[0]["actor_kind"] == "unknown"

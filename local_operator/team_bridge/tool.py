@@ -32,11 +32,21 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   channel is the agent's own space, not a silent copy of its owner's.
 - **channel_post** — append one message as the agent. The body is the caller's
   text; one ``client_ref`` is minted per call, so a retry inside the client
-  reuses it and a second call is a second message.
+  reuses it and a second call is a second message. ``thread_root_id`` posts it
+  as a REPLY in that message's thread instead of at channel level — how agents
+  coordinate without flooding the channel (e.g. one QA-claim thread per item
+  in #agents). Threads are one level: the root must be a channel-level message.
+- **channel_thread** — one thread, oldest-first: the root (with its reply
+  count) and a bounded page of replies. Same screening rule as history — an
+  unadmitted reply is metadata with ``body`` null.
 - **channel_history** — a bounded page of messages. The server admits bodies
   per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
   hash) of messages it has not admitted, with ``body`` null, and only the
   admitted bodies. There is intentionally no local body cache here.
+
+- **react** — set an emoji on an admitted conversation message (or remove it
+  with ``remove=true``). This is a screened agent WRITE, never an ack; the hub
+  refuses a message this endpoint has not admitted. Reactions never wake agents.
 
 IDENTITY is never a model argument: the actor endpoint and provenance session
 come from ``runtime.owner.endpoint_id`` and ``runtime.session_id``. Every send
@@ -60,6 +70,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,7 +98,14 @@ from .types import (
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
 #: tries the word gets the right sentence back.
-CHANNEL_OPS: tuple[str, ...] = ("channels", "channel_create", "channel_post", "channel_history")
+CHANNEL_OPS: tuple[str, ...] = (
+    "channels",
+    "channel_create",
+    "channel_post",
+    "channel_history",
+    "react",
+    "channel_thread",
+)
 BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", *CHANNEL_OPS)
 
 #: The server caps a conversation page at 100 (contract §10.1); bounding here
@@ -147,7 +165,7 @@ class BridgeRuntime:
 
 
 class ChannelMemberParams(BaseModel):
-    """One invited member: an agent names its endpoint, a human must not."""
+    """One invited member. An agent names its endpoint; a human must not."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -184,6 +202,8 @@ class BridgeToolParams(BaseModel):
         "channel_create",
         "channel_post",
         "channel_history",
+        "react",
+        "channel_thread",
     ]
     message_id: str = ""
     body_sha256: str = ""
@@ -207,10 +227,17 @@ class BridgeToolParams(BaseModel):
     visibility: Literal["tenant", "private"] | None = None
     members: list[ChannelMemberParams] = Field(default_factory=list)
     body: str = ""
+    # A reaction is a write, not a read or an acknowledgement. The actor is the
+    # enrolled endpoint; the model supplies only the message and emoji.
+    emoji: str = ""
+    remove: bool = False
     limit: int = 50
     cursor: str | None = None
     before_seq: int | None = None
     after_seq: int | None = None
+    #: channel_post: reply in this root message's thread; channel_thread: the
+    #: thread to read. A conversation message id (bcmsg_…).
+    thread_root_id: str = ""
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -222,6 +249,10 @@ def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
 #: the path (``#``, ``..``, slashes) is refused BEFORE any client call. The
 #: pattern lives in ``team_bridge.types`` so the two entry points cannot drift.
 _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
+#: A conversation MESSAGE id is interpolated into the replies path the same
+#: way, so it is held to the minted grammar (the desktop route's
+#: ``_MESSAGE_ID``) before any client call.
+_CONVERSATION_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
 
 
 def _full_body_text(result: Any) -> str | None:
@@ -340,7 +371,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # admit the read, while disabled/signin/pending refuse both directions. The
     # channel reads (list/history) are fetches for the same reason; create and
     # post are mutations.
-    is_read = op in ("take_up", "channels", "channel_history")
+    is_read = op in ("take_up", "channels", "channel_history", "channel_thread")
     refusal = admission_refusal(runtime, is_read=is_read)
     if refusal is not None:
         admit_soon(runtime)
@@ -529,6 +560,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error("channel_post needs a conversation id (bcv_…)")
         if not params.body.strip():
             return _error("channel_post needs non-empty body")
+        thread_root_id = params.thread_root_id.strip()
+        if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
+            return _error("channel_post thread_root_id must be a message id (bcmsg_…)")
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -541,6 +575,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 tenant_id=runtime.tenant_id,
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
+                thread_root_id=thread_root_id or None,
             )
         except Exception as failure:
             return _error(f"the post did not confirm: {failure}", code="post_failed")
@@ -550,9 +585,44 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         message_id = str(message.get("id") or "")
         seq = message.get("seq")
         content = f"posted to {channel_id}: message {message_id or '?'}"
+        if thread_root_id:
+            content += f" (reply in thread {thread_root_id})"
         if isinstance(seq, int):
             content += f" at seq {seq}"
         return {"ok": True, "message_id": message_id, "state": "sent", "content": content}
+
+    if params.op == "react":
+        channel_id = params.channel_id.strip()
+        if _CONVERSATION_ID.fullmatch(channel_id) is None:
+            return _error("react needs a conversation id (bcv_…)")
+        if re.fullmatch(r"bcmsg_[0-9a-z]{8,64}", params.message_id) is None:
+            return _error("react needs a conversation message id (bcmsg_…)")
+        emoji = unicodedata.normalize("NFC", params.emoji)
+        if not emoji or len(emoji.encode("utf-8")) > 128:
+            return _error("react needs one emoji, at most 128 UTF-8 bytes")
+        # No body fetch, local cache, or implicit admission here: the server
+        # requires this exact endpoint's prior allow verdict before a reaction
+        # can act on a message. It is a normal write at both admission and tool
+        # approval boundaries, never an ack-shaped bypass.
+        try:
+            result = await runtime.client.conversation_react(
+                channel_id,
+                params.message_id,
+                emoji,
+                active=not params.remove,
+                tenant_id=runtime.tenant_id,
+                actor_endpoint_id=endpoint_id,
+            )
+        except Exception as failure:
+            return _error(f"the reaction did not confirm: {failure}", code="react_failed")
+        return {
+            "ok": True,
+            "state": "removed" if params.remove else "reacted",
+            "message_id": params.message_id,
+            # Labels in reaction summaries are member-authored external data,
+            # just like a history sender label: keep the untrusted framing.
+            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+        }
 
     if params.op == "channel_history":
         channel_id = params.channel_id.strip()
@@ -579,6 +649,36 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # Bodies are external content even when the sender is a teammate's
         # agent: the same untrusted wrap as take_up. Unadmitted messages carry
         # ``body: null`` — metadata only — and stay that way (no local cache).
+        return {
+            "ok": True,
+            "state": "ok",
+            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+        }
+
+    if params.op == "channel_thread":
+        channel_id = params.channel_id.strip()
+        if _CONVERSATION_ID.fullmatch(channel_id) is None:
+            return _error("channel_thread needs a conversation id (bcv_…)")
+        thread_root_id = params.thread_root_id.strip()
+        if _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
+            return _error("channel_thread needs thread_root_id, a message id (bcmsg_…)")
+        if params.before_seq is not None:
+            return _error("channel_thread reads oldest-first: page with after_seq (inclusive)")
+        if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
+            return _error(f"channel_thread limit must be 1..{CONVERSATION_PAGE_MAX}")
+        try:
+            result = await runtime.client.conversation_replies(
+                channel_id,
+                thread_root_id,
+                tenant_id=runtime.tenant_id,
+                limit=int(params.limit),
+                after_seq=params.after_seq,
+                endpoint_id=endpoint_id,
+            )
+        except Exception as failure:
+            return _error(f"could not read the thread: {failure}", code="thread_failed")
+        # Same untrusted wrap as channel_history: a reply body is external
+        # content, and an unadmitted one is already null from the server.
         return {
             "ok": True,
             "state": "ok",
@@ -672,15 +772,16 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         name="bridge",
         label="Team Bridge",
         description=(
-            "Team Bridge: take_up/ack delivered messages, send/reply, and channel ops "
-            "(channels, channel_create, channel_post, channel_history) as this session's "
-            "agent. This tool cannot approve or deny — that is the human's ask queue."
+            "Team Bridge as this session's agent: take_up/ack, send/reply, and "
+            "channel ops (channels, channel_create, channel_post, channel_history, "
+            "channel_thread, react). Cannot approve or deny."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
         call_approval_tier=lambda args: (
             "read"
-            if str(args.get("op")) in ("take_up", "ack", "channels", "channel_history")
+            if str(args.get("op"))
+            in ("take_up", "ack", "channels", "channel_history", "channel_thread")
             else "write"
         ),
         concurrency="exclusive",

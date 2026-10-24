@@ -56,6 +56,7 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
@@ -1130,6 +1131,10 @@ class ConversationSendIn(ConversationOwnerIn):
     client_ref: str = Field(min_length=1, max_length=128)
     body: str = Field(min_length=1)
     agent_label: str | None = Field(default=None, max_length=64)
+    #: Reply in this root message's thread (agent-server threads). Held to the
+    #: minted message-id grammar here so a malformed id never reaches the hub;
+    #: the hub owns the real rule (same conversation, root not a reply).
+    thread_root_id: str | None = Field(default=None, pattern=r"^bcmsg_[0-9a-z]{8,64}$")
 
 
 class ConversationJoinIn(ConversationOwnerIn):
@@ -1161,6 +1166,31 @@ class ConversationConsentIn(ConversationOwnerIn):
 class ConversationAdmitIn(ConversationOwnerIn):
     verdict: Literal["allow", "reject"]
     body_hash: str = Field(min_length=1, max_length=128)
+
+
+class ConversationReactIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+
+
+#: The hub's reaction-key byte bound (agent-server §10.2: NFC, <=128 UTF-8
+#: bytes, one fully-qualified RGI sequence). Only the BOUND is mirrored here,
+#: as a cheap pre-flight: the RGI allowlist is the hub's, and keeping a second
+#: copy in the runtime would be a second opinion that drifts with Unicode.
+_REACTION_EMOJI_MAX_BYTES = 128
+
+
+def _require_reaction_emoji(emoji: str) -> str:
+    """Refuse an empty or over-long reaction key before any upstream I/O.
+
+    The value is percent-encoded with no safe characters by the client, so it
+    can never reshape the upstream path; this guard only stops obviously
+    non-emoji input (text, pasted paragraphs) from costing a hub round trip.
+    """
+
+    key = unicodedata.normalize("NFC", emoji)
+    if not key or len(key.encode("utf-8")) > _REACTION_EMOJI_MAX_BYTES:
+        _raise_read("invalid_request")
+    return key
 
 
 def _conversation_owner_query(request: Request) -> ConversationOwnerIn:
@@ -1590,6 +1620,55 @@ async def send_conversation_message(
                 tenant_id=body.tenant_id,
                 expected_account_id=body.expected_account_id,
                 agent_label=body.agent_label,
+                thread_root_id=body.thread_root_id,
+            )
+        )
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/replies",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_replies(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One thread (root + replies, oldest-first) under the history route's gate.
+
+    Mirrors ``conversation_history``'s discipline: the id grammar is checked
+    before any I/O, an unknown query key is refused rather than dropped, and the
+    numeric hints are parsed (never interpolated) so a caller-controlled value
+    is a 422, not a 500.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if set(request.query_params) - {"tenant_id", "limit", "after_seq", "endpoint_id"}:
+        _raise_read("invalid_request")
+    try:
+        parsed_limit = int(limit) if limit is not None else None
+        parsed_after = int(after_seq) if after_seq else None
+    except ValueError:
+        _raise_read("invalid_request")
+    if parsed_after is not None and parsed_after < 0:
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_replies(
+                conversation_id,
+                message_id,
+                tenant_id=tenant_id,
+                limit=parsed_limit,
+                after_seq=parsed_after,
+                endpoint_id=endpoint_id,
             )
         )
     )
@@ -1650,6 +1729,79 @@ async def conversation_admit(
                 tenant_id=body.tenant_id,
                 expected_account_id=body.expected_account_id,
                 endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_add(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    body: ConversationReactIn | None = None,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Add the signed-in person's reaction; idempotent upstream.
+
+    The desktop reacts as the HUMAN only: an agent reaction goes through the
+    agent's own ``bridge`` tool (``react``), which carries the actor endpoint
+    from the runtime and is screened like every agent write. There is no
+    ``actor_endpoint_id`` on this body, so the renderer cannot act as an agent.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _refuse_write_scope(request)
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id,
+                message_id,
+                key,
+                active=True,
+                tenant_id=body.tenant_id if body else None,
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_remove(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None, max_length=128),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Remove the signed-in person's reaction; removing an unset one is a no-op.
+
+    ``tenant_id`` is a query parameter here (not a body) because a DELETE body
+    is not reliably carried by every client and proxy; the hub accepts both.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if set(request.query_params) - {"tenant_id"}:
+        _raise_read("invalid_request")
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id, message_id, key, active=False, tenant_id=tenant_id
             )
         )
     )

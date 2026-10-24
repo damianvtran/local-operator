@@ -56,7 +56,7 @@ from collections.abc import Callable
 from . import catalogues
 from . import resolve as _locale
 from . import runtime as _runtime
-from .messages import Msg
+from .messages import Msg, RenderedMessage
 
 _logger = logging.getLogger(__name__)
 
@@ -115,18 +115,16 @@ def _sources(root: str, namespace: str, locale: str) -> dict[str, str]:
         return {}
 
 
-def tr(namespace: str) -> Callable[[Msg], str]:
-    """The resolver for one namespace's copy: ``_t = tr("tui.welcome")``.
+def tr_record(namespace: str) -> Callable[[Msg], RenderedMessage]:
+    """Namespace-cached rendering with actual source provenance for paint.
 
-    The namespace is the caller's to state, deliberately: a slice owns exactly
-    one catalogue, and discovering it from each code would re-run the probe
-    ``messages._namespace_for`` keeps for codes arriving off the wire, for a
-    fact the call site already knows. Root and locale are read at each call,
-    not captured here, so a resolver built before a catalogue re-point or a
-    locale move still resolves from the tree and language in force now.
+    This is the source-aware counterpart to :func:`tr`, not a second catalogue
+    path. TUI bidi projection needs to distinguish Urdu copy from English
+    fallback without paying ``messages.render_record``'s wire-code namespace
+    probe and catalogue read on every frame.
     """
 
-    def resolve(message: Msg) -> str:
+    def resolve(message: Msg) -> RenderedMessage:
         # Recheck the operational switch on cached resolvers too: toggling it
         # must not leave previously selected translations live until a move.
         locale = _locale.eligible_locale(_active_locale)
@@ -138,7 +136,7 @@ def tr(namespace: str) -> Callable[[Msg], str]:
             source = _sources(root, namespace, "en").get(message.code)
             source_locale = "en"
         if source is None:
-            return message.code
+            return RenderedMessage(message.code, None)
         if source_locale != locale:
             _logger.debug(
                 "i18n fallback code=%s requested=%s source=%s",
@@ -147,8 +145,25 @@ def tr(namespace: str) -> Callable[[Msg], str]:
                 source_locale,
             )
         try:
-            return _runtime.render_message(source, dict(message.params), source_locale)
+            rendered = _runtime.render_message(source, dict(message.params), source_locale)
+            provenance = None if _runtime.is_passthrough_message(source) else source_locale
+            return RenderedMessage(rendered, provenance)
         except _runtime.MessageError:
-            return message.code
+            return RenderedMessage(message.code, None)
 
     return resolve
+
+
+def tr(namespace: str) -> Callable[[Msg], str]:
+    """The raw resolver for one namespace's copy: ``_t = tr("tui.welcome")``.
+
+    Root and locale are read at each call, not captured here, so a resolver
+    built before a catalogue re-point or locale move follows the current tree
+    and language. Bidi controls belong only to the TUI's ``display_tr`` adapter.
+    """
+    resolve = tr_record(namespace)
+
+    def resolve_text(message: Msg) -> str:
+        return resolve(message).text
+
+    return resolve_text
