@@ -568,7 +568,7 @@ async def test_transcriptions_cleanup_client_cleans_elevenlabs(
     assert b'name="no_verbatim"' in body and b"\r\n\r\nfalse\r\n" in body
     assert result["text"] == "So I think."
     assert result["raw_text"] == "Uh, so I think."
-    assert result["cleanup"] == "client.rules.v1"
+    assert result["cleanup"] == "client.rules.v2"
     assert result["removed"] == [{"start": 0, "end": 2, "kind": "filler", "token": "Uh"}]
 
 
@@ -620,6 +620,6 @@ async def test_a_request_cleanup_field_still_wins_over_the_setting(
     assert response.status_code == 200, response.text
     result = response.json()["result"]
     assert result["text"] == "Hello."
-    assert result["cleanup"] == "client.rules.v1"
+    assert result["cleanup"] == "client.rules.v2"
     assert b'name="no_verbatim"' in upstream.requests[0]["body"]
     assert b"\r\n\r\nfalse\r\n" in upstream.requests[0]["body"]

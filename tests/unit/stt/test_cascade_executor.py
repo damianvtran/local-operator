@@ -537,7 +537,7 @@ async def test_auto_cleans_radient_fillers(rig) -> None:
 
     assert outcome.text == "So I think we should ship."
     assert outcome.raw_text == "Uh, so I think we should ship."
-    assert outcome.cleanup == "client.rules.v1"
+    assert outcome.cleanup == "client.rules.v2"
     assert [(span.kind, span.token) for span in outcome.removed] == [("filler", "Uh")]
 
 
@@ -559,7 +559,7 @@ async def test_a_caller_language_hint_is_normalised_for_radient_and_the_rules(ri
 
     assert rig.client("radient").calls[0]["language"] == "en"
     assert outcome.text == "Hello."
-    assert outcome.cleanup == "client.rules.v1"
+    assert outcome.cleanup == "client.rules.v2"
 
 
 @pytest.mark.asyncio
@@ -579,7 +579,7 @@ async def test_a_confident_detected_language_cleans_fillers(rig) -> None:
     outcome = await rig.run()
 
     assert outcome.text == "Hello."
-    assert outcome.cleanup == "client.rules.v1"
+    assert outcome.cleanup == "client.rules.v2"
 
 
 @pytest.mark.asyncio
@@ -605,7 +605,7 @@ async def test_client_mode_cleans_elevenlabs_without_the_provider_switch(rig) ->
     assert call["tag_audio_events"] is False
     assert outcome.text == "So I think."
     assert outcome.raw_text == "Uh, so I think."
-    assert outcome.cleanup == "client.rules.v1"
+    assert outcome.cleanup == "client.rules.v2"
 
 
 @pytest.mark.asyncio
@@ -630,4 +630,4 @@ async def test_auto_on_openai_uses_client_rules(rig) -> None:
 
     assert outcome.text == "Hello."
     assert outcome.raw_text == "Uh, hello."
-    assert outcome.cleanup == "client.rules.v1"
+    assert outcome.cleanup == "client.rules.v2"
