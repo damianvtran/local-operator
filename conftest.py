@@ -235,10 +235,11 @@ import shutil
 import subprocess
 import sys
 import warnings
+from collections.abc import Iterator
 
 import pytest
 
-from tests import shard_stall_watchdog, tree_identity
+from tests import shard_memory_dump, shard_stall_watchdog, tree_identity
 
 # ---------------------------------------------------------------------------
 # Real-store guard
@@ -394,6 +395,7 @@ _install_real_store_guard()
 def pytest_configure(config: pytest.Config) -> None:
     _refuse_a_split_tree(config)
     shard_stall_watchdog.install(config, on_ci=_on_ci_host())
+    shard_memory_dump.install()
 
 
 def _refuse_a_split_tree(config: pytest.Config) -> None:
@@ -430,6 +432,22 @@ def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     shard_stall_watchdog.note_report(report)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Iterator[None]:
+    """Capture the shard's memory state when a test dies of ENOMEM.
+
+    A hookwrapper rather than a plain implementation, because
+    ``pytest_runtest_makereport`` is ``firstresult``: a plain observation hook
+    that returns ``None`` is only reached if pluggy happens to call it before
+    the runner's implementation returns the report. A wrapper always runs
+    around that result, and it runs in the xdist worker that holds the failing
+    test. ``tests/shard_memory_dump.py`` owns the trigger and the safety rules.
+    """
+    outcome = yield
+    shard_memory_dump.note_failure(item, call)
+    outcome.get_result()
 
 
 # ---------------------------------------------------------------------------

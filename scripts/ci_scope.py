@@ -173,8 +173,9 @@ WINDOWS_CONFTEST_PATHS = frozenset(
 )
 
 #: What the job's pytest run imports THROUGH that chain, which the path list
-#: above does not cover. `conftest.py` does `from tests import
-#: shard_stall_watchdog` at module scope, and pytest imports the `__init__.py`
+#: above does not cover. The root `conftest.py` imports the shard-side test
+#: helpers (`tests/shard_memory_dump.py`, `tests/shard_stall_watchdog.py`) at
+#: module scope, and pytest imports the `__init__.py`
 #: markers for the selected modules — so a change to any of these can change
 #: the Windows job's behaviour without touching a file it names. Narrow, since
 #: Linux runs `tests/shard_stall_watchdog.py` too, but it is the same "flag
@@ -185,6 +186,7 @@ WINDOWS_CONFTEST_PATHS = frozenset(
 #: a reason to widen this predicate to all tests/**.
 WINDOWS_LOADED_PATHS = frozenset(
     {
+        "tests/shard_memory_dump.py",
         "tests/shard_stall_watchdog.py",
         "tests/__init__.py",
         "tests/unit/__init__.py",
