@@ -65,6 +65,7 @@ from pydantic import (
     model_validator,
 )
 
+from local_operator import advisories
 from local_operator.procstate import O_BINARY
 
 logger = logging.getLogger(__name__)
@@ -2032,15 +2033,22 @@ class ProjectRegistry:
             collisions.add(collision)
             if collision in self._seen_duplicates:
                 continue
-            logger.warning(
+            # An ADVISORY, not a failure: the rows stay readable and writable.
+            # Routed through the shared helper so a captured `lop update`
+            # stderr is not filled with a store notice before the updater has
+            # said anything (2026-10-24); a terminal still shows it.
+            advisories.emit(
                 "the LOADED page of the project store at %s carries %d rows named "
                 "%r (ids: %s); uniqueness applies when a name is ASSIGNED, so these "
                 "rows stay readable and writable — rename one when convenient. A "
-                "pair entirely beyond the page is not reported by this check.",
-                self.projects_dir,
-                len(ids),
-                name,
-                ", ".join(sorted(ids)),
+                "pair entirely beyond the page is not reported by this check."
+                % (
+                    self.projects_dir,
+                    len(ids),
+                    name,
+                    ", ".join(sorted(ids)),
+                ),
+                logger=logger,
             )
         # Replacing (not updating) the memo forgets a vanished pair, so a later
         # reappearance is announced.
