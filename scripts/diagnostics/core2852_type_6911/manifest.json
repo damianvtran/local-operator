@@ -1,0 +1,26 @@
+{
+  "baseline": "492eb559d1e5d95e395c378b983c1ec1982d1dce",
+  "fixed": "f0443498d15da3cdea8abef878bbdfb3e5e3ccbf",
+  "config_sha256": "7c66086ce620a7a19b797257f916284a914b0bab00aa33986c32d4e8b1677c77",
+  "execution_sources": {
+    "scripts/diagnostics/core2852_type_6911/runner.py": "4e7c9bf400c4c689755aa75459b048acd0ab71d781c525dac7c096c9d5adf615",
+    "scripts/run_bounded.py": "5dddc5307ba096ccd69df4ad0eb738f54788db73f91a5be1475899367795c7dc",
+    "local_operator/memory_guard.py": "58826153781694840f96829a11194928919f47336e47b245272ce2d95e66db60"
+  },
+  "snapshots": {
+    "BASELINE": {
+      "tests/worker_code_identity.py": "d406c201c1f4d9102beb033cd93ec6397eb6bcb262fed645ee4f25739e8dda78",
+      "tests/unit/test_worker_code_identity.py": "8c1f8bdd33c4c2e0fd3fbd2a64bea8ffeda40cb2b59a769fdf402e99e377ab58",
+      "tests/__init__.py": "ab8543ea4a1daccc84646f89c7ab79ae1df919410f6ee3c9fcacda470593f255",
+      "tests/unit/__init__.py": "e3b717299b9aed17497c86ceef84228e061278b1a3346c8c1c41c44ba3011928"
+    },
+    "FIXED": {
+      "tests/worker_code_identity.py": "4f971fb0b6f2a1ca4066b212b9a35a815d4f5a42e72cdec16d5e0b03e6d8e05e",
+      "tests/unit/test_worker_code_identity.py": "8c1f8bdd33c4c2e0fd3fbd2a64bea8ffeda40cb2b59a769fdf402e99e377ab58",
+      "tests/__init__.py": "ab8543ea4a1daccc84646f89c7ab79ae1df919410f6ee3c9fcacda470593f255",
+      "tests/unit/__init__.py": "e3b717299b9aed17497c86ceef84228e061278b1a3346c8c1c41c44ba3011928"
+    }
+  },
+  "tool": "pyright@1.1.414",
+  "source_only": true
+}
