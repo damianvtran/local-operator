@@ -1618,6 +1618,7 @@ async def test_kimi_live_shape_reports_the_monthly_pool_and_no_duplicate_5h() ->
     assert five_hour.resets_at_ms == 1_792_883_373_000
     monthly = by_id["kimi:monthly-total"]
     assert monthly.label == "Monthly total"
+    assert monthly.window == "monthly"
     assert monthly.shared is True
     assert monthly.amount.fraction() == pytest.approx(0.0006)
     assert monthly.resets_at_ms == 1_795_564_800_000
@@ -1656,6 +1657,7 @@ async def test_kimi_renders_a_legacy_weekly_ratio_as_weekly(key: str, label: str
         report = await fetch_usage(client, "kimi", access_token="tok")
     assert report is not None
     assert [limit.label for limit in report.limits] == [label]
+    assert report.limits[0].window == "weekly"
     assert report.limits[0].amount.fraction() == pytest.approx(0.15)
     assert report.limits[0].resets_at_ms == 1_793_491_200_000
 
@@ -1710,6 +1712,94 @@ async def test_kimi_ratio_spellings_and_data_envelope_are_tolerated() -> None:
     assert report.limits[0].label == "Weekly total"
     assert report.limits[0].amount.fraction() == pytest.approx(0.2)
     assert report.limits[0].resets_at_ms == 1_793_491_200_000
+
+
+@pytest.mark.asyncio
+async def test_kimi_dedupes_the_same_window_quoted_in_different_units() -> None:
+    """``limits[]`` can quote the 5h window in seconds where ``usages`` calls it
+    ``limit_5h``. Label equality misses that; the period does not."""
+    body = {
+        "limits": [
+            {
+                "window": {"duration": 18000, "timeUnit": "TIME_UNIT_SECOND"},
+                "detail": {
+                    "limit": "100",
+                    "used": "1",
+                    "remaining": "99",
+                    "resetTime": "2026-10-24T23:09:33Z",
+                },
+            }
+        ],
+        "usages": {"limit_5h": {"used_ratio": 0.0095}},
+    }
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    assert [limit.id for limit in report.limits] == ["kimi:0"]
+
+
+@pytest.mark.asyncio
+async def test_kimi_dedupes_a_custom_named_limit_against_a_ratio_window() -> None:
+    """A ``limits[]`` row with a ``name`` but no window object is still the same
+    5h window; its final label is what the ratio label must collide with."""
+    body = {
+        "limits": [
+            {
+                "name": "5h limit",
+                "detail": {"limit": "100", "used": "1", "remaining": "99"},
+            }
+        ],
+        "usages": {"limit_5h": {"used_ratio": 0.0095}},
+    }
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    assert [limit.id for limit in report.limits] == ["kimi:0"]
+
+
+@pytest.mark.asyncio
+async def test_kimi_monthly_ratio_is_suppressed_by_a_30_day_absolute_window() -> None:
+    """The monthly pool arriving as an absolute 30-day window and as
+    ``limit_month_total`` is one pool, not two."""
+    body = {
+        "limits": [
+            {
+                "window": {"duration": 30, "timeUnit": "TIME_UNIT_DAY"},
+                "detail": {"limit": "100", "used": "1", "remaining": "99"},
+            }
+        ],
+        "usages": {
+            "limit_month_total": {"used_ratio": 0.01},
+            "limit_month_code": {"used_ratio": 0.01},
+        },
+    }
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    assert [limit.id for limit in report.limits] == ["kimi:0"]
+
+
+@pytest.mark.asyncio
+async def test_kimi_weekly_window_reported_in_both_shapes_renders_once() -> None:
+    """A legacy plan can report its 7-day window both ways; the absolute row is
+    the one to keep, and the generic ratio path must not add a second."""
+    body = {
+        "limits": [
+            {
+                "window": {"duration": 7, "timeUnit": "TIME_UNIT_DAY"},
+                "detail": {"limit": "100", "used": "15", "remaining": "85"},
+            }
+        ],
+        "usages": {"limit_week_total": {"used_ratio": 0.15}},
+    }
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "kimi", access_token="tok")
+    assert report is not None
+    assert [limit.id for limit in report.limits] == ["kimi:0"]
 
 
 #: The legacy SuperGrok weekly billing shape (``?format=credits``). Amounts are
