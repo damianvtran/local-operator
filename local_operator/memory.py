@@ -872,6 +872,9 @@ CREATE TABLE IF NOT EXISTS causal_edges(op_id TEXT,parent TEXT,PRIMARY KEY(op_id
 CREATE INDEX IF NOT EXISTS causal_edges_parent ON causal_edges(parent);
 CREATE TABLE IF NOT EXISTS captures(session TEXT,compaction TEXT,status TEXT,n INTEGER,
  PRIMARY KEY(session,compaction));
+CREATE TABLE IF NOT EXISTS journal_prune(at REAL NOT NULL,origin TEXT NOT NULL,
+ ops INTEGER NOT NULL,bytes INTEGER NOT NULL,reason TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS journal_prune_at ON journal_prune(at);
 """
 
 
@@ -1050,6 +1053,28 @@ class MemoryStore:
         finally:
             db.close()
 
+    @contextmanager
+    def _reader(self) -> Iterator[sqlite3.Connection]:
+        """A connection that only reads: no schema block, no DDL, no store creation.
+
+        WHY this exists beside ``connection()``: that one re-runs ``_SCHEMA``,
+        which CREATES ``journal_prune`` on a store written before this pass — so
+        a preview through it mutates the store it promises to leave alone, and on
+        a read-only copy (file mode 0444, exactly what an operator inspects
+        before a destructive pass) it fails with "Memory store unavailable"
+        instead of reporting the plan.
+
+        ``mode=ro`` still reads WAL correctly; ``immutable=1`` would not and must
+        not be used on a live store.
+        """
+        db = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            yield db
+        finally:
+            db.close()
+
     @staticmethod
     def _page_budget(db: sqlite3.Connection) -> tuple[int, int, int, int]:
         """``(page_count, page_size, max_page_count, freelist_count)`` as enforced.
@@ -1199,6 +1224,58 @@ class MemoryStore:
         value = load_or_mint(self.root.parent).device_id
         db.execute("INSERT INTO meta VALUES ('origin',?)", (value,))
         return value
+
+    #: ``meta`` key holding one origin's highest sequence number ever ALLOCATED.
+    #: The ops table alone cannot carry this: journal compaction deletes rows, so
+    #: ``max(seq)`` stops being monotone and a later allocation would mint a
+    #: ``(origin, seq)`` identity a peer already holds — which `apply_ops` treats
+    #: as "already seen" and silently drops. See :meth:`_note_seq`.
+    SEQ_HIGH_WATER = "origin-high-water:"
+
+    @classmethod
+    def _seq_high_water(cls, db: sqlite3.Connection, origin: str) -> int:
+        """The highest sequence number ``origin`` may already have used.
+
+        ``max(seq)`` alone is NOT that number after a compaction: the row holding
+        it can legitimately be deleted (a superseded revision, or a put under a
+        forgotten entity), and the counter then goes backwards. The persisted
+        high-water is the part of the counter that survives the pass, so it is
+        read here as the first term rather than as a cache.
+        """
+        row = db.execute("SELECT value FROM meta WHERE key=?", (cls.SEQ_HIGH_WATER + origin,))
+        persisted = (row.fetchone() or [0])[0]
+        stored = db.execute(
+            "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
+        ).fetchone()[0]
+        return max(int(persisted), int(stored))
+
+    @classmethod
+    def _note_seq(cls, db: sqlite3.Connection, origin: str, seq: int) -> None:
+        """Raise ``origin``'s persisted high-water to at least ``seq``.
+
+        Never lowers it: the row is a floor for the allocator and for the
+        contiguous-arrival check, and a compaction that deletes the newest row
+        must not be able to move it down. The guarded upsert keeps that true
+        without a read-modify-write race inside the caller's transaction.
+        """
+        key = cls.SEQ_HIGH_WATER + origin
+        db.execute(
+            "INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value "
+            "WHERE CAST(excluded.value AS INTEGER) > CAST(meta.value AS INTEGER)",
+            (key, str(int(seq))),
+        )
+
+    @classmethod
+    def _next_seq(cls, db: sqlite3.Connection, origin: str) -> int:
+        """Allocate and persist ``origin``'s next sequence number.
+
+        ONE allocator for every local write (put, bulk forget, move, promote).
+        Allocating from ``max(seq)+1`` directly is what made a compacted store
+        re-issue a number a peer already held.
+        """
+        seq = cls._seq_high_water(db, origin) + 1
+        cls._note_seq(db, origin, seq)
+        return seq
 
     @staticmethod
     def _ops(db: sqlite3.Connection, entity: str) -> list[dict[str, Any]]:
@@ -1499,9 +1576,7 @@ class MemoryStore:
                     )
                 parents = list(dict.fromkeys([*parents, self._heads(target)[0]["op_id"]]))
             origin = self._origin(db)
-            seq = db.execute(
-                "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
-            ).fetchone()[0]
+            seq = self._next_seq(db, origin)
             last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
             now = int(time.time() * 1000)
             clock = max(now, int(last[0]) + 1 if last else 0)
@@ -1609,9 +1684,7 @@ class MemoryStore:
                             "Memory changed concurrently. Read its current revision and retry; "
                             "no fact in this bulk forget was changed."
                         )
-                    seq = db.execute(
-                        "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
-                    ).fetchone()[0]
+                    seq = self._next_seq(db, origin)
                     # One strictly increasing HLC per tombstone in this transaction:
                     # two ops sharing a clock would make head order depend on op_id.
                     clock = max(clock + 1, int(time.time() * 1000))
@@ -1666,6 +1739,513 @@ class MemoryStore:
         if warning:
             result["warning"] = warning
         return result
+
+    # -------------------------------------------------------------- compaction
+    #
+    # The journal carries STATE, not history. ``_reindex`` rebuilds ``current``,
+    # ``recall`` and ``associations`` from an entity's ops and materialises
+    # ``_heads(ops)[0]``, so a non-head revision is unreadable by every read
+    # path. Retaining one op per entity therefore reproduces the store exactly;
+    # measured on a 65,929,216 B store: 50,377 ops -> 25,188, ``current`` rebuilt
+    # 4,084/4,084 with 0 missing/extra/mismatched, 0 of 25,188 entities changed
+    # state, ``causal_edges`` 7.7 MB -> 3 rows, file 32,411,648 B.
+    #
+    # WHY this needs no peer acknowledgement: the rule is a function of the local
+    # op set alone, which is the property that matters here — the failure it
+    # fixes is a full store that cannot accept a peer's push, so any rule that
+    # waits for an ack cannot run. A rule phrased as "newer than the oldest peer
+    # cursor" is dead on arrival: the cursor this store holds for a peer
+    # describes what it RECEIVED from that peer (``network/memory.py``), so the
+    # minimum over our own origin is always 0 and such a rule frees zero bytes.
+    #
+    # Protocol safety: a compacted journal is a legal stream. ``batch()`` emits
+    # content-free skip ranges for absent sequence numbers and ``receive()``
+    # only requires ops+skips to be contiguous, never an op per sequence — so
+    # this pass needs no generation bump and no wire change.
+
+    def _retained(self, ops: list[dict[str, Any]]) -> set[str]:
+        """The op ids ONE entity keeps when its journal is compacted.
+
+        See the compaction note above for why one op per entity is state
+        preserving. TWO RULES MUST NOT BE SIMPLIFIED:
+
+        * ALL heads, never ``self._heads(ops)[0]``. One head reproduces
+          ``current`` and silently resolves visible conflicts: ``show()``'s
+          conflict list and ``put(merge=...)`` both read the head SET, so
+          keeping one would turn a concurrent edit into an invisible one and
+          make a later merge resolve against the wrong parent.
+        * A forgotten entity keeps EVERY tombstone and no puts. ``_reindex``
+          clears an entity only on seeing a tombstone, so a peer that received
+          the put and not the tombstone would hold a fact that nothing will
+          ever clear. Puts under a tombstone are unreachable (``_reindex``
+          returns before writing ``current``) and were 44% of this journal.
+        """
+        if any(op["kind"] == "tombstone" for op in ops):
+            return {op["op_id"] for op in ops if op["kind"] == "tombstone"}
+        return {op["op_id"] for op in self._heads(ops)}
+
+    @staticmethod
+    def _pins(db: sqlite3.Connection) -> set[str]:
+        """Op ids that are endpoints of a CROSS-entity causal edge.
+
+        ``_NOT_REPLACED_SQL`` (``search``/``tagged``) and ``show()``'s
+        ``moved_from`` read a replacement/move edge by joining BOTH endpoints,
+        so an op that looks like a superseded revision can be the parent half of
+        a live replacement. ``causal_edges`` is the authority rather than the op
+        bodies because an edge survives body redaction, and it is the one table
+        that still knows a parent whose own row is already gone.
+        """
+        pinned: set[str] = set()
+        for child, parent, child_entity, parent_entity in db.execute(
+            "SELECT e.op_id, e.parent, c.entity_id, p.entity_id FROM causal_edges e "
+            "JOIN ops c ON c.op_id=e.op_id JOIN ops p ON p.op_id=e.parent"
+        ):
+            if child_entity != parent_entity:
+                pinned.update((child, parent))
+        return pinned
+
+    @staticmethod
+    def _journal_fingerprint(victims: list[str]) -> str:
+        """Short digest of the exact op set a preview would delete.
+
+        The confirmed run recomputes it inside its write transaction: any
+        concurrent write that would change what is deleted (a new revision, a
+        forget, a received op) changes the victim set and is refused. Hashing
+        victims only is deliberate — a write that only ADDS retained state does
+        not change the outcome and must not make the operator's preview stale.
+        """
+        digest = hashlib.sha256()
+        for op_id in sorted(victims):
+            digest.update(op_id.encode() + b"\n")
+        return digest.hexdigest()[:12]
+
+    @staticmethod
+    def _empty_journal_plan(path: Path) -> dict[str, Any]:
+        """The plan shape for a store that does not exist (nothing to compact)."""
+        return {
+            "exists": False,
+            "database_path": str(path),
+            "ops": {"before": 0, "kept": 0, "dropped": 0},
+            "entities": {"live": 0, "forgotten": 0},
+            "retained": {"ops": 0, "payload_bytes": 0, "tombstones": 0, "pinned": 0},
+            "dropped": {
+                "superseded": 0,
+                "under_forgotten": 0,
+                "payload_bytes": 0,
+            },
+            "causal_edges": {"rows": 0, "kept": 0, "dropped": 0},
+            "storage": {
+                "bytes_before": 0,
+                "pages_before": 0,
+                "page_size": CAP_PAGE_SIZE,
+                "freelist_pages": 0,
+                "page_cap": MAX_DB_BYTES // CAP_PAGE_SIZE,
+                "headroom_before": (MAX_DB_BYTES // CAP_PAGE_SIZE) * CAP_PAGE_SIZE,
+                "bytes_after_estimate": 0,
+                "pages_after_estimate": 0,
+                "reclaim_estimate": 0,
+                "estimate_basis": "none",
+            },
+            "last_pass": None,
+            "fingerprint": MemoryStore._journal_fingerprint([]),
+        }
+
+    @staticmethod
+    def _journal_estimate(
+        db: sqlite3.Connection,
+        keep: set[str],
+        sizes: dict[str, int],
+        surviving_edges: int,
+        total_edges: int,
+        pages: int,
+        page_size: int,
+    ) -> tuple[int, str]:
+        """``(predicted bytes after the pass, which model produced it)``.
+
+        ``dbstat`` is the only view of how many pages each b-tree actually
+        holds, and the ops table is where a payload-only model is badly wrong:
+        deleted rows leave free space INSIDE pages, which only ``VACUUM`` packs
+        away, so "before - dropped payload" understates the reclaim by
+        megabytes. Scaling every object by its own retained share is an upper
+        bound (packing can only make the result smaller) and measured 13% high
+        on the real store: 36,564,992 predicted vs 32,411,648 attained.
+
+        ``dbstat`` is a compile option (``SQLITE_ENABLE_DBSTAT_VTAB``), not a
+        SQLite version guarantee. Without it the payload-only lower bound is
+        returned with a different ``basis`` so the preview can say which number
+        the operator is reading rather than pass an estimate off as a
+        measurement.
+        """
+        retained_bytes = sum(sizes[op_id] for op_id in keep)
+        total_bytes = sum(sizes.values())
+        try:
+            stats = db.execute("SELECT name, sum(pgsize) FROM dbstat GROUP BY name").fetchall()
+        except sqlite3.OperationalError:
+            return max(0, pages * page_size - (total_bytes - retained_bytes)), "payload"
+        if not total_bytes:
+            return pages * page_size, "dbstat"
+        index_table = {
+            name: table
+            for name, table in db.execute(
+                "SELECT name, tbl_name FROM sqlite_schema WHERE type='index'"
+            )
+        }
+        kept_rows = len(keep)
+        rows = len(sizes)
+        predicted_pages = 0
+        for name, size in stats:
+            if not size:
+                continue
+            held = -(-int(size) // page_size)
+            table = "ops" if name == "ops" else index_table.get(name)
+            if name == "ops":
+                scaled = -(-held * retained_bytes // total_bytes)
+            elif table == "ops":
+                scaled = -(-held * kept_rows // rows)
+            elif name == "causal_edges" or table == "causal_edges":
+                scaled = -(-held * surviving_edges // total_edges) if total_edges else held
+            else:
+                scaled = held
+            predicted_pages += max(1, scaled)
+        return predicted_pages * page_size, "dbstat"
+
+    def _journal_plan(
+        self, db: sqlite3.Connection
+    ) -> tuple[dict[str, Any], list[str], set[str], dict[str, int]]:
+        """``(preview, victims, owners, highest seq per origin)`` for one pass.
+
+        ONE scan over ``ops`` rather than ``_ops`` per entity: the measured
+        store has 25,188 entities, and the per-entity reader would be 25,188
+        round trips for the same bytes. ``_retained``/``_heads`` — the only
+        definition of a head — still decides; this only supplies their input,
+        plus the accounting (bytes, entity, scope/owner) a receipt, the export
+        rewrite and the sequence high-water need.
+
+        The fourth value is the sequence floor the pass must persist BEFORE it
+        deletes: an origin's newest row is exactly what a deletion can remove,
+        and ``max(seq)`` is what the allocator used to trust.
+        """
+        rows = db.execute(
+            "SELECT op_id, entity_id, owner, scope, data, length(CAST(data AS BLOB)) FROM ops"
+        ).fetchall()
+        by_entity: dict[str, list[dict[str, Any]]] = {}
+        entity_of: dict[str, str] = {}
+        size_of: dict[str, int] = {}
+        place_of: dict[str, tuple[str, str]] = {}
+        by_op: dict[str, dict[str, Any]] = {}
+        for op_id, entity, owner, scope, data, size in rows:
+            operation = json.loads(data)
+            by_entity.setdefault(entity, []).append(operation)
+            by_op[op_id] = operation
+            entity_of[op_id] = entity
+            size_of[op_id] = int(size)
+            place_of[op_id] = (scope, owner)
+        pinned = self._pins(db)
+        keep = set(pinned)
+        # `_heads` is per entity (a cross-entity parent does not make an op a
+        # non-head), so the child graph is built per entity too.
+        head_ids: set[str] = set()
+        children: dict[str, list[str]] = {}
+        for ops in by_entity.values():
+            keep |= self._retained(ops)
+            ids = {op["op_id"] for op in ops}
+            head_ids.update(op["op_id"] for op in self._heads(ops))
+            for operation in ops:
+                for parent in operation["parents"]:
+                    if parent in ids:
+                        children.setdefault(parent, []).append(operation["op_id"])
+        dead = {
+            entity
+            for entity, ops in by_entity.items()
+            if any(op["kind"] == "tombstone" for op in ops)
+        }
+        # Defence in depth for the sequence floor: keep each origin's newest
+        # operation even when it is a superseded revision. The meta row is what
+        # actually guarantees monotonicity (it survives any later deletion of
+        # that op); this keeps the counter readable from the journal itself.
+        newest: dict[str, int] = {}
+        for operation in by_op.values():
+            origin, seq = operation["origin_device"], operation["seq"]
+            if seq > newest.get(origin, 0):
+                newest[origin] = seq
+        keep.update(
+            op["op_id"] for op in by_op.values() if newest[op["origin_device"]] == op["seq"]
+        )
+        # A retained NON-head whose children all went is promoted to a head by
+        # `_heads`; close the set so a pin (or the newest-op floor above) never
+        # fabricates a conflict.
+        closure_ops = self._close_over_children(keep, by_op, children, head_ids)
+        victims = [op_id for op_id in size_of if op_id not in keep]
+        superseded = sum(1 for op_id in victims if entity_of[op_id] not in dead)
+        tombstones = sum(
+            1 for entity in dead for op in by_entity[entity] if op["kind"] == "tombstone"
+        )
+        edges = db.execute("SELECT op_id, parent FROM causal_edges").fetchall()
+        surviving_edges = sum(1 for child, parent in edges if child in keep and parent in keep)
+        pages, page_size, free = self._journal_pages(db)
+        # The enforced page cap, from the constant `connection()` sets: a reader
+        # must not ask PRAGMA max_page_count, which is per-connection and would
+        # report SQLite's default (2^30) rather than this store's cap.
+        cap = MAX_DB_BYTES // CAP_PAGE_SIZE
+        after_estimate, basis = self._journal_estimate(
+            db, keep, size_of, surviving_edges, len(edges), pages, page_size
+        )
+        try:
+            last = db.execute(
+                "SELECT at, ops, bytes FROM journal_prune ORDER BY at DESC LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # An older store has no journal_prune yet, and a preview must not be
+            # the thing that creates it.
+            last = None
+        dropped_bytes = sum(size_of[op_id] for op_id in victims)
+        before = pages * page_size
+        plan = {
+            "exists": True,
+            "database_path": str(self.path),
+            "ops": {"before": len(size_of), "kept": len(keep), "dropped": len(victims)},
+            "entities": {"live": len(by_entity) - len(dead), "forgotten": len(dead)},
+            "retained": {
+                "ops": len(keep),
+                "payload_bytes": sum(size_of[op_id] for op_id in keep),
+                "tombstones": tombstones,
+                "pinned": len(pinned),
+                "closure_ops": closure_ops,
+            },
+            "dropped": {
+                "superseded": superseded,
+                "under_forgotten": len(victims) - superseded,
+                "payload_bytes": dropped_bytes,
+            },
+            "causal_edges": {
+                "rows": len(edges),
+                "kept": surviving_edges,
+                "dropped": len(edges) - surviving_edges,
+            },
+            "storage": {
+                "bytes_before": before,
+                "pages_before": pages,
+                "page_size": page_size,
+                "freelist_pages": free,
+                "page_cap": cap,
+                "headroom_before": cap * page_size - before,
+                "bytes_after_estimate": after_estimate,
+                "pages_after_estimate": -(-after_estimate // page_size),
+                "reclaim_estimate": max(0, before - after_estimate),
+                "estimate_basis": basis,
+            },
+            "last_pass": ({"at": last[0], "ops": last[1], "bytes": last[2]} if last else None),
+            "fingerprint": self._journal_fingerprint(victims),
+        }
+        owners = {place_of[op_id][1] for op_id in victims if place_of[op_id][0] == "session"}
+        return plan, victims, owners, newest
+
+    @staticmethod
+    def _journal_pages(db: sqlite3.Connection) -> tuple[int, int, int]:
+        """``(page_count, page_size, freelist_count)`` — read-only safe.
+
+        Separate from ``_page_budget`` because the cap is NOT readable from a
+        read-only connection (``max_page_count`` is per-connection state).
+        """
+        return (
+            int(db.execute("PRAGMA page_count").fetchone()[0]),
+            int(db.execute("PRAGMA page_size").fetchone()[0]),
+            int(db.execute("PRAGMA freelist_count").fetchone()[0]),
+        )
+
+    @staticmethod
+    def _close_over_children(
+        keep: set[str],
+        by_op: dict[str, dict[str, Any]],
+        children: dict[str, list[str]],
+        head_ids: set[str],
+    ) -> int:
+        """Retain a path from every retained NON-head up to its full-set head.
+
+        WHY: `_heads` decides head-ness from the operations PRESENT in an
+        entity, so deleting a retained operation's only child PROMOTES it. A
+        `replaces` pin is exactly that shape — it names the target's head as it
+        was at write time, and later edits above it are non-heads — so without
+        this closure a compaction fabricates a second head: `show().conflicts`
+        reports a conflict nobody made and `merge` records a false confluence
+        naming a revision no one edited.
+
+        Returns how many operations the closure added (0 on a store with no
+        retained non-heads, which is the common case).
+        """
+        added = 0
+        pending = [op_id for op_id in keep if op_id not in head_ids]
+        while pending:
+            op_id = pending.pop()
+            heirs = children.get(op_id, [])
+            if any(child in keep for child in heirs):
+                continue
+            if not heirs:
+                # A full-set non-head always has a child; defensive only.
+                continue
+            # Shortest path first (a head ends the walk), then anything already
+            # kept, then the earliest revision as a deterministic tie-break.
+            child = min(
+                heirs,
+                key=lambda candidate: (
+                    candidate not in head_ids,
+                    candidate not in keep,
+                    by_op[candidate]["hlc"],
+                    candidate,
+                ),
+            )
+            keep.add(child)
+            added += 1
+            if child not in head_ids:
+                pending.append(child)
+        return added
+
+    def journal_plan(self) -> dict[str, Any]:
+        """What :meth:`compact` would delete and roughly what it would free.
+
+        Genuinely read-only: it opens the file read-only, so it performs no DDL,
+        no INSERT/UPDATE/DELETE, creates no store when none exists, and works on
+        a 0444 copy. ``connection()`` would re-run ``_SCHEMA`` and create
+        ``journal_prune`` — a preview that mutates is a trap on the full store
+        whose operator is previewing a destructive pass. This is that operator's
+        preview: the pass refuses to run without the fingerprint it prints.
+        """
+        if not self.path.exists():
+            return {**self._empty_journal_plan(self.path), "read_only": True}
+        with self._reader() as db:
+            plan, _victims, _owners, _newest = self._journal_plan(db)
+        return {**plan, "read_only": True}
+
+    def compact(self, *, expect: str) -> dict[str, Any]:
+        """Apply the previewed journal compaction in one pass.
+
+        ``expect`` is the ``fingerprint`` of the preview the operator read; the
+        plan is recomputed inside the write transaction and a mismatch refuses
+        the WHOLE pass with nothing deleted (the same optimistic-confirmation
+        shape as a bulk forget's ``--expect``). Requiring it is deliberate: old
+        revisions are unrecoverable afterwards, and a call without a preview is
+        a call whose operator has not seen what it deletes.
+
+        Serialisation: ``BEGIN IMMEDIATE`` takes the write lock BEFORE the plan
+        is read, so ``apply_ops`` (also IMMEDIATE) lands wholly before or wholly
+        after; ``busy_timeout=5000`` from ``connection()`` is what waits. A push
+        that loses that race and read a pre-compaction sequence state gets one
+        ``Memory sequence gap/overlap`` refusal on the receiver and succeeds on
+        its next tick against the compacted stream — the journal announces the
+        absent numbers as skip ranges, so the stream stays legal.
+
+        Export ordering: the deletes commit first, then every affected session's
+        portable ``memory-session.jsonl`` is rewritten. A crash between the two
+        leaves an export that still holds dropped ops; ``import_session``
+        re-applies them and the next pass drops them again, so the residue is
+        bytes, never wrong state.
+
+        Sequence identity: this is the one pass that makes ``max(seq)`` stop
+        being a counter, so every origin's high-water is persisted in the same
+        transaction BEFORE the delete and allocation reads that floor. Without
+        it, a store whose newest row is dropped re-issues ``(origin, seq)`` for a
+        NEW operation, and a peer already at that cursor skips the op as one it
+        has seen: silent, permanent divergence from an ordinary forget.
+
+        ``VACUUM`` cannot run inside a transaction, and is skipped when the pass
+        dropped nothing and the freelist is already empty — that is what makes a
+        second run a no-op instead of a full file rewrite. It is also what makes
+        the reclaim real: the DELETE only returns pages to the freelist.
+        """
+        if not self.path.exists():
+            raise MemoryError("Memory not found: there is no journal to compact.")
+        if not expect:
+            raise MemoryError(
+                "Compaction needs the fingerprint from its preview. Nothing was deleted. "
+                "Run the preview first."
+            )
+        with self.connection() as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                plan, victims, owners, newest = self._journal_plan(db)
+                if plan["fingerprint"] != expect:
+                    raise MemoryError(
+                        "The journal changed since the preview you confirmed (fingerprint "
+                        "mismatch). Nothing was deleted; run the preview again."
+                    )
+                if victims:
+                    # Persist the sequence floor BEFORE the delete, in the same
+                    # transaction: an origin's newest row is exactly what the
+                    # delete can remove, and `max(seq)` must not move backwards
+                    # or a later allocation re-issues a number a peer holds.
+                    for origin, seq in sorted(newest.items()):
+                        self._note_seq(db, origin, seq)
+                    db.executemany("DELETE FROM ops WHERE op_id=?", [(op,) for op in victims])
+                    # An edge row is inert iff either endpoint is gone: the only
+                    # reader (``_NOT_REPLACED_SQL``) INNER JOINs both ops, so
+                    # deleting these cannot change a query result. They are also
+                    # the second-largest object in the store, so they are pruned
+                    # rather than left to rot.
+                    db.execute(
+                        "DELETE FROM causal_edges WHERE op_id NOT IN (SELECT op_id FROM ops) "
+                        "OR parent NOT IN (SELECT op_id FROM ops)"
+                    )
+                    db.execute(
+                        "INSERT INTO journal_prune VALUES (?,?,?,?,?)",
+                        (
+                            time.time(),
+                            self._origin(db),
+                            len(victims),
+                            plan["dropped"]["payload_bytes"],
+                            "operator",
+                        ),
+                    )
+                db.commit()
+                if victims:
+                    for owner in sorted(owners):
+                        directory = self._session_directory(owner, db)
+                        if directory is None:
+                            continue
+                        try:
+                            self._export(db, owner, directory)
+                        except (MemoryError, OSError) as exc:
+                            raise MemoryError(
+                                "The journal was compacted, but rewriting session "
+                                f"{owner[:8]}'s portable export failed ({exc}). The store is "
+                                "correct; that export still holds the dropped operations and "
+                                "the next pass rewrites it."
+                            ) from exc
+                    db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            free_before = plan["storage"]["freelist_pages"]
+        vacuumed = False
+        if plan["ops"]["dropped"] or free_before:
+            try:
+                with self.connection() as db:
+                    db.execute("VACUUM")
+                vacuumed = True
+            except sqlite3.OperationalError as exc:
+                raise MemoryError(
+                    "The journal was compacted, but the file could not be rebuilt (VACUUM: "
+                    f"{exc}). The freed pages are already reusable, so writes are not "
+                    "blocked; free disk space and run the pass again to shrink the file."
+                ) from exc
+        with self.connection() as db:
+            pages, page_size, cap, free = self._page_budget(db)
+        after = pages * page_size
+        return {
+            **plan,
+            "action": "compact",
+            "read_only": False,
+            "applied": True,
+            "vacuumed": vacuumed,
+            "storage": {
+                **plan["storage"],
+                "bytes_after": after,
+                "pages_after": pages,
+                "freelist_pages": free,
+                "reclaimed_bytes": max(0, plan["storage"]["bytes_before"] - after),
+                "headroom_after": cap * page_size - after,
+            },
+            "confirmation": expect,
+        }
 
     def move(
         self,
@@ -1856,9 +2436,7 @@ class MemoryStore:
                         "tombstone history cap. Consolidate or export that history first; "
                         "nothing was changed."
                     )
-            seq = db.execute(
-                "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
-            ).fetchone()[0]
+            seq = self._next_seq(db, origin)
             last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
             clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
             moved: list[dict[str, Any]] = []
@@ -2086,9 +2664,6 @@ class MemoryStore:
             db.execute("BEGIN IMMEDIATE")
             if promote:
                 origin = self._origin(db)
-                seq = db.execute(
-                    "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
-                ).fetchone()[0]
                 clock_row = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
                 clock = max(int(time.time() * 1000), int(clock_row[0]) if clock_row else 0)
                 prefix = self.identity.session_id + "|"
@@ -2113,7 +2688,7 @@ class MemoryStore:
                     fact = operation["fact"]
                     if fact and fact["replaces"]:
                         fact = dict(fact, replaces=remap(fact["replaces"]))
-                    seq += 1
+                    seq = self._next_seq(db, origin)
                     clock += 1
                     rewritten = dict(
                         operation,
@@ -2171,17 +2746,12 @@ class MemoryStore:
                     if conflict:
                         raise MemoryError(conflict)
                 if contiguous:
-                    seq = db.execute(
-                        "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?",
-                        (op["origin_device"],),
-                    ).fetchone()[0]
+                    seq = self._seq_high_water(db, op["origin_device"]) + 1
                     if op["seq"] != seq:
                         raise MemoryError("Memory sequence gap; refresh peer state and retry.")
                 if len(old_ops) >= MAX_REVISIONS and op["kind"] != "tombstone":
                     raise MemoryError("Memory revision cap reached; no conflicts discarded.")
-                previous_max = db.execute(
-                    "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (op["origin_device"],)
-                ).fetchone()[0]
+                previous_max = self._seq_high_water(db, op["origin_device"])
                 filled_gap |= op["seq"] < previous_max
                 stored = dict(op, fact=None) if dead and op["kind"] == "put" else op
                 try:
@@ -2201,6 +2771,11 @@ class MemoryStore:
                 except sqlite3.IntegrityError as exc:
                     raise MemoryError("Memory origin sequence reused; refresh peer state.") from exc
                 changed.add(entity)
+                # A received op is evidence of its origin's counter: persist it, so a
+                # later compaction that deletes this row cannot let the next
+                # contiguous arrival be refused as a gap (or, on the local origin,
+                # let an allocation reuse this number).
+                self._note_seq(db, op["origin_device"], op["seq"])
                 owners.add((op["scope"], op["owner_key"]))
                 if op["kind"] != "tombstone":
                     growing.add((op["scope"], op["owner_key"]))
