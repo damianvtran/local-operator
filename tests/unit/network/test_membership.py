@@ -981,3 +981,94 @@ def test_a_rotation_frame_may_not_revert_a_rename() -> None:
     successor = types.MemberRecord.from_json(stale)
     relay._take_over_standing(peer, successor)  # noqa: SLF001
     assert successor.name == "build-box"
+
+
+def test_a_peer_cannot_store_an_invalid_label_as_its_name() -> None:
+    """The RECEIVING half of the guard (review round 1, F1). A signature proves who
+    sent a name, never that the text is usable — so a hostile or buggy build cannot
+    park another member's id in a row and make a later name query answer the wrong
+    device. The ROW IS KEPT: a cosmetic label is not a reason to drop a member."""
+    record, _state = _record()
+    _admit_peer(record)
+    hostile = record.member(PEER).to_json()
+    hostile["name"] = "d_" + "a" * 32  # this record's OWN id, as a "name"
+    changed, added = relay.adopt_members(record, [hostile], sender_device_id=PEER)
+    assert (changed, added) == (False, [])
+    assert record.member(PEER).name == "laptop"
+
+    # A NEWCOMER is still adopted — with no name at all when the frame's is invalid.
+    newcomer_id = "d_" + "d" * 32
+    newcomer = types.MemberRecord(
+        device_id=newcomer_id,
+        public_key=wire.b64u(b"d" * 32),
+        name="bad#name",
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+    ).to_json()
+    changed, added = relay.adopt_members(record, [newcomer], sender_device_id=PEER)
+    assert added == [newcomer_id]
+    assert record.member(newcomer_id).name == ""
+
+    # The admission path applies the same rule to the join name.
+    joiner = "d_" + "e" * 32
+    row = relay.admit(
+        record,
+        device_id=joiner,
+        public_key=wire.b64u(b"e" * 32),
+        name="line\u2028sep",
+        added_by=SELF,
+        persist=False,
+    )
+    assert row.name == ""
+
+
+def test_a_row_write_that_fails_is_reported_as_a_partial_rename(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, F3. When the identity write lands and a row write does not,
+    the two surfaces disagree — ``identity show`` says the new name and every member
+    listing says the old one. That state is raised and named, never reported as a
+    success, so the operator knows to retry instead of believing the rename landed."""
+    me, _record = _renamable(root)
+    second = types.NetworkRecord(
+        network_id="n_ffffffffffffffffffffffff",
+        name="second-net",
+        epoch=1,
+        self_device_id=me.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    second.members.append(
+        types.MemberRecord(
+            device_id=me.device_id,
+            public_key=me.public_key,
+            name=me.name,
+            role="admin",
+            capabilities=sorted(types.capabilities_for_role("admin")),
+            added_via="self",
+        )
+    )
+    store.save(second, root)
+
+    real_mutate = store.mutate
+
+    def refuse_one(network_id: str, root: Path | None = None) -> Any:
+        if network_id == second.network_id:
+            raise RuntimeError("the record's lock is unavailable")
+        return real_mutate(network_id, root)
+
+    monkeypatch.setattr(store, "mutate", refuse_one)
+    with pytest.raises(types.MeshRefusal) as partial:
+        relay.rename_self("build-box", root=root)
+    assert partial.value.code == "rename_partial"
+    assert "build-box" in partial.value.sentence
+    assert "second-net" in partial.value.sentence
+    assert "NOT updated" in partial.value.sentence
+    # THE HALF THAT DID LAND IS REAL, and that is exactly why it must be reported:
+    # the identity file already carries the new name.
+    monkeypatch.setattr(store, "mutate", real_mutate)
+    assert identity.load(root).name == "build-box"
+    reread = next(
+        row for row in store.list_networks(root) if row.network_id == second.network_id
+    )
+    assert reread.member(me.device_id).name == "ip-172-31-18-0"

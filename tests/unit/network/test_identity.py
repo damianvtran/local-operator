@@ -266,24 +266,27 @@ def test_a_name_is_trimmed_and_stored_on_the_identity(root: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("raw", "why"),
+    ("raw", "expected"),
     [
-        ("", "empty"),
-        ("   ", "whitespace only"),
-        ("x" * (identity.MEMBER_NAME_MAX + 1), "one over the row budget"),
-        ("a#b", "the peer-token separator"),
-        ("tab\tbed", "a control character"),
-        ("line\u2028sep", "a line separator"),
-        ("d_" + "c" * 32, "a device id"),
+        ("", "cannot be empty"),
+        ("   ", "cannot be empty"),
+        ("x" * (identity.MEMBER_NAME_MAX + 1), "at most 64 characters"),
+        ("a#b", "cannot contain '#'"),
+        ("tab\tbed", "control characters"),
+        ("line\u2028sep", "control characters"),
+        ("d_" + "c" * 32, "cannot be a device id"),
     ],
 )
-def test_a_name_rule_refuses_what_no_surface_can_render(raw: str, why: str) -> None:
-    """Every rejection carries a SENTENCE, because the caller is a person-facing
-    verb — and the cases are the ones that would break a listing or make an
-    argument ambiguous rather than merely look odd."""
+def test_a_name_rule_refuses_what_no_surface_can_render(raw: str, expected: str) -> None:
+    """Every rejection carries a SENTENCE and says what is wrong with the INPUT.
+
+    The assertion is on the substantive clause, not on the shape of the string: a
+    punctuation check would pass for any ``ValueError`` from any cause, which is
+    the same all-errors-look-alike trap a bare ``pytest.raises`` sets.
+    """
     with pytest.raises(ValueError) as excinfo:
         identity.validate_member_name(raw)
-    assert str(excinfo.value).endswith((".", "?")) or ":" in str(excinfo.value), why
+    assert expected in str(excinfo.value)
 
 
 def test_a_name_of_exactly_the_limit_is_accepted() -> None:

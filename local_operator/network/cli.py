@@ -834,7 +834,10 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         # The limit and the rejected characters are ``identity.validate_member_name``'s
         # (``MEMBER_NAME_MAX`` = 64); restated here because the parser must answer
         # ``--help`` without importing the key module.
-        help="The new display name (1-64 characters; no '#', no control characters, not a device id)",
+        help=(
+            "The new display name (1-64 characters; no '#', no control characters, "
+            "not a device id)"
+        ),
     )
     identity_set_name.add_argument("--json", action="store_true")
 
