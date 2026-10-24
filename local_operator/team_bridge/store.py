@@ -2154,6 +2154,13 @@ class Store:
         claim" into a write, and an absent store must mean no frame rather
         than a new file (the fail-closed law ``_connect_readonly`` enforces).
 
+        THE BINDING IS THE ROW'S OWN, not merely the owner key's: a same-account
+        re-login keeps the key and changes ``credential_id`` /
+        ``enrollment_generation``, and ``active_owner`` treats that as a
+        DIFFERENT owner. Matching only the key would serve the OLD generation's
+        reservation under the new credential — claim, fetch and inject included
+        (design S-3b).
+
         Oldest-first is FIFO: a message admitted earlier must not starve
         behind a newer one. A ``pending`` row qualifies, and so does a claim
         whose lease EXPIRED — otherwise a turn that died mid-flight would strand
@@ -2172,11 +2179,18 @@ class Store:
             return self._reservation(
                 conn.execute(
                     "SELECT * FROM body_reservations WHERE owner_key = ? "
+                    "AND credential_id = ? AND enrollment_generation = ? "
                     "AND designated_session = ? AND (state = 'pending' OR "
                     "(state = 'claimed' AND claim_expires_at IS NOT NULL "
                     "AND claim_expires_at < ?)) "
                     "ORDER BY created_at ASC, rowid ASC LIMIT 1",
-                    (_owner_key(owner), designated_session, moment),
+                    (
+                        _owner_key(owner),
+                        owner.credential_id,
+                        owner.enrollment_generation,
+                        designated_session,
+                        moment,
+                    ),
                 ).fetchone()
             )
 

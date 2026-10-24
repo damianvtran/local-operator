@@ -26,6 +26,7 @@ reservation's own state transitions, which carry ids, digests and closed codes
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -54,12 +55,20 @@ __all__ = [
 #: The terminal verdicts that may complete a reservation (S-11). A provider
 #: error, an abort or a truncation is NOT proof the answer consumed the body,
 #: so the row stays retryable rather than being completed on a bad turn.
+logger = logging.getLogger(__name__)
+
 SUCCESS_STOP_REASONS = frozenset({"stop", "length", "toolUse"})
 
-#: A lease must outlive the longest single provider call, because the claimant
-#: renews only per call: an expiry mid-call would let a second consumer claim
-#: and serve the same body twice (S-12).
-_CLAIM_TTL_SECONDS = 900.0
+#: The lease is renewed at the start of EVERY provider call, so the window it
+#: must survive is one call plus whatever runs between two calls — a tool batch,
+#: which this module cannot observe. NORMAL TURNS HAVE NO WALL-CLOCK DEADLINE
+#: (``LoopConfig.deadline`` is unset in the session path), so no finite TTL can
+#: be proven "above the maximum turn budget". One hour is chosen as the longest
+#: single tool batch we can name and state; a turn that exceeds it loses
+#: injection (fail-closed: that call goes without the frame, the row is
+#: released) rather than letting a second consumer serve the same body.
+#: A caller that KNOWS its run deadline passes a larger ``lease_ttl_seconds``.
+_DEFAULT_CLAIM_TTL_SECONDS = 3600.0
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,10 @@ class FetchedBody:
     body_sha256: str
     conversation_label: str
     sender_label: str
+    #: The hub's CLOSED sender kind (human|agent|unknown). It is the one
+    #: provenance fact the frame's trusted section may state; an older backend
+    #: that omits it reads as "unknown" rather than being inferred from a name.
+    sender_kind: str = "unknown"
 
 
 class PendingTurn:
@@ -88,10 +101,17 @@ class PendingTurn:
         *,
         config_dir: Path,
         store: Store | None = None,
+        lease_ttl_seconds: float | None = None,
     ) -> None:
         self._owner = owner
         self._session_id = session_id
         self._store = store if store is not None else Store(config_dir)
+        #: Never shorter than the stated floor: a caller's deadline may extend
+        #: the lease, never shrink it below one long tool batch (S-12).
+        self._ttl = max(
+            _DEFAULT_CLAIM_TTL_SECONDS,
+            float(lease_ttl_seconds) if lease_ttl_seconds else 0.0,
+        )
         self._fence = TurnFence()
         self._claim_token: str | None = None
         self._turn_token: str | None = None
@@ -102,6 +122,7 @@ class PendingTurn:
         self._policy_epoch: int | None = None
         self._consent_version: str | None = None
         self._drifted = False
+        self._drift_reason = "admission_drift"
         self._injected: InjectedBody | None = None
 
     # -- lifecycle ----------------------------------------------------------
@@ -151,7 +172,7 @@ class PendingTurn:
                 claim_token=claim_token,
                 turn_token=turn_token,
                 now=time.time(),
-                ttl=_CLAIM_TTL_SECONDS,
+                ttl=self._ttl,
             )
         except StoreRefused:
             return False
@@ -179,24 +200,25 @@ class PendingTurn:
             return False
 
         reservation_id = f"{conversation_id}/{message_id}"
-        pending = PendingBody(
-            reservation_id=reservation_id,
-            source=_source_ref(row),
-            conversation_label=fetched.conversation_label,
-            sender_label=fetched.sender_label,
-            body=fetched.body,
-            authority=RequestAuthority(
-                admission_digest=admission_digest(
-                    _owner_key(self._owner),
-                    str(row["screening_fingerprint"]),
-                    fetched.body_sha256,
-                    reservation_id,
-                ),
-                receipt_id=str(row["screening_fingerprint"]),
-                policy_digest=str(row["policy_epoch"]),
-            ),
-        )
         try:
+            pending = PendingBody(
+                reservation_id=reservation_id,
+                source=_source_ref(row),
+                conversation_label=fetched.conversation_label,
+                sender_label=fetched.sender_label,
+                sender_kind=_closed_sender_kind(fetched.sender_kind),
+                body=fetched.body,
+                authority=RequestAuthority(
+                    admission_digest=admission_digest(
+                        _owner_key(self._owner),
+                        str(row["screening_fingerprint"]),
+                        fetched.body_sha256,
+                        reservation_id,
+                    ),
+                    receipt_id=str(row["screening_fingerprint"]),
+                    policy_digest=str(row["policy_epoch"]),
+                ),
+            )
             self._injected = assemble_injection(pending, budget, self._fence)
         except BodyNotFitted:
             # Capacity is a fact about THIS request, not a verdict on the
@@ -255,15 +277,23 @@ class PendingTurn:
                 claim_token=self._claim_token,
                 turn_token=self._turn_token or "",
                 now=now,
-                ttl=_CLAIM_TTL_SECONDS,
+                ttl=self._ttl,
             )
-        except StoreRefused:
-            held = False
+        except StoreRefused as failure:
+            # TRANSIENT (busy store, damaged read) is not a stolen lease: the
+            # row may still be ours, so this call goes without the frame and
+            # settlement records drift — never `claim_lost`, which would leave
+            # the row parked until expiry with no one to blame.
+            self._drifted = True
+            self._drift_reason = "admission_drift"
+            logger.debug("bridge: lease renew refused code=%s", failure.code)
+            return None
         if not held:
             # S-12: an expired or stolen lease means this turn no longer owns
             # the row. It must stop injecting rather than race the new holder.
             self._drifted = True
             self._lost_lease = True
+            self._drift_reason = "claim_lost"
             return None
         try:
             facts = self._store.per_call_admission_state(self._owner, self._session_id)
@@ -273,6 +303,7 @@ class PendingTurn:
             # S-10/S-21: send THIS call without the frame and stop for the
             # rest of the turn; the row stays pending with its reason.
             self._drifted = True
+            self._drift_reason = "admission_drift"
             return None
         self._fence.record_append()
         return self._injected.text
@@ -301,7 +332,7 @@ class PendingTurn:
                 # and releasing would be a no-op against their token anyway.
                 self._claim_token = None
                 return "claim_lost"
-            self._release("admission_drift")
+            self._release(self._drift_reason)
             return "drifted"
         if self._fence.appended_calls < 1:
             # Nothing was ever appended: a later ordinary turn must not inherit
@@ -362,6 +393,20 @@ class PendingTurn:
         self._turn_token = None
 
 
+def _closed_sender_kind(value: Any) -> str:
+    """Narrow the hub's sender kind to the frame's closed enum.
+
+    WHY not pass it through: the frame validates it, and an unexpected string
+    from a newer backend would refuse the whole frame. Mapping an unknown value
+    to "unknown" keeps the trusted section honest — the kind is never inferred
+    from a label.
+    """
+
+    from .body_frame import SENDER_KINDS
+
+    return value if isinstance(value, str) and value in SENDER_KINDS else "unknown"
+
+
 def _source_ref(row: dict[str, Any]) -> Any:
     """Rebuild the frame's source locator from the reservation row.
 
@@ -385,5 +430,5 @@ def _source_ref(row: dict[str, Any]) -> Any:
         message_id=str(row["message_id"]),
         mention=bool(mention) if isinstance(mention, (int, bool)) else False,
         tenant_id=str(row["tenant_id"]),
-        sender_kind="unknown",
+        sender_kind=_closed_sender_kind(row.get("sender_kind")),
     ).validated()
