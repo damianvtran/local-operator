@@ -38,6 +38,17 @@ class LockUnsupported(InstallTransactionError):
     """No validated lock implementation on this platform; fail before mutation."""
 
 
+class LockBusy(InstallTransactionError):
+    """A cooperating writer holds the root, or this process could not take it.
+
+    A CLASS, not a sentence, because the update report classifies a failed
+    install's cause structurally: the caller knows a bounded wait happened and
+    that nothing was mutated, which is a different fact from an installer that
+    exited non-zero. Matching this by message text would make the report depend
+    on wording a future edit is free to improve.
+    """
+
+
 # flock locks file descriptions, not Python threads; reentrancy belongs to the
 # owning thread, so nested primitive calls cannot unlock a parent's transaction.
 _MUTEXES: dict[Path, threading.RLock] = {}
@@ -180,9 +191,7 @@ def transaction(
         mutex = _MUTEXES.setdefault(root, threading.RLock())
     deadline = time.monotonic() + max(0.0, timeout)
     if not mutex.acquire(timeout=max(0.0, deadline - time.monotonic())):
-        raise InstallTransactionError(
-            f"another install mutation owns {root}; retry when it settles"
-        )
+        raise LockBusy(f"another install mutation owns {root}; retry when it settles")
     tokens = getattr(_LOCAL, "tokens", None)
     if tokens is None:
         tokens = _LOCAL.tokens = {}
@@ -219,11 +228,9 @@ def transaction(
                 break
             except OSError as exc:
                 if exc.errno not in (errno.EAGAIN, errno.EACCES):
-                    raise InstallTransactionError(
-                        f"cannot lock install root {root}: {exc}"
-                    ) from exc
+                    raise LockBusy(f"cannot lock install root {root}: {exc}") from exc
                 if time.monotonic() >= deadline:
-                    raise InstallTransactionError(
+                    raise LockBusy(
                         f"another install mutation owns {root}; retry when it settles "
                         "(lop install status shows observational details)"
                     ) from None
