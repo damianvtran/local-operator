@@ -26,6 +26,10 @@ import httpx
 from local_operator.clients._http import APIError
 from local_operator.stt.errors import api_error_from_httpx_response
 from local_operator.tts.adapters import Params
+from local_operator.tts.output_format import PREFERRED_OUTPUT_FORMAT
+from local_operator.tts.output_format import (
+    post_with_format_fallback as _post_at_best_format,
+)
 
 #: The hosts. Overridable per instance for tests; the OpenAI default carries
 #: the ``/v1`` the API reference uses, the ElevenLabs default does not (its
@@ -129,9 +133,17 @@ class ElevenLabsTtsClient:
         ``params`` comes from the vendored map's ElevenLabs executor, so this
         client owns transport and nothing else — it does not decide stability,
         clamp speed, or choose a voice. The platform constants it does need
-        (``similarity_boost``, ``use_speaker_boost``, the output format) come
-        from the map's ``fixed`` block, which is the one place the hub's own
-        client reads them from too.
+        (``similarity_boost``, ``use_speaker_boost``) come from the map's
+        ``fixed`` block, which is the one place the hub's own client reads them
+        from too; the output format is a code preference instead (see
+        :mod:`local_operator.tts.output_format`), not the map's.
+
+        ``output_format`` overrides that preference for a caller that needs one
+        specific token. It is a deliberate, narrow seam: a value other than the
+        preferred format is sent as-is and gets NO tier fallback, because the
+        fallback is a statement about this client's own preference, not about
+        a format a caller asked for on purpose. No production caller passes it
+        today.
         """
         model_id = model or ELEVENLABS_TTS_MODEL
         voice_settings: dict[str, Any] = {
@@ -153,21 +165,30 @@ class ElevenLabsTtsClient:
         # dot-segment must not address another endpoint on the vendor's API
         # under our key (the hub validates the same shape from the map's
         # `fixed.elevenlabs.voice_id_pattern`).
-        audio = await _post_audio(
-            self._client,
-            f"{self._base_url}/v1/text-to-speech/{params.voice_id}",
-            headers={
-                "xi-api-key": self._api_key,
-                "Content-Type": "application/json",
-                "Accept": "audio/mpeg",
-            },
-            payload=payload,
+        answer = await _post_at_best_format(
+            lambda wire: _post_audio(
+                self._client,
+                f"{self._base_url}/v1/text-to-speech/{params.voice_id}",
+                headers={
+                    "xi-api-key": self._api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "audio/mpeg",
+                },
+                payload=payload,
+                params=wire,
+                timeout_s=timeout_s,
+                label="ElevenLabs",
+                secrets=[self._api_key],
+            ),
+            api_key=self._api_key,
+            # The same endpoint and model the audio tool's BYOK rung uses, so a
+            # cap measured here is honoured there and vice versa: one vendor
+            # capability, one measurement.
+            endpoint="voiceover",
+            model=model_id,
             params={"output_format": output_format or OUTPUT_FORMAT},
-            timeout_s=timeout_s,
-            label="ElevenLabs",
-            secrets=[self._api_key],
         )
-        return TtsClientResult(audio=audio, model=model_id, provider="elevenlabs")
+        return TtsClientResult(audio=answer.value, model=model_id, provider="elevenlabs")
 
 
 class OpenAiTtsClient:
@@ -244,7 +265,13 @@ OPENAI_TTS_MODEL = str(_map_fixed("openai").get("model") or "gpt-4o-mini-tts")
 #: map's own ``medium`` row is 0.5, which is also the pre-descriptor constant.
 SIMILARITY_BOOST = float(_map_fixed("elevenlabs").get("similarity_boost", 0.75))
 USE_SPEAKER_BOOST = bool(_map_fixed("elevenlabs").get("use_speaker_boost", True))
-OUTPUT_FORMAT = str(_map_fixed("elevenlabs").get("output_format") or "mp3_44100_128")
+OUTPUT_FORMAT = PREFERRED_OUTPUT_FORMAT
+#: The vendored map's ``fixed.elevenlabs.output_format`` (128) is the vendor's
+#: universal format and the documented fallback, NOT this leg's preference: the
+#: map is a byte-for-byte copy of agent-server's artifact and cannot be edited
+#: locally (``voicing_map/README.md``), so the preference moved into code. The
+#: one-shot 128 fallback for a plan that refuses 192 lives beside it in
+#: :mod:`local_operator.tts.output_format`.
 DEFAULT_STABILITY = 0.5
 
 __all__ = [

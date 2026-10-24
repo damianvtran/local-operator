@@ -23,7 +23,19 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 DEFAULT_AUTO_UPDATE_AGENTS = True
 DEFAULT_AUTO_UPDATE_TEAMS = True
-DEFAULT_CHECK_INTERVAL_MIN = 60
+#: Fifteen minutes, not the old hour. The cost of an unchanged tick fell when
+#: checks became conditional: a skill/agent/team that did not move costs one
+#: ``If-None-Match`` request answered 304 with no document (agent-server #175,
+#: local-operator #2808), so the price of a tick is now roughly one empty round
+#: trip per linked item rather than a full read of each. That makes an hourly
+#: default needlessly stale -- an operator could wait up to an hour to see a
+#: teammate's publish -- while the interval still sits far above the 5-minute
+#: floor a user can opt into. Fifteen is the conservative end of the 10-15
+#: minute band this trade-off argues for: the freshness gained below it is
+#: marginal against the request rate it multiplies, and a quarter-hour is a
+#: cadence a user can reason about. The floor, the ceiling and the +-10 % jitter
+#: are unchanged, and an explicit ``hub.check_interval_min`` still wins.
+DEFAULT_CHECK_INTERVAL_MIN = 15
 MIN_CHECK_INTERVAL_MIN = 5
 MAX_CHECK_INTERVAL_MIN = 1440
 

@@ -112,5 +112,48 @@
     "role": "boolean choice description",
     "tone": "plain",
     "note": "What OFF means: work stays on this machine. Lowercase, about 10 cells."
+  },
+  "wire.settings.session_compression.description": {
+    "note": "Desktop-only section header sentence. Must make clear that NOTHING is removed and that history stays complete: this section sits beside two cleanup sections and must not read as a third deletion policy.",
+    "role": "settings section description",
+    "tone": "plain, reassuring, precise"
+  },
+  "wire.settings.session_compression.title": {
+    "maxCells": 34,
+    "note": "Section heading for transcript compression, a third storage control beside the two cleanup sections. Keep it short enough for the settings header's 34-cell value column.",
+    "role": "settings section title",
+    "tone": "plain"
+  },
+  "wire.settings.session_compression_after_days.help": {
+    "note": "Carries both bounds and the default because the page paints help but not min/max. 'Idle' is measured from the transcript's last write, not from when the session was created.",
+    "role": "settings help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.session_compression_after_days.label": {
+    "maxCells": 29,
+    "note": "Sub-row label with the page's '↳' prefix, within the 29-cell budget. Names the threshold in DAYS; the stored value is always days.",
+    "role": "numeric setting label",
+    "tone": "plain"
+  },
+  "wire.settings.session_compression_enabled.choice.false.description": {
+    "note": "What OFF means: transcripts stay plain files, and sessions already compressed stay readable (the switch only stops new compressions).",
+    "role": "boolean choice description",
+    "tone": "plain"
+  },
+  "wire.settings.session_compression_enabled.choice.true.description": {
+    "note": "What ON means, lowercase, in the terms of the age row directly below it.",
+    "role": "boolean choice description",
+    "tone": "plain"
+  },
+  "wire.settings.session_compression_enabled.help": {
+    "note": "Leads with what OFF means (nothing new is compressed, and already-compressed sessions are still readable) then what ON does, in the cleanup master's shape. The age row below carries the threshold; reads decompress automatically and the section description says so, so this line stays inside the settings page's ~100-cell help budget.",
+    "role": "settings help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.session_compression_enabled.label": {
+    "maxCells": 29,
+    "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET). Boolean master switch: ON compresses transcripts older than the age row below.",
+    "role": "settings row label",
+    "tone": "plain"
   }
 }

@@ -260,5 +260,26 @@ def revert_policy_if_unchanged(
             hub["public_egress_grants"] = grants
         else:
             hub.pop("public_egress_grants", None)
-        manager.set_config_value("hub", hub)
+        # DECLARED, and load-bearing: ``ConfigManager._write_config`` copies every
+        # disk value the payload does not model back into the file, so an
+        # undeclared removal here is resurrected — the staged entry survives a
+        # refused install and the function still returns True. That is a consent
+        # leak, not a stale key: a persisted ``public_egress_grants[link_id]``
+        # satisfies both ``_eligibility`` and ``update_policy``'s
+        # ``confirm_public_egress`` gate, so the next attempt reuses a grant the
+        # user never approved for it. The declaration names the ENTRY; the
+        # copy-through treats a declared path as covering its whole subtree, so
+        # the emptied ``links``/``public_egress_grants`` parents are not recreated.
+        manager.set_config_value(
+            "hub",
+            hub,
+            drop={
+                ("hub", "links", identity.link_id): "reverted a staged link policy",
+                (
+                    "hub",
+                    "public_egress_grants",
+                    identity.link_id,
+                ): "reverted its staged public-egress grant",
+            },
+        )
         return True

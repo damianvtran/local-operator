@@ -14,7 +14,8 @@ WHAT THE COS MAY DO with a delivered bridge message, per contract:
   stealing a successor's claim.
 - **send / reply** — outbound notes/questions/requests through the durable
   outbox (write-intent-first, §6.2). ``reply`` is the §13.5 pairing: thread_id
-  AND to always together.
+  AND to always together. ``state=sent`` means server acceptance into the
+  legacy peer inbox, not conversation delivery or recipient agent execution.
 - **NO decide** — the ``decide`` op does not exist here BY DESIGN: only H5b's
   answer path (a trusted human Approve/Deny) may call ``/decide`` (§10.3,
   #125). The schema omits it and the executor refuses the word if a model
@@ -31,7 +32,13 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   channel is the agent's own space, not a silent copy of its owner's.
 - **channel_post** — append one message as the agent. The body is the caller's
   text; one ``client_ref`` is minted per call, so a retry inside the client
-  reuses it and a second call is a second message.
+  reuses it and a second call is a second message. ``thread_root_id`` posts it
+  as a REPLY in that message's thread instead of at channel level — how agents
+  coordinate without flooding the channel (e.g. one QA-claim thread per item
+  in #agents). Threads are one level: the root must be a channel-level message.
+- **channel_thread** — one thread, oldest-first: the root (with its reply
+  count) and a bounded page of replies. Same screening rule as history — an
+  unadmitted reply is metadata with ``body`` null.
 - **channel_history** — a bounded page of messages. The server admits bodies
   per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
   hash) of messages it has not admitted, with ``body`` null, and only the
@@ -67,16 +74,26 @@ import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
-from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    Content,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
-from .types import CONVERSATION_ID_PATTERN
+from .types import (
+    CONVERSATION_ID_PATTERN,
+    InvalidSendRecipient,
+    validate_send_recipient,
+)
 
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
@@ -87,6 +104,7 @@ CHANNEL_OPS: tuple[str, ...] = (
     "channel_post",
     "channel_history",
     "react",
+    "channel_thread",
 )
 BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", *CHANNEL_OPS)
 
@@ -157,10 +175,23 @@ class ChannelMemberParams(BaseModel):
     display_label: str = ""
 
 
-class BridgeToolParams(BaseModel):
-    """Bridge args; ``extra="forbid"`` makes a hallucinated field a refusal."""
+def _closed_recipient_schema(schema: dict[str, Any]) -> None:
+    # Derive explicit properties from Pydantic's Literal-key schema instead of
+    # requiring every provider to implement propertyNames. This preserves the
+    # closed key set without a second hand-maintained list or duplicate models.
+    for branch in schema.get("anyOf", [schema]):
+        if branch.get("type") == "object":
+            names = branch.pop("propertyNames")["enum"]
+            value = branch["additionalProperties"]
+            branch["properties"] = {name: value for name in names}
+            branch["additionalProperties"] = False
 
-    model_config = ConfigDict(extra="forbid")
+
+class BridgeToolParams(BaseModel):
+    # Keep implementation guidance in comments, not the model docstring: Pydantic
+    # publishes that prose in every tool call's schema. extra="forbid" already
+    # communicates the closed top-level contract without restating it as prose.
+    model_config = ConfigDict(extra="forbid", title="Bridge")
 
     op: Literal[
         "take_up",
@@ -172,11 +203,18 @@ class BridgeToolParams(BaseModel):
         "channel_post",
         "channel_history",
         "react",
+        "channel_thread",
     ]
     message_id: str = ""
     body_sha256: str = ""
     state: Literal["working", "done"] | None = None
-    to: dict[str, str] | None = None
+    # Literal keys + cardinality publish the same closed one-of as two named
+    # recipient models, without duplicating object definitions, titles and
+    # descriptions in every prompt. Pydantic and JSON Schema both reject unknown
+    # keys; the shared pre-admission/client guard additionally rejects padding.
+    to: dict[Literal["endpoint_id", "account_id"], Annotated[str, Field(min_length=1)]] | None = (
+        Field(default=None, min_length=1, max_length=1, json_schema_extra=_closed_recipient_schema)
+    )
     type: Literal["note", "question", "request"] = "note"
     text: str = ""
     thread_id: str | None = None
@@ -197,6 +235,9 @@ class BridgeToolParams(BaseModel):
     cursor: str | None = None
     before_seq: int | None = None
     after_seq: int | None = None
+    #: channel_post: reply in this root message's thread; channel_thread: the
+    #: thread to read. A conversation message id (bcmsg_…).
+    thread_root_id: str = ""
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -208,6 +249,10 @@ def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
 #: the path (``#``, ``..``, slashes) is refused BEFORE any client call. The
 #: pattern lives in ``team_bridge.types`` so the two entry points cannot drift.
 _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
+#: A conversation MESSAGE id is interpolated into the replies path the same
+#: way, so it is held to the minted grammar (the desktop route's
+#: ``_MESSAGE_ID``) before any client call.
+_CONVERSATION_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
 
 
 def _full_body_text(result: Any) -> str | None:
@@ -310,6 +355,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     fence = owner_fence_refusal(runtime)
     if fence is not None:
         return _error(fence["error"], code=fence["code"])
+    # Refuse unsupported destinations before even scheduling admission I/O.
+    # The local authority fence keeps precedence; no invalid destination can
+    # create an outbox intent, send a message, or trigger a status request.
+    recipient: dict[str, str] = {}
+    if op in ("send", "reply"):
+        try:
+            recipient = validate_send_recipient(args.get("to"))
+        except InvalidSendRecipient as failure:
+            return _error(str(failure), code=failure.code)
     # ADMISSION GATE, second: only a SETTLED "admitted" may act. A non-admitted
     # state refuses THIS op typed and schedules the same single-flight boundary
     # read (fire-and-forget — never waits, never posts). ``take_up`` is a FETCH
@@ -317,7 +371,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # admit the read, while disabled/signin/pending refuse both directions. The
     # channel reads (list/history) are fetches for the same reason; create and
     # post are mutations.
-    is_read = op in ("take_up", "channels", "channel_history")
+    is_read = op in ("take_up", "channels", "channel_history", "channel_thread")
     refusal = admission_refusal(runtime, is_read=is_read)
     if refusal is not None:
         admit_soon(runtime)
@@ -393,11 +447,6 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         return {"ok": True, "state": "done", "message_id": params.message_id}
 
     if params.op in ("send", "reply"):
-        if (
-            not params.to
-            or len([k for k in ("endpoint_id", "account_id") if params.to.get(k)]) != 1
-        ):
-            return _error("send/reply name `to` as exactly one of endpoint_id/account_id")
         if not params.text.strip():
             return _error("send/reply need non-empty text")
         if params.op == "reply" and not (params.thread_id or "").strip():
@@ -407,7 +456,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         outbox = Outbox(runtime.config_dir)
         intent = outbox.record_send(
             runtime.key(),
-            to=params.to,
+            to=recipient,
             type=params.type,
             text=params.text,
             thread_id=params.thread_id,
@@ -420,7 +469,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         except Exception as failure:
             return _error(f"the send did not confirm: {failure}", code="send_unconfirmed")
         message = (result or {}).get("message") or {}
-        return {"ok": True, "message_id": str(message.get("id") or ""), "state": "sent"}
+        # Keep the legacy fields/wire semantics, but make their limited meaning
+        # machine-readable in the actual result (including an idempotent reply).
+        # Acceptance is only into the peer inbox, never conversation history or
+        # proof of execution: even a read ACK precedes the local wake handoff.
+        # These are result-only constants, not request/body fields or a new
+        # outbox schema. Errors above must never acquire this success receipt.
+        return {
+            "ok": True,
+            "message_id": str(message.get("id") or ""),
+            "state": "sent",
+            "destination_type": "peer_inbox",
+            "receipt_stage": "server_accepted",
+            "conversation_history": False,
+            "execution_confirmed": False,
+        }
 
     if params.op == "channels":
         if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
@@ -497,6 +560,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error("channel_post needs a conversation id (bcv_…)")
         if not params.body.strip():
             return _error("channel_post needs non-empty body")
+        thread_root_id = params.thread_root_id.strip()
+        if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
+            return _error("channel_post thread_root_id must be a message id (bcmsg_…)")
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -509,6 +575,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 tenant_id=runtime.tenant_id,
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
+                thread_root_id=thread_root_id or None,
             )
         except Exception as failure:
             return _error(f"the post did not confirm: {failure}", code="post_failed")
@@ -518,6 +585,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         message_id = str(message.get("id") or "")
         seq = message.get("seq")
         content = f"posted to {channel_id}: message {message_id or '?'}"
+        if thread_root_id:
+            content += f" (reply in thread {thread_root_id})"
         if isinstance(seq, int):
             content += f" at seq {seq}"
         return {"ok": True, "message_id": message_id, "state": "sent", "content": content}
@@ -586,6 +655,36 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
         }
 
+    if params.op == "channel_thread":
+        channel_id = params.channel_id.strip()
+        if _CONVERSATION_ID.fullmatch(channel_id) is None:
+            return _error("channel_thread needs a conversation id (bcv_…)")
+        thread_root_id = params.thread_root_id.strip()
+        if _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
+            return _error("channel_thread needs thread_root_id, a message id (bcmsg_…)")
+        if params.before_seq is not None:
+            return _error("channel_thread reads oldest-first: page with after_seq (inclusive)")
+        if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
+            return _error(f"channel_thread limit must be 1..{CONVERSATION_PAGE_MAX}")
+        try:
+            result = await runtime.client.conversation_replies(
+                channel_id,
+                thread_root_id,
+                tenant_id=runtime.tenant_id,
+                limit=int(params.limit),
+                after_seq=params.after_seq,
+                endpoint_id=endpoint_id,
+            )
+        except Exception as failure:
+            return _error(f"could not read the thread: {failure}", code="thread_failed")
+        # Same untrusted wrap as channel_history: a reply body is external
+        # content, and an unadmitted one is already null from the server.
+        return {
+            "ok": True,
+            "state": "ok",
+            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+        }
+
     # The decide/unknown refusals above run before the gates; this later return
     # is the schema-valid op that lost its branch — a programmer error, not a
     # model input.
@@ -614,7 +713,14 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
     ) -> ToolResult:
         outcome = await execute_bridge(runtime, args)
         if outcome.get("ok"):
-            if outcome.get("content") is not None:
+            peer_receipt = args.get("op") in ("send", "reply")
+            if peer_receipt:
+                # Providers receive TextContent, not necessarily details. Keep
+                # the same receipt in both so "sent" cannot hide the inbox-only
+                # acceptance boundary from a model. The executor's receipt is
+                # closed metadata; never serialize the request or server body.
+                content = json.dumps(outcome, ensure_ascii=False)
+            elif outcome.get("content") is not None:
                 # Read-shaped channel results carry their own model-facing
                 # rendering (JSON page, or the untrusted-wrapped history).
                 content = str(outcome["content"])
@@ -638,12 +744,20 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                     note = str(getter() or "")
                 except Exception:  # noqa: BLE001 — advice only, never a failure
                     note = ""
+            blocks: list[Content] = [TextContent(text=content)]
             if note:
-                content = f"{content}\n\n[bridge guidance — advisory]\n{note}"
+                if peer_receipt:
+                    # Preserve existing advice without appending prose to the
+                    # receipt's JSON block, which must parse on its own.
+                    blocks.append(TextContent(text=f"[bridge guidance — advisory]\n{note}"))
+                else:
+                    blocks = [
+                        TextContent(text=f"{content}\n\n[bridge guidance — advisory]\n{note}")
+                    ]
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="bridge",
-                content=[TextContent(text=content)],
+                content=blocks,
                 details=outcome,
             )
         return ToolResult(
@@ -659,14 +773,16 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         label="Team Bridge",
         description=(
             "Team Bridge: take_up/ack delivered messages, send/reply, and channel ops "
-            "(channels, channel_create, channel_post, channel_history, react) as this session's "
+            "(channels, channel_create, channel_post [thread_root_id replies in a "
+            "thread], channel_history, channel_thread, react) as this session's "
             "agent. This tool cannot approve or deny — that is the human's ask queue."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
         call_approval_tier=lambda args: (
             "read"
-            if str(args.get("op")) in ("take_up", "ack", "channels", "channel_history")
+            if str(args.get("op"))
+            in ("take_up", "ack", "channels", "channel_history", "channel_thread")
             else "write"
         ),
         concurrency="exclusive",

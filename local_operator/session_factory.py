@@ -67,6 +67,14 @@ from local_operator.paths import config_dir as app_config_dir
 # its own module rather than living here.
 from local_operator.resume import ResumeNotFound, resume_dir
 
+# The conversation's own approval record, also a stdlib-only module (its
+# docstring states why it must stay that way): read here so a resumed
+# conversation's gate starts in the mode its human left it in. Aliased so the
+# call site reads as a policy question rather than a bare ``read_override``.
+from local_operator.session.approval_policy import (
+    read_override as read_approval_override,
+)
+
 if TYPE_CHECKING:
     # Type-only imports: this module's whole discipline is that the heavy
     # engine, registry and provider modules load lazily inside the functions
@@ -1166,18 +1174,39 @@ def _latest_compaction_id(transcript: Any) -> str | None:
     return None
 
 
-def _env_details(cwd: str | None = None) -> str:
+def _env_details(cwd: str | None = None, session_id: str = "") -> str:
     """Volatile environment facts for the env block (date rides there too,
     added by ``build_system_blocks``). Kept tiny and byte-stable within a
     run: no timestamps, no process ids. ``cwd`` comes from the session's
-    working directory, never the process-global value at call time."""
+    working directory, never the process-global value at call time.
+
+    ``session_id`` is the session's own directory name, and it rides HERE for
+    one reason: it is byte-stable for the life of the run, so an agent can
+    recognise its own row in ``sessions(op='list')`` output instead of reading
+    that row as another session working the same topic. It is the same id the
+    listing prints, so the comparison is exact string equality.
+
+    The session NAME is deliberately NOT here. Auto-naming runs mid-session and
+    a user rename can land at any time, so a name in the prefix would either
+    anchor a stale name for the whole run or force a stable-prefix rebuild on
+    every rename — both reprice the cached prompt for something the model does
+    not need to act on. The id is stable; the name is not.
+
+    Empty ``session_id`` renders the original three-line shape, which is what a
+    caller with no transcript directory to name gets. The benchmark harness is
+    NOT such a caller: ``scripts/bench_context_budget.py`` hand-builds its own
+    env text rather than calling here, which is why the ratchet does not price
+    the extra line."""
     import platform
 
-    return (
+    text = (
         f"Platform: {platform.system()} {platform.release()} ({platform.machine()})\n"
         f"Python: {platform.python_version()}\n"
         f"Working directory: {cwd if cwd is not None else os.getcwd()}"
     )
+    if session_id:
+        text += f"\nSession ID: {session_id}"
+    return text
 
 
 #: The SERVER-OWNED shape of a configuration run: the preamble a run is built
@@ -2379,6 +2408,13 @@ def _projects_fingerprint(hooks: _KnowledgeHooks) -> tuple[int, float] | None:
     ``updated_at``, a delete moves at least one of the two — while an update the
     store itself refused as a no-op (identical text on a fresh record) writes
     nothing and correctly changes nothing here.
+
+    PAGE-SCOPED, deliberately: ``list_projects`` is the registry's recency page,
+    so this signal watches the rows a session can currently see. A change to a
+    row that has aged off the page is not detected here — but a write to that
+    row moves its mtime and promotes it back, which changes this pair on the
+    next read, and a delete of an invisible row changes nothing a session could
+    have been told about. The signal is an optimisation, never a gate (m2).
     """
     registry = hooks.project_registry
     if registry is None:
@@ -3621,6 +3657,7 @@ def _make_system_blocks_provider(
     repo_guidance: str = "",
     language_line: str = "",
     variable_store: "VariableStore | None" = None,
+    session_id: str = "",
 ) -> Callable[..., Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -3648,9 +3685,25 @@ def _make_system_blocks_provider(
     settings change takes effect at the next session (or the next stable-prefix
     rebuild), never mid-session — rewriting it mid-session would reprice the
     cached prefix from a settings edit nobody asked to be prompt-interrupting.
+
+    ``session_id`` is captured ONCE, like the two strings above and for the
+    same reason: it rides the env block, so re-reading it per turn could not
+    produce a different answer anyway.
+
+    A FORK passes its own id here like any other session — ``_prepare`` has no
+    fork branch. What differs is the INHERITED prefix: a fork loads the
+    parent's frozen ``system_prefix`` byte-for-byte (``session/session.py``),
+    so the wire block keeps the PARENT's ``Session ID`` line (and the parent's
+    provider cache still hits), while the fork's own id reaches the same
+    request as a ``[session-state] ## Environment`` delta. That residual is
+    deliberate and pinned by
+    ``test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own``:
+    until the next prefix epoch the authoritative block names the parent while
+    ``sessions`` marks the fork's own row, and the state record is the newer
+    authority — it is in context before the first model call.
     """
 
-    environment = _env_details(cwd)
+    environment = _env_details(cwd, session_id)
     # The HOST capability answer, taken ONCE at construction and passed to every
     # render (see ``prompts_api.host_capability_probes`` for the measured
     # incident). It is read here for the same reason ``user_instructions`` and
@@ -3736,6 +3789,15 @@ def _make_system_blocks_provider(
         interactive = goal_state.interactivity() if goal_state is not None else None
         can_ask = goal_state.can_ask() if goal_state is not None else None
         channel = None if can_ask is None else (CHANNEL_ASK if can_ask else CHANNEL_NONE)
+        # The open-asks reminder (design §16/SA-D3), rendered by the session off
+        # its own live queue. Read HERE, per provider step, because that is the
+        # only cadence at which an ask raised or settled mid-turn can reach the
+        # next request. ``None`` is the reminder's third state — this host has no
+        # queue and cannot answer — and it renders NOTHING, exactly like the known
+        # empty ``""``; the difference is decided in ``Session._system_state_delta``
+        # (unknown must not ship as a removal), because only that layer can see the
+        # section the model is already reading (QA round 1, Q2).
+        open_asks = goal_state.open_asks() if goal_state is not None else None
         key = (
             knowledge_block,
             date_str,
@@ -3748,6 +3810,7 @@ def _make_system_blocks_provider(
             model_label,
             interactive,
             channel,
+            open_asks or "",
             tuple((tool.name, tool.description) for tool in tools),
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
@@ -3778,6 +3841,7 @@ def _make_system_blocks_provider(
             # tri-state note above and ``GoalState.interactivity``.
             interactive=interactive,
             channel=channel,
+            open_asks=open_asks or "",
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )
@@ -3928,7 +3992,15 @@ _STORE_MAINTENANCE_STAMP_SCHEMA = 1
 #: which the freshness check already catches through ``passes``; the version is
 #: the explicit signal, so an older build reading a newer stamp (or the reverse)
 #: retries once instead of reasoning about a half-known sequence.
-_STORE_MAINTENANCE_STAMP_VERSION = 2
+#:
+#: 3: the transcript-compression pass joined the sequence, after cleanup. A stamp
+#: written by a build that DOES compress therefore must not be reused by one
+#: whose ``passes`` list has no compression pass — and the reverse, where a
+#: build that compresses would skip a store a previous build already swept,
+#: would leave the new pass unrun until the stamp expired. The bump makes the
+#: first maintenance run after an upgrade walk the store once under the new
+#: sequence.
+_STORE_MAINTENANCE_STAMP_VERSION = 3
 _STORE_MAINTENANCE_STAMP_TTL_SECONDS = 60.0
 _STORE_MAINTENANCE_PASS_NAMES = (
     # FIRST, deliberately: the census diffs what the store held at the end of
@@ -3937,6 +4009,10 @@ _STORE_MAINTENANCE_PASS_NAMES = (
     # unaccounted disappearance the same sequence caused.
     "session store census",
     "session cleanup policy",
+    # AFTER cleanup, deliberately: a session this pass's cleanup removes makes a
+    # compression row it would have written pointless, and a transcript cleanup
+    # has just freed is not worth compressing.
+    "session transcript compression",
     "orphan process-group sweep",
     "session origin backfill",
     "session title backfill",
@@ -4110,7 +4186,7 @@ def _run_store_maintenance(
     *,
     stop_event: threading.Event | None = None,
 ) -> bool:
-    """Run the seven idempotent store passes under one daemon-owned lock.
+    """Run the eight idempotent store passes under one daemon-owned lock.
 
     Separate runtime processes can start more than the 0.75-second idle delay
     apart, so mutual exclusion alone does not suppress their duplicate walks.
@@ -4161,6 +4237,7 @@ def _run_store_maintenance(
         )
         from local_operator.session.census import run_store_census
         from local_operator.session.cleanup import cleanup_from_config
+        from local_operator.session.compression import compress_from_config
         from local_operator.tools.group_reaper import sweep_orphan_groups
 
         # NO pass here deletes a session directory on its own judgement. The
@@ -4181,6 +4258,19 @@ def _run_store_maintenance(
             (
                 "session cleanup policy",
                 lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
+            ),
+            (
+                "session transcript compression",
+                # RETURNS a result and never raises (``compress_from_config``
+                # catches its own failures), and stands down at its next
+                # directory when this process is leaving — the same shape as
+                # every other store-walking pass here.
+                lambda: compress_from_config(
+                    config_manager,
+                    config_dir,
+                    live_dir=live_dir,
+                    should_stop=stop.is_set,
+                ),
             ),
             ("orphan process-group sweep", lambda: sweep_orphan_groups(config_dir)),
             (
@@ -4228,7 +4318,7 @@ def _run_store_maintenance(
                 _write_store_maintenance_stamp(config_dir, pass_names)
             except OSError:
                 # Fail closed: without a trustworthy completion record, do
-                # not let each later process repeat the seven store-wide walks.
+                # not let each later process repeat the eight store-wide walks.
                 logger.debug(
                     "store maintenance completion stamp write failed; skipping", exc_info=True
                 )
@@ -4414,6 +4504,12 @@ async def _prepare(
         resolve_birth
     )
     yolo = bool(getattr(args, "yolo", False))
+    # The BIRTH SPEED DIAL (ui#1265): its viewer's choice for a conversation that
+    # did not exist yet, read exactly as ``birth_effort`` above is. A separate
+    # name because no CLI flag sets it -- only a viewer can pick a tier before a
+    # session exists -- so every other caller (the CLI, the TUI, ``exec``) leaves
+    # the attribute off and is constructed on the bytes it always was.
+    birth_fast = bool(getattr(args, "birth_fast", False))
 
     transcript_dir, agent_id, is_new = _transcript_dir_and_agent_id(agent, args, agent_registry)
 
@@ -4565,6 +4661,16 @@ async def _prepare(
         )
     )
     spec = model_configuration.spec
+    # THE BIRTH DIAL, clamped on the route's own ``supports_fast_mode`` -- the
+    # same conjunction the journal restore (``model_selection.fast_dial_from_row``)
+    # and the spawn environment (``launch._spawn_runtime``) apply, and for the
+    # same reason: a stored pick can outlive the catalogue that offered it, and
+    # putting the speed key on a request the provider refuses would fail the very
+    # turn this construction exists to open. CLAMPED rather than raised because
+    # the refusal belongs to the moment the user picks (the create/preview 422);
+    # by the time a birth record reaches here it is a decision already taken.
+    if birth_fast and spec.supports_fast_mode:
+        spec = spec.model_copy(update={"fast_mode": True})
 
     # ONE CONSTRUCTION SITE, and ``build_auth_store`` returns the very same
     # ``AuthStore`` on a device that borrows nothing — no network, no placement, or
@@ -4641,7 +4747,29 @@ async def _prepare(
     # exec-launched headless session (the 2026-09-28 incident's addendum), and
     # the posture surfaces had to carve an exception around a gate that ignored
     # the file they report against.
-    request_approval = _make_request_approval(yolo or _approval_mode_is_auto(config_manager))
+    #
+    # THE CONVERSATION'S OWN RECORDED CHOICE OUTRANKS THE FILE, in BOTH
+    # directions (2026-10-23). ``transcript_dir`` is this run's session
+    # directory, so a ``--resume`` reads the resumed conversation's
+    # ``approvals.json`` and starts in the mode its human left it in —
+    # including a recorded ``ask`` that must beat a config ``auto``. A fresh
+    # run's directory has no such file, which is exactly why reading it here
+    # keeps the config default for new conversations without a separate
+    # resume branch: the sidecar IS the choice, and its absence is the absence
+    # of one.
+    #
+    # Degrading to ``ask`` is preserved: an unreadable record reads as ``ask``
+    # (``approval_policy.read_override`` fails closed), and the config read
+    # itself still falls back to ``ask`` on an odd or missing file.
+    _persisted_approval, _approval_warning = read_approval_override(transcript_dir)
+    if _approval_warning:
+        print(f"\033[1;33mWarning: {_approval_warning}\033[0m", file=sys.stderr)
+    _approval_auto = (
+        _persisted_approval == "auto"
+        if _persisted_approval is not None
+        else _approval_mode_is_auto(config_manager)
+    )
+    request_approval = _make_request_approval(yolo or _approval_auto)
     # The variables surface behind list_variables/read_variable: config
     # overrides ride above the project file and process environment, and
     # values stay out of the system prompt (read on demand, not baked).
@@ -4862,6 +4990,11 @@ async def _prepare(
         repo_guidance=repo_guidance,
         language_line=language_line,
         variable_store=variable_store,
+        # ``transcript_dir.name`` IS the session id (the directory is named for
+        # it, and every other ``session_id=`` below reads the same field), so
+        # the id a listing prints and the id the prompt carries are the same
+        # bytes — exact equality is what lets a row be recognised as this one.
+        session_id=transcript_dir.name,
     )
 
     # The MONITOR gate's callable (``docs/design/monitor-tool.md`` §8): the

@@ -95,7 +95,7 @@ class _AskSession(FakeSession):
         super().__init__()
         self.answered: list[tuple[str, dict[str, Any], str]] = []
         self.declined: list[tuple[str, str]] = []
-        self.dismissed: list[tuple[str, str]] = []
+        self.dismissed: list[tuple[str, str, str | None]] = []
         self.refusals: dict[str, str] = {}
         self.dismiss_refusals: dict[str, str] = {}
 
@@ -108,8 +108,11 @@ class _AskSession(FakeSession):
         self.declined.append((ask_id, by))
         return {"ok": True}
 
-    def dismiss_ask(self, ask_id, *, by="unknown"):
-        self.dismissed.append((ask_id, by))
+    def dismiss_ask(self, ask_id, *, by="unknown", reason=None):
+        # `reason` is the dismiss chooser's word (R5): recorded beside the surface
+        # so a test can prove WHICH reason the door forwarded, and `None` is the
+        # lapsed row's one-key path — the queue's own default applies there.
+        self.dismissed.append((ask_id, by, reason))
         error = self.dismiss_refusals.get(ask_id)
         return {"ok": not error, **({"error": error} if error else {})}
 
@@ -586,7 +589,7 @@ async def test_the_list_declines_and_dismisses_explicitly(enabled):
         await pilot.press("down")
         await pilot.press("x")
         await _settle(pilot)
-        assert session.dismissed == [("a2", "terminal")]
+        assert session.dismissed == [("a2", "terminal", None)]
 
 
 async def test_the_list_marks_a_timed_out_ask_as_timed_out_and_read_only(enabled):
@@ -1230,9 +1233,15 @@ async def test_the_list_header_stays_one_line_and_never_splits_a_hint(enabled, s
         header = painted[0]
         assert cell_len(header) <= listing.content_size.width, header
         # Every hint that IS painted is painted whole — key and verb together.
-        for hint in listing.HEADER_HINTS:
-            if hint.split()[-1] in header:
-                assert hint in header, f"{hint!r} was split at the row end"
+        # Probed by removing the whole ones and looking for a leftover piece:
+        # hints now share words (`x dismiss` / `enter dismiss`), so a single word
+        # appearing proves nothing about which hint painted it.
+        live = listing.header_hints()
+        residue = header
+        for hint in live:
+            residue = residue.replace(hint, "")
+        for hint in live:
+            assert hint.split()[-1] not in residue, f"{hint!r} was split at the row end"
         # The hint that survives at this width, in full.
         assert kept in header, header
 
@@ -1411,7 +1420,7 @@ async def test_the_bar_and_the_list_speak_from_one_fold(enabled):
     """
     session = _AskSession()
     app = _app(session)
-    async with app.run_test(size=(120, 30)) as pilot:
+    async with app.run_test(size=(170, 30)) as pilot:
         await _settle(pilot)
         app._sync_ask_surface(
             ask_rows(
@@ -1598,7 +1607,7 @@ async def test_the_urgency_word_counts_the_same_set_on_both_surfaces(enabled):
     """
     session = _AskSession()
     app = _app(session)
-    async with app.run_test(size=(120, 30)) as pilot:
+    async with app.run_test(size=(170, 30)) as pilot:
         await _settle(pilot)
         app._sync_ask_surface(
             ask_rows(
@@ -1659,8 +1668,8 @@ class _ViewerAskSession(FakeSession):
         self.wire.append(("decline", ask_id, {}, by))
         return {"ok": False, "error": "already answered by phone."}
 
-    async def dismiss_ask(self, ask_id, *, by="unknown"):
-        self.wire.append(("dismiss", ask_id, {}, by))
+    async def dismiss_ask(self, ask_id, *, by="unknown", reason=None):
+        self.wire.append(("dismiss", ask_id, {"reason": reason}, by))
         return {"ok": True}
 
 

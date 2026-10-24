@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.library import index
+from local_operator.library import indexer, service
 from local_operator.server.routes import capabilities, desktop_library
 from local_operator.session.attachments import cache_media
 
@@ -21,6 +21,7 @@ from ._fixtures import (
     png,
     session,
     user_row,
+    wav,
     write_rows,
 )
 
@@ -53,8 +54,11 @@ def seed(root: Path) -> tuple[str, str, str]:
     assert block and block.attachment
     session(root, SESSION, write_rows("w1", 1, text) + image_rows("g1", 2, block.attachment))
     session(root, OTHER, [user_row("u1", 3, f"see {text}")])
-    catalog = index.build_catalog(root, budget_s=None)
-    by_name = {asset.derived_name: asset.id for asset in catalog.assets}
+    # Build the index the daemon would have built, then read the ids back from
+    # the same SQLite tables the route reads.
+    indexer.rebuild_now(root)
+    frame = service.list_assets(root, service.Query())
+    by_name = {row["name"]: row["id"] for row in frame["rows"]}
     return by_name["report.txt"], by_name["cat.png"], block.attachment
 
 
@@ -236,6 +240,7 @@ async def test_a_metadata_edit_does_not_duplicate_or_skip_a_page(api) -> None:
         path.write_text(name)
         rows += write_rows(f"w{number}", number + 1, path)
     session(root, SESSION, rows)
+    indexer.rebuild_now(root)
 
     first = await client.get(
         "/v1/desktop/library/assets", params={"sort": "name", "order": "asc", "limit": 2}
@@ -287,3 +292,268 @@ async def test_scope_final_narrows_the_route_listing(api) -> None:
     refused = await client.get("/v1/desktop/library/assets", params={"scope": "nope"})
     assert refused.status_code == 422
     assert refused.json()["detail"]["code"] == "library_bad_filter"
+
+
+# ---------------------------------------------------------------------------
+# Waveform: peaks are read, never decoded by a renderer
+# ---------------------------------------------------------------------------
+
+
+def audio_rows(
+    call_id: str, ts: float, digest: str, name: str = "boom.wav"
+) -> list[dict[str, Any]]:
+    """One ``generate_sound_effect`` result carrying an audio attachment block."""
+    block = {
+        "kind": "audio",
+        "attachment": digest,
+        "content_type": "audio/wav",
+        "name": name,
+        "size_bytes": len(wav()),
+        "duration_s": 0.2,
+    }
+    return [
+        {
+            "id": f"a-{call_id}",
+            "ts": ts,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "assistant",
+                "content": [],
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "name": "generate_sound_effect",
+                        "arguments": {"prompt": "boom"},
+                    }
+                ],
+            },
+        },
+        {
+            "id": f"t-{call_id}",
+            "ts": ts + 0.5,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "tool",
+                "content": [{"text": "ok"}, block],
+                "tool_call_id": call_id,
+                "tool_name": "generate_sound_effect",
+                "provider_payload": {
+                    "details": {
+                        "artifacts": [
+                            {
+                                "digest": digest,
+                                "kind": "audio",
+                                "name": name,
+                                "content_type": "audio/wav",
+                                "duration_s": 0.2,
+                            }
+                        ]
+                    }
+                },
+            },
+        },
+    ]
+
+
+async def test_waveform_reads_the_digest_sidecar_and_computes_a_path_asset_once(
+    api, monkeypatch
+) -> None:
+    client, root = api
+    text_id, _image_id, _digest = seed(root)
+    block = cache_media(wav(), "audio/wav", kind="audio", name="boom.wav")
+    assert block and block.attachment
+    clip = root.parent / "clip.wav"
+    clip.write_bytes(wav())
+    broken = root.parent / "broken.wav"
+    broken.write_bytes(b"not audio")
+    session(
+        root,
+        "999999999999",
+        write_rows("w9", 1, clip)
+        + write_rows("w8", 2, broken)
+        + audio_rows("s9", 3, block.attachment),
+    )
+    indexer.rebuild_now(root)
+    by_name = {row["name"]: row["id"] for row in service.list_assets(root, service.Query())["rows"]}
+
+    digest_id = by_name["boom.wav"]
+    digest_response = await client.get(f"/v1/desktop/library/assets/{digest_id}/waveform")
+    assert digest_response.status_code == 200, digest_response.text
+    payload = digest_response.json()
+    assert payload["version"] == 1 and payload["bars"] == 240 and len(payload["peaks"]) == 240
+    assert digest_response.headers["x-content-type-options"] == "nosniff"
+    assert digest_response.headers["cache-control"] == "no-store"
+
+    path_id = by_name["clip.wav"]
+    path_response = await client.get(f"/v1/desktop/library/assets/{path_id}/waveform")
+    assert path_response.status_code == 200, path_response.text
+    assert path_response.json()["peaks"] == payload["peaks"]
+    # Computed ONCE, cached under the thumbnail cache's own stamp scheme.
+    cache_dir = root / "cache" / "library" / "peaks"
+    cached = list(cache_dir.glob(f"{path_id}-*.json"))
+    assert len(cached) == 1
+    # The second read must come from the cache: make a decode fail the test.
+    from local_operator.library import service as library_service
+
+    original_decode = library_service._decode_peaks_bounded
+    monkeypatch.setattr(
+        library_service,
+        "_decode_peaks_bounded",
+        lambda raw: pytest.fail("a cached waveform was decoded a second time"),
+    )
+    again = await client.get(f"/v1/desktop/library/assets/{path_id}/waveform")
+    assert again.status_code == 200 and again.json() == path_response.json()
+    # Restore before the 404 cases: an undecodable asset MUST reach the decoder.
+    monkeypatch.setattr(library_service, "_decode_peaks_bounded", original_decode)
+
+    # No waveform is a designed 404 -- never a fabricated flat line.
+    # A digest asset that is NOT audio has no waveform either, and the kind check
+    # must refuse it before it can take the one decoder slot.
+    image = await client.get(f"/v1/desktop/library/assets/{_image_id}/waveform")
+    assert image.status_code == 404
+    undecodable = by_name["broken.wav"]
+    broken_response = await client.get(f"/v1/desktop/library/assets/{undecodable}/waveform")
+    assert broken_response.status_code == 404
+    text = await client.get(f"/v1/desktop/library/assets/{text_id}/waveform")
+    assert text.status_code == 404
+    assert text.json()["detail"]["code"] == "library_content_missing"
+    traversal = await client.get("/v1/desktop/library/assets/../../etc/passwd/waveform")
+    assert traversal.status_code in (404, 422)
+    bad = await client.get("/v1/desktop/library/assets/la_nothex/waveform")
+    assert bad.status_code == 422
+
+
+def test_waveform_service_refuses_a_denied_path(tmp_path, monkeypatch) -> None:
+    """The denylist is re-checked on every read (``resolve_content``'s rule).
+
+    A path that was harmless when it was indexed can become sensitive later; the
+    waveform route maps the refusal to 404 like every other unavailable waveform.
+    """
+    from local_operator.library import service
+    from local_operator.session_files import service as files_service
+
+    root = config_root(monkeypatch, tmp_path)
+    clip = tmp_path / "denied.wav"
+    clip.write_bytes(wav())
+    session(root, SESSION, write_rows("w1", 1, clip))
+    indexer.rebuild_now(root)
+    asset_id = {
+        row["name"]: row["id"] for row in service.list_assets(root, service.Query())["rows"]
+    }["denied.wav"]
+    monkeypatch.setattr(files_service, "make_deny", lambda config: (lambda path: True))
+    with pytest.raises(service.ContentUnavailable):
+        service.waveform(root, asset_id)
+
+
+async def test_a_corrupt_index_recovers_and_answers_a_building_page(api, monkeypatch) -> None:
+    """ "Derived" must mean "rebuildable at runtime", not only in a docstring."""
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    client, root = api
+    seed(root)
+    original = LibraryStore.query_page
+    recovered = {"done": False}
+
+    def broken(self, *args, **kwargs):
+        if not recovered["done"]:
+            raise IndexUnavailable("file is not a database")
+        return original(self, *args, **kwargs)
+
+    def recover(self) -> bool:
+        recovered["done"] = True
+        return True
+
+    monkeypatch.setattr(LibraryStore, "query_page", broken)
+    monkeypatch.setattr(LibraryStore, "recover_derived", recover)
+    response = await client.get("/v1/desktop/library/assets")
+    assert response.status_code == 200, response.text
+    page = response.json()["result"]
+    assert page["state"] == "building" and page["rows"] == []
+
+
+async def test_a_corrupt_index_that_cannot_recover_is_a_503(api, monkeypatch) -> None:
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    client, root = api
+    seed(root)
+
+    def boom(self, *args, **kwargs):
+        raise IndexUnavailable("file is not a database")
+
+    monkeypatch.setattr(LibraryStore, "query_page", boom)
+    monkeypatch.setattr(LibraryStore, "asset", boom)
+    monkeypatch.setattr(LibraryStore, "recover_derived", lambda self: False)
+
+    listed = await client.get("/v1/desktop/library/assets")
+    assert listed.status_code == 503, listed.text
+    assert listed.json()["detail"]["code"] == "library_metadata_unavailable"
+
+    detail = await client.get("/v1/desktop/library/assets/la_0123456789abcdef")
+    assert detail.status_code == 503, detail.text
+
+
+async def test_an_unknown_tag_id_is_not_a_name_grammar_error(api) -> None:
+    """An id the caller copied is a missing resource, not a malformed name."""
+    client, root = api
+    text_id, _image_id, _digest = seed(root)
+    response = await client.put(
+        f"/v1/desktop/library/assets/{text_id}/tags", json={"tags": ["deadbeef01"]}
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["code"] == "library_tag_unknown"
+
+
+async def test_a_torn_derived_page_is_never_a_500(api, monkeypatch) -> None:
+    """A malformed b-tree inside ``idx_occurrences`` used to escape as a 500.
+
+    The store translates ``sqlite3.DatabaseError`` into ``IndexUnavailable`` at
+    its read boundary, so the route's one-shot recovery answers a building page.
+    """
+    import sqlite3
+
+    from local_operator.library.store import LibraryStore
+
+    client, root = api
+    seed(root)
+
+    def torn(self, *args, **kwargs) -> None:
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(LibraryStore, "_occurrences", torn)
+    response = await client.get("/v1/desktop/library/assets?scope=all")
+    assert response.status_code != 500, response.text
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["state"] == "building"
+
+
+async def test_write_routes_map_an_unreadable_index_to_the_503_envelope(api, monkeypatch) -> None:
+    from local_operator.library.store import IndexUnavailable, LibraryStore
+
+    client, root = api
+    text_id, _image_id, _digest = seed(root)
+
+    def boom(self, *args, **kwargs):
+        raise IndexUnavailable("file is not a database")
+
+    monkeypatch.setattr(LibraryStore, "asset", boom)
+    monkeypatch.setattr(LibraryStore, "recover_derived", lambda self: False)
+
+    patched = await client.patch(f"/v1/desktop/library/assets/{text_id}", json={"name": "Renamed"})
+    tagged = await client.put(f"/v1/desktop/library/assets/{text_id}/tags", json={"tags": []})
+    chatted = await client.put(
+        f"/v1/desktop/library/assets/{text_id}/chat", json={"session_id": SESSION}
+    )
+    for response in (patched, tagged, chatted):
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["code"] == "library_metadata_unavailable"
+
+
+async def test_an_empty_library_answers_ready_not_building(api) -> None:
+    """A fresh install has no sessions: that is an empty READY library."""
+    client, _root = api
+    response = await client.get("/v1/desktop/library/assets")
+    assert response.status_code == 200, response.text
+    page = response.json()["result"]
+    assert page["state"] == "ready" and page["rows"] == [] and page["total"] == 0

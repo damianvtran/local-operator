@@ -52,6 +52,11 @@ from local_operator.resume import (
     recent_sessions,
     session_origin,
 )
+from local_operator.session.approval_policy import (
+    OVERRIDE_FILENAME,
+    read_override,
+    write_override,
+)
 
 PARENT_ID = "aaaaaaaaaaaa"
 
@@ -122,6 +127,28 @@ class TestTheCloneItself:
             "created_at.json",  # own birth, never the parent's inherited journal date
             "origin.json",  # written by the fork itself, not copied
         }
+
+    def test_a_parents_approval_choice_does_not_reach_the_fork(self, tmp_path: Path) -> None:
+        """A FORK STARTS WITH NO APPROVAL CHOICE OF ITS OWN (2026-10-23).
+
+        ``approvals.json`` records a decision about ONE conversation. A fork is
+        a new conversation that shares history, so inheriting ``auto`` would
+        expand the consent the parent's human gave — every fork of a long
+        unattended run would open ungated with nothing in its own history
+        saying anyone chose that here. The record is written with a REAL payload
+        (not the generic deny-list loop's placeholder) so this pins the reader's
+        view as well: the fork's own sidecar question answers "no choice".
+        """
+        parent = _seed_parent(tmp_path)
+        write_override(parent, "auto")
+
+        fork_id = fork_session(tmp_path, PARENT_ID)
+        fork_dir = tmp_path / "sessions" / fork_id
+
+        assert not (fork_dir / OVERRIDE_FILENAME).exists()
+        assert read_override(fork_dir) == (None, None)
+        # ...while the parent keeps its own record, untouched.
+        assert read_override(parent) == ("auto", None)
 
     def test_the_fork_is_left_unowned_so_its_own_boot_can_claim_it(self, tmp_path: Path) -> None:
         """R1. The fork must have NO live owner when the clone returns.

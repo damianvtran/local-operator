@@ -807,6 +807,30 @@ async def test_ctrl_c_twice_exits_and_offers_the_resume_command(
         assert any("the session can be resumed" in row for row in rows(app))
         assert not any("--resume" in row for row in rows(app))
 
+        # RE-ARM THE LADDER IMMEDIATELY BEFORE THE SECOND PRESS, so the press
+        # lands INSIDE the window rather than wherever the runner got to.
+        #
+        # The ladder compares two real ``time.monotonic()`` readings against
+        # :data:`DOUBLE_INTERRUPT_WINDOW_S` (1.5 s), and everything above is
+        # unbounded on a loaded machine: ``pilot.pause()`` waits for the app to
+        # go idle, then three separate ``rows(app)`` calls each re-render the
+        # frame. Measured on this host, the quiet gap is 0.216 s — but 1.6 s of
+        # a stalled event loop turns the second press into a FIRST press and
+        # leaves the app running, which is exactly the failure CI caught
+        # (run 39838493282, 3.12 shard 3: ``assert not app.is_running`` got
+        # ``True``, the cell taking 2.48 s against ~1.2 s for its siblings).
+        #
+        # Re-stamping keeps what the cell is actually about — two presses inside
+        # the window leave — instead of betting on the runner's speed. Nothing
+        # about the window is weakened: the assertion below pins that the FIRST
+        # press armed it, and the other two halves stay pinned elsewhere —
+        # ``test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit`` ages
+        # this same stamp past the window rather than sleeping for it, and
+        # ``test_the_double_interrupt_window_is_a_deliberate_double_tap`` pins
+        # the constant's value, which neither pilot cell can (agent review
+        # round 1, R1-1).
+        assert app._last_interrupt_at, "the first press did not arm the exit ladder"
+        app._last_interrupt_at = time.monotonic()
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert not app.is_running
@@ -837,6 +861,31 @@ async def test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit() -> None:
         assert session.aborts == ["interrupted", "interrupted"]
         # One hint, not one per press: it is replaced rather than repeated.
         assert len([row for row in rows(app) if "ctrl+c again to exit" in row]) == 1
+
+
+def test_the_double_interrupt_window_is_a_deliberate_double_tap() -> None:
+    """Pin the window's VALUE, which both pilot cells above are relative to.
+
+    A unit test rather than a pilot one because it asserts a fact about the
+    constant, needs no app, and cannot itself flake.
+
+    Both cells drive the constant instead of a literal — the fast one re-stamps
+    the ladder, the slow one ages it by ``DOUBLE_INTERRUPT_WINDOW_S + 1`` — so
+    both would pass with the window set to 20 ms or to a minute. Without this
+    the number itself is pinned nowhere (agent review round 1, R1-1).
+
+    The bounds are the two real failures. Too SHORT and two presses of the same
+    key stop being one gesture: an impatient second tap becomes a fresh
+    interrupt and never an exit, so a user who wants out cannot get out by
+    pressing twice. Too LONG and an ordinary "interrupt two turns in a row"
+    quits the app, which is the hazard the slow cell above exists for. 1.5 s is
+    one deliberate double-tap; half a second is the floor for "one gesture" and
+    a few seconds the ceiling for "not two turns".
+    """
+    assert 0.5 <= DOUBLE_INTERRUPT_WINDOW_S <= 3.0, (
+        f"DOUBLE_INTERRUPT_WINDOW_S is {DOUBLE_INTERRUPT_WINDOW_S}s: outside the range where "
+        "two presses are one deliberate double-tap"
+    )
 
 
 @pytest.mark.asyncio
@@ -1179,12 +1228,19 @@ async def test_a_turn_start_racing_the_stop_cannot_revive_a_denied_ask() -> None
 
 
 @pytest.mark.asyncio
-async def test_approvals_auto_answers_the_question_on_screen() -> None:
-    """ "Every tool runs without asking" must include the one already asking.
+async def test_approvals_auto_leaves_the_question_on_screen_unanswered() -> None:
+    """ "Every tool runs without asking" governs the NEXT request, not this one.
 
-    Setting the mode without settling the live prompt left the loudest notice in
-    the app next to a question still waiting, with the tool behind it parked on
-    a future nothing would settle.
+    This test used to pin the opposite: `/approvals auto` answered the visible
+    prompt as allowed, through the widget, so the transcript kept an honest
+    receipt of a decision the USER never made. A mode change is a statement
+    about future requests; answering the one on screen on its behalf is the
+    class of "the setting did something the user did not ask for" this round
+    removes (2026-10-23).
+
+    What the user gets instead: the card stays parked and answerable, its own
+    reserved status slot says the mode was saved, and the next gate is the one
+    that skips.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1194,13 +1250,23 @@ async def test_approvals_auto_answers_the_question_on_screen() -> None:
         session.streaming = True
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: make"))
         await pilot.pause()
-        assert app.query(ApprovalPrompt)
+        card = app.query(ApprovalPrompt).first()
+        assert card
 
         app._run_slash_command("/approvals auto")
         await pilot.pause()
-        assert await asyncio.wait_for(pending, 2) is True
-        painted = [strip.text for strip in app.screen._compositor.render_strips()]
-        assert [row for row in painted if "allowed" in row]
+
+        assert not pending.done(), "a mode change answered a request nobody answered"
+        assert not card.answered
+        text = "\n".join(card.render_lines_for_test())
+        assert "Auto saved for this session, with this conversation" in text, text
+        assert app._approve_all is True
+
+        # The parked request still takes an answer, and then the gate is loose.
+        await pilot.press("n")
+        assert await asyncio.wait_for(pending, 2) is False
+        second = asyncio.ensure_future(_approval_gate(session)("bash", "run: make"))
+        assert await asyncio.wait_for(second, 2) is True
 
 
 @pytest.mark.asyncio
@@ -1861,6 +1927,16 @@ async def test_a_narrow_card_still_names_what_it_is_authorising() -> None:
     `rm -rf` that never named the tool, the command, or the target, with the
     cursor parked on the permissive option. The question now outranks both the
     option rows and the count, so the last thing to go is what is being asked.
+
+    RE-DERIVED for the inline auto handles (2026-10-23). The tight treatment
+    replaces the movement/enter/escape hint with the rail plus the mode and the
+    two destinations, which the design spec does deliberately: the answer
+    letters are all visible in the rail, so the hint is no longer the only place
+    the keys are named. The assertion that the exit is "still stated" moved with
+    it — what must hold now is that the frame names its SUBJECT and every
+    ANSWER it can take, including Deny. The D9 state this test was written for
+    (a frame whose entire content was the word for refusing) is impossible
+    while three labels are drawn.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1879,8 +1955,14 @@ async def test_a_narrow_card_still_names_what_it_is_authorising() -> None:
         # The subject is on screen: the tool AND its target.
         assert "bash" in text, lines
         assert "rm -rf" in text, lines
-        # And the exit is still stated.
-        assert "esc" in lines[-1], lines
+        # Every answer it can take is visible, including the refusal — the
+        # property D9's `esc deny`-only frame failed.
+        assert "y.Allow" in text, lines
+        assert "n.Deny" in text, lines
+        assert "A.Allow all" in text, lines
+        # ...and both setting destinations are named, so the row that used to
+        # carry the hint still carries an actionable sentence.
+        assert "[S]session" in lines[-1] and "[G]all sessions" in lines[-1], lines
 
         pending.cancel()
         try:

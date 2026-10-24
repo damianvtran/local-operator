@@ -227,9 +227,11 @@ def fingerprint_snapshot(kind: Kind, fields: Mapping[str, Any]) -> str:
     transcripts, credentials, or local provenance.
     """
     if kind == "skill":
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_json
 
-        return SkillDocument.from_json(dict(fields)).fingerprint
+        # FORM DISPATCH: a bundle link's fingerprint is its tree hash, which is
+        # recomputable from the managed directory; a document's is unchanged.
+        return skill_manifest_from_json(dict(fields)).fingerprint
     return _sha(
         json.dumps(
             dict(fields), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -239,9 +241,9 @@ def fingerprint_snapshot(kind: Kind, fields: Mapping[str, Any]) -> str:
 
 def fingerprint_fields(kind: Kind, fields: Mapping[str, Any]) -> str:
     if kind == "skill":
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_json
 
-        return SkillDocument.from_json(dict(fields)).fingerprint
+        return skill_manifest_from_json(dict(fields)).fingerprint
     if kind == "team":
         return fingerprint_team(fields)
     return fingerprint_agent(
@@ -311,6 +313,12 @@ class BaselineRecord:
     #: has no managed directory. Only an explicit write may move it, and only
     #: the managed-skill writer (install/apply) may move it back to ``present``.
     content_state: ContentState = "present"
+    #: The publisher a PUBLIC bundle install was confirmed against (design §6.2).
+    #: ``publisher_id`` is the binding value (a display name is user-controlled),
+    #: ``publisher_name`` is display-only and ``archive_hash`` the exact bytes
+    #: confirmed. A later update whose row names another publisher REFUSES rather
+    #: than silently replacing content under a consent given to someone else.
+    bundle_confirmation: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", deepcopy(dict(self.fields)))
@@ -334,6 +342,11 @@ class BaselineRecord:
             "legacy_subscribe_hint": self.legacy_subscribe_hint,
             "scope_known": self.scope_known,
             "content_state": self.content_state,
+            "bundle_confirmation": (
+                deepcopy(dict(self.bundle_confirmation))
+                if self.bundle_confirmation is not None
+                else None
+            ),
         }
 
 
@@ -582,6 +595,31 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
     content_state = raw.get("content_state", "present")
     if content_state not in ("present", "absent"):
         return None
+    bundle_confirmation = None
+    raw_confirmation = raw.get("bundle_confirmation")
+    if raw_confirmation is not None:
+        # A persisted pin is a SECURITY input: only a well-formed one is
+        # trusted. An unreadable one is DROPPED, not the record: a hand-edited
+        # pin must not erase the link (round-2 M3b). With no pin the update
+        # behaves like an older record and the public consent gate still
+        # applies to any install.
+        if isinstance(raw_confirmation, dict):
+            publisher_id = raw_confirmation.get("publisher_id")
+            archive_hash = raw_confirmation.get("archive_hash")
+            publisher_name = raw_confirmation.get("publisher_name", "")
+            if (
+                isinstance(publisher_id, str)
+                and publisher_id.strip()
+                and isinstance(publisher_name, str)
+                and isinstance(archive_hash, str)
+                and len(archive_hash) == 64
+                and all(c in "0123456789abcdef" for c in archive_hash)
+            ):
+                bundle_confirmation = {
+                    "publisher_id": publisher_id.strip(),
+                    "publisher_name": publisher_name,
+                    "archive_hash": archive_hash,
+                }
     return BaselineRecord(
         kind=kind,
         local_id=local_id,
@@ -600,6 +638,7 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
         legacy_subscribe_hint=hint,
         scope_known=scope_known,
         content_state=content_state,
+        bundle_confirmation=bundle_confirmation,
     )
 
 

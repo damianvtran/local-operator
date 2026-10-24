@@ -141,6 +141,10 @@ def effort_not_in_levels(*, model: str, levels: str, effort: str) -> Msg:
     )
 
 
+def fast_mode_unsupported(*, model: str) -> Msg:
+    return Msg("wire.errors.desktop.fast_mode_unsupported", {"model": model})
+
+
 def feed_subscriber_limit() -> Msg:
     return Msg("wire.errors.desktop.feed_subscriber_limit", {})
 

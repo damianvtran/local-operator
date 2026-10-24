@@ -579,6 +579,23 @@ export function attachmentUrl(
 	return `/api/sessions/${encodeURIComponent(sessionId)}/attachment?${q}`;
 }
 
+/** One supplement sound's bytes, keyed by the beat's own
+    `sounds[].attachment` digest. A separate route from `attachmentUrl` on
+    purpose: a turn's generated sound is a supplement artifact with no message
+    block to index, so `(entry, kind, i)` cannot address it. Range-capable — the
+    player's media element needs 206s — and the digest is the cache key. */
+export function soundUrl(sessionId: string, digest: string): string {
+	const q = new URLSearchParams({ digest });
+	return `/api/sessions/${encodeURIComponent(sessionId)}/sound?${q}`;
+}
+
+/** The waveform sidecar for one supplement sound, keyed by the same digest.
+    404 (never fabricated zeros) means "draw the flat scrubber". */
+export function soundWaveformUrl(sessionId: string, digest: string): string {
+	const q = new URLSearchParams({ digest });
+	return `/api/sessions/${encodeURIComponent(sessionId)}/waveform?${q}`;
+}
+
 /* ---- turn supplements ("Highlights", memo §2.7) --------------------------- */
 
 /** The component document route: `{html}` assembled server-side; the bytes
@@ -1001,4 +1018,10 @@ export function libraryBytesUrl(assetId: string, download = false): string {
 
 export function libraryThumbUrl(assetId: string, width = 480): string {
 	return `/api/library/assets/${encodeURIComponent(assetId)}/thumbnail?w=${width}`;
+}
+
+/** One audio asset's waveform payload (`no-store`). A 404 is the honest
+    no-waveform state, which the player draws as a flat scrubber. */
+export function libraryWaveformUrl(assetId: string): string {
+	return `/api/library/assets/${encodeURIComponent(assetId)}/waveform`;
 }

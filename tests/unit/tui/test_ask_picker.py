@@ -1196,6 +1196,14 @@ async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> No
     against the app's 5, and pinned the rule at the TERMINAL width when the
     real card is inset by the stylesheet's padding to `size[0] - 4`. The body
     text was right; the geometry it was measured in was not.
+
+    RE-DERIVED for the inline auto handles (2026-10-23). The two blank spacer
+    rows are now the approval card's effective-mode sentence and its two
+    setting destinations, which the design spec places AFTER the answer rows
+    and before the hint. The card's height is unchanged (twelve rows at every
+    pinned size): the new rows spend the spacers, they do not buy height. Every
+    other line is byte-identical, and the no-window assertions below are
+    untouched — this is the intended layout, not a relaxation of the guard.
     """
     # The frames the REAL app draws, measured through `OperatorApp` with the
     # stylesheet applied and the transcript seeded. Written out in full because
@@ -1205,14 +1213,14 @@ async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> No
         "the agent needs your approval",
         "─",
         f"Allow bash? {_APPROVAL_TARGET}",
-        "",
         "❯ y. Allow",
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
         "  A. Allow all",
         "     stop asking for this session",
-        "",
+        "Approvals: Ask — global default.",
+        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 
@@ -6010,6 +6018,14 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
     A guard that cannot see the app's real geometry is not a guard. See
     :func:`_real_approval_card` for why the fix is the real `OperatorApp` and
     not a dock bolted onto the lightweight host.
+
+    RE-DERIVED for the inline auto handles (2026-10-23). The two blank spacer
+    rows are now the approval card's effective-mode sentence and its two
+    setting destinations, which the design spec places AFTER the answer rows
+    and before the hint. The card's height is unchanged (twelve rows at every
+    pinned size): the new rows spend the spacers, they do not buy height. Every
+    other line is byte-identical, and the no-window assertions below are
+    untouched — this is the intended layout, not a relaxation of the guard.
     """
     #: Card width is the terminal less the stylesheet's horizontal padding.
     #: Derived rather than hardcoded per size so a padding change fails with a
@@ -6018,14 +6034,14 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
         "the agent needs your approval",
         "─",
         f"Allow bash? {_APPROVAL_TARGET}",
-        "",
         "❯ y. Allow",
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
         "  A. Allow all",
         "     stop asking for this session",
-        "",
+        "Approvals: Ask — global default.",
+        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 
@@ -6954,19 +6970,27 @@ async def test_the_approval_gate_is_byte_identical_with_the_thumb() -> None:
     consequence or adds an option so the gate windows, ``show_position`` flips
     true, a thumb appears over an authorisation surface, and this fails with a
     readable cause.
+
+    RE-DERIVED for the inline auto handles (2026-10-23). The two blank spacer
+    rows are now the approval card's effective-mode sentence and its two
+    setting destinations, which the design spec places AFTER the answer rows
+    and before the hint. The card's height is unchanged (twelve rows at every
+    pinned size): the new rows spend the spacers, they do not buy height. Every
+    other line is byte-identical, and the no-window assertions below are
+    untouched — this is the intended layout, not a relaxation of the guard.
     """
     body = [
         "the agent needs your approval",
         "─",
         f"Allow bash? {_APPROVAL_TARGET}",
-        "",
         "❯ y. Allow",
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
         "  A. Allow all",
         "     stop asking for this session",
-        "",
+        "Approvals: Ask — global default.",
+        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 
