@@ -1,0 +1,9 @@
+{
+  "tui.palette.kind_agent": "ایجنٹ",
+  "tui.palette.kind_command": "کمانڈ",
+  "tui.palette.kind_session": "سیشن",
+  "tui.palette.kind_setting": "ترتیب",
+  "tui.palette.kind_team": "ٹیم",
+  "tui.palette.no_matches": "کوئی مماثلت نہیں ملی",
+  "tui.palette.placeholder": "کمانڈز، ترتیبات، سیشنز، ایجنٹس تلاش کریں…"
+}

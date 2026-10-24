@@ -1,0 +1,279 @@
+{
+  "schema": 1,
+  "record_kind": "translator_provenance",
+  "locale": "ur",
+  "scope": "core namespace set carried by shipped ru at base revision; excludes desktop catalogues",
+  "base_revision": "b8f47dd34745d9bfecafcdca884d79016c3004c5",
+  "date": "2026-10-23",
+  "status": "translation_complete_pending_independent_audit",
+  "source_set": {
+    "reference_locale": "ru",
+    "namespace_count": 23,
+    "key_count": 1355,
+    "empty_namespaces": [
+      "wire.errors",
+      "wire.incidents",
+      "wire.notices"
+    ]
+  },
+  "integrator": {
+    "agent": "translator (lopdev team)",
+    "session": "3f68f20b2cad",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "fallback": "none",
+    "note": "Integrated disjoint translations; preserved source placeholder order and shortened two /help labels."
+  },
+  "contributors": [
+    {
+      "agent": "translator specialist (ur-wire-settings)",
+      "task": "203043716d58",
+      "session": "ffc94c8cb17d",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none reported; parent model selected"
+    },
+    {
+      "agent": "translator specialist (ur-wire-relay)",
+      "task": "df4e11a1ea6e",
+      "session": "7a648afb0f8d",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none reported; parent model selected"
+    },
+    {
+      "agent": "translator specialist (ur-tui-flows)",
+      "task": "f9393060905d",
+      "session": "7c4a4229b011",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none reported; parent model selected"
+    },
+    {
+      "agent": "translator specialist (ur-tui-shell)",
+      "task": "89c8c9c3dff1",
+      "session": "52136848d1fc",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "fallback": "none reported; parent model selected"
+    }
+  ],
+  "hash_algorithm": "SHA-256 over exact UTF-8 file bytes; context_sha256 is null when English has no sidecar",
+  "namespaces": [
+    {
+      "namespace": "cli.exec_remote_help",
+      "key_count": 11,
+      "en_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "ur_sha256": "6fe867390d79bd9c59172ffd17cfc0a3db6016df45b426b6a945fcbf74662cf6",
+      "context_sha256": "fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f",
+      "translator_session": "7a648afb0f8d"
+    },
+    {
+      "namespace": "relay.ask",
+      "key_count": 11,
+      "en_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "ur_sha256": "960c074ad43959e9fb01d09768d0ccdb4ced21f2b14db5a64713e998d0b78248",
+      "context_sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42",
+      "translator_session": "7a648afb0f8d"
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key_count": 19,
+      "en_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "ur_sha256": "4f0fab7f40bacc152b1cabba0244372b8d8dec40213c778ef8c417ac6be242aa",
+      "context_sha256": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7",
+      "translator_session": "7a648afb0f8d"
+    },
+    {
+      "namespace": "tui.asks",
+      "key_count": 11,
+      "en_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "ur_sha256": "a6b23ec177d56c65c3d7bb22c950f7e202a67ed2dd19467d847015a246a29a1f",
+      "context_sha256": "e09cd8e796359ab8c4d8de2fd5a59bb990c76f8488c28846cfb1623610507362",
+      "translator_session": "52136848d1fc"
+    },
+    {
+      "namespace": "tui.authoring",
+      "key_count": 49,
+      "en_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+      "ur_sha256": "81bb894f733b2ce4362b3c32d6e3054e8f0d167319ab5d6f2cf28a9f6a0fb61c",
+      "context_sha256": "df98bba4457c1080b3941e9a24a04a52e360d11d2a07bdda992861c6cb54928c",
+      "translator_session": "7c4a4229b011"
+    },
+    {
+      "namespace": "tui.palette",
+      "key_count": 7,
+      "en_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "ur_sha256": "1e320792eb96004d220e0ead013b628b749b9eb5f904421d00c6532f4513ccea",
+      "context_sha256": "edd5a12c66ec852e65e9afb4eee92f1b9436a3a148683b8d756a002b68ff06f7",
+      "translator_session": "52136848d1fc"
+    },
+    {
+      "namespace": "tui.projects_edit",
+      "key_count": 35,
+      "en_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "ur_sha256": "971f60ecf5722347088e73ca36d881b2d143c3bcd9e1d0e3bb0bb0a615e0b477",
+      "context_sha256": "db995023c6489ee9313403c2f463c36ea65162ceea52a572c3da26db02fbd01c",
+      "translator_session": "7c4a4229b011"
+    },
+    {
+      "namespace": "tui.review",
+      "key_count": 73,
+      "en_sha256": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+      "ur_sha256": "683847761d616f3145caaaabd733f57af5c1e749c7c640403cd92f22e54bd868",
+      "context_sha256": "b879498a3ba2debfac6ec65a640a75b8d53e71073a1d32676dc41f7325dbc202",
+      "translator_session": "7c4a4229b011"
+    },
+    {
+      "namespace": "tui.schedule",
+      "key_count": 61,
+      "en_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "ur_sha256": "3d3dc64afa2a4cb1a486daae2d7b446e6ad13608e0131c26100d1fe3e43f0f0f",
+      "context_sha256": "829e18450b21ca836cc047813b9d18770414f1fd23f14c18b794c1f45648afb4",
+      "translator_session": "7c4a4229b011"
+    },
+    {
+      "namespace": "tui.status",
+      "key_count": 7,
+      "en_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "ur_sha256": "183a01fdfec59548bab675db30c675170e71ef20bb4d97c943f4fa211acf68f8",
+      "context_sha256": "3bab032efffea4adb669aa1f3c8d7a489f7b3b630b19b52636d70bd2b09bdfbc",
+      "translator_session": "52136848d1fc"
+    },
+    {
+      "namespace": "tui.tags",
+      "key_count": 27,
+      "en_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "ur_sha256": "7a2e08723312b513b5af38691134ec2fdc381f120e913b691588b777d4265821",
+      "context_sha256": null,
+      "translator_session": "52136848d1fc"
+    },
+    {
+      "namespace": "tui.team_authoring",
+      "key_count": 36,
+      "en_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+      "ur_sha256": "50437b6e50c25040937f9863550a9cfea0afe159987f8dd5f942e38f772ccb80",
+      "context_sha256": "40e81d7469be5fb0da215e96d77189b218ed6a9879b13e4d4dc9f7b5f6c188ce",
+      "translator_session": "7c4a4229b011"
+    },
+    {
+      "namespace": "tui.transcript",
+      "key_count": 17,
+      "en_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "ur_sha256": "3772f0bc1cb8f893e261445180c69ac7cc77874a590e48be8aa909fb3116db86",
+      "context_sha256": "3c2252debbbc33c2fab2061a5dcdc9dfa036e07ab5793ba4dabdf889ac7113fc",
+      "translator_session": "52136848d1fc"
+    },
+    {
+      "namespace": "tui.viewer",
+      "key_count": 19,
+      "en_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "ur_sha256": "7a4f8d943e17fe8e706b1f1b567323bea822d51784b7778ec6b43032e849b743",
+      "context_sha256": "ed4535ceb6e3119c8a3b35f0aa0570ed0398d61c212a43f35bc6d2aa9ac389ae",
+      "translator_session": "52136848d1fc",
+      "reused_byte_identical_from_commit": "33e836ac64be29923becb746eb0f05666448a017"
+    },
+    {
+      "namespace": "tui.welcome",
+      "key_count": 30,
+      "en_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "ur_sha256": "8c931ffd4d9284216d113daa043b99bda068acc1b34b3600e87011496333dacc",
+      "context_sha256": "bfd46d9dbcc5c4dfbee6a3fd93e47264f17f123e01ddf84a7aae99869c41debd",
+      "translator_session": "52136848d1fc"
+    },
+    {
+      "namespace": "wire.errors",
+      "key_count": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "translator_session": "7a648afb0f8d"
+    },
+    {
+      "namespace": "wire.errors.settings",
+      "key_count": 12,
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "7da3d38e00605b0ce286e1c1aa02dddd8766e5d483d517ed026966b02b0e4c0c",
+      "context_sha256": null,
+      "translator_session": "7a648afb0f8d"
+    },
+    {
+      "namespace": "wire.incidents",
+      "key_count": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "translator_session": "7a648afb0f8d"
+    },
+    {
+      "namespace": "wire.memory",
+      "key_count": 17,
+      "en_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "ur_sha256": "672982af74dc2436980566f94fcda01ac60e60dd2f588de1151a4176ac337a98",
+      "context_sha256": "852518b5d2bd41f4b8b72d6d89d961d35b1bafaf341726e0406973d12b1c5e7d",
+      "translator_session": "7a648afb0f8d",
+      "reused_byte_identical_from_commit": "4d03e96b47a8ced27f5ce9b987f30a1746b40882"
+    },
+    {
+      "namespace": "wire.notices",
+      "key_count": 0,
+      "en_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "ur_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "context_sha256": null,
+      "translator_session": "7a648afb0f8d"
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "key_count": 43,
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "50991b04b030ff3851190fe1c7ef71d7b9306a712ca5af264b8edbfe7d4bb826",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "translator_session": "7a648afb0f8d"
+    },
+    {
+      "namespace": "wire.settings",
+      "key_count": 818,
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "a9df8aff733066dc9786c40098bd1f4c992f645143991e503e5c8d57b683a942",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "translator_session": "ffc94c8cb17d"
+    },
+    {
+      "namespace": "wire.slash",
+      "key_count": 52,
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "35ebd056ec897ded1cba799498ab2c67ba9fdff4636dcf1ca6a1cc1a2bec421a",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "translator_session": "7a648afb0f8d"
+    }
+  ],
+  "terminology_decisions": {
+    "credentials": "کریڈینشل / کریڈینشلز (the shared glossary ur cell was undecided)",
+    "job": "جاب",
+    "remote_compute": "ریموٹ کمپیوٹ",
+    "run": "رن",
+    "workstreams": "ورک اسٹریمز",
+    "proactive": "پیش قدم",
+    "reactive": "ردِ عمل",
+    "role": "کردار",
+    "specialist": "ماہر",
+    "milestone": "سنگ میل",
+    "turn": "ٹرن",
+    "estimate": "تخمینہ",
+    "aliases": "عرفی نام",
+    "provider": "پرووائیڈر",
+    "dismiss": "خارج کریں / خارج کیا گیا (context-dependent)",
+    "branch_in_slash_fork": "شاخ",
+    "scratchpad": "Scratchpad (sidecar-required product noun)"
+  },
+  "width": {
+    "explicit_maxCells_checked": 54,
+    "overflow_risks": [],
+    "help_approx_55_cells": {
+      "wire.slash.agent": 51,
+      "wire.slash.fork": 53
+    }
+  },
+  "pending_gates": [
+    "Independent i18n-auditor semantic and terminology audit over every carried namespace; translator cannot self-audit.",
+    "Independent native Urdu review of plural branches, safety meaning and glossary consistency.",
+    "Native RTL/bidi/shaping and rendered fallback/long-text evidence; mechanical parity is not RTL or design sign-off.",
+    "Second independent audit for high-visibility/safety copy as required by docs/I18N.md.",
+    "Ledger rows and shipped eligibility remain unchanged until the independent programme gates pass."
+  ]
+}
