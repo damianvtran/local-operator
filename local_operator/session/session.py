@@ -20359,14 +20359,15 @@ class Session:
             # it here too would put the same row into the context twice.
             #
             # Best-effort: a failed early write must not fail the settle path
-            # or the deferral, which is still the delivery of record.
+            # or the pending delivery. The safe boundary retries before commit;
+            # the turn-end fallback remains the recovery of last resort.
             message = self._job_result_message(job_id, text, job)
             try:
                 await self._transcript.append_message(message)
             except Exception:  # noqa: BLE001 -- visibility must not fail the delivery
                 logger.warning(
-                    "could not journal job %s's result early; the turn-end batch "
-                    "still delivers it",
+                    "could not journal job %s's result early; a safe boundary "
+                    "or the turn-end batch will retry it",
                     job_id,
                     exc_info=True,
                 )
@@ -21081,12 +21082,39 @@ class Session:
             if getattr(job, "consumed", False):
                 self._deferred_job_results.pop(job_id, None)
                 continue
+            if not self._transcript.has_entry(message.id):
+                try:
+                    # The settle-time best-effort write may have failed. Unlike
+                    # an INITIAL fallback, aside injection has no later journal
+                    # pass: this stable-ID retry must succeed BEFORE the carrier
+                    # can commit, or restart would lose the consumed result.
+                    await self._transcript.append_message(message)
+                except Exception:  # noqa: BLE001 -- fallback retains delivery ownership
+                    logger.warning(
+                        "could not journal job %s's result at a safe boundary; "
+                        "leaving it pending for the turn-end fallback",
+                        job_id,
+                        exc_info=True,
+                    )
+                    continue
+                # The retry awaited I/O. Re-read every ownership signal before
+                # arming hooks: wait may have consumed, a new attempt may have
+                # replaced the entry, or departure may have won meanwhile.
+                current = self._deferred_job_results.get(job_id)
+                if current is None or current[0] is not job or current[2] is not message:
+                    continue
+                if getattr(job, "consumed", False):
+                    self._deferred_job_results.pop(job_id, None)
+                    continue
+                if self._leaving_deliveries or self._abort_requested:
+                    break
             if any(existing.id == message.id for existing in self._context.messages):
                 # A rebuilt context or an already-admitted INITIAL already owns
                 # this exact row. Re-adding it would duplicate one canonical
                 # event; its presence in live context is the commit we needed.
                 job.consumed = True
                 self._deferred_job_results.pop(job_id, None)
+                self._note_run_input(message)
                 continue
 
             def commit(
@@ -21099,7 +21127,13 @@ class Session:
                     # the loop's synchronous append+commit. The append is not
                     # delivery in that state: remove this carrier and leave the
                     # pending entry for the same finally/durable hold as any
-                    # other pre-commit discard.
+                    # other pre-commit discard. The loop re-reads cancellation
+                    # after its pending hooks, BEFORE another provider request;
+                    # the leaving latch has its own flag, so join its existing
+                    # graceful cancellation path here rather than merely
+                    # emptying the carrier and buying an empty continuation.
+                    if self._leaving_deliveries:
+                        self.request_graceful_cancel("runtime is leaving")
                     if self._context.messages and self._context.messages[-1] is message:
                         self._context.messages.pop()
                     if message.on_commit is commit:
@@ -21114,6 +21148,11 @@ class Session:
                     self._deferred_job_results.pop(job_id, None)
                     if not consumed_elsewhere:
                         job.consumed = True
+                        # Attention origin is a COMMIT fact, not a settle or
+                        # materialization fact. A peer+job run keeps the job's
+                        # loud completion policy; wait/discard/departure paths
+                        # never reach this registration.
+                        self._note_run_input(message)
                 if not owned or consumed_elsewhere:
                     # The loop appends before firing on_commit. If wait (or an
                     # already-committed identical carrier) won during an awaited

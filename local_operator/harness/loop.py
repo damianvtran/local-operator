@@ -2248,6 +2248,20 @@ class AgentLoop:
                     self._drain_pending(pending, context)
                     pending = []
 
+                    # Cancellation can land while an awaited injection collector
+                    # or a commit hook is running. That hook may withdraw its
+                    # own message, but the non-empty local batch has already
+                    # opened this continuation. Re-read the existing latches at
+                    # the actual provider boundary so a suppressed job result
+                    # cannot buy an empty request after abort/departure.
+                    if (signal is not None and signal.aborted) or _graceful_cancel_requested(
+                        config
+                    ):
+                        yield AgentEndEvent(
+                            messages=new_messages, aborted=True, generation=generation
+                        )
+                        return
+
                     gate = config.before_model_call
                     if gate is not None:
                         proceed = gate()
