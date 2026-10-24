@@ -413,7 +413,11 @@ async def test_quarantine_survives_reopen_forced_refresh_and_record_success(
         reopened.close()
 
 
-def test_quarantine_scan_preserves_known_accounts_and_disabled_states(store: AuthStore) -> None:
+@pytest.mark.asyncio
+async def test_quarantine_scan_preserves_known_accounts_and_disabled_states(
+    store: AuthStore,
+) -> None:
+    active_known = store.upsert_credential("radient", _login("account-c"))
     known = store.upsert_credential("radient", _login("account-a"))
     store.disable_credential(known.id, "operator_disabled")
     unknown = store.upsert_credential(
@@ -425,7 +429,11 @@ def test_quarantine_scan_preserves_known_accounts_and_disabled_states(store: Aut
         },
     )
     store.disable_credential(unknown.id, "operator_disabled")
-    store.upsert_credential("radient", _login("account-b"))
+    # Generic upsert deliberately does not scan anymore. Enter the verified
+    # completion transition so these assertions cover the named scan boundary.
+    store.complete_radient_login(await _verified_login_result("account-b"))
+    assert _stored(store, active_known.id).data == active_known.data
+    assert _stored(store, active_known.id).disabled_cause is None
     assert _stored(store, known.id).disabled_cause == "operator_disabled"
     assert _stored(store, unknown.id).disabled_cause == "operator_disabled"
     assert _stored(store, known.id).data == known.data
