@@ -1768,14 +1768,22 @@ class UserBlock(TranscriptBlock):
             # (design round 2, D6). `wrap_cells` is what the notice tier and the
             # prompt prose already use.
             marker = QUEUED_ROW_TEXT if self._queued_offer else QUEUED_ROW_TEXT_OLDER
-            mark = wrap_cells(marker, max(body, 1))
+            # The leading `·` is app chrome, not translated prose. Prefixing it
+            # to the projected run put it INSIDE the RLI, where an RTL paragraph
+            # resolves a left-edge marker to the right edge — the fallback
+            # contract this row already honours when there is no translation.
+            dot = "· " if marker.startswith("· ") else ""
+            text = marker[len(dot) :] if dot else marker
+            mark = wrap_cells(text, max(body - len(dot), 1))
+            if len(mark) > 1:
+                # Only the FIRST line pays for the dot; the tail keeps the row.
+                mark = [mark[0], *wrap_cells(" ".join(mark[1:]), max(body, 1))]
             start = len(rows)
-            rows.extend(
-                localized_display(
+            for index, line in enumerate(mark):
+                painted = localized_display(
                     line, source_locale=_QUEUED_SOURCE, technical_literals=("esc",)
                 ).plain
-                for line in mark
-            )
+                rows.append(f"{dot}{painted}" if index == 0 and dot else painted)
             # EVERY row the marker wrapped onto is receipt ink, not just its
             # last: the receipt token means "the app is talking here", and a
             # control row painted half in the prompt's own colour reads as

@@ -358,6 +358,33 @@ def test_update_row_copy_and_narrow_wrap() -> None:
         assert cell_len(line) <= 22, line
 
 
+@pytest.mark.parametrize("height", [1, 2, 3])
+def test_wrapped_update_group_is_whole_or_absent(height: int) -> None:
+    """R2-1: the wrapped sentence is atomic in the height ladder.
+
+    At tiny heights the ladder used to shed one wrapped line at a time and keep
+    the contextless tail (`/update` with no sentence). The group now leaves or
+    stays whole.
+    """
+    info = WelcomeInfo(
+        version="0.27.0",
+        model_label="test/model",
+        cwd="/tmp/project",
+        update_available="0.28.0",
+    )
+    rendered = plain(build_welcome_lines(info, 24, height))
+    lines = rendered.splitlines()
+    has_command = any("/update" in line for line in lines)
+    has_sentence = any("latest is" in line for line in lines)
+    # A wrapped tail that survives without its sentence is the defect; a whole
+    # group whose last line happens to BE "/update" is the correct render.
+    assert has_command == has_sentence, lines
+    if has_command:
+        assert any("v0.28.0" in line for line in lines), lines
+    if height == 1:
+        assert not has_command, lines
+
+
 def test_update_sheds_before_harness_notice_and_login() -> None:
     """Update is optional news. A quota fallback outranks it; login outranks both."""
     info = WelcomeInfo(
