@@ -12,6 +12,7 @@ import functools
 import weakref
 from contextlib import ExitStack
 from types import CoroutineType, FunctionType, MethodType
+from typing import cast
 from unittest.mock import patch
 
 ACTIVE = None
@@ -60,17 +61,19 @@ class WorkerCodeIdentity:
     def code_id(self, work):
         # Exact native-type checks: never getattr/hasattr/repr/unwrap an arbitrary
         # callable, nor read partial arguments, coroutine frames or local vars.
+        # Casts express the exact native-type guards to the type checker; they
+        # neither inspect an arbitrary object nor broaden subclass acceptance.
         for _ in range(4):
             if type(work) is functools.partial:
-                work = work.func
+                work = cast(functools.partial, work).func
             else:
                 break
         if type(work) is CoroutineType:
-            code = work.cr_code
+            code = cast(CoroutineType, work).cr_code
         elif type(work) is FunctionType:
             code = work.__code__
-        elif type(work) is MethodType and type(work.__func__) is FunctionType:
-            code = work.__func__.__code__
+        elif type(work) is MethodType and type(cast(MethodType, work).__func__) is FunctionType:
+            code = cast(FunctionType, cast(MethodType, work).__func__).__code__
         else:
             self.counts["unknown"] += 1
             return UNKNOWN

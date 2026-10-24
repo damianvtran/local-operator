@@ -9,7 +9,9 @@ from pathlib import Path
 from tests import worker_code_identity as identity
 
 
-async def first():
+async def first(*_ignored: object):
+    # The privacy partial binds an ignored argument; this fixture accepts it
+    # even though the identity-only assertion never invokes that partial.
     await asyncio.sleep(0)
 
 
@@ -33,7 +35,7 @@ def allowlist():
 
 class FakeWorker:
     def __init__(self, node, work, **kwargs):
-        self._task = None
+        self._task: asyncio.Task[None] | None = None
         self.work = work
         self.labels = []
 
@@ -53,11 +55,15 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
         try:
             registry.install(FakeWorker)
             workers = [FakeWorker(None, f) for f in (first, second)]
+            tasks: list[asyncio.Task[None]] = []
             for worker in workers:
                 worker._start(None)
+                task = worker._task
+                assert task is not None
+                tasks.append(task)
                 self.assertNotEqual(registry.label(worker._task), "")
                 self.assertEqual(worker.labels, [])  # no first resume yet
-            await asyncio.gather(*(w._task for w in workers))
+            await asyncio.gather(*tasks)
             self.assertNotEqual(workers[0].labels[0], workers[1].labels[0])
             self.assertTrue(all(len(set(w.labels)) == 1 and len(w.labels) == 2 for w in workers))
             self.assertTrue(registry.quality()["qualified"])
@@ -79,13 +85,19 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
 
             Subclass(None, first)
             workers = [FakeWorker(None, first), FakeWorker(None, second)]
+            tasks: list[asyncio.Task[None]] = []
             for worker in workers:
                 worker._start(None)
-            await asyncio.gather(*(w._task for w in workers))
+                task = worker._task
+                assert task is not None
+                tasks.append(task)
+            await asyncio.gather(*tasks)
             loop.set_task_factory(lambda loop, coro, **kw: asyncio.Task(coro, loop=loop, **kw))
             extra = FakeWorker(None, first)
             extra._start(None)
-            await extra._task
+            extra_task = extra._task
+            assert extra_task is not None
+            await extra_task
             self.assertFalse(registry.quality()["qualified"])
             self.assertGreater(registry.counts["unsupported"], 0)
             self.assertGreater(registry.counts["overflow"], 0)
