@@ -85,14 +85,19 @@ def approve(root: Path | None, approval_id: str) -> dict[str, Any]:
     if isinstance(what, dict) and finite_share.OP in what:
         # Presence of the typed operation key is the boundary, NOT intent()'s successfully
         # parsed value: a malformed finite payload must fail closed here too, never fall
-        # through to the generic onboarding signer. Only a typed value may be sent to the
-        # CLI; an untyped one would miss its finite validator and reach the generic signer.
-        if finite_share.intent(record) is None:
+        # through to the generic onboarding signer. Only the EXACT shape finite apply accepts
+        # (``finite_share.apply``: ``set(what) == {OP, "anchor"}``) may be sent to the CLI.
+        # An untyped value misses the finite validator, and any extra key -- an unknown
+        # ``credential_*`` operation or an install scope -- is signed by the CLI without being
+        # disclosed (its validator reads only the finite intent), so both refuse here with
+        # no signing remedy at all (agent review round 1, R1).
+        if finite_share.intent(record) is None or set(what) != {finite_share.OP, "anchor"}:
             raise MeshRefusal(
                 "finite_disclosure_invalid",
-                "The finite-share request payload is not a typed object this build can "
-                "validate and disclose. Nothing was approved; request a new finite-share "
-                "recovery with the complete withdrawal disclosure.",
+                "The finite-share request is not the exact typed shape this build can "
+                "validate and disclose (one finite-share operation and its anchor, nothing "
+                "else). Nothing was approved; request a new finite-share recovery with the "
+                "complete withdrawal disclosure.",
             )
         # Until the desktop can render the full validated withdrawal disclosure, the
         # existing CLI is the only signing surface that prints and validates it before
