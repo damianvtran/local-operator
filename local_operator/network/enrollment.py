@@ -296,7 +296,7 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
     Identity/network/member positives also come from the runner's fresh pinned
     SSH identity + both-sided active-join check. This requires live targeted
     reachability, build and operator authority from the real readiness producer.
-    Git/model/tool shortcomings remain visible, never healed with account access.
+    Git/model/repository/tool shortcomings remain visible, never healed with account access.
     """
     require(
         isinstance(report, dict)
@@ -311,6 +311,7 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
         "build",
         "operator_authority",
         "git_identity",
+        "repository",
         "model_credential",
         "mcp_servers",
         "mcp_credential",
@@ -405,6 +406,7 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
             and row.get("capability")
             in {
                 "git_identity",
+                "repository",
                 "model_credential",
                 "mcp_servers",
                 "mcp_credential",

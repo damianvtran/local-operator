@@ -18,6 +18,7 @@ Two properties are pinned here rather than only observed in the link tests:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -259,6 +260,111 @@ def test_git_row_keeps_the_placeholder_for_values_this_device_lacks(
     )
     remedy = " ".join(row["remedies"])
     assert "Damian Tran <…>" in remedy
+
+
+# ---------------------------------------------------------------------------
+# repository working copy — real git metadata, never a mocked filesystem seam
+# ---------------------------------------------------------------------------
+
+
+_REPOSITORY_URL = "https://github.com/damianvtran/local-operator"
+
+
+def _init_checkout(path: Path) -> None:
+    """Make a real checkout; an empty `.git` lookalike is not a valid fixture."""
+    subprocess.run(
+        ["git", "init", "--quiet", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _repository_row(path: Path, *, home: Path) -> dict[str, Any]:
+    fact = readiness.repository_fact(
+        home,
+        repository={"path": str(path), "url": _REPOSITORY_URL},
+    )
+    return readiness.repository_row(_member(), _facts(repository=fact), peer_label="cloud-node-1")
+
+
+def test_repository_default_is_derived_from_installed_project(tmp_path: Path) -> None:
+    """No request identity means the package's identity, never this machine's cwd."""
+    fact = readiness.repository_fact(home=tmp_path)
+
+    assert fact == {
+        "path": str(tmp_path / "local-operator"),
+        "url": _REPOSITORY_URL,
+        "state": "missing",
+    }
+
+
+def test_repository_checkout_is_ok_and_names_the_path(tmp_path: Path) -> None:
+    path = tmp_path / "checkout"
+    _init_checkout(path)
+
+    row = _repository_row(path, home=tmp_path)
+
+    assert row["ok"] is True
+    assert row.get("code", "") == ""
+    assert row["detail"] == (
+        f"cloud-node-1 has a git checkout at {path}: offloaded work has a working copy there"
+    )
+    assert row["observed"] == {"path": str(path), "state": "checkout"}
+    assert row["remedies"] == []
+
+
+def test_repository_missing_is_an_honest_warning_with_the_clone_remedy(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "missing"
+    before = sorted(tmp_path.rglob("*"))
+
+    row = _repository_row(path, home=tmp_path)
+
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_NO_REPOSITORY
+    assert row["detail"] == (
+        f"cloud-node-1 has no working copy at {path}: offloaded work for that repository "
+        "cannot edit or test it there"
+    )
+    assert row["remedies"] == [
+        f"on cloud-node-1, run `git clone {_REPOSITORY_URL} {path}`, then re-check"
+    ]
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN
+    assert readiness.onboarding_failures([row]) == []
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+def test_repository_plain_directory_is_distinguishable_from_a_missing_checkout(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "not-a-checkout"
+    path.mkdir()
+
+    row = _repository_row(path, home=tmp_path)
+
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_NOT_GIT_CHECKOUT
+    assert row["code"] != readiness.CODE_NO_REPOSITORY
+    assert row["detail"] == (
+        f"{path} on cloud-node-1 exists but is not a git checkout: offloaded work "
+        "does not have the repository's working copy there"
+    )
+    assert row["observed"]["state"] == "not_git_checkout"
+    assert f"git clone {_REPOSITORY_URL} {path}" in row["remedies"][0]
+
+
+def test_repository_row_is_inserted_after_git_identity_only() -> None:
+    assert readiness.PEER_SIDE_CHECKS == (
+        readiness.CAPABILITY_OPERATOR_AUTHORITY,
+        readiness.CAPABILITY_GIT,
+        readiness.CAPABILITY_REPOSITORY,
+        readiness.CAPABILITY_MCP_SERVERS,
+        readiness.CAPABILITY_MODEL_CREDENTIAL,
+        readiness.CAPABILITY_TOOLING,
+        readiness.CAPABILITY_RESILIENCE,
+    )
 
 
 # ---------------------------------------------------------------------------
