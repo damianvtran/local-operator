@@ -1935,6 +1935,19 @@ def _observation_failure(observation: Mapping[str, Any]) -> str:
     )
 
 
+def _model_choice_remedy(peer_label: str) -> str:
+    """Offer only a remedy supported by the peer's observed credential state.
+
+    Readiness cannot distinguish a deliberately withheld credential from one not
+    shared yet, so it must not re-offer sharing. The peer payload also has no
+    alternative-provider inventory: keep the selector as a placeholder rather
+    than inventing an example the peer may be unable to serve.
+    """
+    return (
+        f"create with --model <provider>/<model-id> naming a provider {peer_label} " "holds instead"
+    )
+
+
 def model_credential_row(
     member: Any,
     facts: Mapping[str, Any],
@@ -1978,8 +1991,8 @@ def model_credential_row(
             detail=sentence,
             remedies=[
                 "set the peer's default (`/model default` in its window, or "
-                "`local-operator config edit model_name <model>` there), then its "
-                "provider needs a login or a share"
+                "`local-operator config edit model_name <model>` there), then sign in "
+                "to its provider on the peer"
             ],
             source=SOURCE_PEER,
         )
@@ -2090,13 +2103,7 @@ def model_credential_row(
                 f"{provider} is shared in this network, but {peer_label} is not among its "
                 "holders: a borrow there would be refused"
             ),
-            remedies=[
-                (
-                    f"share it with {peer_label} (run here)"
-                    if owner == viewer.device_id
-                    else f"ask the device that owns {provider} to add {peer_label} as a holder"
-                )
-            ],
+            remedies=[_model_choice_remedy(peer_label)],
             source=SOURCE_PEER,
         )
     mine = viewer.provider_rows(provider)
@@ -2136,7 +2143,7 @@ def model_credential_row(
                 f"this device is signed in to {provider} but does not share it with "
                 f"{peer_label}, so nothing would reach it"
             ),
-            remedies=[f"share it with {peer_label} (run here)"],
+            remedies=[_model_choice_remedy(peer_label)],
             source=SOURCE_LOCAL,
         )
     if mine is None:
@@ -2164,8 +2171,8 @@ def model_credential_row(
             "offloaded work on that model cannot start"
         ),
         remedies=[
-            f"sign in to {provider} here and share it, or sign in on {peer_label} "
-            "to use its own account"
+            f"{_model_choice_remedy(peer_label)}, or sign in to {provider} on "
+            f"{peer_label} to use its own account"
         ],
         source=SOURCE_LOCAL,
     )
