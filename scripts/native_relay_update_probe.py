@@ -182,10 +182,15 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     env["XDG_RUNTIME_DIR"] = str(xdg)
     env["SYSTEMD_LOG_LEVEL"] = "debug"
     env["SYSTEMD_LOG_TARGET"] = "console"
+    # systemd 259's chroot probe needs privilege to stat /proc/1/root on the
+    # hosted runner. This fixture is not chrooted, so use upstream's supported
+    # unprivileged override rather than sudo or a host permission change.
+    env["SYSTEMD_IN_CHROOT"] = "0"
     env.pop("DBUS_SESSION_BUS_ADDRESS", None)
     # Set this in the parent BEFORE Popen too: failure cleanup must still talk
     # to the private manager, never fall back to the runner's real user bus.
     os.environ["XDG_RUNTIME_DIR"] = str(xdg)
+    os.environ["SYSTEMD_IN_CHROOT"] = "0"
     os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
     executable = _systemd_binary()
     if executable is None:
