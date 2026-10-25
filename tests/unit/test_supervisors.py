@@ -181,6 +181,7 @@ def test_a_unit_finds_user_local_uv_under_the_managers_sparse_path(
     sparse_path = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin"
     assert shutil.which("uv", path=sparse_path) is None
     discovered_uv = shutil.which("uv", path=supervisors.systemd_path())
+    assert discovered_uv is not None, "the unit PATH did not resolve the user-local uv"
     assert discovered_uv == str(uv)
     assert subprocess.run([discovered_uv], capture_output=True, text=True, check=True).stdout == (
         "uv-fixture-ok\n"
