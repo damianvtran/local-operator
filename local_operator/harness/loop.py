@@ -109,6 +109,7 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
     is_agent_forwarding_call,
+    one_turn_container_has_secret,
     one_turn_public_text,
     one_turn_secret_value_is_present,
 )
@@ -4041,12 +4042,12 @@ class AgentLoop:
                     != call.raw_arguments
                 )
                 if (
-                    one_turn_secret_value_is_present(
-                        secrets, json.dumps(call.arguments, default=str), argument_scrub
-                    )
+                    # Walk the LEAVES: dumping the container double-escapes an
+                    # embedded JSON string and hides its own spelling (S-12).
+                    one_turn_container_has_secret(secrets, call.arguments, argument_scrub)
                     or (
                         call.raw_arguments is not None
-                        and one_turn_secret_value_is_present(
+                        and one_turn_container_has_secret(
                             secrets, call.raw_arguments, argument_scrub
                         )
                     )
@@ -5501,10 +5502,7 @@ class AgentLoop:
             )
             public = result.model_copy(update={"content": content, "details": details})
             leases = list(context.one_turn_secret_leases.values())
-            published = json.dumps(public.model_dump(mode="json"), default=str)
-            if one_turn_secret_value_is_present(
-                [lease.value for lease in leases], published, redact
-            ):
+            if one_turn_container_has_secret([lease.value for lease in leases], public, redact):
                 raise OneTurnSecretScopeError("tool event scrub incomplete")
             return public
         except Exception as exc:
@@ -5532,14 +5530,19 @@ class AgentLoop:
             or not is_agent_forwarding_call(tool.name, item.args)
         ):
             return None
-        redact = config.redact_tool_result
-        if redact is None:
-            return self._one_turn_secret_error(call, tool.name, text=_ONE_TURN_SECRET_FORWARD_ERROR)
-        scrub = config.redact_tool_arguments or redact
+        # Sink-INDEPENDENT on purpose (review S-13). Forwarding hands text to
+        # another agent's history, which is a different blast radius from the
+        # local transcript: defence in depth here must not depend on the
+        # configured redactor, and a no-op sink must not open fourteen
+        # dispatch-capable verbs. The primitive recognises the raw and encoded
+        # spellings on its own.
+        secrets = [lease.value for lease in context.one_turn_secret_leases.values()]
+        redact = config.redact_tool_arguments or config.redact_tool_result
         try:
-            _, arguments_changed = _scrub_argument_value(item.args, scrub)
-            raw = call.raw_arguments
-            raw_changed = raw is not None and _scrub_raw_arguments(raw, scrub) != raw
+            forwarded = one_turn_container_has_secret(secrets, item.args, redact) or (
+                call.raw_arguments is not None
+                and one_turn_container_has_secret(secrets, call.raw_arguments, redact)
+            )
         except Exception as exc:
             logger.warning(
                 "one-turn secret forwarding inspection failed for %s: %s",
@@ -5547,7 +5550,7 @@ class AgentLoop:
                 type(exc).__name__,
             )
             return self._one_turn_secret_error(call, tool.name, text=_ONE_TURN_SECRET_FORWARD_ERROR)
-        if arguments_changed or raw_changed:
+        if forwarded:
             return self._one_turn_secret_error(call, tool.name, text=_ONE_TURN_SECRET_FORWARD_ERROR)
         return None
 

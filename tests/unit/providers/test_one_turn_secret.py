@@ -680,6 +680,11 @@ async def test_real_session_stream_dispatches_with_the_canary_in_one_body(
     monkeypatch.setattr(owner, "preflight_usage", no_preflight)
     monkeypatch.setattr(owner, "_client_for", client_for)
     request = _live_request(canary, "openrouter")
+    # S-14: the shared fixture seeds ``prompt_cache_key``, which makes
+    # ``SessionStreamFn`` skip its own decoration and would prove nothing about
+    # the real pass. Clear it and let the session set it.
+    request = request.model_copy(update={"prompt_cache_key": None})
+    assert request.prompt_cache_key is None
     request.model = request.model.model_copy(
         update={"supports_prompt_cache": True, "reasoning_efforts": ("low", "high")}
     )
@@ -692,5 +697,7 @@ async def test_real_session_stream_dispatches_with_the_canary_in_one_body(
     assert json.dumps(bodies[0]).count(canary) == 1, "raw value belongs in this one body"
     # The session's own cache key reached the wire, i.e. decoration ran and
     # did not raise. The exact spelling is the client's business, not this test's.
-    assert bodies[0].get("prompt_cache_key")
+    assert (
+        bodies[0].get("prompt_cache_key") == "reachable-session"
+    ), "the SESSION's lineage key must be on the wire: decoration ran on a request that had none"
     assert any(isinstance(event, StreamEndEvent) for event in events)

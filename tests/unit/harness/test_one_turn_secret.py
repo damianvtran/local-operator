@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import json
 import urllib.parse
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from typing import Any, cast
 
 import pytest
@@ -755,6 +755,204 @@ async def test_sessions_and_network_forwarding_fail_before_dispatch(
     assert dispatched == []
     assert canary not in result.model_dump_json()
     assert payload not in result.model_dump_json()
+    loop._clear_one_turn_secrets(context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize(
+    ("tool_name", "args", "carrier"),
+    [
+        ("task", {"prompt": "safe"}, "prompt"),
+        ("send", {"message": "safe"}, "message"),
+        ("hub", {"op": "send", "text": "safe"}, "text"),
+        ("sessions", {"op": "spawn", "prompt": "safe"}, "prompt"),
+        (
+            "network",
+            {"action": "sessions", "peer": "peer", "send": "child", "text": "safe"},
+            "text",
+        ),
+    ],
+)
+async def test_forwarding_is_sink_independent(
+    tool_name: str, carrier: str, encoded: bool, args: dict[str, Any]
+) -> None:
+    """S-13: forwarding decisions must not depend on the redactor.
+
+    With a no-op sink the previous check compared ``redact(value) != value`` and
+    therefore allowed every dispatch-capable verb. A forwarded prompt leaves
+    this session's blast radius, so the refusal is made with the coverage
+    primitive and holds with no sink at all.
+    """
+    canary = 'v0rn-sink independent-"q"/path-3c8e'
+    payload = json.dumps(canary)[1:-1] if encoded else canary
+    args = {**args, carrier: payload}
+    variables = VariableStore()
+    loop = AgentLoop()
+    context = _context_with_lease(loop, variables, canary)
+    loop._arm_one_turn_secrets(context, _request("call-a"))
+    dispatched: list[dict[str, Any]] = []
+
+    async def execute(tool_call_id: str, call_args: dict[str, Any], *_args: Any) -> ToolResult:
+        dispatched.append(call_args)
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            content=[TextContent(text="safe")],
+        )
+
+    tool = AgentTool(
+        name=tool_name,
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+    call = _tool_call("forward-noop", tool_name, args)
+    result = await loop._runner_result(
+        _PlannedCall(call=call, tool=tool, args=args),
+        context,
+        _config(
+            lambda *_args: None,
+            variables,
+            redact_tool_result=lambda text: text,
+            redact_tool_arguments=lambda text: text,
+        ),
+        None,
+        asyncio.Queue(),
+    )
+    assert result.is_error
+    assert dispatched == []
+    assert payload not in result.model_dump_json()
+    loop._clear_one_turn_secrets(context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", [False, True])
+async def test_noop_sink_cannot_execute_json_escaped_arguments(encoded: bool) -> None:
+    """S-12 argument arm: dumping the container double-escaped the value."""
+    canary = 'v0rn-"json"\\args/path-5a1c'
+    rendered = json.dumps(canary)[1:-1] if encoded else canary
+    variables = VariableStore()
+    executed: list[dict[str, Any]] = []
+    requests: list[ChatRequest] = []
+    payload = json.dumps({"text": rendered})
+
+    def stream_fn(request: ChatRequest, _signal: AbortSignal | None) -> Any:
+        requests.append(request)
+        index = len(requests)
+
+        async def generate() -> Any:
+            if index == 1:
+                for event in _tool_delta("secret-call", "native-secret", "{}"):
+                    yield event
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            assert request.has_one_turn_secrets
+            for event in _tool_delta("echo-call", "echo", payload):
+                yield event
+            yield StreamEndEvent(stop_reason="toolUse")
+
+        return generate()
+
+    context = LoopContext(
+        system_blocks=[],
+        messages=[],
+        tools=[_secret_tool("native-secret", canary), _echo_tool("echo", executed)],
+        tool_context=ToolContext(cwd=".", variables=variables),
+    )
+    config = _config(
+        stream_fn,
+        variables,
+        redact_tool_result=lambda text: text,
+        redact_tool_arguments=lambda text: text,
+    )
+    loop = AgentLoop()
+    events = [event async for event in loop.run([Message.user("go")], context, config, None)]
+    assert executed == [], "an unprovable argument must not reach the executor"
+    published = _public_event_json(events)
+    assert rendered not in published and payload not in published
+    loop._clear_one_turn_secrets(context)
+
+
+@pytest.mark.asyncio
+async def test_noop_sink_cannot_publish_a_json_escaped_result() -> None:
+    """S-12 result arm: a tool RESULT carrying the encoded value."""
+    canary = 'v0rn-"result"\\path-6b2d'
+    rendered = json.dumps(canary)[1:-1]
+    variables = VariableStore()
+    requests: list[ChatRequest] = []
+
+    async def echo_encoded(tool_call_id: str, _args: dict[str, Any], *_rest: Any) -> ToolResult:
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="echo",
+            content=[TextContent(text=rendered)],
+            details={"echo": rendered},
+        )
+
+    def stream_fn(request: ChatRequest, _signal: AbortSignal | None) -> Any:
+        requests.append(request)
+        index = len(requests)
+
+        async def generate() -> Any:
+            if index == 1:
+                for event in _tool_delta("secret-call", "native-secret", "{}"):
+                    yield event
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            assert request.has_one_turn_secrets
+            for event in _tool_delta("echo-call", "echo", json.dumps({"text": "x"})):
+                yield event
+            yield StreamEndEvent(stop_reason="toolUse")
+
+        return generate()
+
+    echo = AgentTool(
+        name="echo",
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        execute=echo_encoded,
+    )
+    context = LoopContext(
+        system_blocks=[],
+        messages=[],
+        tools=[_secret_tool("native-secret", canary), echo],
+        tool_context=ToolContext(cwd=".", variables=variables),
+    )
+    config = _config(
+        stream_fn,
+        variables,
+        redact_tool_result=lambda text: text,
+        redact_tool_arguments=lambda text: text,
+    )
+    loop = AgentLoop()
+    events = [event async for event in loop.run([Message.user("go")], context, config, None)]
+    published = _public_event_json(events)
+    history = json.dumps(
+        [
+            message.model_dump(mode="json")
+            for message in context.messages
+            if isinstance(message, Message)
+        ]
+    )
+
+    # Assert on DECODED leaves. A substring search in the JSON text hides the
+    # leak for exactly the reason the code missed it: the dump escapes the
+    # value a second time, so both sides of the old check agreed on nothing.
+    def string_leaves(value: Any) -> Any:
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, Mapping):
+            for key, entry in value.items():
+                yield from string_leaves(key)
+                yield from string_leaves(entry)
+        elif isinstance(value, (list, tuple)):
+            for entry in value:
+                yield from string_leaves(entry)
+
+    published_leaves = list(string_leaves(json.loads(published)))
+    history_leaves = list(string_leaves(json.loads(history)))
+    assert all(canary not in leaf for leaf in published_leaves)
+    assert all(rendered not in leaf for leaf in published_leaves)
+    assert all(rendered not in leaf for leaf in history_leaves)
     loop._clear_one_turn_secrets(context)
 
 
