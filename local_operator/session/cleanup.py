@@ -1862,9 +1862,9 @@ def _subagent_child_count(directory: Path) -> int:
     less informative.
     """
     try:
-        from local_operator.session.session import (
-            SUBAGENT_ROSTER_SIDECAR,
-            _read_roster_sidecar,
+        from local_operator.session.roster_sidecar import SUBAGENT_ROSTER_SIDECAR
+        from local_operator.session.roster_sidecar import (
+            read_roster_sidecar as _read_roster_sidecar,
         )
 
         payload = _read_roster_sidecar(directory / SUBAGENT_ROSTER_SIDECAR)

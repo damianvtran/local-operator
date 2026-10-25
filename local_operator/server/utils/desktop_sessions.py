@@ -6684,10 +6684,12 @@ def _persisted_children(
     roster read must not block the loop a streaming turn is using either way.
     """
     from local_operator.fork import fork_instant
-    from local_operator.session.session import (
+    from local_operator.session.roster_sidecar import (
         SUBAGENT_ROSTER_CUSTOM_TYPE,
         SUBAGENT_ROSTER_SIDECAR,
-        _read_roster_sidecar,
+    )
+    from local_operator.session.roster_sidecar import (
+        read_roster_sidecar as _read_roster_sidecar,
     )
 
     payload = _read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
@@ -9263,7 +9265,30 @@ class DesktopSessions:
             # runs on every bridge creation for a session that carries no
             # ``desktop.json`` marker. The reader answers from the tail
             # backward and never creates the directory.
-            checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+            #
+            # ABSENCE FIRST. For a journal with NO checkpoint row that
+            # backward walk has no row to stop on and parses the whole file
+            # (measured 290 ms cProfile-cum on a 32k-row journal, on every
+            # fresh process's first open, cache hit or not). ``tail_anchor``
+            # records exactly that fact for exactly this type (its
+            # ``ANCHOR_CUSTOM_TYPE`` is the frontend checkpoint type), written
+            # by core-start prewarm, never by this reader. ``proves_absent``
+            # re-validates the record against the journal on disk (inode,
+            # boundary-row digest, needle scan of every byte appended since),
+            # so when it says absent the walk would have answered ``None``
+            # too; anything unproven — no sidecar, a stale one, a compressed
+            # journal — falls through to the walk unchanged.
+            from local_operator.session.tail_anchor import (
+                ANCHOR_CUSTOM_TYPE,
+                proves_absent,
+            )
+
+            checkpoint = (
+                None
+                if ANCHOR_CUSTOM_TYPE == FRONTEND_CHECKPOINT_CUSTOM_TYPE
+                and proves_absent(path)
+                else read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+            )
             return _LocatedSession(
                 str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
                 None,
