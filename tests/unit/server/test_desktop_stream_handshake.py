@@ -13,6 +13,7 @@ names -- and the handshake BETWEEN them is driven directly on the bridge, which 
 where D1's change lives.
 """
 
+import ast
 import asyncio
 import json
 import re
@@ -33,44 +34,55 @@ ROUTE = (
 )
 
 
-def test_the_route_acquires_before_any_response_exists() -> None:
-    """The ordering D1 depends on, and the promise it protects.
+def _events_handler(source: str) -> str:
+    """The `events` route handler's OWN source text.
 
-    `host(request).session(...)` -- which ACQUIRES the bridge -- runs before the
-    route returns anything, and `bridge.subscribe(...)` runs after it and still
-    inside the `async with errors(request)` block. So an invalid identity or a
-    full subscriber table is a JSON status rather than a 200 followed by a broken
-    stream, which is why D1 did NOT take the "subscribe after the snapshot"
-    route: that would move both refusals past the response start.
+    WHY THE HANDLER, NOT A DECORATOR-TO-DECORATOR SLICE (reviewer MINOR, #2931).
+    The ordering asserted below is a property of THIS handler. A slice bounded by
+    the next `@router.` happens to be this handler today and quietly stops being
+    it the moment the route table changes; and a slice that accidentally widened
+    would let an unrelated route's `….session(session_id…)` satisfy the anchor,
+    turning the assertion into a tautology that still passes. `ast` names the
+    handler, so the instrument cannot test another route by accident.
     """
-    source = ROUTE.read_text()
-    entry = source.index('@router.get("/v1/desktop/sessions/{session_id}/events")')
-    body = source[entry : source.index("\n@router.", entry + 1)]
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "events":
+            lines = source.splitlines()
+            first = min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])
+            return "\n".join(lines[first - 1 : node.end_lineno])
+    raise AssertionError("the desktop routes module no longer defines an `events` handler")
 
-    # THE ANCHOR IS A PREFIX, DELIBERATELY. This test is about an ORDERING, not
-    # about a call's arguments, and the arguments change for reasons that have
-    # nothing to do with the ordering: main added `allow_draft=True` here for the
-    # draft pre-engage path, and a test anchored on the full argument list went
-    # red for a change that preserved the property it exists to assert. Matching
-    # the receiver and the method keeps the assertion about what it names.
-    #
-    # THE MATCH ALSO TOLERATES A WRAPPED CALL AND A HOISTED RECEIVER, for that
-    # same reason one level down. A formatter is free to break this expression
-    # across lines, and holding the pool in a local (`pool = host(request)`)
-    # is a spelling of the same acquire: Black did both to this route, and the
-    # literal `host(request).session(session_id` prefix this test used to index
-    # stopped existing while the ordering it pins did not change. So the search
-    # runs on whitespace-collapsed source and accepts either receiver; what is
-    # asserted is still WHEN the bridge is acquired, never how the call reads.
-    flat = " ".join(body.split())
-    acquired = re.search(r"(?:host\(request\)|\bpool)\.session\(\s*session_id", flat)
-    assert acquired is not None, (
-        "the stream route no longer acquires its bridge through a call on the "
-        "request's pool, so the hand-off this test pins has moved: " + flat[:400]
+
+def _assert_handshake_order(source: str) -> None:
+    """Assert the stream route's open hand-off: acquire first, and awaited.
+
+    The ordering D1 depends on, and the promise it protects. The bridge is
+    acquired -- and the acquire AWAITED -- before `bridge.subscribe(...)` runs and
+    still inside the `async with errors(request)` block. So an invalid identity or
+    a full subscriber table is a JSON status rather than a 200 followed by a
+    broken stream, which is why D1 did NOT take the "subscribe after the
+    snapshot" route: that would move both refusals past the response start.
+
+    THE ANCHOR IS A SHAPE, DELIBERATELY. This asserts an ORDERING, not a call's
+    arguments or spelling: the argument list already changed once for the draft
+    pre-engage path (`allow_draft=True`), and the receiver changed when the route
+    started reusing a pool local (CORE-PROFILE L1) -- both preserved the property
+    and one of them turned a literal anchor red. So the match runs on
+    whitespace-collapsed source (a wrapped call collapses back to one line) and
+    accepts either receiver.
+    """
+    handler = _events_handler(source)
+    flat = " ".join(handler.split())
+    acquires = re.findall(r"(?:host\(request\)|\bpool)\.session\(\s*session_id", flat)
+    assert len(acquires) == 1, (
+        "the stream route must acquire exactly one bridge, so that 'before the "
+        f"subscribe' names one call; found {len(acquires)}: " + flat[:400]
     )
-    acquire = acquired.start()
+    acquire = re.search(r"(?:host\(request\)|\bpool)\.session\(\s*session_id", flat)
+    assert acquire is not None  # narrowed by the count above
     subscribe = flat.index("bridge.subscribe(")
-    assert acquire < subscribe, (
+    assert acquire.start() < subscribe, (
         "the bridge must be acquired before the subscription is taken; the "
         "capacity refusal and the move fence both depend on it happening while a "
         "JSON status is still possible"
@@ -79,6 +91,57 @@ def test_the_route_acquires_before_any_response_exists() -> None:
         "and the acquire must be AWAITED before the subscribe, not merely ordered "
         "before it in the source"
     )
+
+
+def test_the_route_acquires_before_any_response_exists() -> None:
+    """The events handler takes its bridge before it can return anything."""
+    _assert_handshake_order(ROUTE.read_text())
+
+
+def test_the_ordering_assertion_catches_a_subscription_taken_first() -> None:
+    """The instrument's failing direction, on the REAL handler.
+
+    A control that only ever passes proves nothing, so the ordering is inverted
+    here the way a regression would invert it -- the subscribe taken before the
+    acquire -- and the instrument must refuse it.
+    """
+    source = ROUTE.read_text()
+    acquire_call = "    context = pool.session(session_id, read=True, allow_draft=True)\n"
+    assert source.count(acquire_call) == 1, "the control anchors on the route's real acquire"
+    inverted = source.replace(acquire_call, "    early = bridge.subscribe()\n" + acquire_call)
+    with pytest.raises(AssertionError, match="acquired before the subscription"):
+        _assert_handshake_order(inverted)
+
+
+def test_the_ordering_assertion_cannot_be_satisfied_from_another_route() -> None:
+    """The boundary control: a decoy route must not satisfy the anchor.
+
+    Every earlier route in this module that also acquires a bridge is exactly the
+    material a widened slice would match first. With one prepended AND the real
+    handler's ordering inverted, an instrument that searched more than the
+    handler would anchor on the decoy, see a correct-looking order and pass; the
+    handler-scoped one must still fail.
+    """
+    source = ROUTE.read_text()
+    decoy = (
+        '@router.get("/v1/desktop/sessions/{session_id}/decoy")\n'
+        "async def decoy(session_id: str, request: Request):\n"
+        "    context = host(request).session(session_id, read=True)\n"
+        "    return None\n"
+        "\n"
+        "\n"
+    )
+    events_decorator = '@router.get("/v1/desktop/sessions/{session_id}/events")'
+    assert source.count(events_decorator) == 1
+    acquire_call = "    context = pool.session(session_id, read=True, allow_draft=True)\n"
+    inverted = source.replace(acquire_call, "    early = bridge.subscribe()\n" + acquire_call)
+    decoyed = inverted.replace(events_decorator, decoy + events_decorator)
+
+    with pytest.raises(AssertionError, match="acquired before the subscription"):
+        _assert_handshake_order(decoyed)
+
+    # And the decoy alone must not disturb the real handler's passing direction.
+    _assert_handshake_order(source.replace(events_decorator, decoy + events_decorator))
 
 
 async def _snapshot_that_bursts(bridge: Any, original: Any, count: int) -> Any:
