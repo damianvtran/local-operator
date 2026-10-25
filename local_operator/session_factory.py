@@ -4974,12 +4974,17 @@ async def _prepare(
     # Repo guidance (AGENTS.md/CLAUDE.md ancestors) joins the same read-once
     # contract: the head block must stay byte-stable for the session, so the
     # filesystem is consulted here and never again.
-    from local_operator.context_files import load_repo_guidance
+    from local_operator.context_files import load_repo_guidance_with_record
 
+    # The record names the guidance files this prompt ACTUALLY carries (path +
+    # head digest), so the read tool can say "already in your prompt" only
+    # when that is true — never from a later look at the disk (review R1-1).
     try:
-        repo_guidance = load_repo_guidance(effective_cwd, boundary=world_root)
+        repo_guidance, injected_guidance = load_repo_guidance_with_record(
+            effective_cwd, boundary=world_root
+        )
     except Exception:  # noqa: BLE001 — never block session construction
-        repo_guidance = ""
+        repo_guidance, injected_guidance = "", ()
 
     system_blocks_provider = _make_system_blocks_provider(
         tools,
@@ -4997,6 +5002,10 @@ async def _prepare(
         # bytes — exact equality is what lets a row be recognised as this one.
         session_id=transcript_dir.name,
     )
+    # Beside ``repo_guidance`` and for the same reason: a child inherits the
+    # parent's prompt block, so it must inherit the record of what that block
+    # holds (read by ``Session._build_tool_context`` and ``launch_subagent``).
+    setattr(system_blocks_provider, "injected_guidance", injected_guidance)
 
     # The MONITOR gate's callable (``docs/design/monitor-tool.md`` §8): the
     # scheduler asks it for one materiality class per changed monitor, and a

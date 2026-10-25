@@ -5652,21 +5652,32 @@ async def test_read_summary_falls_back_on_syntax_error(tools, context, tmp_path)
     assert "def broken(:" in result.text
 
 
-def _oversized_guidance() -> str:
+def _oversized_guidance(head: str = "Head section") -> str:
     filler = "\n".join(f"padding line {i}" for i in range(900))
-    body = f"# Project\n\n## Head section\n\n{filler}\n"
+    body = f"# Project\n\n## {head}\n\n{filler}\n"
     for index in range(3):
         body += f"\n## Late section {index}\n\nrule {index} lives here.\n"
     return body
 
 
+def _injected_session(tmp_path: Path) -> tuple[dict[str, AgentTool], ToolContext]:
+    """Tools whose context carries the record a real session would build:
+    the same ``load_repo_guidance_with_record`` call session_factory makes."""
+    from local_operator.context_files import load_repo_guidance_with_record
+
+    _, record = load_repo_guidance_with_record(tmp_path)
+    ctx = ToolContext(cwd=str(tmp_path), session_id="unit-test", injected_guidance=record)
+    return {tool.name: tool for tool in create_tools(ctx)}, ctx
+
+
 @pytest.mark.asyncio
-async def test_read_whole_injected_guidance_returns_section_index(tools, context, tmp_path) -> None:
-    """A whole-file read of the AGENTS.md this session's prompt already carries
-    returns the section index, not the 8 KiB clamp that only repeats the head."""
+async def test_read_whole_injected_guidance_returns_section_index(tmp_path) -> None:
+    """A whole-file read of the AGENTS.md this session's prompt carries returns
+    the section index, not the 8 KiB clamp that mostly repeats the head."""
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
-    result = await _call(tools, "read", {"path": "AGENTS.md"}, context)
+    tools, ctx = _injected_session(tmp_path)
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, ctx)
     assert result.is_error is False
     assert "already in your system prompt" in result.text
     assert re.search(r"- L\d+-\d+: Late section 2", result.text)
@@ -5677,33 +5688,60 @@ async def test_read_whole_injected_guidance_returns_section_index(tools, context
 
 
 @pytest.mark.asyncio
-async def test_read_guidance_range_raw_and_foreign_files_stay_exact(
-    tools, context, tmp_path
-) -> None:
+async def test_read_guidance_edited_after_start_is_a_plain_read(tmp_path) -> None:
+    # R1-1: the prompt was built from the OLD head; claiming the new head is
+    # "already in your system prompt" would hide the edit from its author.
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
-    ranged = await _call(tools, "read", {"path": "AGENTS.md", "range": "3-3"}, context)
+    tools, ctx = _injected_session(tmp_path)
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance(head="Edited head"))
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, ctx)
+    assert "already in your system prompt" not in result.text
+    assert "Edited head" in result.text
+    assert "truncated at" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_guidance_created_after_start_is_a_plain_read(tmp_path) -> None:
+    (tmp_path / ".git").mkdir()
+    tools, ctx = _injected_session(tmp_path)  # nothing injected
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, ctx)
+    assert "already in your system prompt" not in result.text
+    assert "padding line 5" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_guidance_range_raw_and_foreign_files_stay_exact(tmp_path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
+    tools, ctx = _injected_session(tmp_path)
+    ranged = await _call(tools, "read", {"path": "AGENTS.md", "range": "3-3"}, ctx)
     assert ranged.text == "3| ## Head section"
-    raw = await _call(tools, "read", {"path": "AGENTS.md", "raw": True}, context)
+    raw = await _call(tools, "read", {"path": "AGENTS.md", "raw": True}, ctx)
     assert "padding line 5" in raw.text and "already in your system prompt" not in raw.text
-    # An AGENTS.md discovery would NOT inject for this cwd (a sibling repo) was
-    # never in the prompt, so claiming its head is there would be false.
+    # An AGENTS.md this prompt did NOT carry (a sibling repo) is never shaped.
     other = tmp_path.parent / f"{tmp_path.name}-other"
     (other / ".git").mkdir(parents=True)
     (other / "AGENTS.md").write_text(_oversized_guidance())
-    foreign = await _call(tools, "read", {"path": str(other / "AGENTS.md")}, context)
+    foreign = await _call(tools, "read", {"path": str(other / "AGENTS.md")}, ctx)
     assert "already in your system prompt" not in foreign.text
     assert "padding line 5" in foreign.text
 
 
 @pytest.mark.asyncio
-async def test_read_small_injected_guidance_stays_whole(tools, context, tmp_path) -> None:
-    # Fits the injected head whole: nothing was elided, the plain read is honest.
+async def test_read_guidance_under_the_read_clamp_stays_whole(tmp_path) -> None:
+    # R1-4 / Q1: larger than the 4 KiB injected head but under the 8 KiB read
+    # clamp: one plain read returns the whole file, an index would cost two.
     (tmp_path / ".git").mkdir()
-    (tmp_path / "AGENTS.md").write_text("# Project\n\nshort rule\n")
-    result = await _call(tools, "read", {"path": "AGENTS.md"}, context)
-    assert "short rule" in result.text
+    body = "# Project\n\n" + "\n".join(f"rule line {i}" for i in range(400)) + "\n## Tail\n\nend\n"
+    assert 4096 < len(body) < 8 * 1024
+    (tmp_path / "AGENTS.md").write_text(body)
+    tools, ctx = _injected_session(tmp_path)
+    assert ctx.injected_guidance, "fixture must be injected for this to test the gate"
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, ctx)
     assert "already in your system prompt" not in result.text
+    assert "rule line 399" in result.text and "end" in result.text
 
 
 @pytest.mark.asyncio

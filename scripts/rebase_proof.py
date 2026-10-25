@@ -20,14 +20,23 @@ The verdict is MECHANICAL only when ALL three hold:
 3. no file the PR changes (before or after) is among the files upstream
    changed between the two merge-bases.
 
-(3) is what (1) and (2) cannot see: an identical patch over a moved file can
-still be a semantic conflict (a renamed callee, a changed default), so any
-overlap is reported by name and stays a review. Exit 0 = MECHANICAL, 1 = review
-needed, 2 = the proof could not be computed (unknown rev, git failure) — a
-missing proof is never a pass.
+(3) is what (1) and (2) cannot see: an identical patch over a file upstream
+also moved can still conflict semantically INSIDE that file, so any overlap is
+reported by name and stays a review. Exit 0 = MECHANICAL, 1 = review needed,
+2 = the proof could not be computed (unknown rev, git failure) — a missing
+proof is never a pass.
+
+What this does NOT detect: a CROSS-FILE semantic break. Upstream renames a
+function in ``lib.py``; the PR, which never touches ``lib.py``, calls it from
+``app.py``. Range-diff is ``=``, the patch is identical, the overlap is empty —
+MECHANICAL — and the rebased head fails at import (reproduced by review R1-2
+and QA Q3). The proof is file-level by design; green CI on the REBASED head is
+the guard for this class, which is why merge-time CI stays required.
 
 The old head is usually gone from the branch after a force-push; fetch it by
 SHA first (``git fetch origin <old-sha>``) — GitHub serves PR heads by SHA.
+After the PR has MERGED, ``origin/main`` already contains the new head, so its
+range is empty: pass ``--base <main as of the rebase>`` for a retrospective run.
 
 Run (from the repository, after fetching both heads and the base):
     python scripts/rebase_proof.py <old-head> <new-head> [--base origin/main]
@@ -88,6 +97,16 @@ def _changed_files(repo: Path, base: str, head: str) -> set[str]:
     return {line for line in out.splitlines() if line}
 
 
+def _unequal_commits(range_out: str) -> list[str]:
+    """Range-diff lines whose status is not ``=``, trimmed for the verdict."""
+    rows = []
+    for line in range_out.splitlines():
+        match = _RANGE_DIFF_PAIR.match(line)
+        if match and match.group(1) != "=":
+            rows.append(" ".join(line.split()))
+    return rows
+
+
 def prove(repo: Path, old: str, new: str, base: str) -> tuple[bool, str]:
     """(mechanical, markdown block) for the rebase ``old`` -> ``new``."""
     old_sha = _git(repo, "rev-parse", "--verify", f"{old}^{{commit}}").strip()
@@ -95,6 +114,13 @@ def prove(repo: Path, old: str, new: str, base: str) -> tuple[bool, str]:
     old_mb = _git(repo, "merge-base", base, old_sha).strip()
     new_mb = _git(repo, "merge-base", base, new_sha).strip()
 
+    if new_mb == new_sha:
+        # The base already contains the new head (the PR merged): its range is
+        # empty and git would answer with its whole usage text (QA Q2).
+        raise ProofError(
+            f"{new} is already contained in {base}; pass --base <{base} as of the "
+            f"rebase> (e.g. the merge commit's first parent) for a retrospective proof"
+        )
     range_out = _git(
         repo, "range-diff", "--no-color", f"{old_mb}..{old_sha}", f"{new_mb}..{new_sha}"
     )
@@ -118,13 +144,20 @@ def prove(repo: Path, old: str, new: str, base: str) -> tuple[bool, str]:
     else:
         reasons = []
         if not range_equal:
-            reasons.append(f"range-diff not all '=' ({range_summary})")
+            unequal = _unequal_commits(range_out)
+            reasons.append(
+                f"range-diff not all '=' ({range_summary})"
+                + (": " + " | ".join(unequal) if unequal else "")
+            )
         if not patch_identical:
             delta = (old_patch - new_patch) + (new_patch - old_patch)
             reasons.append(f"patch lines differ ({sum(delta.values())} lines)")
-        files = ", ".join(f"`{f}`" for f in overlap) or "none overlapping"
+        # Never "none": a failed proof with no overlap still has content to
+        # review — the PR's own files, since its patch is what changed (R1-3).
+        named = overlap or sorted(pr_files)
+        files = ", ".join(f"`{f}`" for f in named) or "(PR changes no files)"
         verdict = f"CONVERGENCE REVIEW NEEDED — files: {files}; " + "; ".join(
-            reasons or ["overlap"]
+            reasons or ["upstream also changed these files"]
         )
 
     short = lambda sha: sha[:10]  # noqa: E731 — display only

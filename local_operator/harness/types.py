@@ -2058,6 +2058,12 @@ class ToolContext(BaseModel):
     #: true for a busy session and a dormant one alike — a probe would either
     #: never fire or invent a second idle definition beside the runtime's.
     kernel_managed_by_session: bool = False
+    #: The guidance files this session's system prompt actually carries, as
+    #: ``(resolved path, sha256 of the injected head)`` pairs; empty on a host
+    #: that injects none. The ``read`` tool shapes a whole read of one into its
+    #: section index only when the file is listed here and its head is still
+    #: the injected one (``context_files.render_read_index``).
+    injected_guidance: tuple[tuple[str, str], ...] = ()
     # Session-owned transport and duplicate-read coordinator. Kept off wire
     # payloads; its lifecycle belongs to the session that constructs tools.
     web_io: Any | None = Field(default=None, exclude=True)

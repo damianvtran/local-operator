@@ -117,6 +117,21 @@ def test_changed_patch_needs_review(tmp_path: Path) -> None:
     assert "CHANGED" in result.stdout
     assert "range-diff not all '='" in result.stdout
     assert "patch lines differ" in result.stdout
+    # R1-3: no overlap here, yet the verdict must name what to review.
+    assert "CONVERGENCE REVIEW NEEDED — files: `pr.txt`" in result.stdout
+    assert "none" not in result.stdout.split("Verdict:")[1]
+
+
+def test_merged_pr_against_its_own_base_hints_at_base_flag(tmp_path: Path) -> None:
+    # QA Q2: after the PR merged, main contains the new head; exit 2 with a
+    # one-line hint, never git's usage dump.
+    repo, old = _setup(tmp_path)
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--ff-only", "pr")
+    result = _run(repo, old, old)
+    assert result.returncode == 2
+    assert "pass --base" in result.stderr
+    assert "usage:" not in result.stderr
 
 
 def test_unknown_revision_is_an_error_not_a_pass(tmp_path: Path) -> None:
