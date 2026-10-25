@@ -582,10 +582,17 @@ export async function resolveInitialLocale(): Promise<void> {
 			buffered += decoder.decode(value, { stream: true });
 			const end = buffered.indexOf("\n\n");
 			if (end === -1) continue;
+			// A comment/keep-alive block before the baseline is not the baseline:
+			// keep reading until a block actually carries a `data:` line, bounded
+			// by the same abort budget.
+			let applied = false;
 			for (const line of buffered.slice(0, end).split("\n")) {
-				if (line.startsWith("data:")) applyConfigFrame(line.slice(5).trim());
+				if (!line.startsWith("data:")) continue;
+				applyConfigFrame(line.slice(5).trim());
+				applied = true;
 			}
-			return;
+			buffered = buffered.slice(end + 2);
+			if (applied) return;
 		}
 	} catch {
 		/* English stays: an absent or stalled stream is not a paint failure. */

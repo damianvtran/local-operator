@@ -20,14 +20,20 @@ initWideView();
    painted is still decided by the audited owned bundle — `resolveInitialLocale`
    only tells the store which backend preference to test against, and a missing
    or stalled stream keeps the English default rather than a device guess. */
-void resolveInitialLocale().then(() => {
+void (async () => {
+	try {
+		await resolveInitialLocale();
+	} catch {
+		/* The resolver fails open to English itself; this guards the MOUNT, so an
+		   unexpected rejection can never leave the relay blank. */
+	}
 	initializeLocaleMetadata();
 	createRoot(document.getElementById("root")!).render(
 		<StrictMode>
 			<App />
 		</StrictMode>,
 	);
-});
+})();
 
 /* Note: private-storage cleanup on sign-out is NOT wired here. The SPA never
    renders a logout control, and the login screen is a separate server-rendered
