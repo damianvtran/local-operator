@@ -168,6 +168,12 @@ _DESKTOP_HOTKEY_DETAIL = (
 #: enter refusal elaborates.
 _HOLD_HOTKEY_DETAIL = "Global shortcut for the desktop app — set it in the app."
 
+#: Recording is delivered only to the focused desktop main window, not globally.
+#: Keep this distinct from Quick Send's genuinely global registration.
+_RECORDING_HOTKEY_DETAIL = (
+    "Desktop window shortcut — press keys the terminal can send, or set it in the app."
+)
+
 #: The `enter` refusal on such a row. The affordance must not ARM — a
 #: listening frame whose every completion the validator refuses reads as a
 #: broken capture — so the press states the constraint instead. Same family as
@@ -4785,6 +4791,8 @@ class SettingsView(Vertical):
                     if keymap_mod.capturable_in_terminal(row.setting.key)
                     else _HOLD_HOTKEY_DETAIL
                 )
+                if row.setting.key == "keymap.start_recording":
+                    help_text = _RECORDING_HOTKEY_DETAIL
             # THE SHED LADDER, one rule for every row (design round 3, D12):
             # the key path sheds first; the state clause is never shed while
             # anything else remains; help sheds after the key. Walked top to

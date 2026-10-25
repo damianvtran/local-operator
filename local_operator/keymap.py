@@ -210,6 +210,23 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
         scope="desktop",
     ),
+    # DESKTOP-owned recording action, not a Textual action: the desktop reads
+    # this persisted value directly, including when no daemon is reachable.
+    # `action=""`, no `Binding`, and `tip=""` keep a global shortcut out of the
+    # terminal dispatch and splash. `primary+shift+s` is the one canonical
+    # accelerator across platforms; it is deliberately NOT reserved against
+    # itself, while the generic group-conflict check still refuses collisions
+    # with every other backend keymap action. The id is persisted user data,
+    # so renaming it would orphan existing overrides.
+    KeyAction(
+        id="keymap.start_recording",
+        action="",
+        label="Start recording",
+        default="primary+shift+s",
+        help="Starts speech-to-text recording in the desktop window.",
+        tip="",
+        scope="desktop",
+    ),
 )
 
 #: ``id -> KeyAction`` for the lookups the page, the app and the tips all do.
@@ -810,7 +827,15 @@ def validate_desktop_key(value: Any, *, action_id: str | None = None) -> str | N
     action with a different value space cannot be validated by the wrong
     rules.
     """
-    return _grammar_for(action_id).validate(value)
+    reason = _grammar_for(action_id).validate(value)
+    if (
+        action_id == "keymap.start_recording"
+        and reason == "a global shortcut needs a modifier — it would otherwise fire while you type"
+    ):
+        return (
+            "a desktop window shortcut needs a modifier — " "it would otherwise fire while you type"
+        )
+    return reason
 
 
 def _canonical_variants(action_id: str | None, text: str) -> frozenset[str]:

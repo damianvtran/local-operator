@@ -335,7 +335,10 @@ async def test_a_reserved_key_is_refused_with_its_reason_and_capture_stays_open(
 
 
 @pytest.mark.asyncio
-async def test_a_desktop_row_captures_and_validates_by_its_own_rules(tmp_path: Path) -> None:
+@pytest.mark.parametrize("action_id", ["keymap.quick_send", "keymap.start_recording"])
+async def test_a_desktop_row_captures_and_validates_by_its_own_rules(
+    tmp_path: Path, action_id: str
+) -> None:
     """The capture widget dispatches on the ROW's scope, not one global rule.
 
     The refusal SENTENCE is what proves which grammar ran: the app scope's
@@ -352,7 +355,14 @@ async def test_a_desktop_row_captures_and_validates_by_its_own_rules(tmp_path: P
         app._open_settings_view()
         view = app.query_one(SettingsView)
         await pilot.pause()
-        _select(view, "keymap.quick_send")
+        _select(view, action_id)
+        await pilot.pause()
+        if action_id == "keymap.start_recording":
+            assert view._detail_text.plain.startswith(
+                "Desktop window shortcut — press keys the terminal can send, or set it in the app."
+            )
+        else:
+            assert "Global shortcut for the desktop app" in view._detail_text.plain
 
         await pilot.press("enter")
         await pilot.pause()
@@ -375,7 +385,7 @@ async def test_a_desktop_row_captures_and_validates_by_its_own_rules(tmp_path: P
         await pilot.press("enter")
         await pilot.pause()
 
-        setting = settings_io.BY_KEY["keymap.quick_send"]
+        setting = settings_io.BY_KEY[action_id]
         assert settings_io.read_setting(ConfigManager(tmp_path), setting) == "ctrl+alt+space"
 
 

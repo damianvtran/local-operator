@@ -525,6 +525,38 @@ def test_push_to_talk_ships_the_frozen_hold_row() -> None:
     assert keymap.scope_of("keymap.push_to_talk") == "desktop"
 
 
+def test_start_recording_ships_the_desktop_action_row() -> None:
+    """The persisted desktop action is visible to settings, never to Textual.
+
+    The generic inventory test must fail if this registration is removed;
+    these assertions additionally pin the cross-repo default and start-only copy.
+    """
+    action = keymap.BY_ID["keymap.start_recording"]
+    assert action.scope == "desktop"
+    assert action.action == ""
+    assert action.default == "primary+shift+s"
+    assert action.help == "Starts speech-to-text recording in the desktop window."
+    assert action.label == "Start recording"
+    assert action.tip == ""
+    assert action.default not in keymap.DESKTOP_RESERVED_COMBOS
+    assert keymap.capturable_in_terminal(action.id) is True
+    assert keymap.validate_desktop_key("n", action_id=action.id) == (
+        "a desktop window shortcut needs a modifier — " "it would otherwise fire while you type"
+    )
+    assert keymap.validate_desktop_key("n", action_id="keymap.quick_send") == (
+        "a global shortcut needs a modifier — it would otherwise fire while you type"
+    )
+
+    setting = settings_io.BY_KEY[action.id]
+    assert setting.kind is settings_io.Kind.HOTKEY
+    assert setting.hotkey_scope == "desktop"
+    assert keymap.group_conflict(action.id, action.default, {}) is None
+    for other in keymap.KEY_ACTIONS:
+        if other.id != action.id:
+            problem = keymap.group_conflict(other.id, action.default, {})
+            assert problem is not None, other.id
+
+
 def test_the_hold_grammar_accepts_exactly_the_six_family_tokens() -> None:
     """Membership is the rule: six bare-modifier holds, nothing else.
 
