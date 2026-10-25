@@ -440,7 +440,10 @@ def _record_with_what(source: dict[str, Any], what: dict[str, Any], root: Any) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shape", ["valid", "empty-withdrawals", "malformed-operation"])
+@pytest.mark.parametrize(
+    "shape",
+    ["valid", "empty-withdrawals", "malformed-operation", "mixed-unknown", "mixed-install"],
+)
 async def test_desktop_finite_refusal_precedes_signer_and_validator(
     rig: Any, monkeypatch: pytest.MonkeyPatch, shape: str
 ) -> None:
@@ -452,6 +455,12 @@ async def test_desktop_finite_refusal_precedes_signer_and_validator(
         # intent() returns None for this shape. Key-presence containment must
         # refuse it anyway rather than treating it as ordinary onboarding.
         what[finite_share.OP] = ["not", "a", "typed", "payload"]
+    elif shape == "mixed-unknown":
+        # R1: a VALID finite intent beside an unknown credential operation. The CLI
+        # validator reads only the finite half, so its remedy would sign the rest blind.
+        what["credential_unknown_typed_operation"] = {"scope": "unknown"}
+    elif shape == "mixed-install":
+        what["install"] = True
     record = valid if shape == "valid" else _record_with_what(valid, what, rig.root)
     policy = consent.ConsentDocument(N, rig.own.device_id, rig.root).path.read_bytes()
 
@@ -459,14 +468,13 @@ async def test_desktop_finite_refusal_precedes_signer_and_validator(
         response = await client.post(f"/v1/desktop/approvals/{record['approval_id']}/approve")
         assert response.status_code == 409, response.text
         detail = response.json()["detail"]
+        unsafe = shape in {"malformed-operation", "mixed-unknown", "mixed-install"}
         expected_code = (
-            "finite_disclosure_invalid"
-            if shape == "malformed-operation"
-            else "finite_terminal_approval_required"
+            "finite_disclosure_invalid" if unsafe else "finite_terminal_approval_required"
         )
         assert detail["code"] == expected_code
-        if shape == "malformed-operation":
-            # Never direct an untyped payload to the CLI's generic signer.
+        if unsafe:
+            # Never direct a shape the finite validator cannot fully disclose to the CLI.
             assert "lop network approvals approve" not in detail["text"]
         else:
             assert "complete withdrawal disclosure" in detail["text"]
