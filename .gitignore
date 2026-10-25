@@ -78,5 +78,5 @@ bench/
 /.worktrees/
 
 # pytest HOME/TMPDIR sandboxes created by local verification runs
-.tmp-tmp/
-.tmp-home/
+/.tmp-tmp/
+/.tmp-home/

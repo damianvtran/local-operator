@@ -98,8 +98,12 @@ SECURITY_HELD_LOCALES: frozenset[str] = frozenset()
 #: change links the pending card carries. It is a namespace of its own rather
 #: than more ``relay.asks`` keys because the asks catalogues are already
 #: carried by every translated locale, and a new key there would be untranslated
-#: in all of them; this one starts en-only and rides §2.5 fallback until its own
-#: translation wave.
+#: in all of them. It was expected to start en-only and ride §2.5 fallback; it
+#: does not, because the programme's rule is that new copy ships translated. It
+#: carries all seven locales, and the day it landed untranslated is the day the
+#: ratchet and the census became mutually unsatisfiable for it (check.py forbade
+#: the debt, the census required it). Recorded here because the next new
+#: namespace will hit the same wall.
 OWNED_SPA_NAMESPACES = (
     "relay.shell",
     "relay.session",
