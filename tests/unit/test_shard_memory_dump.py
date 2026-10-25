@@ -10,7 +10,9 @@ against the dump's formatting.
 
 The fake ``/proc`` tree is deliberate: these tests must not assert on the
 host's current memory, its process table or its cgroup layout, because the CI
-runner and a developer laptop have none of those in common.
+runner and a developer laptop have none of those in common. The worker's own
+resource and kernel ceilings are asserted the same way -- the fixture gives the
+controller different values, so a dump that reads the wrong process cannot pass.
 """
 
 from __future__ import annotations
@@ -77,17 +79,48 @@ def _write_process(
     name: str,
     rss_kb: int | None,
     cmdline: str,
+    uid: int = 4242,
 ) -> None:
     entry = root / str(pid)
     entry.mkdir()
     # Only the comm and ppid fields matter to the parser; the rest of the
     # kernel's stat line is filler, present so the shape matches /proc.
     (entry / "stat").write_text(f"{pid} ({name}) S {ppid} 100 100 0 -1 4194560 0 0\n")
-    status = f"Name:\t{name}\n"
+    status = f"Name:\t{name}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"
     if rss_kb is not None:
         status += f"VmRSS:\t   {rss_kb} kB\n"
     (entry / "status").write_text(status)
     (entry / "cmdline").write_bytes(cmdline.replace(" ", "\x00").encode() + b"\x00")
+
+
+#: The worker's limits. The controller's differ on purpose: a dump that reads
+#: the wrong process is indistinguishable from a correct one unless the fixture
+#: makes the two disagree on a value the real one does not also carry.
+WORKER_LIMITS = {
+    "Max address space": ("unlimited", "unlimited", "bytes"),
+    "Max data size": ("unlimited", "unlimited", "bytes"),
+    "Max processes": ("63488", "63488", "processes"),
+    "Max stack size": ("8388608", "unlimited", "bytes"),
+    "Max open files": ("1048576", "1048576", "files"),
+}
+CONTROLLER_LIMITS = {
+    "Max address space": ("unlimited", "unlimited", "bytes"),
+    "Max data size": ("unlimited", "unlimited", "bytes"),
+    "Max processes": ("4096", "4096", "processes"),
+    "Max stack size": ("8388608", "unlimited", "bytes"),
+    "Max open files": ("4096", "4096", "files"),
+}
+
+
+def _write_limits(root: Path, pid: int, rows: dict[str, tuple[str, str, str]]) -> None:
+    lines = ["Limit                     Soft Limit           Hard Limit           Units"]
+    for label, (soft, hard, units) in rows.items():
+        lines.append(f"{label:<26}{soft:<21}{hard:<21}{units}")
+    (root / str(pid) / "limits").write_text("\n".join(lines) + "\n")
+
+
+def _write_maps(root: Path, pid: int, lines: list[str]) -> None:
+    (root / str(pid) / "maps").write_text("\n".join(lines) + "\n")
 
 
 @pytest.fixture
@@ -101,6 +134,8 @@ def fake_proc(tmp_path: Path) -> Path:
         "MemAvailable:    2345678 kB\n"
         "Cached:          3456789 kB\n"
         "SwapFree:         456789 kB\n"
+        "CommitLimit:     1048576 kB\n"
+        "Committed_AS:    2097152 kB\n"
     )
     (root / "loadavg").write_text("0.52 0.58 0.59 2/456 7890\n")
     _write_process(root, 100, 1, "python", 400_000, "python -m pytest tests/unit -n 3")
@@ -114,7 +149,46 @@ def fake_proc(tmp_path: Path) -> Path:
     )
     _write_process(root, 102, 101, "Local Operator", 80_000, "/opt/lo/bin/Local Operator --run")
     _write_process(root, 103, 101, "sleep", None, "sleep 30")
-    _write_process(root, 999, 1, "unrelated", 5_000, "/usr/bin/other --daemon")
+    _write_process(root, 999, 1, "unrelated", 5_000, "/usr/bin/other --daemon", uid=0)
+
+    # Ceilings for the failing worker. 3277 mappings against the older 65530
+    # default gives a 5% ratio, so the arithmetic is visible in the rendering.
+    (root / "sys" / "vm").mkdir(parents=True)
+    (root / "sys" / "vm" / "max_map_count").write_text("65530\n")
+    (root / "sys" / "vm" / "overcommit_memory").write_text("2\n")
+    (root / "sys" / "vm" / "overcommit_ratio").write_text("50\n")
+    _write_limits(root, 101, WORKER_LIMITS)
+    _write_limits(root, 100, CONTROLLER_LIMITS)
+    _write_maps(
+        root,
+        101,
+        [
+            f"7f{index:014x}-7f{index + 1:014x} r-xp 00000000 08:01 42 /usr/lib/libx.so"
+            for index in range(3277)
+        ],
+    )
+    (root / "101" / "fd").mkdir()
+    for descriptor in range(3):
+        (root / "101" / "fd" / str(descriptor)).write_text("")
+    # The process's own cgroup path: a nested group, so the resolver has a
+    # path to prefer (the tests that exercise nesting create it) and the
+    # fallback tests have something concrete to report as not present.
+    (root / "101" / "cgroup").write_text("0::/nested/group\n4:memory:/nested/group\n")
+    with (root / "101" / "status").open("a") as status_file:
+        status_file.write(
+            "VmPeak:\t 3145728 kB\nVmSize:\t 2097152 kB\n"
+            "VmData:\t 1048576 kB\nVmStk:\t 132 kB\nThreads:\t 17\n"
+        )
+
+    # A v1 hierarchy has its ceiling below memory/, where the v2 reads above
+    # find nothing; both are recorded so neither layout can hide a ceiling.
+    cgroup_v1 = tmp_path / "cgroup" / "memory"
+    cgroup_v1.mkdir(parents=True)
+    (cgroup_v1 / "memory.limit_in_bytes").write_text("524288000\n")
+    (cgroup_v1 / "memory.usage_in_bytes").write_text("104857600\n")
+    (cgroup_v1 / "memory.stat").write_text(
+        "cache 0\nhierarchical_memory_limit 524288000\ntotal_rss 104857600\n"
+    )
     return root
 
 
@@ -175,7 +249,109 @@ def test_the_dump_records_every_field_the_next_measurement_needs(
     assert "message: [Errno 12] Cannot allocate memory" in text
 
     # cgroup v2 absent is stated, not silently blank.
-    assert "no cgroup v2 memory.max/memory.current/memory.peak" in text
+    assert "no cgroup v2 hierarchy" in text
+
+
+def test_the_worker_ceilings_are_read_from_the_failing_worker(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """Every ceiling reading, taken from the worker that caught the error.
+
+    Mutation that must fail this: read ``/proc/self`` instead of the worker's
+    pid (the controller's limits differ here), print a numeric sentinel for an
+    unlimited limit, or emit ``maps`` contents rather than their line count.
+    """
+    text = memory.build_report(
+        nodeid="tests/unit/secrets/test_cli.py::test_keyring_write",
+        error=OSError(errno.ENOMEM, "Cannot allocate memory"),
+        config=_Config({"workerid": "gw3", "workercount": 3}),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "no-cgroup",
+        pid=101,
+        root_pid=100,
+    )
+
+    # Soft and hard, with ``unlimited`` rendered as the word the kernel prints.
+    assert "RLIMIT_AS (Max address space): soft=unlimited hard=unlimited units=bytes" in text
+    assert "RLIMIT_DATA (Max data size): soft=unlimited hard=unlimited units=bytes" in text
+    assert "RLIMIT_NPROC (Max processes): soft=63488 hard=63488 units=processes" in text
+    assert "RLIMIT_STACK (Max stack size): soft=8388608 hard=unlimited units=bytes" in text
+    assert "RLIMIT_NOFILE (Max open files): soft=1048576 hard=1048576 units=files" in text
+    # The controller's descriptor limit is 4096; only the worker's row may appear.
+    assert "soft=4096" not in text
+
+    # Address space and thread count at the failure, from the worker's status.
+    assert "VmPeak: 3145728 kB (3072.0 MiB)" in text
+    assert "VmSize: 2097152 kB (2048.0 MiB)" in text
+    assert "VmData: 1048576 kB (1024.0 MiB)" in text
+    assert "VmStk: 132 kB (0.1 MiB)" in text
+    assert "VmRSS: 262000 kB (255.9 MiB)" in text
+    assert "Threads: 17" in text
+
+    # Mapping headroom: the count only, then the ratio to the kernel ceiling.
+    assert "map_count: 3277 (" in text
+    assert "max_map_count: 65530 (" in text
+    assert "map_count / max_map_count: 3277/65530 = 0.0500 (5.00%)" in text
+
+    # The namespace task total, the same 4/788 figure /proc/loadavg carries.
+    assert "namespace tasks: total=456 runnable=2 (/proc/loadavg field 4)" in text
+
+    # Descriptor and per-UID task ceilings: both must describe the worker.
+    assert "open file descriptors: 3 (" in text
+    assert "processes owned by uid 4242: 4 (" in text
+
+
+def test_commit_overcommit_and_cgroup_v1_ceilings_are_recorded(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """The strongest capacity-shaped hypothesis, plus the v1 hierarchy.
+
+    Mutation that must fail this: drop the commit block, divide by a zero
+    ``CommitLimit``, or leave the v1 files unread (the v2 block alone finds
+    nothing on a v1 host).
+    """
+    text = memory.build_report(
+        nodeid="tests/unit/secrets/test_cli.py::test_keyring_write",
+        error=OSError(errno.ENOMEM, "Cannot allocate memory"),
+        config=_Config({"workerid": "gw3", "workercount": 3}),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup",
+        pid=101,
+        root_pid=100,
+    )
+
+    assert "CommitLimit: 1048576 kB (1024.0 MiB)" in text
+    assert "Committed_AS: 2097152 kB (2048.0 MiB)" in text
+    assert "Committed_AS / CommitLimit: 2097152/1048576 = 2.0000 (200.00%)" in text
+    assert "vm.overcommit_memory: 2 (" in text
+    assert "vm.overcommit_ratio: 50 (" in text
+    assert "overcommit policy: strict" in text
+
+    assert "memory.limit_in_bytes: 524288000 bytes (500.0 MiB)" in text
+    assert "memory.usage_in_bytes: 104857600 bytes (100.0 MiB)" in text
+    assert "memory.stat hierarchical_memory_limit: 524288000 bytes (500.0 MiB)" in text
+    assert "memory.stat total_rss: 104857600 bytes (100.0 MiB)" in text
+    assert "cgroup source: mount root (nested v1 group /nested/group not present)" in text
+
+
+def test_a_zero_commit_limit_does_not_produce_a_ratio(tmp_path: Path) -> None:
+    """Overcommit policy 1 reports ``CommitLimit: 0 kB``; do not divide by it."""
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "meminfo").write_text("CommitLimit: 0 kB\nCommitted_AS: 1024 kB\n")
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "Cannot allocate memory"),
+        proc_root=proc,
+        cgroup_root=tmp_path / "no-cgroup",
+        pid=1,
+    )
+
+    assert "CommitLimit: 0 kB (0.0 MiB)" in text
+    assert "Committed_AS / CommitLimit: unavailable (a reading is missing)" in text
 
 
 def test_no_command_line_or_argv_text_reaches_the_dump(
@@ -193,11 +369,15 @@ def test_no_command_line_or_argv_text_reaches_the_dump(
     """
     line_marker = "LEAKMARKER-ARGV-31337"
     argv_marker = "LEAKMARKER-AUX-90210"
+    map_marker = "LEAKMARKER-MAP-PATH-77777"
     for entry in fake_proc.iterdir():
         if entry.is_dir() and (entry / "cmdline").exists():
             (entry / "cmdline").write_bytes(
                 f"--label {line_marker} pytest".replace(" ", "\x00").encode() + b"\x00"
             )
+    (fake_proc / "101" / "maps").write_text(
+        f"7f0000000000-7f0000001000 r-xp 00000000 08:01 42 /opt/{map_marker}/lib.so\n"
+    )
     monkeypatch.setattr(memory.sys, "argv", ["pytest", "--label", argv_marker])
     config = _Config(
         {
@@ -220,9 +400,12 @@ def test_no_command_line_or_argv_text_reaches_the_dump(
 
     assert line_marker not in text
     assert argv_marker not in text
+    assert map_marker not in text
+    assert "/opt/" not in text
     # Removing the text did not remove the reading: the tree still roots at the
-    # controller from the worker's parent pid.
+    # controller from the worker's parent pid, and the map table is counted.
     assert "tree root pid: 100" in text
+    assert "map_count: 1 (" in text
 
 
 def test_cgroup_v2_peak_is_included_when_the_files_exist(tmp_path: Path) -> None:
@@ -250,6 +433,206 @@ def test_cgroup_v2_peak_is_included_when_the_files_exist(tmp_path: Path) -> None
     assert "memory.max: 1073741824 bytes (1024.0 MiB)" in text
     assert "memory.current: 536870912 bytes (512.0 MiB)" in text
     assert "memory.peak: 805306368 bytes (768.0 MiB)" in text
+    # The process's cgroup file is unreadable here, and the block says it
+    # fell back to the mount root.
+    assert "cgroup source: mount root;" in text
+
+
+def test_one_unreadable_cgroup_v1_file_is_rendered_as_unavailable(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """A failed read on the limit must not read as an absent controller.
+
+    Mutation that must fail this: ``continue`` on a failed read (the shipped
+    round-1 behaviour), which printed the usage line and never mentioned the
+    limit.
+    """
+    memory_dir = tmp_path / "cgroup-one" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "memory.limit_in_bytes").mkdir()
+    (memory_dir / "memory.usage_in_bytes").write_text("123\n")
+    (memory_dir / "memory.stat").write_text("hierarchical_memory_limit 456\ntotal_rss 123\n")
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup-one",
+        pid=101,
+    )
+
+    assert "memory.limit_in_bytes: unavailable: IsADirectoryError" in text
+    assert "memory.usage_in_bytes: 123 bytes (0.0 MiB)" in text
+    assert "no cgroup v1 memory controller" not in text
+
+
+def test_all_unreadable_cgroup_v1_files_are_not_reported_as_absent(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """Every file failing is still four stated reads, not a missing controller."""
+    memory_dir = tmp_path / "cgroup-all" / "memory"
+    memory_dir.mkdir(parents=True)
+    for name in ("memory.limit_in_bytes", "memory.usage_in_bytes", "memory.stat"):
+        (memory_dir / name).mkdir()
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup-all",
+        pid=101,
+    )
+
+    assert "memory.limit_in_bytes: unavailable: IsADirectoryError" in text
+    assert "memory.usage_in_bytes: unavailable: IsADirectoryError" in text
+    assert "memory.stat: unavailable: IsADirectoryError" in text
+    assert "no cgroup v1 memory controller" not in text
+
+
+def test_a_file_where_the_cgroup_v1_directory_belongs_is_not_absence(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """``memory`` occupied by a regular file is an error, not a missing controller."""
+    root = tmp_path / "cgroup-file"
+    root.mkdir()
+    (root / "memory").write_text("")
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=root,
+        pid=101,
+    )
+
+    assert "memory.limit_in_bytes: unavailable: NotADirectoryError" in text
+    assert "memory.usage_in_bytes: unavailable: NotADirectoryError" in text
+    assert "memory.stat: unavailable: NotADirectoryError" in text
+    assert "no cgroup v1 memory controller" not in text
+
+
+def test_a_missing_cgroup_v1_controller_is_reported_as_absent(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """Only a controller directory that does not exist is an absence."""
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup-absent",
+        pid=101,
+    )
+
+    assert "(no cgroup v1 memory controller at" in text
+    assert "unavailable" not in text.split("-- cgroup v1 memory", 1)[1].split("--", 1)[0]
+
+
+def test_cgroup_v2_read_errors_are_reported_per_file(tmp_path: Path) -> None:
+    """The v2 block states each failed read instead of dropping it."""
+    root = tmp_path / "cgroup-v2-broken"
+    root.mkdir()
+    (root / "memory.max").mkdir()
+    (root / "memory.current").write_text("100\n")
+    (root / "memory.peak").mkdir()
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=tmp_path / "no-proc",
+        cgroup_root=root,
+        pid=101,
+    )
+
+    assert "memory.max: unavailable: IsADirectoryError" in text
+    assert "memory.current: 100 bytes (0.0 MiB)" in text
+    assert "memory.peak: unavailable: IsADirectoryError" in text
+    assert "no cgroup v2 hierarchy" not in text
+
+
+def test_a_nested_cgroup_v2_ceiling_is_preferred_over_the_mount_root(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """A container or scope ceiling is lower than the root's; read the nested one."""
+    root = tmp_path / "cgroup-v2-nested"
+    nested = root / "nested" / "group"
+    nested.mkdir(parents=True)
+    (root / "memory.max").write_text("max\n")
+    (nested / "memory.max").write_text("536870912\n")
+    (nested / "memory.current").write_text("1048576\n")
+    (nested / "memory.peak").write_text("2097152\n")
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=root,
+        pid=101,
+    )
+
+    assert f"-- cgroup v2 memory ({nested}) --" in text
+    assert "cgroup source: nested v2 group /nested/group" in text
+    assert "memory.max: 536870912 bytes (512.0 MiB)" in text
+    assert "memory.current: 1048576 bytes (1.0 MiB)" in text
+    assert "memory.peak: 2097152 bytes (2.0 MiB)" in text
+
+
+def test_a_nested_cgroup_v1_ceiling_is_preferred_over_the_mount_root(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """The v1 memory controller resolves the same nested path."""
+    root = tmp_path / "cgroup-v1-nested"
+    nested = root / "memory" / "nested" / "group"
+    nested.mkdir(parents=True)
+    (root / "memory" / "memory.limit_in_bytes").write_text("555\n")
+    (nested / "memory.limit_in_bytes").write_text("524288000\n")
+    (nested / "memory.usage_in_bytes").write_text("104857600\n")
+    (nested / "memory.stat").write_text(
+        "hierarchical_memory_limit 524288000\ntotal_rss 104857600\n"
+    )
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=root,
+        pid=101,
+    )
+
+    assert f"-- cgroup v1 memory ({nested}) --" in text
+    assert "cgroup source: nested v1 group /nested/group" in text
+    assert "memory.limit_in_bytes: 524288000 bytes (500.0 MiB)" in text
+    assert "memory.limit_in_bytes: 555 bytes" not in text
+
+
+def test_the_v1_unlimited_sentinel_renders_as_unlimited(fake_proc: Path, tmp_path: Path) -> None:
+    """The near-LONG_MAX page count is a no-limit value, like v2's ``max``."""
+    memory_dir = tmp_path / "cgroup-unlimited" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "memory.limit_in_bytes").write_text("9223372036854771712\n")
+    (memory_dir / "memory.usage_in_bytes").write_text("1234\n")
+    (memory_dir / "memory.stat").write_text(
+        "hierarchical_memory_limit 9223372036854771712\ntotal_rss 1234\n"
+    )
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup-unlimited",
+        pid=101,
+    )
+
+    assert "memory.limit_in_bytes: unlimited" in text
+    assert "memory.stat hierarchical_memory_limit: unlimited" in text
+    assert "9223372036854771712" not in text
 
 
 def test_the_process_list_is_capped_and_reports_the_omitted_count(tmp_path: Path) -> None:
@@ -307,6 +690,8 @@ def test_missing_and_unreadable_files_are_reported_not_raised(tmp_path: Path) ->
     (entry / "stat").write_text("101 (python) S 100 100 100 0 0\n")
     (entry / "status").mkdir()
     (entry / "cmdline").mkdir()
+    (entry / "limits").mkdir()
+    (entry / "maps").mkdir()
 
     text = memory.build_report(
         nodeid="tests/unit/x.py::test_y",
@@ -318,6 +703,16 @@ def test_missing_and_unreadable_files_are_reported_not_raised(tmp_path: Path) ->
     )
 
     assert "unavailable: IsADirectoryError" in text
+    assert "map_count: unavailable: IsADirectoryError" in text
+    assert "max_map_count: unavailable: FileNotFoundError" in text
+    assert "map_count / max_map_count: unavailable (a reading is missing)" in text
+    assert "open file descriptors: unavailable: FileNotFoundError" in text
+    assert "processes owned by uid: unavailable: IsADirectoryError" in text
+    assert "commit readings unavailable: IsADirectoryError" in text
+    assert "Committed_AS / CommitLimit: unavailable (a reading is missing)" in text
+    assert "vm.overcommit_memory: unavailable: FileNotFoundError" in text
+    assert "(no cgroup v1 memory controller at" in text
+    assert "memory.stat: unavailable: IsADirectoryError" not in text
     # The process is still represented by its stat line, with no RSS.
     assert "processes in tree: 1" in text
     assert re.search(r"^\s*101\s+100\s+-", text, re.MULTILINE)
