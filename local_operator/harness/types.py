@@ -32,8 +32,12 @@ Design notes carried over from the reference engine:
 from __future__ import annotations
 
 import asyncio
+import json
+import urllib.parse
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import Enum
 from typing import (
     Any,
     Awaitable,
@@ -43,6 +47,7 @@ from typing import (
     Mapping,
     Protocol,
     Sequence,
+    cast,
     runtime_checkable,
 )
 
@@ -51,6 +56,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    SecretStr,
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
@@ -685,6 +691,276 @@ class ToolCall(BaseModel):
     raw_arguments: str | None = None
 
 
+ONE_TURN_SECRET_RECEIPT = (
+    "Secret resolved for one model request; value redacted from session history."
+)
+
+#: Request fields the session's own decoration passes may set on an ARMED
+#: request. They are applied on every turn (effort fit, prompt-cache key,
+#: aggregator host pin) and carry no message content; refusing them made a real
+#: ``SessionStreamFn`` fail closed before dispatch (review S-9). ``with_model``
+#: deliberately does NOT consult this set: a change to the model contract —
+#: provider, model id, wire capability, fast mode or generation budget — still
+#: raises, so an armed secret cannot be re-aimed at another model.
+_CLONE_GUARD_FIELDS = frozenset(
+    {
+        "prompt_cache_key",
+        "provider_affinity",
+        "effort_override",
+        "effort_ceiling",
+        # Local native-accounting clone performed inside a wire builder
+        # (``providers/context.bind_native_context``); it changes admission
+        # bookkeeping for the same bytes, never the bytes themselves.
+        "context_tokens_hint",
+        "context_tokens_hint_model",
+        "context_tokens_hint_measured",
+        "context_binding",
+        "native_context_tokens",
+    }
+)
+#: Model fields that same decoration may set: the per-turn effort fit.
+_CLONE_GUARD_MODEL_FIELDS = frozenset({"reasoning_effort"})
+
+
+def one_turn_secret_value_is_present(
+    values: Iterable[SecretStr], text: str, redact: Callable[[str], str] | None
+) -> bool:
+    """Recognize the raw and encoded spellings the existing scrub supports.
+
+    A no-op sink must not turn an opaque encoded value into an approved public
+    identity. These bounded comparison forms mirror the redactor's exact-value
+    JSON/URL coverage without trying to be a second credential-shape parser.
+    """
+    forms = {text}
+    try:
+        forms.add(json.loads('"' + text.replace('"', '\\"') + '"'))
+    except (ValueError, TypeError):
+        pass
+    # BOTH URL decoders: ``quote_plus`` spells a space as ``+`` and ``quote`` as
+    # ``%20``, and a canary with either character is only recognised by its own
+    # decoder (review Q-5 measured ``quote_plus`` surviving).
+    for decode in (urllib.parse.unquote, urllib.parse.unquote_plus):
+        try:
+            forms.add(decode(text))
+        except (TypeError, ValueError):
+            pass
+    for secret in values:
+        value = secret.get_secret_value()
+        if not value:
+            return True
+        encoded = json.dumps(value, ensure_ascii=False)[1:-1]
+        candidates = {
+            value,
+            encoded,
+            urllib.parse.quote(value, safe=""),
+            urllib.parse.quote_plus(value),
+        }
+        for candidate in candidates:
+            if any(candidate and candidate in form for form in forms):
+                return True
+        if redact is not None:
+            try:
+                if any(redact(form) != form for form in forms if isinstance(form, str)):
+                    return True
+            except Exception:
+                return True
+    return False
+
+
+#: Leaf-walk budget. Deep enough for message/tool-result trees, small enough
+#: that a hostile or cyclic structure cannot turn a refusal into a hang.
+_ONE_TURN_WALK_MAX_DEPTH = 64
+
+
+def one_turn_container_has_secret(
+    values: Iterable[SecretStr],
+    value: Any,
+    redact: Callable[[str], str] | None = None,
+) -> bool:
+    """Walk every LEAF of ``value`` with the coverage primitive.
+
+    Never ``json.dumps`` a container first: dumping escapes the quotes of an
+    already-escaped leaf, so an encoded value inside arguments, a tool result
+    or a forwarded prompt stops matching its own spelling (review S-12/R3-1,
+    measured as JSON-escaped args and results passing a no-op sink).
+
+    Scalars are checked because the WIRE can turn them into text: ``bytes``,
+    ``bytearray`` and ``memoryview`` are decoded as UTF-8 (and searched as raw
+    bytes as a fallback), and pydantic models are dumped in JSON mode so a
+    ``Path``, ``Enum``, UUID or similar renders exactly as it will in the body
+    (review S-15: a tool result's ``details={"blob": value.encode()}`` reached
+    the event stream, history and the later request because Python-mode dumps
+    leave those objects untouched). A model that refuses to dump cannot be
+    proven safe, so it counts as a hit. Depth and cycle bounds keep a
+    pathological structure from becoming a hang.
+    """
+    seen: set[int] = set()
+    limit = _ONE_TURN_WALK_MAX_DEPTH
+
+    def walk(item: Any, depth: int = 0) -> bool:
+        if depth > limit:
+            # Cannot be proven safe inside the budget: fail closed.
+            return True
+        if isinstance(item, str):
+            return one_turn_secret_value_is_present(values, item, redact)
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            raw = bytes(item)
+            for secret in values:
+                needle = secret.get_secret_value()
+                if needle and needle.encode("utf-8", "surrogatepass") in raw:
+                    return True
+            try:
+                decoded = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                decoded = raw.decode("utf-8", "surrogateescape")
+            return one_turn_secret_value_is_present(values, decoded, redact)
+        if isinstance(item, Mapping):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            return any(
+                walk(key, depth + 1) or walk(entry, depth + 1) for key, entry in item.items()
+            )
+        if isinstance(item, (list, tuple, set, frozenset)):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            return any(walk(entry, depth + 1) for entry in item)
+        if isinstance(item, Enum):
+            # A plain Enum renders as its VALUE on the wire, and its value may
+            # itself be a container; ``str(member)`` would only show the name.
+            return walk(item.value, depth + 1) or walk(str(item.name), depth + 1)
+        dump = getattr(item, "model_dump", None)
+        if callable(dump):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            try:
+                return walk(dump(mode="json"), depth + 1)
+            except Exception:
+                return True
+        if isinstance(item, (int, float, bool, type(None))):
+            # JSON scalars with no text of their own. Rendering them would
+            # refuse ordinary counters while armed for a one-character secret.
+            return False
+        # Any remaining object (``Path``, UUID, datetime, a decoder's output)
+        # is rendered by the serializer rather than by this walker. Check the
+        # two spellings Python would produce for it.
+        try:
+            rendered = str(item)
+        except Exception:
+            return True
+        if one_turn_secret_value_is_present(values, rendered, redact):
+            return True
+        try:
+            return one_turn_secret_value_is_present(values, repr(item), redact)
+        except Exception:
+            return False
+
+    return walk(value)
+
+
+def one_turn_public_text(request: "ChatRequest", value: str | None) -> str | None:
+    """Return safe provider metadata, or None when it cannot be proven safe."""
+    if value is None or not request.has_one_turn_secrets:
+        return value
+    redact = request._one_turn_redact
+    if redact is None or one_turn_secret_value_is_present(
+        request._one_turn_secrets.values(), value, redact
+    ):
+        return None
+    return value
+
+
+def one_turn_scrubbed_text(request: "ChatRequest", value: str, fallback: str) -> str:
+    """Scrub provider prose; use static detail if coverage cannot be proven."""
+    redact = request._one_turn_redact
+    if redact is None:
+        return fallback
+    try:
+        scrubbed = redact(value)
+        if one_turn_secret_value_is_present(request._one_turn_secrets.values(), scrubbed, redact):
+            return fallback
+        return scrubbed
+    except Exception:
+        return fallback
+
+
+def one_turn_safe_log_detail(request: "ChatRequest", error: Any) -> str:
+    """Keep provider diagnostics only after active-sink coverage is proven."""
+    status = getattr(error, "status", None)
+    kind = getattr(error, "kind", None)
+    selector = getattr(error, "failing_selector", None)
+    if selector is None:
+        selector = getattr(error, "attempted_selector", None)
+    route = ""
+    if selector is not None:
+        provider = one_turn_public_text(request, getattr(selector, "provider", None))
+        model_id = one_turn_public_text(request, getattr(selector, "model_id", None))
+        if provider and model_id:
+            route = f" {provider}/{model_id}"
+    fallback = (
+        f"provider failure{route} "
+        f"(status={status!r}, kind={kind!r}, class={type(error).__name__}); "
+        "detail withheld for one-turn secret request"
+    )
+    redact = request._one_turn_redact
+    if redact is None:
+        return fallback
+    try:
+        describe = getattr(error, "describe", None)
+        detail = str(describe()) if callable(describe) else str(error)
+        scrubbed = redact(detail)
+        if one_turn_secret_value_is_present(request._one_turn_secrets.values(), scrubbed, redact):
+            return fallback
+        return scrubbed
+    except Exception:
+        return fallback
+
+
+class OneTurnSecretSerializationError(ValueError):
+    """An armed one-turn secret reached generic serialization."""
+
+
+class OneTurnSecretScopeError(ValueError):
+    """An armed one-turn secret escaped its exact request scope."""
+
+
+# Harness-owned channels that can carry a prompt into another agent's history.
+# This registry is shared by the native and nested-eval runner. Unknown future
+# verbs are dispatch-capable by default; only explicitly read-only verbs pass.
+_AGENT_FORWARDING_TOOLS = frozenset({"task", "hub", "send", "sessions", "network"})
+_FORWARDING_READ_OPS: dict[str, frozenset[str]] = {
+    "hub": frozenset({"list", "peek", "pause", "cancel"}),
+    "sessions": frozenset({"list", "info", "stop", "peek", "help"}),
+    "network": frozenset(
+        {
+            "status",
+            "ls",
+            "show",
+            "peers",
+            "log",
+            "doctor",
+            "ready",
+            "credentials",
+            "definitions_state",
+            "mcp_state",
+        }
+    ),
+}
+
+
+def is_agent_forwarding_call(tool_name: str, arguments: Mapping[str, Any]) -> bool:
+    if tool_name not in _AGENT_FORWARDING_TOOLS:
+        return False
+    operation = arguments.get("op", arguments.get("action"))
+    if tool_name == "network" and operation == "sessions":
+        return any(
+            arguments.get(field) for field in ("create", "engage", "send", "steer", "slash", "text")
+        )
+    return operation not in _FORWARDING_READ_OPS.get(tool_name, frozenset())
+
+
 class ToolResult(BaseModel):
     """The outcome of executing one ``ToolCall``.
 
@@ -716,6 +992,62 @@ class ToolResult(BaseModel):
     duration_s: float | None = None
     is_error: bool = False
     useless: bool = False
+
+    # Private by construction: JSON/MCP producers cannot inject this marker, and
+    # the native loop must consume it before hooks or events can publish the row.
+    _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
+
+    @classmethod
+    def one_turn_secret(
+        cls,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        value: str,
+        duration_s: float | None = None,
+    ) -> "ToolResult":
+        """Build the internal, not-yet-public form of a one-request secret.
+
+        Only the native loop may turn this into a provider overlay. The fixed
+        receipt prevents a producer from smuggling the value through public text
+        or renderer details; the serializer guard makes an unconsumed marker a
+        loud failure instead of a misleading redacted dump.
+        """
+        if not isinstance(value, str) or not value:
+            raise ValueError("One-turn secret value must be a non-empty string.")
+        result = cls(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            content=[TextContent(text=ONE_TURN_SECRET_RECEIPT)],
+            details=None,
+            duration_s=duration_s,
+            is_error=False,
+            useless=False,
+        )
+        result._one_turn_secret = SecretStr(value)
+        return result
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secret is not None:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret result cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_unconsumed_secret(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    # Pydantic wraps exceptions raised INSIDE a wrap serializer. These direct
+    # guards preserve the API's static exception type; the serializer above is
+    # still required for nested event/model serialization.
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
 
     @property
     def text(self) -> str:
@@ -784,6 +1116,30 @@ class Message(BaseModel):
     provider_payload: dict[str, Any] | None = None
     # Stable id for transcript entries and cache memoization.
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+
+    # Set only on the ephemeral raw copies returned by ChatRequest.wire_messages.
+    # Explicit provider encoders may read the content; generic serialization may
+    # not silently turn this raw-bearing row into apparently safe public JSON.
+    _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secret is not None:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret message cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_unconsumed_secret(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
 
     @property
     def text(self) -> str:
@@ -1286,6 +1642,10 @@ class VariableStoreProtocol(Protocol):
     def credential_env(self) -> dict[str, str]: ...
 
     def redact(self, text: str) -> str: ...
+
+    def acquire_scoped_redaction(self, value: str) -> str: ...
+
+    def release_scoped_redaction(self, token: str) -> bool: ...
 
 
 @runtime_checkable
@@ -4145,6 +4505,47 @@ class ChatRequest(BaseModel):
             self._max_tokens_from_policy = True
         return self
 
+    def _one_turn_model_contract(self) -> dict[str, Any]:
+        """Provider-visible model contract protected by an armed request.
+
+        Context/output limits stay in scope even though they are metadata: they
+        govern admission and the effective generation bound. Pure discovery
+        markers such as ``context_metadata_resolved`` may resolve only when this
+        complete contract is unchanged.
+        """
+        return self.model.model_dump(
+            mode="python",
+            exclude={"context_metadata_resolved", "display_name"},
+        )
+
+    def _one_turn_safe_template(self, *, allow_local_decoration: bool = False) -> tuple[Any, ...]:
+        # Direct field reads, NOT an armed model_dump exemption. Generic callers
+        # must never be able to repeat the private comparison as a public dump.
+        # preparation_ms and same_route_retry are the only outer-retry
+        # normalizations; every other declared field is part of the contract.
+        #
+        # ``allow_local_decoration`` is the CLONE guard's view only (see
+        # ``model_copy``). It tolerates the two passes ``SessionStreamFn`` runs
+        # on every request -- the per-turn effort fit and the cache/routing
+        # decoration -- plus the wire builder's native accounting. Refusing
+        # those made a real session fail closed before dispatch (review S-9),
+        # which made the feature unreachable where it must work. They steer
+        # caching and host choice for the SAME model; none carries content.
+        # ``with_model`` stays strict, so an armed secret still cannot change
+        # model, provider, fast mode or generation budget.
+        excluded = {"preparation_ms", "same_route_retry"}
+        if allow_local_decoration:
+            excluded |= _CLONE_GUARD_FIELDS
+        values: list[Any] = []
+        for name in type(self).model_fields:
+            if name in excluded:
+                continue
+            value = getattr(self, name)
+            if name == "model" and allow_local_decoration:
+                value = value.model_dump(exclude=_CLONE_GUARD_MODEL_FIELDS)
+            values.append(value)
+        return tuple(values)
+
     def with_model(self, spec: "ModelSpec") -> "ChatRequest":
         """This request aimed at a DIFFERENT model, with its bound re-derived.
 
@@ -4176,7 +4577,106 @@ class ChatRequest(BaseModel):
         update: dict[str, Any] = {"model": spec}
         if self._max_tokens_from_policy:
             update["max_tokens"] = turn_output_budget(spec)
-        return self.model_copy(update=update)
+        candidate = cast("ChatRequest", BaseModel.model_copy(self, update=update))
+        if self.has_one_turn_secrets and (
+            candidate._one_turn_model_contract() != self._one_turn_model_contract()
+            or candidate.max_tokens != self.max_tokens
+        ):
+            # A secret overlay is authorized for one exact model/budget request.
+            # Failover and fast-mode downgrade must not re-aim or rewrite it.
+            # Stricter than the design's minimum ON PURPOSE (review M1): a
+            # context-window-only change with an equal output bound is refused
+            # too, because the window is part of what admitted this request and
+            # the design says not to blanket-allow context-window changes. The
+            # allowed relaxation is the METADATA marker handled by
+            # ``_one_turn_model_contract``, not the budget itself.
+            raise OneTurnSecretScopeError(
+                "An armed one-turn secret request cannot change model or generation budget."
+            )
+        return candidate
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> "ChatRequest":
+        """Copy an ordinary request, or prove an armed rewrite is inert.
+
+        Pydantic preserves private attributes on every bare clone. Enforcing the
+        scope HERE closes present and future post-arming decoration paths rather
+        than relying on every caller to remember ``with_model``.
+        """
+        candidate = cast("ChatRequest", BaseModel.model_copy(self, update=update, deep=deep))
+        if self.has_one_turn_secrets and (
+            candidate._one_turn_safe_template(allow_local_decoration=True)
+            != self._one_turn_safe_template(allow_local_decoration=True)
+        ):
+            raise OneTurnSecretScopeError("An armed one-turn secret request cannot be rewritten.")
+        return candidate
+
+    _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
+
+    @property
+    def has_one_turn_secrets(self) -> bool:
+        return bool(self._one_turn_secrets)
+
+    def arm_one_turn_secrets(
+        self,
+        values: Mapping[str, SecretStr],
+        *,
+        redact: Callable[[str], str] | None = None,
+    ) -> None:
+        """Attach request-private values and the metadata scrub callback."""
+        self._one_turn_secrets = dict(values)
+        self._one_turn_redact = redact
+
+    _one_turn_redact: Callable[[str], str] | None = PrivateAttr(default=None)
+
+    def wire_messages(self) -> list[Message]:
+        """Return public history, or narrowly scoped raw provider-bound copies.
+
+        With no overlay this is the historical zero-cost path: the original list
+        and message objects are returned untouched. An armed request instead
+        proves that every id identifies exactly one tool row before making only
+        those ephemeral copies; ambiguity fails before any provider call.
+        """
+        if not self._one_turn_secrets:
+            return self.messages
+        messages = list(self.messages)
+        for call_id, secret in self._one_turn_secrets.items():
+            matches = [
+                index
+                for index, message in enumerate(messages)
+                if message.role == "tool" and message.tool_call_id == call_id
+            ]
+            if len(matches) != 1:
+                raise OneTurnSecretScopeError(
+                    "An armed one-turn secret must resolve to exactly one tool message."
+                )
+            index = matches[0]
+            raw = messages[index].model_copy(
+                update={"content": [TextContent(text=secret.get_secret_value())]}
+            )
+            raw._one_turn_secret = secret
+            messages[index] = raw
+        return messages
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secrets:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret request cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_armed_request_serialization(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
 
     #: True when ``max_tokens`` was filled from :func:`turn_output_budget`
     #: because the caller named nothing, False when a caller named a value --
