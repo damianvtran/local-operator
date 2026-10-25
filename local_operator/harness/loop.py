@@ -29,7 +29,7 @@ import re
 import time
 import uuid
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar, cast
 
@@ -108,6 +108,9 @@ from local_operator.harness.types import (
     TurnEndEvent,
     TurnStartEvent,
     Usage,
+    is_agent_forwarding_call,
+    one_turn_public_text,
+    one_turn_secret_value_is_present,
 )
 from local_operator.i18n.keys import tui_notices as _nt
 from local_operator.i18n.messages import Msg
@@ -1111,7 +1114,7 @@ class _OneTurnSecretLease:
     """
 
     value: SecretStr
-    template: dict[str, Any] | None = None
+    template: tuple[Any, ...] | None = None
     redaction_token: str | None = None
 
 
@@ -3864,14 +3867,14 @@ class AgentLoop:
         return int(hint) if hint else None
 
     @staticmethod
-    def _one_turn_request_template(request: ChatRequest) -> dict[str, Any]:
+    def _one_turn_request_template(request: ChatRequest) -> tuple[Any, ...]:
         """Capture the safe request identity used to recognize an exact retry.
 
         This runs BEFORE arming, so neither equality nor serialization can touch
         the raw value. Only wall-clock preparation and the observational retry
         marker are excluded; every provider-affecting field still participates.
         """
-        return request.model_dump(mode="python", exclude={"preparation_ms", "same_route_retry"})
+        return request._one_turn_safe_template()
 
     def _release_one_turn_secret(self, context: LoopContext, call_id: str) -> None:
         lease = context.one_turn_secret_leases.pop(call_id, None)
@@ -3909,6 +3912,8 @@ class AgentLoop:
             if tool_context is None:
                 raise OneTurnSecretScopeError("scoped redaction is unavailable")
             variables = tool_context.variables
+            if variables is None:
+                raise OneTurnSecretScopeError("scoped redaction is unavailable")
             acquire = getattr(variables, "acquire_scoped_redaction")
             release = getattr(variables, "release_scoped_redaction")
             if not callable(acquire) or not callable(release):
@@ -3941,7 +3946,7 @@ class AgentLoop:
                 lease.template = template
                 values[call_id] = lease.value
             if values:
-                request.arm_one_turn_secrets(values)
+                request.arm_one_turn_secrets(values, redact=variables.redact)
             return request
         except Exception as exc:
             # Roll back only tokens acquired by THIS attempt. Previously live
@@ -3985,7 +3990,16 @@ class AgentLoop:
             if redact is None:
                 raise OneTurnSecretScopeError("assistant redaction is unavailable")
             argument_scrub = config.redact_tool_arguments or redact
+            needles = [secret.get_secret_value() for secret in secrets]
+            if not needles or any(not needle for needle in needles):
+                raise OneTurnSecretScopeError("secret finalization has no live value")
             content: list[Content] = []
+            for call in assistant.tool_calls:
+                if any(
+                    one_turn_secret_value_is_present(secrets, text, argument_scrub)
+                    for text in (call.id, call.name)
+                ):
+                    raise OneTurnSecretScopeError("unsafe assistant tool identity")
             for block in assistant.content:
                 if (
                     not isinstance(block, TextContent)
@@ -4000,10 +4014,6 @@ class AgentLoop:
             public = _scrub_history_arguments(carrier, redact, config.redact_tool_arguments)
             public.provider_payload = None
             scrubbed_error = redact(error) if error else error
-
-            needles = [secret.get_secret_value() for secret in secrets]
-            if not needles or any(not needle for needle in needles):
-                raise OneTurnSecretScopeError("secret finalization has no live value")
 
             def contains_raw(value: Any) -> bool:
                 if isinstance(value, str):
@@ -4025,6 +4035,16 @@ class AgentLoop:
                 if contains_raw(block.text) or redact(block.text) != block.text:
                     raise OneTurnSecretScopeError("assistant text scrub incomplete")
             for call in public.tool_calls:
+                # Tool identity is the pairing key and the dispatch name. A
+                # secret here cannot be masked into a different valid identity:
+                # refuse the whole turn before execution or publication.
+                if (
+                    contains_raw(call.id)
+                    or contains_raw(call.name)
+                    or redact(call.id) != call.id
+                    or redact(call.name) != call.name
+                ):
+                    raise OneTurnSecretScopeError("unsafe assistant tool identity")
                 _, arguments_changed = _scrub_argument_value(call.arguments, argument_scrub)
                 raw_changed = (
                     call.raw_arguments is not None
@@ -4052,11 +4072,10 @@ class AgentLoop:
             assistant.tool_calls = public.tool_calls
             assistant.provider_payload = None
             return executing, assistant, scrubbed_error, False
-        except Exception as exc:
-            logger.warning(
-                "one-turn secret assistant finalization refused: %s",
-                type(exc).__name__,
-            )
+        except Exception:
+            # Exception args and traceback locals can contain the raw request or
+            # provider echo, so this boundary logs only a fixed diagnostic.
+            logger.warning("one-turn secret assistant finalization refused safely")
             # Fail closed with no text, arguments, native payload, or producer
             # exception detail. Returning this same safe object for both callers
             # guarantees the outer run cannot execute an unpaired raw call.
@@ -4261,7 +4280,14 @@ class AgentLoop:
             request = self._arm_one_turn_secrets(context, request)
             secret_active = request.has_one_turn_secrets
             stream = _abortable_stream(config.stream_fn(request, signal), signal)
+            from local_operator.providers.failover import _one_turn_scrub_stream_event
+
             async for event in stream:
+                if secret_active:
+                    # Failover already applies this boundary. Reapplying it here
+                    # is idempotent and covers custom/direct streams and test
+                    # hosts, so provider metadata cannot bypass this seam.
+                    event = _one_turn_scrub_stream_event(request, event)
                 if isinstance(event, StreamModelEvent):
                     model = event.model
                     yield ModelChangeEvent(
@@ -4281,9 +4307,9 @@ class AgentLoop:
                     # yielded from a placeholder before the request is even
                     # built, so it cannot carry that meaning.
                     yield ProviderTurnStartEvent(
-                        response_id=event.response_id,
-                        provider=model.provider,
-                        model_id=model.model_id,
+                        response_id=one_turn_public_text(request, event.response_id),
+                        provider=one_turn_public_text(request, model.provider),
+                        model_id=one_turn_public_text(request, model.model_id),
                     )
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
@@ -4754,11 +4780,11 @@ class AgentLoop:
                 nameless_call_drops += 1
                 logger.warning(
                     "dropping a tool call that arrived with no name "
-                    "(index %d, %d argument bytes, id %r); a nameless call cannot "
+                    "(index %d, %d argument bytes, id %s); a nameless call cannot "
                     "be executed and cannot be replayed to any provider",
                     index,
                     state["bytes"],
-                    state["id"] or "<none>",
+                    ("<withheld>" if secret_active else repr(state["id"] or "<none>")),
                 )
                 continue
             assembled_calls.append(self._assemble_tool_call(state))
@@ -4870,7 +4896,11 @@ class AgentLoop:
 
     @staticmethod
     def _not_run_compose_frame(
-        call: ToolCall, reason: str, kind: str | None = None
+        call: ToolCall,
+        reason: str,
+        kind: str | None = None,
+        *,
+        secret_active: bool = False,
     ) -> ToolCallComposeEvent:
         """The terminal compose frame for a call that will never START.
 
@@ -4924,14 +4954,21 @@ class AgentLoop:
             # The assembled argument payload, which is the same measurement the
             # streaming frames reported: their byte count is the sum of the
             # argument deltas, and those are what ``raw_arguments`` joined.
-            argument_bytes=len(call.raw_arguments or ""),
+            # Secret-active calls were never publicly composed. This terminal
+            # frame must not become a second raw-argument carrier.
+            argument_bytes=0 if secret_active else len(call.raw_arguments or ""),
             dictation_complete=True,
             not_run_reason=text,
             not_run_kind=kind,
         )
 
     def _not_run_frames(
-        self, calls: list[ToolCall], reason: str, kind: str | None = None
+        self,
+        calls: list[ToolCall],
+        reason: str,
+        kind: str | None = None,
+        *,
+        secret_active: bool = False,
     ) -> list[ToolCallComposeEvent]:
         """Terminal frames for a set of calls that will never START, one verdict.
 
@@ -4940,7 +4977,11 @@ class AgentLoop:
         (``skipped``). The planning-failure path above carries a per-call reason
         and calls :meth:`_not_run_compose_frame` directly for that reason.
         """
-        return [self._not_run_compose_frame(call, reason, kind=kind) for call in calls if call.name]
+        return [
+            self._not_run_compose_frame(call, reason, kind=kind, secret_active=secret_active)
+            for call in calls
+            if call.name
+        ]
 
     async def _execute_tool_calls(
         self,
@@ -4981,13 +5022,21 @@ class AgentLoop:
             if call.id in seen_ids:
                 # Duplicate call id within one batch: first wins; the duplicate
                 # is paired with a skipped result and never executes.
-                logger.warning("duplicate tool call id %s dropped from batch", call.id)
+                secret_active = bool(context.one_turn_secret_leases)
+                logger.warning(
+                    "duplicate tool call id dropped from batch%s",
+                    "" if secret_active else f": {call.id}",
+                )
                 plan.append(
                     _PlannedCall(
                         call=call,
                         failure=self._synthetic_result(
                             call,
-                            f"Duplicate call id '{call.id}' skipped.",
+                            (
+                                _ONE_TURN_SECRET_SCRUB_ERROR
+                                if secret_active
+                                else f"Duplicate call id '{call.id}' skipped."
+                            ),
                             details={FAULT_KEY: FAULT_DUPLICATE_ID},
                         ),
                     )
@@ -5021,8 +5070,13 @@ class AgentLoop:
                 raw_kind = (failure.failure.details or {}).get(FAULT_KEY)
                 yield self._not_run_compose_frame(
                     failure.call,
-                    failure.failure.text,
+                    (
+                        _ONE_TURN_SECRET_SCRUB_ERROR
+                        if context.one_turn_secret_leases
+                        else failure.failure.text
+                    ),
                     kind=raw_kind if isinstance(raw_kind, str) and raw_kind else None,
+                    secret_active=bool(context.one_turn_secret_leases),
                 )
         index = 0
         first_slot = True
@@ -5081,8 +5135,13 @@ class AgentLoop:
                 # as a steering skip.
                 for frame in self._not_run_frames(
                     [item.call for item in plan[index:] if item.failure is None],
-                    SKIPPED_RESULT_TEXT,
+                    (
+                        _ONE_TURN_SECRET_SCRUB_ERROR
+                        if context.one_turn_secret_leases
+                        else SKIPPED_RESULT_TEXT
+                    ),
                     kind=FAULT_SKIPPED,
+                    secret_active=bool(context.one_turn_secret_leases),
                 ):
                     yield frame
                 break
@@ -5226,7 +5285,12 @@ class AgentLoop:
             try:
                 refusal = tool.refuse_args(args, offered)
             except Exception:
-                logger.warning("plan-time refusal check failed for %s", call.name, exc_info=True)
+                logger.warning(
+                    "plan-time refusal check failed for %s%s",
+                    call.name,
+                    "" if context.one_turn_secret_leases else " (details attached)",
+                    exc_info=not context.one_turn_secret_leases,
+                )
             else:
                 if not isinstance(refusal, str) or not refusal.strip():
                     refusal = None
@@ -5255,7 +5319,12 @@ class AgentLoop:
             except Exception:
                 # Unknown resource identity keeps the legacy exclusive
                 # barrier; a failed optimization must never create a race.
-                logger.debug("tool resource identity failed for %s", call.name, exc_info=True)
+                logger.debug(
+                    "tool resource identity failed for %s%s",
+                    call.name,
+                    "" if context.one_turn_secret_leases else " (details attached)",
+                    exc_info=not context.one_turn_secret_leases,
+                )
         return _PlannedCall(call=call, tool=tool, args=args, intent=intent, resources=resources)
 
     @classmethod
@@ -5296,11 +5365,20 @@ class AgentLoop:
         *,
         text: str = _ONE_TURN_SECRET_CAPTURE_ERROR,
         duration_s: float | None = None,
+        redact: Callable[[str], str] | None = None,
+        secrets: Iterable[SecretStr] = (),
     ) -> ToolResult:
-        """Return a static safe failure with no producer-controlled fields."""
+        """Return a safe failure without echoing an unsafe provider identity."""
+        active = tuple(secrets)
+        call_id = call.id
+        if one_turn_secret_value_is_present(active, call_id, redact):
+            call_id = "one-turn-secret-withheld"
+        public_name = tool_name
+        if one_turn_secret_value_is_present(active, public_name, redact):
+            public_name = "tool"
         return ToolResult(
-            tool_call_id=call.id,
-            tool_name=tool_name,
+            tool_call_id=call_id,
+            tool_name=public_name,
             content=[TextContent(text=text)],
             details=None,
             duration_s=duration_s,
@@ -5428,23 +5506,24 @@ class AgentLoop:
                 verdict,
             )
             public = result.model_copy(update={"content": content, "details": details})
-            needles = [
-                lease.value.get_secret_value() for lease in context.one_turn_secret_leases.values()
-            ]
+            leases = list(context.one_turn_secret_leases.values())
+            needles = [lease.value.get_secret_value() for lease in leases]
             published = json.dumps(public.model_dump(mode="json"), default=str)
-            if any(needle in published for needle in needles):
+            if any(needle in published for needle in needles) or one_turn_secret_value_is_present(
+                [lease.value for lease in leases],
+                published,
+                redact,
+            ):
                 raise OneTurnSecretScopeError("tool event scrub incomplete")
             return public
         except Exception as exc:
             logger.warning("one-turn secret tool-event scrub failed: %s", type(exc).__name__)
-            return ToolResult(
-                tool_call_id=result.tool_call_id,
-                tool_name=result.tool_name,
-                content=[TextContent(text=_ONE_TURN_SECRET_CAPTURE_ERROR)],
-                details=None,
+            return self._one_turn_secret_error(
+                ToolCall(id=result.tool_call_id, name=result.tool_name, arguments={}),
+                result.tool_name,
                 duration_s=result.duration_s,
-                is_error=True,
-                useless=False,
+                redact=redact,
+                secrets=[lease.value for lease in context.one_turn_secret_leases.values()],
             )
 
     def _one_turn_forwarding_refusal(
@@ -5458,8 +5537,8 @@ class AgentLoop:
         tool = item.tool
         if (
             tool is None
-            or tool.name not in {"task", "hub", "send"}
             or not context.one_turn_secret_leases
+            or not is_agent_forwarding_call(tool.name, item.args)
         ):
             return None
         redact = config.redact_tool_result
@@ -5633,6 +5712,12 @@ class AgentLoop:
                 )
 
         def on_update(update: AgentToolUpdate) -> None:
+            if context.one_turn_secret_leases:
+                # Executor arguments are deliberately raw. A synchronous update
+                # callback cannot await the deep redaction adapters, and partial
+                # content has no final-coverage proof, so withhold the transient
+                # frame rather than publishing an unverified second carrier.
+                return
             queue.put_nowait(
                 ToolExecutionUpdateEvent(
                     tool_call_id=call.id, tool_name=tool.name, partial_result=update
@@ -5845,8 +5930,7 @@ class AgentLoop:
         except InvalidToolArgumentsError as exc:
             if context.one_turn_secret_leases:
                 logger.debug(
-                    "tool %s rejected arguments during one-turn secret scope: %s",
-                    tool.name,
+                    "tool rejected arguments during one-turn secret scope: %s",
                     type(exc).__name__,
                 )
                 return self._one_turn_secret_error(
@@ -5879,8 +5963,7 @@ class AgentLoop:
         except Exception as exc:
             if context.one_turn_secret_leases:
                 logger.warning(
-                    "tool %s raised during one-turn secret scope: %s",
-                    tool.name,
+                    "tool raised during one-turn secret scope: %s",
                     type(exc).__name__,
                 )
                 return self._one_turn_secret_error(
@@ -5919,8 +6002,7 @@ class AgentLoop:
         except Exception as exc:  # noqa: BLE001 - a hook must never break a turn
             if secret_active:
                 logger.warning(
-                    "post-tool hooks raised during one-turn secret scope for %s: %s",
-                    tool_name,
+                    "post-tool hooks raised during one-turn secret scope: %s",
                     type(exc).__name__,
                 )
             else:
@@ -5935,8 +6017,7 @@ class AgentLoop:
                 notes = [config.redact_tool_result(note) for note in notes]
             except Exception as exc:
                 logger.warning(
-                    "post-tool note scrub failed during one-turn secret scope for %s: %s",
-                    tool_name,
+                    "post-tool note scrub failed during one-turn secret scope: %s",
                     type(exc).__name__,
                 )
                 return result

@@ -20,6 +20,7 @@ from local_operator.harness.loop import (
     AgentLoop,
     LoopContext,
     _ModelTurnResult,
+    _OneTurnSecretLease,
     _PlannedCall,
 )
 from local_operator.harness.types import (
@@ -28,6 +29,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentMessage,
     AgentTool,
+    AgentToolUpdate,
     ChatRequest,
     LoopConfig,
     Message,
@@ -48,6 +50,7 @@ from local_operator.harness.types import (
     ToolCallComposeEvent,
     ToolContext,
     ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent,
     ToolResult,
 )
 from local_operator.variables import VariableStore
@@ -693,6 +696,114 @@ async def test_agent_forwarding_refuses_raw_but_allows_safe_arguments(
     loop._clear_one_turn_secrets(context)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("sessions", {"op": "spawn", "prompt": None}),
+        ("sessions", {"op": "resume", "session": "child", "prompt": None}),
+        ("network", {"action": "sessions", "peer": "peer", "create": True, "prompt": None}),
+        ("network", {"action": "sessions", "peer": "peer", "send": "child", "text": None}),
+        ("network", {"action": "sessions", "peer": "peer", "steer": "child", "text": None}),
+        ("network", {"action": "sessions", "peer": "peer", "slash": "/run", "text": None}),
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("encoded", [False, True])
+async def test_sessions_and_network_forwarding_fail_before_dispatch(
+    tool_name: str,
+    args: dict[str, Any],
+    nested: bool,
+    encoded: bool,
+) -> None:
+    canary = 'v0rn-"quoted\\path\n' + tool_name + "-7d4c"
+    payload = json.dumps(canary)[1:-1] if encoded else canary
+    args = dict(args)
+    carrier = "prompt" if "prompt" in args else "text"
+    args[carrier] = payload
+    variables = VariableStore()
+    variables.acquire_scoped_redaction(canary)
+    loop = AgentLoop()
+    context = _context_with_lease(loop, variables, canary)
+    loop._arm_one_turn_secrets(context, _request("call-a"))
+    dispatched: list[dict[str, Any]] = []
+
+    async def execute(tool_call_id: str, call_args: dict[str, Any], *_args: Any) -> ToolResult:
+        dispatched.append(call_args)
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            content=[TextContent(text="safe")],
+        )
+
+    tool = AgentTool(
+        name=tool_name,
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+    call = _tool_call("forward-operation", tool_name, args)
+    result = await loop._runner_result(
+        _PlannedCall(call=call, tool=tool, args=args),
+        context,
+        _config(lambda *_args: None, variables),
+        None,
+        asyncio.Queue(),
+        allow_one_turn_secret=not nested,
+    )
+    assert result.is_error
+    assert dispatched == []
+    assert canary not in result.model_dump_json()
+    assert payload not in result.model_dump_json()
+    loop._clear_one_turn_secrets(context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("sessions", {"op": "spawn", "prompt": "safe"}),
+        ("sessions", {"op": "resume", "session": "child", "prompt": "safe"}),
+        ("network", {"action": "sessions", "peer": "peer", "create": True, "prompt": "safe"}),
+        ("network", {"action": "sessions", "peer": "peer", "send": "child", "text": "safe"}),
+        ("network", {"action": "sessions", "peer": "peer", "steer": "child", "text": "safe"}),
+        ("network", {"action": "sessions", "peer": "peer", "slash": "/run", "text": "safe"}),
+    ],
+)
+async def test_sessions_and_network_safe_forwarding_remains_allowed(
+    tool_name: str, args: dict[str, Any]
+) -> None:
+    variables = VariableStore()
+    loop = AgentLoop()
+    context = _context_with_lease(loop, variables, _canary("safe-forwarding"))
+    loop._arm_one_turn_secrets(context, _request("call-a"))
+    dispatched: list[dict[str, Any]] = []
+
+    async def execute(tool_call_id: str, call_args: dict[str, Any], *_args: Any) -> ToolResult:
+        dispatched.append(call_args)
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            content=[TextContent(text="safe")],
+        )
+
+    tool = AgentTool(
+        name=tool_name,
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+    call = _tool_call("forward-safe-operation", tool_name, args)
+    result = await loop._runner_result(
+        _PlannedCall(call=call, tool=tool, args=args),
+        context,
+        _config(lambda *_args: None, variables),
+        None,
+        asyncio.Queue(),
+    )
+    assert not result.is_error
+    assert dispatched == [args]
+    loop._clear_one_turn_secrets(context)
+
+
 def test_parent_and_child_lease_and_final_output_are_isolated() -> None:
     parent_value = _canary("parent")
     child_value = _canary("child")
@@ -926,3 +1037,226 @@ async def test_full_run_generator_close_cleans_lease_and_placeholder() -> None:
     assert context.original_call_args == {}
     assert canary not in variables.redaction_values()
     assert canary not in _public_event_json(events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("field", ["id", "name"])
+async def test_model_echoed_tool_identity_never_executes_or_replays(
+    field: str, encoded: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    canary = 'v0rn-"quoted\\path\n' + field + "-7d4c"
+    identity = json.dumps(canary)[1:-1] if encoded else canary
+    variables = VariableStore()
+    executed: list[dict[str, Any]] = []
+    requests: list[ChatRequest] = []
+
+    def stream_fn(request: ChatRequest, _signal: AbortSignal | None) -> Any:
+        requests.append(request)
+        index = len(requests)
+
+        async def generate() -> Any:
+            if index == 1:
+                for event in _tool_delta("secret-call", "native-secret", "{}"):
+                    yield event
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            assert request.has_one_turn_secrets
+            call_id = identity if field == "id" else "echo-call"
+            name = identity if field == "name" else "echo"
+            for event in _tool_delta(call_id, name, json.dumps({"text": "safe"})):
+                yield event
+            yield StreamEndEvent(stop_reason="toolUse")
+
+        return generate()
+
+    context = LoopContext(
+        system_blocks=[],
+        messages=[],
+        tools=[_secret_tool("native-secret", canary), _echo_tool("echo", executed)],
+        tool_context=ToolContext(cwd=".", variables=variables),
+    )
+    with caplog.at_level("WARNING"):
+        events = [
+            event
+            async for event in AgentLoop().run(
+                [Message.user("go")], context, _config(stream_fn, variables), None
+            )
+        ]
+    assert executed == []
+    assert canary not in _public_event_json(events)
+    assert canary not in caplog.text
+    assert identity not in caplog.text
+    history = json.dumps(
+        [
+            message.model_dump(mode="json")
+            for message in context.messages
+            if isinstance(message, Message)
+        ]
+    )
+    assert canary not in history
+    later = ChatRequest(
+        model=MODEL,
+        messages=[message for message in context.messages if isinstance(message, Message)],
+    )
+    assert not later.has_one_turn_secrets
+    from tests.unit.providers.test_one_turn_secret import _BUILDERS
+
+    assert all(canary not in json.dumps(build(later)) for build in _BUILDERS.values())
+    assert context.one_turn_secret_leases == {}
+
+
+@pytest.mark.asyncio
+async def test_nameless_call_warning_withholds_provider_identity(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    canary = _canary("nameless-id")
+    variables = VariableStore()
+    loop = AgentLoop()
+    context = _context_with_lease(loop, variables, canary)
+
+    def stream_fn(_request: ChatRequest, _signal: AbortSignal | None) -> Any:
+        async def generate() -> Any:
+            yield StreamToolCallDelta(index=0, id=canary, argument_delta="{}")
+            yield StreamEndEvent(stop_reason="toolUse")
+
+        return generate()
+
+    with caplog.at_level("WARNING"):
+        events = [
+            event async for event in loop._model_turn(context, _config(stream_fn, variables), None)
+        ]
+    assert canary not in caplog.text
+    assert canary not in _public_event_json(events)
+    loop._clear_one_turn_secrets(context)
+
+
+@pytest.mark.asyncio
+async def test_terminal_compose_and_duplicate_identity_are_safe() -> None:
+    canary = _canary("terminal-compose")
+    variables = VariableStore()
+    context = LoopContext(tool_context=ToolContext(cwd=".", variables=variables))
+    token = variables.acquire_scoped_redaction(canary)
+    context.one_turn_secret_leases["call-a"] = _OneTurnSecretLease(
+        value=SecretStr(canary), redaction_token=token
+    )
+    context.tools = [_echo_tool("echo", [])]
+    calls = [
+        _tool_call("duplicate", "echo", {"text": canary}),
+        _tool_call("duplicate", "echo", {"text": "second"}),
+    ]
+    loop = AgentLoop()
+    results: list[ToolResult] = []
+    frames = [
+        frame
+        async for frame in loop._execute_tool_calls(
+            calls, context, _config(lambda *_args: None, variables), None, results
+        )
+    ]
+    public = json.dumps(
+        [frame.model_dump(mode="json") for frame in frames if isinstance(frame, BaseModel)]
+    )
+    assert canary not in public
+    compose = [frame for frame in frames if isinstance(frame, ToolCallComposeEvent)]
+    assert compose and all(frame.argument_bytes == 0 for frame in compose)
+    loop._clear_one_turn_secrets(context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True])
+async def test_secret_active_tool_progress_is_never_public(nested: bool) -> None:
+    canary = _canary("live-progress")
+    variables = VariableStore()
+    requests: list[ChatRequest] = []
+    executed: list[dict[str, Any]] = []
+
+    async def progress(tool_call_id: str, args: dict[str, Any], *_args: Any) -> ToolResult:
+        executed.append(args)
+        on_update = _args[2]
+        on_update(
+            AgentToolUpdate(
+                content=[TextContent(text=args["text"])], details={"echo": args["text"]}
+            )
+        )
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="echo",
+            content=[TextContent(text=args["text"])],
+        )
+
+    echo = AgentTool(
+        name="echo",
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        execute=progress,
+    )
+
+    def stream_fn(request: ChatRequest, _signal: AbortSignal | None) -> Any:
+        requests.append(request)
+        index = len(requests)
+
+        async def generate() -> Any:
+            if index == 1:
+                for event in _tool_delta("secret-call", "native-secret", "{}"):
+                    yield event
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            assert request.has_one_turn_secrets
+            for event in _tool_delta("echo-call", "echo", json.dumps({"text": canary})):
+                yield event
+            yield StreamEndEvent(stop_reason="toolUse")
+
+        return generate()
+
+    context = LoopContext(
+        system_blocks=[],
+        messages=[],
+        tools=[_secret_tool("native-secret", canary), echo],
+        tool_context=ToolContext(cwd=".", variables=variables),
+    )
+    config = _config(stream_fn, variables)
+    if nested:
+        loop = AgentLoop()
+        loop._capture_one_turn_secret(
+            context,
+            _tool_call("secret-call", "native-secret", {}),
+            "native-secret",
+            _public_tool_result(value=canary),
+            allow=True,
+        )
+        from local_operator.harness.loop import _BatchDone, _ToolDone
+
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        planned = _PlannedCall(
+            call=_tool_call("echo-call", "echo", {"text": canary}),
+            tool=echo,
+            args={"text": canary},
+        )
+        result = await loop._runner_result(
+            planned, context, config, None, queue, allow_one_turn_secret=False
+        )
+        queued: list[Any] = []
+        while not queue.empty():
+            queued.append(queue.get_nowait())
+        assert canary not in result.model_dump_json()
+        assert not any(isinstance(event, ToolExecutionUpdateEvent) for event in queued)
+        assert all(
+            not isinstance(event, (ToolExecutionUpdateEvent, _ToolDone, _BatchDone))
+            or canary not in str(event)
+            for event in queued
+        )
+    else:
+        events = [
+            event async for event in AgentLoop().run([Message.user("go")], context, config, None)
+        ]
+        assert executed == [{"text": canary}]
+        assert not any(isinstance(event, ToolExecutionUpdateEvent) for event in events)
+        assert canary not in _public_event_json(events)
+        assert canary not in json.dumps(
+            [
+                message.model_dump(mode="json")
+                for message in context.messages
+                if isinstance(message, Message)
+            ]
+        )
+    loop = AgentLoop()
+    loop._clear_one_turn_secrets(context)
