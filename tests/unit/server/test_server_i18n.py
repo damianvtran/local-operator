@@ -76,17 +76,34 @@ async def test_wave3_hindi_exec_catalogue_and_conditional_request(test_app_clien
         ("wire.slash", "643981b50181193f5361735c27f93b2d333deba2d85624ccf3375545215f3a79"),
     ],
 )
-async def test_held_chinese_is_absent_even_with_old_candidate_etag(
+async def test_released_chinese_candidate_serves_current_bytes_not_old_etag(
     test_app_client, namespace: str, old_sha: str
 ) -> None:
     # These are the preserved candidate's real byte hashes, not arbitrary
-    # validators: an old cached failed asset must not revalidate as 304.
+    # validators. The released locale now serves its AUDITED catalogues, so a
+    # client holding the old candidate's tag gets fresh bytes with a 200 — a
+    # failed historical asset must never revalidate as 304.
     path = f"/v1/i18n/catalogues/zh-CN/{namespace}"
-    for headers in ({}, {"If-None-Match": f'"{old_sha}"'}, {"If-None-Match": "*"}):
-        response = await test_app_client.get(path, headers=headers)
-        assert response.status_code == 404
-        assert "etag" not in response.headers
-        assert "result" not in response.json()
+    current = await test_app_client.get(path)
+    assert current.status_code == 200
+    result = current.json()["result"]
+    assert result["messages"] == catalogues.load_catalogue("zh-CN", namespace)
+    current_sha = catalogues.catalogue_sha256("zh-CN", namespace)
+    assert result["content_sha256"] == current_sha
+    stale = await test_app_client.get(path, headers={"If-None-Match": f'"{old_sha}"'})
+    if old_sha == current_sha:
+        # wire.exec's released bytes ARE the preserved candidate's bytes (the
+        # audit re-attested them unchanged), so the historical tag is also the
+        # current one and a 304 is the correct revalidation.
+        assert stale.status_code == 304
+    else:
+        # wire.slash was remediated: the historical tag must not revalidate,
+        # and the answer carries the current bytes and current ETag.
+        assert stale.status_code == 200
+        assert stale.json()["result"]["content_sha256"] == current_sha
+        assert stale.headers["etag"] == f'"{current_sha}"'
+    wildcard = await test_app_client.get(path, headers={"If-None-Match": "*"})
+    assert wildcard.status_code == 304
 
 
 @pytest.mark.asyncio
@@ -298,11 +315,30 @@ async def test_a_shipped_locale_with_no_wire_files_is_an_empty_bundle(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("locale", ["zh-CN", "xx"])
+@pytest.mark.parametrize("locale", ["xx", "de"])
 async def test_an_unshipped_locale_bundle_is_404(test_app_client, locale: str) -> None:
-    # Held or unknown locales must not answer 200-empty: eligibility is the
-    # same gate the per-namespace route applies, before any disk work.
+    # Unknown or unsupported locales must not answer 200-empty: eligibility is
+    # the same gate the per-namespace route applies, before any disk work.
     response = await test_app_client.get(f"/v1/i18n/catalogues/{locale}")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_held_locale_bundle_is_404_even_with_a_catalogue_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, test_app_client
+) -> None:
+    # The bundle gate is the generated shipped set, not disk presence. Every
+    # supported locale ships today, so narrow the set in isolation: the file
+    # exists but an ineligible tag must still be a 404 before any disk work.
+    monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en",))
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "zh-CN").mkdir()
+    (root / "zh-CN" / "wire.demo.json").write_text(
+        json.dumps({"wire.demo.hello": "Held"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+    response = await test_app_client.get("/v1/i18n/catalogues/zh-CN")
     assert response.status_code == 404
 
 

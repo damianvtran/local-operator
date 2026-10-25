@@ -153,12 +153,27 @@ def test_unsupported_config_falls_through_to_env() -> None:
         mod.shipped_locales = original  # type: ignore[assignment]
 
 
-def test_unshipped_locale_falls_back_to_en() -> None:
-    # Chinese remains supported but its whole candidate is security-held:
-    # every chain path lands on en rather than admitting partial catalogues.
-    assert resolve.resolve_language("zh-CN", environ={}) == "en"
-    assert resolve.resolve_language("auto", environ={"LOP_LANG": "zh-CN"}) == "en"
-    assert resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "en"
+def test_shipped_chinese_resolves_across_the_source_chain() -> None:
+    # The security disposition released the whole candidate (2026-10-24), so
+    # every chain path that names Chinese now lands on zh-CN, not on en.
+    assert resolve.resolve_language("zh-CN", environ={}) == "zh-CN"
+    assert resolve.resolve_language("auto", environ={"LOP_LANG": "zh-CN"}) == "zh-CN"
+    assert (
+        resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "zh-CN"
+    )
+
+
+def test_an_unshipped_locale_still_falls_back_to_en() -> None:
+    # The shipped filter is not gone just because every supported locale now
+    # ships: a locale the ledger never passed is still an English render.
+    import local_operator.i18n.resolve as mod
+
+    original = mod.shipped_locales
+    mod.shipped_locales = lambda: ("en", "fr")  # type: ignore[assignment]
+    try:
+        assert resolve.resolve_language("zh-CN", environ={}) == "en"
+    finally:
+        mod.shipped_locales = original  # type: ignore[assignment]
 
 
 def test_shipped_urdu_resolves_across_the_source_chain() -> None:
@@ -171,12 +186,13 @@ def test_shipped_urdu_resolves_across_the_source_chain() -> None:
 
 def test_os_is_consulted_last_and_filtered() -> None:
     assert resolve.resolve_language("auto", environ={}, system="Linux") == "en"
-    # The shipped filter retains earlier waves and admits hi's complete audit.
-    # Chinese's whole candidate is held outside the active package; its OS
-    # tag still falls back to en without changing the resolution contract.
+    # The shipped filter retains earlier waves, admits hi's complete audit, and
+    # admits Chinese's released candidate without changing the contract.
     assert resolve.resolve_language("auto", environ={"LANG": "ru_RU.UTF-8"}, system="Linux") == "ru"
     assert resolve.resolve_language("auto", environ={"LANG": "hi_IN.UTF-8"}, system="Linux") == "hi"
-    assert resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "en"
+    assert (
+        resolve.resolve_language("auto", environ={"LANG": "zh_CN.UTF-8"}, system="Linux") == "zh-CN"
+    )
     assert resolve.resolve_language("auto", environ={"LANG": "ur_PK.UTF-8"}, system="Linux") == "ur"
 
 
@@ -232,16 +248,18 @@ def test_kill_switch_forces_en_over_config_and_env() -> None:
 
 
 def test_shipped_locales_reads_generated_set() -> None:
-    # The whole Chinese candidate is held outside this branch, not reduced
-    # to nine passed groups. Historical exec ledger-only records still do
-    # not unship earlier waves, which no longer carry exec files.
-    assert resolve.shipped_locales() == ("en", "fr", "es", "ru", "vi", "ur", "hi")
+    # Eight waves: en is always shipped, and Chinese joins after its explicit
+    # security disposition. Historical exec ledger-only records still do not
+    # unship earlier waves, which no longer carry exec files.
+    assert resolve.shipped_locales() == ("en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi")
 
 
-def test_held_chinese_config_and_env_resolve_to_english() -> None:
-    assert resolve.resolve_language("zh-CN", environ={}, system="Linux") == "en"
-    assert resolve.resolve_language("auto", environ={"LOP_LANG": "zh-CN"}, system="Linux") == "en"
-    assert "zh-CN" not in {locale for _, locale in resolve.language_options()}
+def test_chinese_config_and_env_resolve_to_chinese() -> None:
+    assert resolve.resolve_language("zh-CN", environ={}, system="Linux") == "zh-CN"
+    assert (
+        resolve.resolve_language("auto", environ={"LOP_LANG": "zh-CN"}, system="Linux") == "zh-CN"
+    )
+    assert "zh-CN" in {locale for _, locale in resolve.language_options()}
 
 
 def test_language_options_lead_with_auto() -> None:
@@ -269,12 +287,18 @@ def test_preferred_language_line_accepts_supported_but_unshipped_locales() -> No
 
     A supported locale whose translation wave has not shipped resolves to
     ``en`` for every live SURFACE (it cannot render unaudited catalogues), but
-    the model line must state the user's actual preference: a Chinese user
-    gets en UI copy while the candidate is held AND a model told to answer in
-    Chinese. A later "unify the two filters" edit fails HERE rather than
-    silently muting the feature until zh-CN ships.
+    the model line must state the user's actual preference. All supported
+    locales currently ship, so the unshipped side is produced by narrowing the
+    generated set in isolation; unifying the two filters would fail HERE.
     """
-    assert resolve.resolve_language("zh-CN", environ={}, system="Linux") == "en"
+    import local_operator.i18n.resolve as mod
+
+    original = mod.shipped_locales
+    mod.shipped_locales = lambda: ("en", "fr")  # type: ignore[assignment]
+    try:
+        assert resolve.resolve_language("zh-CN", environ={}, system="Linux") == "en"
+    finally:
+        mod.shipped_locales = original  # type: ignore[assignment]
 
     line = resolve.preferred_language_line("zh-CN", environ={}, system="Linux")
     assert "Chinese (Simplified) (zh-CN)" in line

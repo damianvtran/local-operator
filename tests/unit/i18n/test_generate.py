@@ -455,9 +455,17 @@ def test_drift_check_passes_on_the_committed_tree() -> None:
 @pytest.mark.parametrize("slash_status", [None, "failed", "passed"])
 @pytest.mark.parametrize("candidate", ["zh-CN", "zh-cn", "zh-Hans", "zh_CN"])
 def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
-    generated, i18n_generate, slash_status, candidate
+    generated, i18n_generate, monkeypatch, slash_status, candidate
 ) -> None:
-    """Synthetic bytes only: omission is the bypass the carried gate cannot see."""
+    """Synthetic bytes only: omission is the bypass the carried gate cannot see.
+
+    The real disposition is EMPTY for zh-CN as of 2026-10-24, so the
+    canonical tag is held here in the loaded module's isolated state: these
+    synthetic rows (including the fully passed ones) must still be excluded,
+    which is what proves the mechanism is live rather than zh-CN's old status
+    baked into a fixture. The alias candidates are not SUPPORTED tags, so they
+    can never ship however complete their directory looks.
+    """
     root, _ = generated
     entries = []
     for locale in ("en", "fr", candidate):
@@ -490,6 +498,9 @@ def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
             }
         )
     i18n_generate.LEDGER.write_text(json.dumps({"entries": entries}))
+    # The committed disposition is empty; inject the canonical hold under test.
+    assert i18n_generate.SECURITY_HELD_LOCALES == frozenset()
+    monkeypatch.setattr(i18n_generate, "SECURITY_HELD_LOCALES", frozenset({"zh-CN"}))
     # fr proves that ordinary partial namespace eligibility remains supported.
     # Even fabricated passes do not constitute explicit security disposition.
     assert i18n_generate._shipped_locales() == ["en", "fr"]

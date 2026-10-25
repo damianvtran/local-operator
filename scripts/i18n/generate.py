@@ -55,11 +55,22 @@ KEYS_DIR = REPO / "local_operator" / "i18n" / "keys"
 LEDGER = REPO / "i18n" / "ledger.json"
 
 #: Security disposition is independent of per-carried-namespace audit passes.
-#: Chinese's held wire.slash candidate cannot be bypassed by omitting its file
-#: or ledger row and publishing a smaller passed package. Even new passed rows
-#: do not clear the hold: removal requires a separately reviewed, explicit
-#: security disposition. This blocks eligibility, not recognition/formatting.
-SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
+#: A held locale cannot be made eligible by omitting its file or ledger row and
+#: publishing a smaller passed package; removal requires a separately reviewed,
+#: explicit security disposition from the policy owner. This blocks eligibility,
+#: not recognition/formatting.
+#:
+#: EMPTY AS OF 2026-10-24, by the owner's explicit disposition. zh-CN had been
+#: held because ``wire.slash.credential`` was read outside the redaction policy
+#: (docs/security/redaction-policy.md, 2026-10-19). That blocker is resolved at
+#: the source: the policy now names key names as never-secret, and the
+#: sanctioned ``read_public_copy`` route (PR #2877, released in 0.89.0) served
+#: the committed blob with checkout-identity binding and an audit record. The
+#: namespace was then re-audited at its current bytes (evidence:
+#: i18n/audits/evidence/zh-CN/wire.slash/zh24s1/), every carried namespace has a
+#: current-byte passed audit, and i18n/ledger.json carries 81 passed zh-CN rows.
+#: Add a locale back here only with a new reviewed disposition.
+SECURITY_HELD_LOCALES: frozenset[str] = frozenset()
 
 #: Namespaces whose ENGLISH copy the relay SPA carries in-process, as the
 #: ``bundled.gen.ts`` map the store registers before any consumer renders.
