@@ -32,7 +32,10 @@ Design notes carried over from the reference engine:
 from __future__ import annotations
 
 import asyncio
+import json
+import urllib.parse
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -43,6 +46,7 @@ from typing import (
     Mapping,
     Protocol,
     Sequence,
+    cast,
     runtime_checkable,
 )
 
@@ -691,12 +695,141 @@ ONE_TURN_SECRET_RECEIPT = (
 )
 
 
+def one_turn_secret_value_is_present(
+    values: Iterable[SecretStr], text: str, redact: Callable[[str], str] | None
+) -> bool:
+    """Recognize the raw and encoded spellings the existing scrub supports.
+
+    A no-op sink must not turn an opaque encoded value into an approved public
+    identity. These bounded comparison forms mirror the redactor's exact-value
+    JSON/URL coverage without trying to be a second credential-shape parser.
+    """
+    forms = {text}
+    try:
+        forms.add(json.loads('"' + text.replace('"', '\\"') + '"'))
+    except (ValueError, TypeError):
+        pass
+    try:
+        forms.add(urllib.parse.unquote(text))
+    except (TypeError, ValueError):
+        pass
+    for secret in values:
+        value = secret.get_secret_value()
+        if not value:
+            return True
+        encoded = json.dumps(value, ensure_ascii=False)[1:-1]
+        candidates = {value, encoded, urllib.parse.quote(value, safe="")}
+        for candidate in candidates:
+            if any(candidate and candidate in form for form in forms):
+                return True
+        if redact is not None:
+            try:
+                if any(redact(form) != form for form in forms if isinstance(form, str)):
+                    return True
+            except Exception:
+                return True
+    return False
+
+
+def one_turn_public_text(request: "ChatRequest", value: str | None) -> str | None:
+    """Return safe provider metadata, or None when it cannot be proven safe."""
+    if value is None or not request.has_one_turn_secrets:
+        return value
+    redact = request._one_turn_redact
+    if redact is None or one_turn_secret_value_is_present(
+        request._one_turn_secrets.values(), value, redact
+    ):
+        return None
+    return value
+
+
+def one_turn_scrubbed_text(request: "ChatRequest", value: str, fallback: str) -> str:
+    """Scrub provider prose; use static detail if coverage cannot be proven."""
+    redact = request._one_turn_redact
+    if redact is None:
+        return fallback
+    try:
+        scrubbed = redact(value)
+        if one_turn_secret_value_is_present(request._one_turn_secrets.values(), scrubbed, redact):
+            return fallback
+        return scrubbed
+    except Exception:
+        return fallback
+
+
+def one_turn_safe_log_detail(request: "ChatRequest", error: Any) -> str:
+    """Keep provider diagnostics only after active-sink coverage is proven."""
+    status = getattr(error, "status", None)
+    kind = getattr(error, "kind", None)
+    selector = getattr(error, "failing_selector", None)
+    if selector is None:
+        selector = getattr(error, "attempted_selector", None)
+    route = ""
+    if selector is not None:
+        provider = one_turn_public_text(request, getattr(selector, "provider", None))
+        model_id = one_turn_public_text(request, getattr(selector, "model_id", None))
+        if provider and model_id:
+            route = f" {provider}/{model_id}"
+    fallback = (
+        f"provider failure{route} "
+        f"(status={status!r}, kind={kind!r}, class={type(error).__name__}); "
+        "detail withheld for one-turn secret request"
+    )
+    redact = request._one_turn_redact
+    if redact is None:
+        return fallback
+    try:
+        describe = getattr(error, "describe", None)
+        detail = str(describe()) if callable(describe) else str(error)
+        scrubbed = redact(detail)
+        if one_turn_secret_value_is_present(request._one_turn_secrets.values(), scrubbed, redact):
+            return fallback
+        return scrubbed
+    except Exception:
+        return fallback
+
+
 class OneTurnSecretSerializationError(ValueError):
     """An armed one-turn secret reached generic serialization."""
 
 
 class OneTurnSecretScopeError(ValueError):
     """An armed one-turn secret escaped its exact request scope."""
+
+
+# Harness-owned channels that can carry a prompt into another agent's history.
+# This registry is shared by the native and nested-eval runner. Unknown future
+# verbs are dispatch-capable by default; only explicitly read-only verbs pass.
+_AGENT_FORWARDING_TOOLS = frozenset({"task", "hub", "send", "sessions", "network"})
+_FORWARDING_READ_OPS: dict[str, frozenset[str]] = {
+    "hub": frozenset({"list", "peek", "pause", "cancel"}),
+    "sessions": frozenset({"list", "info", "stop", "peek", "help"}),
+    "network": frozenset(
+        {
+            "status",
+            "ls",
+            "show",
+            "peers",
+            "log",
+            "doctor",
+            "ready",
+            "credentials",
+            "definitions_state",
+            "mcp_state",
+        }
+    ),
+}
+
+
+def is_agent_forwarding_call(tool_name: str, arguments: Mapping[str, Any]) -> bool:
+    if tool_name not in _AGENT_FORWARDING_TOOLS:
+        return False
+    operation = arguments.get("op", arguments.get("action"))
+    if tool_name == "network" and operation == "sessions":
+        return any(
+            arguments.get(field) for field in ("create", "engage", "send", "steer", "slash", "text")
+        )
+    return operation not in _FORWARDING_READ_OPS.get(tool_name, frozenset())
 
 
 class ToolResult(BaseModel):
@@ -4243,6 +4376,38 @@ class ChatRequest(BaseModel):
             self._max_tokens_from_policy = True
         return self
 
+    def _one_turn_model_contract(self) -> dict[str, Any]:
+        """Provider-visible model contract protected by an armed request.
+
+        Context/output limits stay in scope even though they are metadata: they
+        govern admission and the effective generation bound. Pure discovery
+        markers such as ``context_metadata_resolved`` may resolve only when this
+        complete contract is unchanged.
+        """
+        return self.model.model_dump(
+            mode="python",
+            exclude={"context_metadata_resolved", "display_name"},
+        )
+
+    def _one_turn_safe_template(self, *, local_accounting: bool = False) -> tuple[Any, ...]:
+        # Direct field reads, NOT an armed model_dump exemption. Generic callers
+        # must never be able to repeat the private comparison as a public dump.
+        # preparation_ms and same_route_retry are the only outer-retry
+        # normalizations. The separate clone comparison additionally tolerates
+        # the existing LOCAL native-accounting clone inside a wire builder; it
+        # does not change messages, model, generation, cache or routing.
+        excluded = {"preparation_ms", "same_route_retry"}
+        if local_accounting:
+            excluded |= {
+                "context_tokens_hint",
+                "context_tokens_hint_model",
+                "context_tokens_hint_measured",
+                "context_binding",
+                "native_context_tokens",
+            }
+        fields = tuple(name for name in type(self).model_fields if name not in excluded)
+        return tuple(getattr(self, name) for name in fields)
+
     def with_model(self, spec: "ModelSpec") -> "ChatRequest":
         """This request aimed at a DIFFERENT model, with its bound re-derived.
 
@@ -4274,9 +4439,10 @@ class ChatRequest(BaseModel):
         update: dict[str, Any] = {"model": spec}
         if self._max_tokens_from_policy:
             update["max_tokens"] = turn_output_budget(spec)
-        candidate = self.model_copy(update=update)
+        candidate = cast("ChatRequest", BaseModel.model_copy(self, update=update))
         if self.has_one_turn_secrets and (
-            candidate.model != self.model or candidate.max_tokens != self.max_tokens
+            candidate._one_turn_model_contract() != self._one_turn_model_contract()
+            or candidate.max_tokens != self.max_tokens
         ):
             # A secret overlay is authorized for one exact model/budget request.
             # Failover and fast-mode downgrade must not re-aim or rewrite it.
@@ -4285,15 +4451,40 @@ class ChatRequest(BaseModel):
             )
         return candidate
 
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> "ChatRequest":
+        """Copy an ordinary request, or prove an armed rewrite is inert.
+
+        Pydantic preserves private attributes on every bare clone. Enforcing the
+        scope HERE closes present and future post-arming decoration paths rather
+        than relying on every caller to remember ``with_model``.
+        """
+        candidate = cast("ChatRequest", BaseModel.model_copy(self, update=update, deep=deep))
+        if self.has_one_turn_secrets and (
+            candidate._one_turn_safe_template(local_accounting=True)
+            != self._one_turn_safe_template(local_accounting=True)
+        ):
+            raise OneTurnSecretScopeError("An armed one-turn secret request cannot be rewritten.")
+        return candidate
+
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 
     @property
     def has_one_turn_secrets(self) -> bool:
         return bool(self._one_turn_secrets)
 
-    def arm_one_turn_secrets(self, values: Mapping[str, SecretStr]) -> None:
-        """Attach the request-private values resolved only by wire builders."""
+    def arm_one_turn_secrets(
+        self,
+        values: Mapping[str, SecretStr],
+        *,
+        redact: Callable[[str], str] | None = None,
+    ) -> None:
+        """Attach request-private values and the metadata scrub callback."""
         self._one_turn_secrets = dict(values)
+        self._one_turn_redact = redact
+
+    _one_turn_redact: Callable[[str], str] | None = PrivateAttr(default=None)
 
     def wire_messages(self) -> list[Message]:
         """Return public history, or narrowly scoped raw provider-bound copies.
