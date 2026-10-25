@@ -2061,6 +2061,12 @@ class ToolContext(BaseModel):
     # Session-owned transport and duplicate-read coordinator. Kept off wire
     # payloads; its lifecycle belongs to the session that constructs tools.
     web_io: Any | None = Field(default=None, exclude=True)
+    # Session-owned ``tools.read_dedup.ReadLedger``: the record of plain-file
+    # reads whose results may still be resident, consulted by ``read`` to
+    # answer an unchanged re-read with a pointer. Owned by the session because
+    # this context is rebuilt every turn and a re-read usually crosses turns;
+    # ``None`` (any other host) means every read returns content, as before.
+    read_ledger: Any | None = Field(default=None, exclude=True, repr=False)
     # Request-bound bridge reusing the harness's validation, approval and event
     # pipeline. Programmatic calls must never bypass ordinary tool policy.
     dispatch_tool: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = Field(

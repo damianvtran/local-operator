@@ -9066,6 +9066,115 @@ async def _read_scratchpad(
     return _scratchpad_address(result, url, target.path)
 
 
+def _stat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return os.stat(path)
+    except OSError:
+        return None
+
+
+def _read_dedup_lookup(
+    ledger: Any,
+    tool_call_id: str,
+    params: ReadParams,
+    path: Path,
+    display_path: str | None,
+) -> ToolResult | None:
+    """The pointer result for a covered, unchanged, resident span, or ``None``.
+
+    ``raw=true`` always reads: it is the documented escape hatch (see
+    ``read_dedup.dedup_notice`` for why ``raw`` and not a new parameter). A
+    malformed range returns ``None`` so the normal path reports it in its own
+    voice. A pointer longer than the result it replaces saves nothing and is
+    skipped.
+    """
+    from local_operator.tools import read_dedup
+
+    if params.raw or not path.is_file():
+        return None
+    if params.range:
+        try:
+            start, end = _parse_line_range(params.range)
+        except InvalidToolArgumentsError:
+            return None
+    else:
+        start, end = 1, None
+    realpath = os.path.realpath(path)
+    entry = ledger.find(realpath, start, end, lambda: read_dedup.fingerprint_file(realpath))
+    if entry is None:
+        return None
+    shown_end = entry.end if end is None else min(end, entry.end)
+    notice = read_dedup.dedup_notice(
+        display_path or str(path), start, shown_end, entry.tool_call_id
+    )
+    if len(notice) >= entry.chars:
+        return None
+    # NO ``path`` in details: compaction's supersede pass keys on
+    # ``details['path']`` and would blank the very result this points at.
+    return _text(
+        tool_call_id,
+        "read",
+        notice,
+        details={
+            read_dedup.DEDUP_DETAILS_KEY: {
+                "of": entry.tool_call_id,
+                "range": f"{start}-{shown_end}",
+                "saved_chars": entry.chars - len(notice),
+            }
+        },
+    )
+
+
+def _read_dedup_record(
+    ledger: Any,
+    tool_call_id: str,
+    path: Path,
+    pre_stat: os.stat_result | None,
+    rendered: str,
+    start: int,
+    end: int,
+    eof: bool,
+    data: bytes | None,
+) -> None:
+    """Record the span of ``rendered`` the model will actually see.
+
+    ``start..end`` is the span the read covered and ``eof`` whether it ran to
+    the end of the file; both are narrowed to what survives the output clamp
+    and the replay bound (``read_dedup.visible_end``), and EOF is claimed only
+    when the whole span survived. The fingerprint is taken AFTER the render
+    and accepted only when size and mtime still match the stat taken BEFORE
+    it, so a file rewritten mid-read is never recorded under bytes it was not
+    rendered from (that would let a later read point at stale text).
+    """
+    from local_operator.tools import read_dedup
+
+    if pre_stat is None:
+        return
+    shown = read_dedup.visible_end(rendered, start, ledger.replay_bound)
+    if shown is None:
+        return
+    if shown < end:
+        end, eof = shown, False
+    realpath = os.path.realpath(path)
+    fingerprint = read_dedup.fingerprint_file(realpath, data)
+    if fingerprint is None or (fingerprint.size, fingerprint.mtime_ns) != (
+        pre_stat.st_size,
+        pre_stat.st_mtime_ns,
+    ):
+        return
+    ledger.record(
+        read_dedup.LedgerEntry(
+            realpath=realpath,
+            start=start,
+            end=end,
+            eof=eof,
+            fingerprint=fingerprint,
+            tool_call_id=tool_call_id,
+            chars=len(rendered),
+        )
+    )
+
+
 async def _read_path(
     tool_call_id: str,
     params: ReadParams,
@@ -9144,6 +9253,27 @@ async def _read_path(
             details={"path": str(path), **(spill_details or {})},
         )
 
+    # Read dedup (``tools/read_dedup.py``): an unchanged span whose earlier
+    # result is still resident is answered with a pointer. After the approval
+    # gate on purpose, so dedup never changes who is asked what; before both
+    # read branches, so a hit costs no render. ``pre_stat`` is what lets the
+    # recording below prove the bytes it hashes are the bytes it rendered.
+    # Plain files only: ``display_path`` is set exactly when the caller is
+    # the scratchpad scheme, whose result text is rewritten after this
+    # function returns — kept out so a pointer never has two spellings.
+    ledger = (
+        getattr(context, "read_ledger", None)
+        if context is not None and display_path is None
+        else None
+    )
+    if ledger is not None:
+        hit = await asyncio.to_thread(
+            _read_dedup_lookup, ledger, tool_call_id, params, path, display_path
+        )
+        if hit is not None:
+            return hit
+    pre_stat = _stat_or_none(path) if ledger is not None else None
+
     # A ranged read streams the window off disk instead of loading the file.
     # The 2 MiB cap below is a CONTEXT budget for a whole-file read, and a
     # range is bounded by the caller's request, so applying the cap here refused
@@ -9193,6 +9323,24 @@ async def _read_path(
                 # whenever the rendered head does not fit this budget.
                 assert total is not None
                 rendered = _clamp_file_body(body, path, start, total, display=display_path)
+            if ledger is not None:
+                # EOF only when the window ran short of its request (or was
+                # open-ended) AND every line of it is visible; a full-length
+                # window may or may not have reached EOF, so it claims none
+                # (the conservative direction: a later longer request misses).
+                window_end = start + ranged.window_lines - 1
+                await asyncio.to_thread(
+                    _read_dedup_record,
+                    ledger,
+                    tool_call_id,
+                    path,
+                    pre_stat,
+                    rendered,
+                    start,
+                    window_end,
+                    end is None or window_end < end,
+                    None,
+                )
             return _text(
                 tool_call_id,
                 "read",
@@ -9300,23 +9448,31 @@ async def _read_path(
     if len(lines) > READ_LINE_CAP:
         body = _number_lines(lines[:READ_LINE_CAP], 1)
         remaining = len(lines) - READ_LINE_CAP
-        return _text(
-            tool_call_id,
-            "read",
+        rendered = (
             _clamp_file_body(body, path, 1, len(lines), display=display_path)
-            + f"\n\n[{remaining} more lines in file. Use range to continue]",
-            details={"path": str(path)},
+            + f"\n\n[{remaining} more lines in file. Use range to continue]"
         )
-    return _text(
-        tool_call_id,
-        "read",
-        (
+    else:
+        rendered = (
             _clamp_file_body(_number_lines(lines, 1), path, 1, len(lines), display=display_path)
             if lines
             else "(empty file)"
-        ),
-        details={"path": str(path)},
-    )
+        )
+    if ledger is not None and lines:
+        # ``data`` is passed so the hash describes the very bytes rendered.
+        await asyncio.to_thread(
+            _read_dedup_record,
+            ledger,
+            tool_call_id,
+            path,
+            pre_stat,
+            rendered,
+            1,
+            len(lines),
+            True,
+            data,
+        )
+    return _text(tool_call_id, "read", rendered, details={"path": str(path)})
 
 
 def build_read_tool() -> AgentTool:

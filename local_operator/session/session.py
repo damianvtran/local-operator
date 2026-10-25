@@ -143,7 +143,10 @@ from local_operator.harness.render import (
     _is_project_reminder,
     _is_todo_reminder,
 )
-from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.replay_bound import (
+    DEFAULT_REPLAY_BOUND_CHARS,
+    bound_replay_payloads,
+)
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
     is_inherit_tier_sentinel,
@@ -5019,6 +5022,18 @@ class Session:
 
         self._web_io = WebReadIO()
         self.add_dispose_hook(self._web_io.aclose)
+        from local_operator.tools.read_dedup import ReadLedger
+
+        # One ledger per runtime, read through the LIVE context: the lambda
+        # resolves ``self._context.messages`` at every lookup because
+        # compaction replaces that list, and a captured reference would keep
+        # answering "resident" for results the model can no longer see. The
+        # bound is the replay bound the loop applies to every request: a
+        # result longer than it reaches the model elided, so it is not a
+        # copy a pointer may stand in for.
+        self._read_ledger = ReadLedger(
+            lambda: self._context.messages, replay_bound=DEFAULT_REPLAY_BOUND_CHARS
+        )
         from local_operator.tools.eval import close_session_kernel
 
         self.add_dispose_hook(lambda: close_session_kernel(self.session_id))
@@ -18901,6 +18916,7 @@ class Session:
             on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
             web_io=self._web_io,
+            read_ledger=self._read_ledger,
             subagent_launcher=self._launch_subagent,
             # DERIVED from the live inventory every turn, never configured.
             # ``task`` is the signal and ``subagent_launcher`` above is not: the
