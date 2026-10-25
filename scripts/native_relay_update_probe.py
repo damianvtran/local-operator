@@ -155,6 +155,18 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _systemd_binary() -> str | None:
+    """The user-manager executable on systemd's PATH or standard library paths."""
+    found = shutil.which("systemd")
+    if found is not None:
+        return found
+    for value in ("/lib/systemd/systemd", "/usr/lib/systemd/systemd"):
+        candidate = Path(value)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     """Start and prove the private manager BEFORE any install/service work."""
     xdg = scratch / "xdg"
@@ -167,8 +179,11 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     # to the private manager, never fall back to the runner's real user bus.
     os.environ["XDG_RUNTIME_DIR"] = str(xdg)
     os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+    executable = _systemd_binary()
+    if executable is None:
+        raise ProbeBlocked("systemd user-manager executable is unavailable")
     proc = subprocess.Popen(  # noqa: S603 — fixed executable, disposable manager
-        ["systemd", "--user"],
+        [executable, "--user"],
         env=env,
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -361,9 +376,11 @@ def main() -> int:
             raise ProbeBlocked("real Linux user systemd is required")
         missing = [
             name
-            for name in ("systemd", "systemctl", "ps", "git")
+            for name in ("systemctl", "ps", "git")
             if shutil.which(name) is None
         ]
+        if _systemd_binary() is None:
+            missing.append("systemd")
         if missing:
             raise ProbeBlocked(f"missing required native tools: {', '.join(missing)}")
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
