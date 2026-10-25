@@ -94,26 +94,37 @@ def test_granted_peer_restarts_and_receipt_has_fresh_process_evidence(
     _grant(server_a, record, server_b.identity.device_id)
     current = {"server": server_a}
     calls: list[str] = []
-    port = devices[3]
+    restart_errors: list[BaseException] = []
 
     def _restart(action: str) -> dict[str, Any]:
         assert action == "restart"
         calls.append(action)
-        old = current["server"]
-        old.stop()
-        # Same identity, store and port; a new RelayServer is a new process
-        # instance for protocol purposes, with a fresh instance id and start time.
-        new = relay.RelayServer(
-            root=old.root,
-            identity=old.identity,
-            settings=relay.NetworkSettings(port=port, listen_address="127.0.0.1"),
-            audit=audit_mod.AuditLog(old.root),
-        )
-        new.bind()
-        new.bind_control()
-        new.start()
-        current["server"] = new
-        return {"ok": True}
+        try:
+            old = current["server"]
+            old.stop()
+            # Same identity and store, but let the kernel choose the new port:
+            # another parallel test process may claim a fixed port in the stop /
+            # rebind gap. The member endpoint is the only thing that changes.
+            new = relay.RelayServer(
+                root=old.root,
+                identity=old.identity,
+                settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+                audit=audit_mod.AuditLog(old.root),
+            )
+            host, port = new.bind()
+            _set_peer_endpoints(
+                server_b,
+                record,
+                server_a.identity.device_id,
+                [f"{host}:{port}"],
+            )
+            new.bind_control()
+            new.start()
+            current["server"] = new
+            return {"ok": True}
+        except BaseException as exc:
+            restart_errors.append(exc)
+            raise
 
     monkeypatch.setattr(relay, "service_action", _restart)
     try:
@@ -121,6 +132,7 @@ def test_granted_peer_restarts_and_receipt_has_fresh_process_evidence(
     finally:
         current["server"].stop()
 
+    assert not restart_errors, (restart_errors, detail)
     assert detail["ok"] is True, detail
     assert detail["state"] == detail["code"] == "restarted", detail
     assert calls == ["restart"]
