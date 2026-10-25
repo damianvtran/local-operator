@@ -4183,9 +4183,12 @@ class DesktopSessionBridge:
            ``building``, the refresh runs on, and the next frame — or the
            ``/history`` that follows inside the same open — carries the facts.
 
-        The refresh is STARTED either way, which is the promise that makes that
-        follow-up read cheap: by the time the client asks again the index is
-        resident, or its cache file exists so the refresh costs 3-62 ms.
+        The refresh task is REGISTERED either way, which makes that follow-up
+        read cheap. During a desktop events open the index module's paint hold
+        postpones a cold full scan that cannot fit its existing first-paint
+        budget until the snapshot has been written; a deferred task is not
+        awaited here (it cannot finish while this request owns the hold). With
+        no hold -- standalone history, TUI or mobile -- scheduling is unchanged.
         """
         from local_operator.session import transcript_index as index_module
 
@@ -9775,6 +9778,24 @@ class DesktopSessions:
             with CancelScope(shield=True):
                 await bridge.release()
 
+    def _checkpoint_row(self, session_id: str) -> SessionRow | None:
+        """The manifest's placement, without the door's unused cwd reconstruction.
+
+        A journal without a desktop marker is still a session under the SAME
+        door predicate. The full ``_locate`` then reads a frontend checkpoint
+        to derive its cwd -- an entire journal pass when that marker is absent
+        (measured on the marker-less gate8 fixture). The manifest never uses
+        cwd, so a local admissible directory stops here instead. The peer arm
+        delegates to ``_locate`` unchanged: reachability, unresolved-peer and
+        unknown-id refusals must remain the door's own answers.
+        """
+        path = self.root / "sessions" / session_id
+        if path.is_dir() and _door_may_open(path):
+            if not (path / DESKTOP_MARKER_NAME).exists() and session_activity(path) is None:
+                raise KeyError("Unknown session")
+            return None
+        return self._locate(session_id).remote_row
+
     async def checkpoints(self, session_id: str) -> dict[str, Any]:
         """The checkpoint rail's manifest, answered WITHOUT taking a bridge.
 
@@ -9803,9 +9824,10 @@ class DesktopSessions:
           a marker is the same 404 the door's M1 close answers -- read here,
           never mutated: the door owns the pool's bookkeeping;
         * a resident bridge carries its own placement (``remote_row``); a cold
-          id shares the door's single-flight lookup (``_locate_flight``), so a
-          concurrent ``/events`` and this request still pay ONE lookup, and the
-          peer answer is the same ``unsupported`` the bridge gave.
+          id uses the same directory admission predicate and the same peer
+          resolution as the door, without reconstructing an unused cwd from
+          journal checkpoints (``_checkpoint_row``). The peer answer is the
+          same ``unsupported`` the bridge gave.
 
         The pool lock is held for the dict reads only, as ``session()`` holds it.
         This request no longer counts as a bridge user, so the retirement poll
@@ -9814,7 +9836,7 @@ class DesktopSessions:
         """
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
-        flight: asyncio.Task[_LocatedSession] | None = None
+        resolve_row = False
         remote_row: SessionRow | None = None
         async with self.lock:
             draft = self._draft_for(session_id)
@@ -9830,13 +9852,10 @@ class DesktopSessions:
             elif draft is not None:
                 self.assert_admitting()
             else:
-                flight = self._locate_flight(
-                    session_id, functools.partial(self._locate, session_id)
-                )
-        if flight is not None:
-            located = await asyncio.shield(flight)
+                resolve_row = True
+        if resolve_row:
+            remote_row = await asyncio.to_thread(self._checkpoint_row, session_id)
             self.assert_admitting()
-            remote_row = located.remote_row
         if remote_row is not None:
             return {
                 "session_id": session_id,

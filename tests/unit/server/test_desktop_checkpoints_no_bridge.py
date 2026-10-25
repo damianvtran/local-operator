@@ -455,3 +455,22 @@ async def test_two_http_opens_cancelled_mid_snapshot_release_only_their_own_hold
             if not request.done():
                 request.cancel()
         await asyncio.gather(*opens, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_markerless_journal_never_reconstructs_the_unused_cwd(api, monkeypatch):
+    """The gate8 case: no desktop.json means the ordinary door derives cwd by
+    scanning frontend checkpoints. A manifest uses no cwd, so that pass is forbidden.
+    """
+    client, app, root = api
+    _write_session(root)
+    (root / "sessions" / SID / "desktop.json").unlink()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the manifest reconstructed cwd from a journal checkpoint")
+
+    monkeypatch.setattr(module, "read_latest_custom", forbidden)
+    cold = _count_cold(monkeypatch)
+    body = await _ready(client)
+    assert body["result"]["index"]["state"] == "ready"
+    assert cold == [] and app.state.desktop_sessions.bridges == {}
