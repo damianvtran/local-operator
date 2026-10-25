@@ -434,11 +434,7 @@ def _anchor_current(directory: Path) -> bool:
     anchor = read_anchor(directory)
     if anchor is None:
         return False
-    return (
-        anchor.checkpoint_absent
-        and anchor.inode == stat.st_ino
-        and anchor.size == stat.st_size
-    )
+    return anchor.checkpoint_absent and anchor.inode == stat.st_ino and anchor.size == stat.st_size
 
 
 async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> int:

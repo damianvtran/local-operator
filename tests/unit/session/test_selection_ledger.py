@@ -93,6 +93,7 @@ async def test_ledger_failure_does_not_fail_commit_and_truncate_falls_back(tmp_p
 @pytest.mark.asyncio
 async def test_ledger_concurrent_commits_compaction_and_missing_sidecar(tmp_path):
     import asyncio
+
     from local_operator.session.tail_anchor import anchor_path
 
     transcript = Transcript(tmp_path)
@@ -257,6 +258,7 @@ async def test_generation_proof_keeps_normal_writer_incremental(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_missing_generation_falls_back_and_recovered_state_survives_prewarm(tmp_path):
     import json
+
     from local_operator.session.index_prewarm import write_tail_anchor
     from local_operator.session.tail_anchor import anchor_path, read_selection_payloads
 
