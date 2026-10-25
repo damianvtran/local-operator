@@ -1161,6 +1161,30 @@ brokered: the node runs what its own disk has, and the mesh moves credentials
 and definitions, never installers. That is the contract in one lane: what
 inherits, what is lent per command, and what must already be on the node.
 
+## Provisioning a working copy on a peer
+
+An offloaded session runs on the peer, and it can only touch repository files
+that peer has on its own disk. Pairing does not create a checkout: onboarding
+installs a build, joins the member and writes the grants, and none of that
+clones a repository. A lane that expects `~/local-operator` on a node without it
+fails at the first `git` call.
+
+Provision the copy on the device that will run the work, in a session created
+there (`lop network sessions create --peer <id>`) or over SSH:
+
+```bash
+git clone https://github.com/<owner>/<repo>.git ~/<repo>   # or: gh repo clone <owner>/<repo> ~/<repo>
+git -C ~/<repo> config user.name      # an identity must print, not an error
+git -C ~/<repo> config user.email
+gh auth status                        # the account that will push
+```
+
+Without `user.name` and `user.email` that peer cannot commit, and without a
+signed-in `gh` it cannot push or open a PR. Both are per-device, and neither one
+is inherited. Re-read `lop network ready --peer <id>` afterwards: its `tooling`
+row still warns about what the node has not installed, and that install is the
+same kind of local step.
+
 ## When something looks wrong
 
 Diagnose in this order, and stop at the first answer that explains it:
