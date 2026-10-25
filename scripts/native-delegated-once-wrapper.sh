@@ -8,9 +8,12 @@ shopt -s nullglob globstar
 
 : "${GITHUB_WORKSPACE:?}" "${GITHUB_REPOSITORY:?}" "${RUNNER_TEMP:?}"
 : "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" "${EXPECTED_HEAD:?}"
-: "${EXPECTED_WRAPPER_SHA256:?}" "${EXPECTED_PROBE_SHA256:?}" "${GH_TOKEN:?}"
+: "${EXPECTED_WRAPPER_SHA256:?}" "${EXPECTED_PROBE_SHA256:?}"
+: "${EXPECTED_SCOPE_LIB_SHA256:?}" "${GH_TOKEN:?}"
 [ "$GITHUB_RUN_ATTEMPT" = 1 ]
 EXPECTED_BASE=7f4b0bab4e2ba4b7327ae36808627ba83c41d0c6
+unset NATIVE_PROC_ROOT
+source "$GITHUB_WORKSPACE/scripts/native_cgroup_evidence.sh"
 # The one-shot label carries the independently reviewed commit. The workflow
 # need not contain its own commit SHA, and a later/relabelled head cannot pass.
 [[ "$EXPECTED_HEAD" =~ ^native-delegated-once-([0-9a-f]{40})$ ]] || {
@@ -42,6 +45,9 @@ actual_wrapper_sha=${actual_wrapper_sha%% *}
 actual_probe_sha=$("$SHA256SUM" "$GITHUB_WORKSPACE/scripts/native_relay_update_probe.py")
 actual_probe_sha=${actual_probe_sha%% *}
 [ "$actual_probe_sha" = "$EXPECTED_PROBE_SHA256" ]
+actual_scope_lib_sha=$("$SHA256SUM" "$GITHUB_WORKSPACE/scripts/native_cgroup_evidence.sh")
+actual_scope_lib_sha=${actual_scope_lib_sha%% *}
+[ "$actual_scope_lib_sha" = "$EXPECTED_SCOPE_LIB_SHA256" ]
 
 # A prior run of this one-shot workflow consumes the authorization even if a
 # later label names another head. The concurrency key serializes relabels, so
@@ -67,100 +73,6 @@ rm -f "$payload_rc" "$preflight_receipt" "$cleanup_receipt" "$outer_receipt"
 
 # Recursive process/populated evidence. Any unreadable file is an error, never
 # an empty cgroup. These globals are reset on every collection.
-collect_cgroup() {
-  local directory=$1 file content value
-  remaining=""
-  populated=""
-  read_error=""
-  [ -d "$directory" ] || return 0
-
-  local process_files=("$directory"/**/cgroup.procs)
-  if [ "${#process_files[@]}" -eq 0 ]; then
-    read_error="no cgroup.procs beneath $directory"
-  fi
-  for file in "${process_files[@]}"; do
-    if [ ! -r "$file" ]; then
-      read_error="unreadable $file"
-    elif ! content=$(cat "$file" 2>/dev/null); then
-      read_error="could not read $file"
-    else
-      remaining+="$content"$'\n'
-    fi
-  done
-
-  local event_files=("$directory"/**/cgroup.events)
-  if [ "${#event_files[@]}" -eq 0 ]; then
-    read_error="no cgroup.events beneath $directory"
-  fi
-  for file in "${event_files[@]}"; do
-    if [ ! -r "$file" ]; then
-      read_error="unreadable $file"
-    elif ! value=$(awk '$1 == "populated" {print $2}' "$file" 2>/dev/null); then
-      read_error="could not read $file"
-    elif [ "$value" = 1 ]; then
-      populated+="$file"$'\n'
-    elif [ "$value" != 0 ]; then
-      read_error="missing populated value in $file"
-    fi
-  done
-}
-
-scope_status=""
-scope_error=""
-scope_state() {
-  local output rc
-  scope_status=""
-  scope_error=""
-  if output=$("$SYSTEMCTL" is-active "$scope" 2>&1); then
-    rc=0
-  else
-    rc=$?
-  fi
-  case "$output" in
-    active | activating | inactive | failed)
-      scope_status="$output"
-      ;;
-    *"could not be found"* | *"not found"* | *"No such unit"*)
-      scope_status="not_found"
-      ;;
-    *)
-      scope_status="unknown"
-      scope_error="systemctl is-active rc=$rc: $output"
-      ;;
-  esac
-}
-
-# Signal only the scope's runner-owned ControlPID, after checking its exact
-# cgroup path (or a descendant of it) and uid. No privileged stop is needed.
-signal_scope_control_pid() {
-  local pid owner pid_cgroup output
-  if ! output=$("$SYSTEMCTL" show "$scope" --property=ControlPID --value 2>/dev/null); then
-    scope_error="could not read ControlPID for $scope"
-    return 1
-  fi
-  [[ "$output" =~ ^[0-9]+$ ]] || return 0
-  [ "$output" -gt 0 ] || return 0
-  pid=$output
-  if [ ! -r "/proc/$pid/cgroup" ]; then
-    scope_error="unreadable /proc/$pid/cgroup"
-    return 1
-  fi
-  pid_cgroup=$(awk -F: '$1 == "0" {print $3}' "/proc/$pid/cgroup")
-  case "$pid_cgroup" in
-    "$expected_cgroup" | "$expected_cgroup"/*) ;;
-    *)
-      scope_error="ControlPID $pid is outside $expected_cgroup"
-      return 1
-      ;;
-  esac
-  owner=$("$PS_BIN" -o uid= -p "$pid" 2>/dev/null | tr -d ' ')
-  if [ "$owner" != "$(id -u)" ]; then
-    scope_error="ControlPID $pid is not runner-owned"
-    return 1
-  fi
-  kill -TERM "$pid" 2>/dev/null || [ ! -d "/proc/$pid" ]
-}
-
 attempted=false
 cleanup_interrupted=false
 deadline=$((SECONDS + 920))
@@ -209,6 +121,8 @@ cat >"$payload" <<'PAYLOAD'
 #!/usr/bin/env bash
 set -euo pipefail
 shopt -s nullglob globstar
+unset NATIVE_PROC_ROOT
+source "$PROBE_REPO/scripts/native_cgroup_evidence.sh"
 expected_cgroup="/system.slice/$PROBE_SCOPE"
 cgroup_dir="/sys/fs/cgroup$expected_cgroup"
 uid=""
@@ -219,68 +133,6 @@ group=""
 
 # Authenticate independently in preflight AND cleanup. Cleanup starts with
 # signals disarmed and may signal only after this exact predicate succeeds.
-authenticate_scope() {
-  uid=$(id -u)
-  gid=$(id -g)
-  cgroup=$(awk -F: '$1 == "0" {print $3}' /proc/self/cgroup)
-  [ "$uid" -ne 0 ] && [ "$gid" -ne 0 ] || return 1
-  [ "$(id -un)" = runner ] && [ "$(id -gn)" = runner ] || return 1
-  [ "$cgroup" = "$expected_cgroup" ] || return 1
-  [ -d "$cgroup_dir" ] || return 1
-  owner=$(stat -c '%u' "$cgroup_dir")
-  group=$(stat -c '%g' "$cgroup_dir")
-  [ "$owner" = "$uid" ] && [ "$group" = "$gid" ]
-}
-
-collect_payload_cgroup() {
-  local file content value
-  remaining=""
-  populated=""
-  read_error=""
-  if [ ! -d "$cgroup_dir" ]; then
-    read_error="scope cgroup is absent while payload is still running"
-    return 0
-  fi
-  local process_files=("$cgroup_dir"/**/cgroup.procs)
-  [ "${#process_files[@]}" -gt 0 ] || read_error="no cgroup.procs beneath scope"
-  for file in "${process_files[@]}"; do
-    if [ ! -r "$file" ]; then
-      read_error="unreadable $file"
-    elif ! content=$(cat "$file" 2>/dev/null); then
-      read_error="could not read $file"
-    else
-      remaining+="$content"$'\n'
-    fi
-  done
-  local event_files=("$cgroup_dir"/**/cgroup.events)
-  [ "${#event_files[@]}" -gt 0 ] || read_error="no cgroup.events beneath scope"
-  for file in "${event_files[@]}"; do
-    if [ ! -r "$file" ]; then
-      read_error="unreadable $file"
-    elif ! value=$(awk '$1 == "populated" {print $2}' "$file" 2>/dev/null); then
-      read_error="could not read $file"
-    elif [ "$value" = 1 ]; then
-      populated+="$file"$'\n'
-    elif [ "$value" != 0 ]; then
-      read_error="missing populated value in $file"
-    fi
-  done
-}
-
-signal_payload_pid() {
-  local pid=$1 signal=$2 pid_cgroup pid_owner
-  [ "$pid" != "$$" ] || return 0
-  [ -r "/proc/$pid/cgroup" ] || return 0
-  pid_cgroup=$(awk -F: '$1 == "0" {print $3}' "/proc/$pid/cgroup")
-  case "$pid_cgroup" in
-    "$expected_cgroup" | "$expected_cgroup"/*) ;;
-    *) return 1 ;;
-  esac
-  pid_owner=$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')
-  [ "$pid_owner" = "$uid" ] || return 1
-  kill "-$signal" "$pid" 2>/dev/null || [ ! -d "/proc/$pid" ]
-}
-
 cleanup_interrupted=false
 payload_cleanup() {
   rc=$?
