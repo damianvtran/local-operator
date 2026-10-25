@@ -678,7 +678,7 @@ _AMBIGUOUS_KEY_NAMES = {
 }
 
 #: Fields a model adds to a non-``wait`` action to mean "pause after this"
-#: (main16: ``wait`` x6 and ``wait_ms`` x7 on ``key`` actions). Not tolerated
+#: (main16: ``wait`` x5 and ``wait_ms`` x1 on ``key`` actions). Not tolerated
 #: (``public_reply.drop_sibling_action_fields`` keeps the refusal for a name no
 #: kind declares: dropping it would silently lose the pause the model asked
 #: for, and turning it into a ``wait`` would invent an action in an ordered

@@ -1268,11 +1268,11 @@ def test_the_envelope_hint_for_the_same_class_still_states_the_whole_contract(
 async def test_a_standard_key_alias_is_bound_and_executed_under_its_canonical_name() -> None:
     """Normalisation happens BEFORE the batch is bound.
 
-    The main16 OSWorld arm refused ``Return``/``Escape``/``Page_Down`` 50+
-    times; the call must now execute, and the batch handed to the adapter --
-    the one the receipt digests and the evidence records -- must carry only
-    the canonical names, so the action-batch id is the one a canonical
-    spelling produces.
+    The main16 OSWorld evidence includes refusals of ``Return``, ``Escape``
+    and ``Page_Down``. The call must now execute, and the parsed batch handed
+    to the adapter must carry canonical names, so its action-batch id matches
+    what the canonical spelling produces. Raw model-response evidence is not
+    rewritten and may still contain aliases.
     """
 
     pending = _observation(2, frames=(_frame("screen"),))

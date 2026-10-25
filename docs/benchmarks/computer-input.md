@@ -39,12 +39,16 @@ application storage semantics.
 
 `key` (and the `paste_text` chord) take an array of key names pressed
 together. A name is either a single printable ASCII character, which is the
-key itself and keeps its case (`"A"` is not `"a"`), or one of the named keys
+key itself and keeps its case in the parsed representation (`"A"` is not
+`"a"`), or one of the named keys
 `protocol.NAMED_KEYS` defines: `alt`, `backspace`, `capslock`, `ctrl`,
 `delete`, `down`, `end`, `enter`, `esc`, `home`, `insert`, `left`, `meta`
 (the Super/logo key), `pagedown`, `pageup`, `right`, `shift`, `space`, `tab`,
 `up`, `f1`–`f24`. Named keys are matched case-insensitively. A chord may not
-name the same key twice.
+name the same key twice. Representation is not a promise of uppercase input:
+the OSWorld compiler lowercases single-character key names, so both `"A"`
+and `"a"` compile to the same physical key. Use `["shift", "a"]` when an
+uppercase key press is intended (or `type` for literal text).
 
 The validator also accepts a small set of standard spellings and rewrites each
 one to the single key it names (`protocol.KEY_ALIASES`):
@@ -67,12 +71,12 @@ X11 keysyms that already match a named key once case is ignored (`BackSpace`,
 the named key is `ESC`.
 
 The rewrite happens while the action is parsed, before the batch is bound to
-an observation. The bound batch, its receipt digest, the recorded evidence and
-the compiled guest statement therefore contain only the named key, so they
-are byte-identical to what the named-key spelling produces. Replay is
-unchanged, and no record ever carries an alias. The surface schema and its
-`tool_schema_digest` are unchanged too, because `named_keys` still lists
-exactly the same set.
+an observation. Parsed actions, bound-batch artifacts, their digests and compiled
+guest commands therefore contain canonical key names and match what the
+canonical spelling produces. Existing canonical batches replay unchanged.
+Raw model-response evidence is not rewritten and can still contain aliases.
+The surface schema and its `tool_schema_digest` are unchanged too, because
+`named_keys` still lists exactly the same set.
 
 An alias is admitted only when it is a standard X11 keysym or
 pyautogui/xdotool name **and** it presses exactly the key its target presses.

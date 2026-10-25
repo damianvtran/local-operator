@@ -477,10 +477,12 @@ _PRINTABLE_KEYS = frozenset(string.ascii_letters + string.digits + string.punctu
 #: WHY. Case-insensitive matching was never the gap: ``Escape`` upper-cases to
 #: ``ESCAPE`` while the canonical name is ``ESC``, so it was refused however it
 #: was cased. Models trained on X11/xdotool/pyautogui reach for those names --
-#: in the OSWorld 2.1 main16 arm (v0.84.16, 3,528 tool calls) ``Return``,
-#: ``Escape``/``escape``/``ESCAPE``, ``Page_Down``, ``minus``/``plus``/``equal``
-#: and ``super`` were refused 50+ times, each a billed corrective turn whose
-#: decision was already complete and unambiguous.
+#: in the OSWorld 2.1 main16 evidence, standard spellings such as ``Return``,
+#: ``Escape`` and ``Page_Down`` caused billed corrective turns despite naming
+#: an existing key unambiguously. Replaying all parser-refused action batches
+#: recovers 31 of 41; the other 10 still fail validation. This denominator is
+#: parser-refused batches, not refused key actions; OSWorld surface admission
+#: adds three non-ASCII type refusals (44 before, 13 after).
 #:
 #: THE BAR for an entry: the spelling is a standard name (an X11 keysym such as
 #: ``Return``/``Page_Down``/``Caps_Lock``, a pyautogui/xdotool spelling such as
@@ -510,10 +512,10 @@ _PRINTABLE_KEYS = frozenset(string.ascii_letters + string.digits + string.punctu
 #: and other synonyms nobody measured (the table stays evidence-sized), and the
 #: X11 ``Prior``/``Next`` page keysyms (``next`` reads as a command, not a key).
 #:
-#: Normalising in the validator is what keeps evidence and replay unchanged:
-#: the parsed action -- and therefore the bound batch, the recorded event and
-#: the compiled guest statement -- carries only the canonical name, so no record
-#: ever contains an alias and every historical record re-parses identically.
+#: Normalising in the validator keeps parsed actions, bound-batch artifacts,
+#: their digests and compiled guest statements canonical. Those artifacts match
+#: what the canonical spelling produces; existing canonical batches replay
+#: unchanged. Raw model-response evidence remains raw and can contain aliases.
 KEY_ALIASES: Mapping[str, str] = MappingProxyType(
     {
         # X11 keysym names
