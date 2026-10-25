@@ -1,0 +1,62 @@
+name: Native relay update
+
+# Real user-systemd evidence for the generation-pinned relay recovery path.
+# Scoped to that machinery: unrelated PRs do not pay for two generation builds
+# or inherit a requirement for a private user manager on the hosted runner.
+on:
+  pull_request:
+    paths:
+      - local_operator/network/relay.py
+      - local_operator/update.py
+      - scripts/native_relay_update_probe.py
+      - .github/workflows/native-relay-update.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-relay-update-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  user-systemd-generation-move:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install existing project and generation-install tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          pip install -e ".[dev]"
+
+      - name: Prove base failure and fixed loaded-build move
+        env:
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_TERMINAL_PROMPT: "0"
+          PYTHONPATH: ${{ github.workspace }}
+          UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+        run: |
+          git fetch --no-tags origin main
+          python scripts/native_relay_update_probe.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --base "$(git merge-base HEAD origin/main)" \
+            --json "$RUNNER_TEMP/native-relay-update.json"
+
+      - name: Upload native identity receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-relay-update
+          path: ${{ runner.temp }}/native-relay-update.json
+          retention-days: 7

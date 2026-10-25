@@ -341,8 +341,8 @@ def test_ready_reads_a_stopped_relay_as_refused_and_a_black_hole_as_silent(
     assert reach[0]["detail"].startswith(relay.CONNECT_FAILED_PREFIX)
     assert reach[0]["observed"]["outcome"] == "refused"
     assert reach[0]["observed"]["attempted"] is True
-    # No link, so no PEER-SIDE capability was asked or passed. The local restart
-    # grant remains knowable and is the one deliberate exception.
+    # No link, so no PEER-SIDE capability was asked or passed. Restart authority
+    # is receiver-local too, so it is honestly unknown rather than inferred.
     peer_rows = [
         row
         for row in _rows(payload, "readiness")
@@ -351,9 +351,9 @@ def test_ready_reads_a_stopped_relay_as_refused_and_a_black_hole_as_silent(
     assert all(row["ok"] is False for row in peer_rows)
     assert {row["code"] for row in peer_rows} == {readiness.CODE_NOT_ASKED}
     restart = _capability(payload, readiness.CAPABILITY_PEER_RESTART)
-    own = record.self_member()
-    expected = bool(own is not None and own.active and "update" in own.capabilities)
-    assert restart["ok"] is expected
+    assert restart["ok"] is False
+    assert restart["code"] == readiness.CODE_UNKNOWN
+    assert restart["source"] == readiness.SOURCE_UNKNOWN
 
     human = _human(capsys, "--peer", server_b.identity.name)
     assert "ConnectionRefusedError" not in human
@@ -1072,8 +1072,8 @@ def test_an_old_peer_degrades_to_peer_too_old_and_is_never_asked(
     build = _capability(payload, readiness.CAPABILITY_BUILD)
     assert build["ok"] is True, build
     restart = _capability(payload, readiness.CAPABILITY_PEER_RESTART)
-    assert restart["source"] == readiness.SOURCE_LOCAL
-    assert restart.get("code") != readiness.CODE_PEER_TOO_OLD
+    assert restart["source"] == readiness.SOURCE_UNKNOWN
+    assert restart["code"] == readiness.CODE_UNKNOWN
     server_b.stop()
 
 

@@ -1620,10 +1620,12 @@ def test_refresh_unit_migrates_a_pre_oom_unit(
 def test_refresh_unit_repoints_a_generation_pinned_unit_to_the_shim(
     linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A unit pinned to ``generations/<old>/…/python3`` is this install's to move.
+    """Pinned-unit drift is independent restart proof when the process probe fails.
 
-    Measured on cloud-node-1: ExecStart named 0.82.3's interpreter while current
-    was 0.84.4, and the shim-only guard declined it as "not addressable" forever.
+    The old code rewrote the unit, then returned ``current`` without a restart
+    whenever ``stale_generation_of_process`` answered ``None``. That left the
+    live relay on the old build with a success receipt. The unit's own generation
+    must drive the restart instead, followed by the post-restart build proof.
     """
     _shim_rig(tmp_path, monkeypatch)
     generations = tmp_path / "lop" / "generations"
@@ -1640,15 +1642,25 @@ def test_refresh_unit_repoints_a_generation_pinned_unit_to_the_shim(
     monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
     calls, record = _manager_recorder()
     monkeypatch.setattr(supervisors, "systemctl_user", record)
-    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(111, 111, 222),
+        record=_RelayRecordScript(111, 222),
+    )
     monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+    monkeypatch.setattr(
+        update_mod,
+        "current_generation",
+        lambda: generations / "20261025T123000Z-0.90.2",
+    )
+    monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: False)
 
     outcome = relay.refresh_unit_if_stale()
 
     assert unit.read_text(encoding="utf-8") == relay.render_systemd()
     assert shim in unit.read_text(encoding="utf-8")
-    assert calls[0] == ("daemon-reload",), calls
-    assert outcome.kind in ("current", "restarted"), outcome
+    assert calls == [("daemon-reload",), ("restart", relay.SYSTEMD_UNIT)], calls
+    assert outcome.kind == "restarted", outcome
 
 
 def test_foreign_system_unit_is_named_with_its_remedy(

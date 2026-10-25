@@ -1635,10 +1635,10 @@ def test_ready_without_a_relay_never_passes_a_check_it_could_not_run(
     }
     assert all(row["ok"] is False for row in not_asked)
     restart = next(row for row in caps if row["capability"] == readiness.CAPABILITY_PEER_RESTART)
-    assert restart["code"] == "update_grant_missing"
+    assert restart["code"] == readiness.CODE_UNKNOWN
     assert restart["remedies"] == [
-        f"on cloud-node-1, run `lop network member grant {NETWORK} "
-        f"{'d_' + 'a' * 32} update`"
+        f"if restart is refused, on cloud-node-1, run "
+        f"`lop network member grant {NETWORK} {'d_' + 'a' * 32} update`"
     ]
     assert payload["ok"] is False and payload["code"] == "unhealthy"
 

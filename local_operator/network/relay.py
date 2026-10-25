@@ -14556,7 +14556,29 @@ def refresh_unit_if_stale() -> Any:
             # macOS arm's "no live pid" decline).
             return launchd.PlistRefresh(name=name, kind="current")
         stale = update.stale_generation_of_process(pid)
-        if stale is None:
+        pinned = _named_generation(image)
+        current_generation = update.current_generation() if pinned is not None else None
+        pinned_stale = (
+            pinned.resolve() != current_generation.resolve()
+            if pinned is not None and current_generation is not None
+            else None if pinned is not None else False
+        )
+        # The unit is independent evidence of drift. A process-probe miss must
+        # not turn an old pinned unit + live process into `current`: a restart
+        # would re-execute that old image, so unit-vs-current proof is enough to
+        # move it. Conversely an unreadable pointer is a loud failed step, not
+        # an unverified restart or success.
+        move = stale or (pinned if pinned_stale else None)
+        if move is None:
+            if pinned_stale is None and pinned is not None:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="failed",
+                    detail=(
+                        f"could not compare pinned generation {pinned.name} with the current "
+                        f"install — run `{recovery}` to reinstall and restart the relay"
+                    ),
+                )
             return launchd.PlistRefresh(name=name, kind="current")
         if current == rendered:
             # The rewrite arm already reloaded this caller's new definition.
@@ -14573,7 +14595,7 @@ def refresh_unit_if_stale() -> Any:
             why = "systemctl would not restart it"
             if str(result.get("reason") or "") == "not_restarted":
                 why = "the restart it accepted did not take"
-            return launchd.build_move_failure(name, recovery, stale, why=why)
+            return launchd.build_move_failure(name, recovery, move, why=why)
         restarted_pid = _managed_service_pid()
         restarted_stale = (
             update.generation_staleness_of_process(restarted_pid)
@@ -14613,7 +14635,7 @@ def refresh_unit_if_stale() -> Any:
         return launchd.PlistRefresh(
             name=name,
             kind="restarted",
-            detail=stale.name,
+            detail=move.name,
             consequence="expect a brief mesh blip",
         )
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
@@ -16091,6 +16113,27 @@ def _names_the_shim(image: Path) -> bool:
         return False
 
 
+def _named_generation(image: Path) -> Path | None:
+    """The generation root an image names, including through an interpreter symlink.
+
+    Do NOT resolve the image itself: a generation's ``bin/python3`` commonly
+    links to the shared runtime, whose real path is outside the generation. The
+    image a unit executes is nevertheless generation-pinned. Resolve only its
+    ancestors, matching ``update.generation_in_argv`` without splitting a path
+    that may contain spaces.
+    """
+    from local_operator import update
+
+    try:
+        root = update.generations_dir().resolve()
+        for parent in image.parents:
+            if parent.parent.resolve() == root:
+                return parent
+    except OSError:
+        return None
+    return None
+
+
 def _names_a_generation(image: Path) -> bool:
     """Whether ``image`` is an interpreter INSIDE this install's generations tree.
 
@@ -16104,14 +16147,7 @@ def _names_a_generation(image: Path) -> bool:
     moved it. An image anywhere else (a source checkout's venv, a pipx tree) is
     still not this run's to repoint.
     """
-    from local_operator import update
-
-    try:
-        root = update.generations_dir().resolve()
-        resolved = image.resolve()
-    except OSError:
-        return False
-    return resolved != root and root in resolved.parents
+    return _named_generation(image) is not None
 
 
 def _restart_target() -> tuple[Path | None, Path | None, bool]:
@@ -16216,21 +16252,16 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
                     reading["relay_generation_stale"] = update.generation_staleness_of_process(pid)
             else:
                 reading["installed_build"] = update.version_of_image(target_image) or None
-                if _names_a_generation(target_image):
+                pinned = _named_generation(target_image)
+                if pinned is not None:
                     # A restart re-executes this fixed image, so the ordinary
                     # "restart the relay" remedy cannot move it onto `current`.
                     # Keep the condition tri-state: only a readable pointer can
                     # prove that the pinned generation differs.
                     current = update.current_generation()
-                    if current is None:
-                        reading["relay_unit_generation_pinned"] = None
-                    else:
-                        resolved_image = target_image.resolve()
-                        resolved_current = current.resolve()
-                        reading["relay_unit_generation_pinned"] = not (
-                            resolved_image != resolved_current
-                            and resolved_current in resolved_image.parents
-                        )
+                    reading["relay_unit_generation_pinned"] = (
+                        None if current is None else pinned.resolve() != current.resolve()
+                    )
     except Exception:  # noqa: BLE001 — a probe must never fail the payload it decorates
         pass
     return reading

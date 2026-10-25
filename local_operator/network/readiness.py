@@ -1294,40 +1294,95 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
     )
 
 
-def peer_restart_row(member: Any, *, record: Any, peer_label: str) -> dict[str, Any]:
+def restart_authority_fact(
+    root: Path, *, network_id: str, viewer_device_id: str
+) -> dict[str, Any]:
+    """The RECEIVER's current restart grant for one authenticated viewer.
+
+    `net_restart` reads the sender's row from the receiver's store on every use.
+    A viewer-local self row cannot answer that question: grants are deliberately
+    receiver-local. The link supplies both ids, never the request frame. An
+    unreadable store is `None` (unknown); a readable record with no active grant
+    is `False`, the same closed answer the authorizer gives.
+    """
+    from local_operator.network import store as store_mod
+    from local_operator.network.types import OP_CAPABILITY
+
+    try:
+        record = store_mod.load(network_id, root)
+    except Exception:  # noqa: BLE001 — a diagnostic fact degrades to unknown, never denial
+        record = None
+    granted: bool | None = None
+    if record is not None:
+        member = record.member(viewer_device_id)
+        granted = bool(
+            member is not None
+            and member.active
+            and OP_CAPABILITY["net_restart"] in member.capabilities
+        )
+    return {
+        "network_id": network_id,
+        "device_id": viewer_device_id,
+        "update_granted": granted,
+    }
+
+
+def peer_restart_row(
+    member: Any, facts: Mapping[str, Any], *, record: Any, peer_label: str
+) -> dict[str, Any]:
     """Can THIS device ask this peer to restart its relay for recovery?
 
-    The answer comes from this device's own member row, the same admission
-    capability set the peer's authorizer applies to `net_restart`. It is a
-    local, read-only prediction and remains visible when the peer is offline;
-    the remote grant check stays authoritative when a restart is attempted.
+    Only the receiver's authenticated answer may assert permission or denial.
+    Offline peers and older builds that omit the fact stay UNKNOWN: their
+    remedy is conditional recovery guidance, never a claim about the grant.
     """
     from local_operator.network.types import OP_CAPABILITY
 
     required = OP_CAPABILITY["net_restart"]
-    own = record.self_member()
-    granted = bool(own is not None and own.active and required in own.capabilities)
+    network_id = str(getattr(record, "network_id", "") or "")
+    viewer_device_id = str(getattr(record, "self_device_id", "") or "")
+    authority = facts.get("restart_authority")
+    granted: Any = None
+    if isinstance(authority, Mapping):
+        same_scope = (
+            bool(network_id and viewer_device_id)
+            and authority.get("network_id") == network_id
+            and authority.get("device_id") == viewer_device_id
+        )
+        if same_scope:
+            candidate = authority.get("update_granted")
+            granted = candidate if isinstance(candidate, bool) else None
+    known = isinstance(granted, bool)
     remedy = (
         f"on {peer_label}, run `lop network member grant "
-        f"{record.network_id} {record.self_device_id} {required}`"
+        f"{network_id or '<network>'} {viewer_device_id or '<this-device-id>'} {required}`"
     )
     return _capability_row(
         device_id=member.device_id,
         device_name=peer_label,
         capability=CAPABILITY_PEER_RESTART,
-        ok=granted,
-        code="" if granted else CODE_UPDATE_GRANT_MISSING,
+        ok=granted is True,
+        code="" if granted is True else CODE_UPDATE_GRANT_MISSING if known else CODE_UNKNOWN,
         detail=(
             f"{peer_label} grants this device {required!r}; peer relay restart is permitted"
-            if granted
-            else f"this device cannot restart {peer_label}'s relay because it lacks "
-            f"the {required!r} grant there"
+            if granted is True
+            else (
+                f"this device cannot restart {peer_label}'s relay because it lacks "
+                f"the {required!r} grant there"
+                if known
+                else f"cannot confirm whether {peer_label} grants this device "
+                f"{required!r} for relay restart"
+            )
         ),
-        remedies=[] if granted else [remedy],
-        source=SOURCE_LOCAL,
+        remedies=(
+            []
+            if granted is True
+            else [remedy if known else f"if restart is refused, {remedy}"]
+        ),
+        source=SOURCE_PEER if known else SOURCE_UNKNOWN,
         observed={
-            "network_id": record.network_id,
-            "device_id": record.self_device_id,
+            "network_id": network_id,
+            "device_id": viewer_device_id,
             "update_granted": granted,
         },
     )
@@ -3779,9 +3834,11 @@ def _peer_checks(
     rows, link = _reachability_rows(
         member, record=record, server=server, deadline=deadline, since=since
     )
-    # This grant is a LOCAL membership fact, so an offline or old peer must not
-    # hide the recovery limitation behind `not_asked` rows.
-    rows.append(peer_restart_row(member, record=record, peer_label=peer_label))
+    # Keep an UNKNOWN row on every early return. Only the peer's authenticated
+    # answer may replace it with a grant verdict; the viewer's own row is not
+    # evidence of what this receiver permits.
+    restart_index = len(rows)
+    rows.append(peer_restart_row(member, {}, record=record, peer_label=peer_label))
     selected_row: dict[str, Any] | None = None
     if selector:
         selected_row = selected_model_row(
@@ -3842,6 +3899,7 @@ def _peer_checks(
     if facts is None:
         rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
         return rows
+    rows[restart_index] = peer_restart_row(member, facts, record=record, peer_label=peer_label)
     rows.append(operator_row(member, facts, peer_label=peer_label))
     rows.append(git_row(member, facts, peer_label=peer_label))
     rows.append(repository_row(member, facts, peer_label=peer_label))
@@ -4185,11 +4243,10 @@ def make_handler(server: "RelayServer") -> Any:
     """The ``net_readiness`` peer-op handler: THIS device's facts, read-only."""
 
     def _handle(link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
-        # The link is unused: every fact is this device's own, and the handler
-        # never sends a request over the link it is serving (the deadlock guard
-        # ``PeerLink.request`` states).
-        del link
-        return collect_peer_facts(
+        # Equipment facts are this device's own. Restart authority is different:
+        # it is THIS RECEIVER's grant for the authenticated sender, read from
+        # the link's network/member ids rather than anything the request claims.
+        facts = collect_peer_facts(
             server.root,
             selector=_bounded(frame.get("selector") or "", 240),
             session_id=_bounded(frame.get("session_id") or "", 80),
@@ -4197,6 +4254,12 @@ def make_handler(server: "RelayServer") -> Any:
                 frame.get("repository") if isinstance(frame.get("repository"), Mapping) else None
             ),
         )
+        facts["restart_authority"] = restart_authority_fact(
+            server.root,
+            network_id=link.network_id,
+            viewer_device_id=link.device_id,
+        )
+        return facts
 
     return _handle
 
