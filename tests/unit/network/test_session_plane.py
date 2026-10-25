@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -2080,6 +2080,112 @@ def test_stopping_the_relay_closes_the_page_loop_it_shelved(
         ), "stop() returned while the page-loop thread was still running"
     finally:
         link.close("test")
+
+
+class _StubPageLoop:
+    """Enough of the page loop for the stop path: only the stop request."""
+
+    def __init__(self) -> None:
+        self.stop_requested = False
+
+    def stop(self) -> None:
+        self.stop_requested = True
+
+    def call_soon_threadsafe(self, callback: Any, *args: object) -> None:
+        callback(*args)
+
+
+class _PageLoopThreadThatIgnoresTheStop(threading.Thread):
+    """A loop thread whose bounded join returns while it keeps running.
+
+    ``stop()`` can only learn whether its join succeeded by asking
+    ``is_alive()``, so the failing branch is answered directly: a real wedged
+    thread would need a sleep and would still race the assertion.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="page-loop-still-running", daemon=True)
+        self.join_timeout: float | None = None
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return True
+
+
+class _PageLoopThreadThatStops(threading.Thread):
+    """The clean arm: the join returns and the thread is already gone."""
+
+    def __init__(self) -> None:
+        super().__init__(name="page-loop-clean", daemon=True)
+        self.join_timeout: float | None = None
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return False
+
+
+def _page_loop_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == relay.logger.name and record.levelno == logging.WARNING
+    ]
+
+
+def test_stop_reports_a_page_loop_thread_that_will_not_stop(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A shelved loop whose thread survives the bounded join is REPORTED.
+
+    The handle used to be nulled with the loop, before the join, so a page loop
+    that ignored its stop left no trace: the shelved fence made new reads build
+    a fresh loop and nothing named the survivor. ``Thread.join(timeout)``
+    returns nothing either way, so the outcome is read from ``is_alive()``; the
+    handle must still be there afterwards so the condition stays observable.
+    """
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    loop = _StubPageLoop()
+    thread = _PageLoopThreadThatIgnoresTheStop()
+    server._page_loop = cast(Any, loop)
+    server._page_loop_thread = thread
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        server.stop()
+    assert loop.stop_requested, "the loop was not asked to stop"
+    assert server._page_loop is None, "a stopped relay must shelve its loop"
+    assert server._page_loop_shelved is True
+    assert server._page_loop_thread is thread, "a live page loop must stay reachable"
+    assert thread.join_timeout == relay.PAGE_LOOP_STOP_JOIN_S
+    warnings = _page_loop_warnings(caplog)
+    assert len(warnings) == 1, caplog.text
+    message = warnings[0].getMessage()
+    assert f"{relay.PAGE_LOOP_STOP_JOIN_S:.1f}s" in message, message
+    assert "still running" in message, message
+
+
+def test_stop_clears_the_page_loop_thread_and_stays_silent_when_it_stopped(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The normal path: the loop thread stopped, the handle goes, no warning."""
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    loop = _StubPageLoop()
+    thread = _PageLoopThreadThatStops()
+    server._page_loop = cast(Any, loop)
+    server._page_loop_thread = thread
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        server.stop()
+    assert loop.stop_requested
+    assert server._page_loop is None
+    assert server._page_loop_thread is None
+    assert thread.join_timeout == relay.PAGE_LOOP_STOP_JOIN_S
+    assert _page_loop_warnings(caplog) == [], caplog.text
 
 
 def test_a_read_racing_a_stop_submits_under_the_lock_that_shelves_the_loop(

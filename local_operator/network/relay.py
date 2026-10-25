@@ -5302,13 +5302,38 @@ class RelayServer:
             if loop is not None:
                 loop.call_soon_threadsafe(loop.stop)
                 self._page_loop = None
-                self._page_loop_thread = None
                 self._page_loop_shelved = True
         # OUTSIDE THE LOCK. The join is bounded but it is still a wait, and a read
         # that arrives during it should not have to queue on this lock to learn
-        # that it needs a new loop.
+        # that it needs a new loop. ``_page_loop`` being None is that fence: a
+        # read builds a fresh loop rather than handing this one to a thread that
+        # has finished.
+        #
+        # THE THREAD HANDLE IS KEPT UNTIL THE JOIN PROVES IT STOPPED. It used to be
+        # nulled with the loop, before the join, so a page loop that ignored its
+        # stop disappeared without a trace: the shelved fence made new reads build
+        # a fresh loop and nothing named the survivor. ``join`` returns nothing
+        # either way, so the outcome is read from ``is_alive()``; a survivor is
+        # reported and stays reachable on the attribute. A thread that ignores its
+        # stop cannot be killed from here — this makes it observable, not
+        # impossible.
         if thread is not None:
             thread.join(timeout=PAGE_LOOP_STOP_JOIN_S)
+            if thread.is_alive():
+                logger.warning(
+                    "mesh relay: page-loop thread did not stop within the %.1fs "
+                    "stop timeout and is still running — it was not killed; the "
+                    "loop was shelved so new reads build a fresh one, and the "
+                    "thread's handle is kept so this stays observable",
+                    PAGE_LOOP_STOP_JOIN_S,
+                )
+            else:
+                with self._page_loop_lock:
+                    # Identity-checked: a read that arrived during the join may
+                    # already have built a new loop, and its thread is not ours
+                    # to forget.
+                    if self._page_loop_thread is thread:
+                        self._page_loop_thread = None
         with self._links_lock:
             links = list(self.links.values())
         for link in links:
