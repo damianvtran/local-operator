@@ -1,0 +1,44 @@
+relay.ask.context.messages
+EN "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}"
+ZH "{count, plural, other {提问后你发来#条消息（最后{time}）}}"
+CX {"maxCells": 60, "note": "The line under an OPEN ask's state line on the phone, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the card draws no line at all for 0 or when an older runtime sends no count) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. It wraps onto more than one line on a narrow phone, so short words and a natural break after 'asked' are welcome.", "role": "phone ask card, context line", "tone": "plain, factual"}
+relay.ask.dismiss.answered_in_chat
+EN "Answered in chat"
+ZH "已在聊天中回答"
+CX {"maxCells": 34, "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the operator already answered the question by typing in the conversation, so the agent should read their messages and treat the ask as settled (sent as reason=answered_in_chat). A reason, not a command; no exclamation mark. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.", "role": "phone ask card, dismiss reason button", "tone": "plain, decisive"}
+relay.ask.dismiss.answered_in_chat_note
+EN "you already replied in the conversation"
+ZH "你已在对话中回复"
+CX {"maxCells": 44, "note": "The one-line explanation drawn UNDER the 'Answered in chat' reason button on the phone, in a smaller dim register. It names what the operator already did, so they can recognise their own case and cannot mistake the button for 'send my answer'. No trailing punctuation, no em dash (the layout puts it on its own line).", "role": "phone ask card, dismiss reason note", "tone": "plain, explanatory"}
+relay.ask.dismiss.cancel
+EN "cancel"
+ZH "取消"
+CX {"maxCells": 12, "note": "The quiet button that puts the reason buttons away again on an OPEN ask's card, sending nothing. Lower-case like the card's other quiet controls; no exclamation mark.", "role": "phone ask card, dismiss cancel button", "tone": "plain, instructional"}
+relay.ask.dismiss.moot
+EN "No longer needed"
+ZH "不再需要"
+CX {"maxCells": 34, "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the question no longer matters to the operator (the work moved on, someone else decided), so the agent should drop it (sent as reason=moot). A reason, not a command, and it must not read as an approval or a refusal of the question. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.", "role": "phone ask card, dismiss reason button", "tone": "plain, decisive"}
+relay.ask.dismiss.moot_note
+EN "stop waiting on it"
+ZH "不再等待此问题"
+CX {"maxCells": 44, "note": "The one-line explanation drawn UNDER the 'No longer needed' reason button on the phone, in a smaller dim register. It says what happens to the waiting: the agent stops expecting an answer. No trailing punctuation, no em dash (the layout puts it on its own line), and it must not read as an approval or a refusal of the question itself.", "role": "phone ask card, dismiss reason note", "tone": "plain, explanatory"}
+relay.ask.dismiss.open
+EN "dismiss…"
+ZH "忽略……"
+CX {"maxCells": 12, "note": "The quiet control on an OPEN ask's card on the phone that reveals the two reasons for putting the question away. It closes the QUESTION, not the screen: keep the trailing ellipsis glyph (…), which is the card's own convention for 'this opens a choice', and keep it lower-case and brief. Use the same verb the terminal uses for this act (dismiss) rather than a second word for it. Nothing is sent until a reason is chosen.", "role": "phone ask card, dismiss control label", "tone": "plain, quiet"}
+relay.ask.dismiss.receipt
+EN "Dismissed — no reply sent"
+ZH "已忽略 — 未发送回复"
+CX {"maxCells": 44, "note": "The line the asks sheet shows in place of its empty state after a TIMED-OUT ask was dismissed with the card's one-tap control, which carries no reason. Say that the dismissal was recorded and that no reply was sent to the agent — the lapsed door's own promise. Past tense, no exclamation mark. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.", "role": "phone asks sheet, dismissal receipt", "tone": "plain, factual"}
+relay.ask.dismiss.receipt_answered_in_chat
+EN "Dismissed — answered in chat"
+ZH "已忽略 — 已在聊天中回答"
+CX {"maxCells": 44, "note": "The line the asks sheet shows in place of its empty state after the operator dismissed this conversation's last open ask with the 'Answered in chat' reason. Past tense, no exclamation mark. It must not read as 'your answer was sent': nothing was sent, and that distinction is the point of the two reasons. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.", "role": "phone asks sheet, dismissal receipt", "tone": "plain, factual"}
+relay.ask.dismiss.receipt_moot
+EN "Dismissed — no longer needed"
+ZH "已忽略 — 不再需要"
+CX {"maxCells": 44, "note": "The line the asks sheet shows in place of its empty state after the operator dismissed this conversation's last open ask with the 'No longer needed' reason: a receipt for the act, not an absence. Past tense, no exclamation mark, no checkmark wording. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.", "role": "phone asks sheet, dismissal receipt", "tone": "plain, factual"}
+relay.ask.dismiss.title
+EN "Dismiss this ask"
+ZH "忽略此问题"
+CX {"maxCells": 24, "note": "The heading above the two reason buttons on an OPEN ask's card, shown after the operator taps 'dismiss…'. It names the act so the two reasons below read as one choice rather than two more card actions. Same words as the terminal's chooser heading where the language allows; no punctuation at the end, no exclamation mark.", "role": "phone ask card, dismiss reasons heading", "tone": "plain, instructional"}

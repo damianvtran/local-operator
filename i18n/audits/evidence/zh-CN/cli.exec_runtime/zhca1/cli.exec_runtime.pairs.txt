@@ -1,0 +1,15 @@
+# cli.exec_runtime — sampled en/zh pairs for attestation zhca1
+# 3/11 keys; all >120 chars and all plurals included
+
+## cli.exec_runtime.error  [17 chars]
+EN: Error: {sentence}
+ZH: 错误：{sentence}
+
+## cli.exec_runtime.model_switched  [33 chars]
+EN: [dim]switched to {selector}[/dim]
+ZH: [dim]已切换至{selector}[/dim]
+
+## cli.exec_runtime.output_check_failed  [76 chars]
+EN: ! output check failed ({format}, attempt {attempt}/{max_attempts}): {reason}
+ZH: ! 输出检查失败（{format}，第{attempt}/{max_attempts}次尝试）：{reason}
+

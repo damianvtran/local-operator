@@ -1,0 +1,7 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": "存储/usage读取的QwenCloud控制台会话cookie",
+  "cli.qwencloud_help.set": "存储cookie；从STDIN读取值，不通过argv传入",
+  "cli.qwencloud_help.status": "显示是否已存储cookie及其存储时长，不显示值",
+  "cli.qwencloud_help.rm": "移除已存储的cookie",
+  "cli.qwencloud_help.migrate": "将明文ticket迁移至加密密钥存储"
+}

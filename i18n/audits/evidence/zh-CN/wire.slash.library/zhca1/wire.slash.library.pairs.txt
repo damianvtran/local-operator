@@ -1,0 +1,7 @@
+# wire.slash.library — sampled en/zh pairs for attestation zhca1
+# 1/2 keys; all >120 chars and all plurals included
+
+## wire.slash.library.help  [31 chars]
+EN: Browse the global asset library
+ZH: 浏览全局资产库
+

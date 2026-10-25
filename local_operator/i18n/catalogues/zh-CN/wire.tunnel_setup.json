@@ -1,0 +1,7 @@
+{
+  "wire.tunnel_setup.in_progress": "手机访问设置已在进行中。重试前检查其状态。",
+  "wire.tunnel_setup.deadline": "设置所负责的工作已排空，随后响应期限已过。重试前检查状态和已完成的步骤。",
+  "wire.tunnel_setup.unavailable": "手机访问设置无法在本次响应中完成。重试前检查当前状态；不要假定已经回滚。",
+  "wire.tunnel_setup.checking": "正在检查所选账户及所需准备工作，尚未作更改。",
+  "wire.tunnel_setup.corrupt_intent": "已保存的手机设置请求无效。保持create.json不变，让智能体恢复原始请求后再重试。未作任何设置更改。"
+}

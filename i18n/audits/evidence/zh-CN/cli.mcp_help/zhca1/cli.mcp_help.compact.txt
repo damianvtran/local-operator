@@ -1,0 +1,4 @@
+cli.mcp_help.add_oauth	Enable OAuth for a remote HTTP server	为远程HTTP服务器启用OAuth
+cli.mcp_help.list	List configured MCP servers (all sources merged)	列出已配置的MCP服务器（合并所有来源）
+cli.mcp_help.logout	Remove the stored OAuth credential for one MCP server	移除一个MCP服务器已存储的OAuth凭据
+cli.mcp_help.remove_name	Server name to remove	要移除的服务器名称

@@ -1,0 +1,5 @@
+cli.config_help.create	Create a new configuration file	创建配置文件
+cli.config_help.edit_key	Configuration key to update (e.g., hosting, model_name, conversation_length, detail_length, max_learnings_history, auto_save_conversation)	要更新的配置键（如hosting、model_name、conversation_length、detail_length、max_learnings_history、auto_save_conversation）
+cli.config_help.instructions	Show which custom-instruction files a session assembles, in order (paths and sizes only, never their contents)	按顺序显示会话组装的自定义指令文件（仅路径和大小，不显示内容）
+cli.config_help.instructions_description	Show which custom-instruction files a session assembles, in order, with the size each contributed and whether it was collapsed as a duplicate, truncated, or overlaps an earlier source. Paths and sizes only, never the contents.	按顺序显示会话组装的自定义指令文件，包括各文件贡献的大小，以及是否因重复而折叠、被截断或与之前的来源重叠。仅显示路径和大小，不显示内容。
+cli.config_help.open	Open the configuration file in the default editor	在默认编辑器中打开配置文件

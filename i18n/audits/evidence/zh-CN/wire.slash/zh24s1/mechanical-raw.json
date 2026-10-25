@@ -1,0 +1,730 @@
+{
+  "namespace": "wire.slash",
+  "audit_id": "zh24s1",
+  "generated_by": "translation-auditor (lopdev team), independent read-only audit",
+  "checks": {
+    "key_parity": {
+      "en_keys": 52,
+      "zh_keys": 52,
+      "missing": [],
+      "extra": [],
+      "order_equal": true
+    },
+    "argument_parity": {
+      "keys_checked": 52,
+      "failures": []
+    },
+    "plural_structure": {
+      "plural_keys": [],
+      "rows": [],
+      "failures": [],
+      "note": "zh-CN legally uses other-only where en has one/other (style guide: no plural agreement); only structural failures are counted."
+    },
+    "hard_token_parity": {
+      "patterns": [
+        "backtick_span",
+        "long_flag",
+        "angle_token",
+        "url",
+        "path",
+        "percent_token"
+      ],
+      "failures": []
+    },
+    "width": {
+      "rows": [
+        {
+          "key": "wire.slash.accounts",
+          "en_cells": 23,
+          "zh_cells": 16,
+          "delta_cells": -7,
+          "ratio": 0.696,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.agent",
+          "en_cells": 69,
+          "zh_cells": 50,
+          "delta_cells": -19,
+          "ratio": 0.725,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.aida",
+          "en_cells": 47,
+          "zh_cells": 30,
+          "delta_cells": -17,
+          "ratio": 0.638,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.analytics",
+          "en_cells": 58,
+          "zh_cells": 29,
+          "delta_cells": -29,
+          "ratio": 0.5,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.approvals",
+          "en_cells": 47,
+          "zh_cells": 30,
+          "delta_cells": -17,
+          "ratio": 0.638,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.archive",
+          "en_cells": 42,
+          "zh_cells": 26,
+          "delta_cells": -16,
+          "ratio": 0.619,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.btw",
+          "en_cells": 50,
+          "zh_cells": 33,
+          "delta_cells": -17,
+          "ratio": 0.66,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.clear",
+          "en_cells": 43,
+          "zh_cells": 28,
+          "delta_cells": -15,
+          "ratio": 0.651,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.compact",
+          "en_cells": 23,
+          "zh_cells": 14,
+          "delta_cells": -9,
+          "ratio": 0.609,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.context",
+          "en_cells": 48,
+          "zh_cells": 37,
+          "delta_cells": -11,
+          "ratio": 0.771,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.copy",
+          "en_cells": 35,
+          "zh_cells": 22,
+          "delta_cells": -13,
+          "ratio": 0.629,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.credential",
+          "en_cells": 44,
+          "zh_cells": 32,
+          "delta_cells": -12,
+          "ratio": 0.727,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.delete",
+          "en_cells": 50,
+          "zh_cells": 26,
+          "delta_cells": -24,
+          "ratio": 0.52,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.effort",
+          "en_cells": 47,
+          "zh_cells": 39,
+          "delta_cells": -8,
+          "ratio": 0.83,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.exit",
+          "en_cells": 12,
+          "zh_cells": 8,
+          "delta_cells": -4,
+          "ratio": 0.667,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.failovers",
+          "en_cells": 51,
+          "zh_cells": 32,
+          "delta_cells": -19,
+          "ratio": 0.627,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.fast",
+          "en_cells": 39,
+          "zh_cells": 26,
+          "delta_cells": -13,
+          "ratio": 0.667,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.fork",
+          "en_cells": 74,
+          "zh_cells": 59,
+          "delta_cells": -15,
+          "ratio": 0.797,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": false,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.goal",
+          "en_cells": 52,
+          "zh_cells": 41,
+          "delta_cells": -11,
+          "ratio": 0.788,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.help",
+          "en_cells": 17,
+          "zh_cells": 12,
+          "delta_cells": -5,
+          "ratio": 0.706,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.highlights",
+          "en_cells": 53,
+          "zh_cells": 34,
+          "delta_cells": -19,
+          "ratio": 0.642,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.hub",
+          "en_cells": 56,
+          "zh_cells": 49,
+          "delta_cells": -7,
+          "ratio": 0.875,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.info",
+          "en_cells": 54,
+          "zh_cells": 28,
+          "delta_cells": -26,
+          "ratio": 0.519,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.keys",
+          "en_cells": 24,
+          "zh_cells": 12,
+          "delta_cells": -12,
+          "ratio": 0.5,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.language",
+          "en_cells": 52,
+          "zh_cells": 32,
+          "delta_cells": -20,
+          "ratio": 0.615,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.links",
+          "en_cells": 47,
+          "zh_cells": 28,
+          "delta_cells": -19,
+          "ratio": 0.596,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.login",
+          "en_cells": 23,
+          "zh_cells": 10,
+          "delta_cells": -13,
+          "ratio": 0.435,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.logout",
+          "en_cells": 34,
+          "zh_cells": 22,
+          "delta_cells": -12,
+          "ratio": 0.647,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.loop",
+          "en_cells": 53,
+          "zh_cells": 41,
+          "delta_cells": -12,
+          "ratio": 0.774,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.mcp",
+          "en_cells": 58,
+          "zh_cells": 48,
+          "delta_cells": -10,
+          "ratio": 0.828,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.mobile",
+          "en_cells": 51,
+          "zh_cells": 46,
+          "delta_cells": -5,
+          "ratio": 0.902,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.model",
+          "en_cells": 54,
+          "zh_cells": 46,
+          "delta_cells": -8,
+          "ratio": 0.852,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.move",
+          "en_cells": 39,
+          "zh_cells": 20,
+          "delta_cells": -19,
+          "ratio": 0.513,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.network",
+          "en_cells": 45,
+          "zh_cells": 32,
+          "delta_cells": -13,
+          "ratio": 0.711,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.new",
+          "en_cells": 24,
+          "zh_cells": 10,
+          "delta_cells": -14,
+          "ratio": 0.417,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.notifications",
+          "en_cells": 40,
+          "zh_cells": 30,
+          "delta_cells": -10,
+          "ratio": 0.75,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.project",
+          "en_cells": 56,
+          "zh_cells": 49,
+          "delta_cells": -7,
+          "ratio": 0.875,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.provider",
+          "en_cells": 42,
+          "zh_cells": 27,
+          "delta_cells": -15,
+          "ratio": 0.643,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.reload",
+          "en_cells": 49,
+          "zh_cells": 26,
+          "delta_cells": -23,
+          "ratio": 0.531,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.rename",
+          "en_cells": 43,
+          "zh_cells": 30,
+          "delta_cells": -13,
+          "ratio": 0.698,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.resume",
+          "en_cells": 54,
+          "zh_cells": 36,
+          "delta_cells": -18,
+          "ratio": 0.667,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.search",
+          "en_cells": 49,
+          "zh_cells": 28,
+          "delta_cells": -21,
+          "ratio": 0.571,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.session",
+          "en_cells": 54,
+          "zh_cells": 34,
+          "delta_cells": -20,
+          "ratio": 0.63,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.settings",
+          "en_cells": 32,
+          "zh_cells": 20,
+          "delta_cells": -12,
+          "ratio": 0.625,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.sidebar",
+          "en_cells": 49,
+          "zh_cells": 39,
+          "delta_cells": -10,
+          "ratio": 0.796,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.skills",
+          "en_cells": 18,
+          "zh_cells": 16,
+          "delta_cells": -2,
+          "ratio": 0.889,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.stop",
+          "en_cells": 66,
+          "zh_cells": 58,
+          "delta_cells": -8,
+          "ratio": 0.879,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": false,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.team",
+          "en_cells": 69,
+          "zh_cells": 46,
+          "delta_cells": -23,
+          "ratio": 0.667,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.theme",
+          "en_cells": 39,
+          "zh_cells": 28,
+          "delta_cells": -11,
+          "ratio": 0.718,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.unarchive",
+          "en_cells": 41,
+          "zh_cells": 22,
+          "delta_cells": -19,
+          "ratio": 0.537,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.update",
+          "en_cells": 49,
+          "zh_cells": 22,
+          "delta_cells": -27,
+          "ratio": 0.449,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.usage",
+          "en_cells": 25,
+          "zh_cells": 18,
+          "delta_cells": -7,
+          "ratio": 0.72,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": true,
+          "zh_shorter_than_en": true
+        }
+      ],
+      "over_approx_help_budget": [
+        {
+          "key": "wire.slash.fork",
+          "en_cells": 74,
+          "zh_cells": 59,
+          "delta_cells": -15,
+          "ratio": 0.797,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": false,
+          "zh_shorter_than_en": true
+        },
+        {
+          "key": "wire.slash.stop",
+          "en_cells": 66,
+          "zh_cells": 58,
+          "delta_cells": -8,
+          "ratio": 0.879,
+          "maxCells": null,
+          "approx_help_budget_cells": 55,
+          "fits_approx_help": false,
+          "zh_shorter_than_en": true
+        }
+      ],
+      "materially_longer_than_en": [],
+      "note": "Budgets: /help ≈ 55 cells pin from i18n/style-guides/zh-CN.md; no sidecar maxCells exists for this namespace. Two rows exceed 55 cells (stop 58, fork 59) but both are shorter than their English sources (66, 74), so they inherit, rather than add, the English fit risk. No zh string is materially longer than its English source."
+    },
+    "punctuation": {
+      "ascii_punctuation_rows": [
+        {
+          "key": "wire.slash.loop",
+          "char": ",",
+          "offset": 18
+        },
+        {
+          "key": "wire.slash.mobile",
+          "char": ",",
+          "offset": 18
+        },
+        {
+          "key": "wire.slash.mobile",
+          "char": ",",
+          "offset": 26
+        },
+        {
+          "key": "wire.slash.mobile",
+          "char": ",",
+          "offset": 32
+        },
+        {
+          "key": "wire.slash.project",
+          "char": ",",
+          "offset": 10
+        },
+        {
+          "key": "wire.slash.project",
+          "char": ",",
+          "offset": 16
+        },
+        {
+          "key": "wire.slash.project",
+          "char": ",",
+          "offset": 21
+        },
+        {
+          "key": "wire.slash.project",
+          "char": ",",
+          "offset": 29
+        },
+        {
+          "key": "wire.slash.project",
+          "char": ",",
+          "offset": 35
+        },
+        {
+          "key": "wire.slash.resume",
+          "char": "(",
+          "offset": 16
+        },
+        {
+          "key": "wire.slash.resume",
+          "char": ")",
+          "offset": 19
+        }
+      ],
+      "reviewed_not_findings": [
+        "wire.slash.loop: the ASCII comma is inside the literal <goal>, <n> syntax.",
+        "wire.slash.mobile and wire.slash.project: ASCII commas separate literal subcommand tokens; the style guide allows Latin punctuation inside Latin/code fragments.",
+        "wire.slash.resume: ASCII parentheses around id were reviewed as an argument hint, not prose punctuation."
+      ],
+      "failures": []
+    },
+    "latin_spacing": {
+      "failures": []
+    },
+    "register": {
+      "address": "你",
+      "nin_occurrences": [],
+      "pronoun_occurrences": []
+    },
+    "encoding": {
+      "non_nfc": [],
+      "bidi_controls": []
+    },
+    "numbers": {
+      "rows_with_digits": [],
+      "failures": []
+    },
+    "render": {
+      "keys_checked": 52,
+      "failures": []
+    },
+    "route_read": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.json",
+      "key": "wire.slash.credential",
+      "digest": "0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd",
+      "chars": 16,
+      "audit_log": "/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config/audit/public-copy-reads.jsonl",
+      "audit_log_sha256": "97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980"
+    }
+  }
+}

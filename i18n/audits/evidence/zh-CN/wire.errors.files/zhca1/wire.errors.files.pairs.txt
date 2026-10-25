@@ -1,0 +1,11 @@
+# wire.errors.files — sampled en/zh pairs for attestation zhca1
+# 2/11 keys; all >120 chars and all plurals included
+
+## wire.errors.files.html_utf8  [34 chars]
+EN: HTML file is not valid UTF-8 text.
+ZH: HTML文件不是有效的UTF-8文本。
+
+## wire.errors.files.sign_auth  [51 chars]
+EN: A local access token or desktop bearer is required.
+ZH: 需要本地访问令牌或桌面bearer令牌。
+

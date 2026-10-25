@@ -1,0 +1,9 @@
+{
+  "tui.palette.kind_agent": "智能体",
+  "tui.palette.kind_command": "命令",
+  "tui.palette.kind_session": "会话",
+  "tui.palette.kind_setting": "设置",
+  "tui.palette.kind_team": "团队",
+  "tui.palette.no_matches": "未找到匹配项",
+  "tui.palette.placeholder": "搜索命令、设置、会话、智能体……"
+}

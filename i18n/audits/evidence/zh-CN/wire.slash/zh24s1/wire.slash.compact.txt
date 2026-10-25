@@ -1,0 +1,59 @@
+namespace=wire.slash keys=52 keys_read=52 audit_id=zh24s1 revision=f286318c89053e5e00cbb7823f6f29cd6a06d205
+en=b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202
+context=32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215
+target=a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11
+blocker=0 major=0 minor=6 nit=1 verdict=clean_with_followups
+finding_keys=wire.slash.agent,wire.slash.highlights,wire.slash.team,wire.slash.context,wire.slash.failovers,wire.slash.hub,wire.slash.stop
+
+wire.slash.accounts	en=23	zh=16	clean
+wire.slash.agent	en=69	zh=50	FINDING
+wire.slash.aida	en=47	zh=30	clean
+wire.slash.analytics	en=58	zh=29	clean
+wire.slash.approvals	en=47	zh=30	clean
+wire.slash.archive	en=42	zh=26	clean
+wire.slash.btw	en=50	zh=33	clean
+wire.slash.clear	en=43	zh=28	clean
+wire.slash.compact	en=23	zh=14	clean
+wire.slash.context	en=48	zh=37	FINDING
+wire.slash.copy	en=35	zh=22	clean
+wire.slash.credential	en=44	zh=32	clean
+wire.slash.delete	en=50	zh=26	clean
+wire.slash.effort	en=47	zh=39	clean
+wire.slash.exit	en=12	zh=8	clean
+wire.slash.failovers	en=51	zh=32	FINDING
+wire.slash.fast	en=39	zh=26	clean
+wire.slash.fork	en=74	zh=59	clean
+wire.slash.goal	en=52	zh=41	clean
+wire.slash.help	en=17	zh=12	clean
+wire.slash.highlights	en=53	zh=34	FINDING
+wire.slash.hub	en=56	zh=49	FINDING
+wire.slash.info	en=54	zh=28	clean
+wire.slash.keys	en=24	zh=12	clean
+wire.slash.language	en=52	zh=32	clean
+wire.slash.links	en=47	zh=28	clean
+wire.slash.login	en=23	zh=10	clean
+wire.slash.logout	en=34	zh=22	clean
+wire.slash.loop	en=53	zh=41	clean
+wire.slash.mcp	en=58	zh=48	clean
+wire.slash.mobile	en=51	zh=46	clean
+wire.slash.model	en=54	zh=46	clean
+wire.slash.move	en=39	zh=20	clean
+wire.slash.network	en=45	zh=32	clean
+wire.slash.new	en=24	zh=10	clean
+wire.slash.notifications	en=40	zh=30	clean
+wire.slash.project	en=56	zh=49	clean
+wire.slash.provider	en=42	zh=27	clean
+wire.slash.reload	en=49	zh=26	clean
+wire.slash.rename	en=43	zh=30	clean
+wire.slash.resume	en=54	zh=36	clean
+wire.slash.search	en=49	zh=28	clean
+wire.slash.session	en=54	zh=34	clean
+wire.slash.settings	en=32	zh=20	clean
+wire.slash.sidebar	en=49	zh=39	clean
+wire.slash.skills	en=18	zh=16	clean
+wire.slash.stop	en=66	zh=58	FINDING
+wire.slash.team	en=69	zh=46	FINDING
+wire.slash.theme	en=39	zh=28	clean
+wire.slash.unarchive	en=41	zh=22	clean
+wire.slash.update	en=49	zh=22	clean
+wire.slash.usage	en=25	zh=18	clean

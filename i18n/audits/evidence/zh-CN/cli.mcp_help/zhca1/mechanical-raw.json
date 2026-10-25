@@ -1,0 +1,127 @@
+{
+ "namespace": "cli.mcp_help",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "anthropic/claude-sonnet-5-5",
+  "date": "2026-10-19",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. 19 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round.",
+ "hash_equality": {
+  "source_sha256_prior_row": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+  "source_sha256_held_candidate": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+  "source_sha256_current": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "6fd7827e5f1be31310b19cf1ebcacece8cfec1e9b488392e9220c17ebcdcf927",
+  "target_sha256_current": "6fd7827e5f1be31310b19cf1ebcacece8cfec1e9b488392e9220c17ebcdcf927",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 19,
+  "zh_count": 19,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 19,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 9,
+   "medium_40_80": 10,
+   "long_80_120": 0,
+   "over_120": 0
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 2,
+   "medium_40_80": 2,
+   "long_80_120": 0,
+   "over_120": 0
+  },
+  "all_over_120": [],
+  "all_plurals": [],
+  "keys_sampled": 4,
+  "fraction_of_namespace": 0.2105,
+  "selected": [
+   "cli.mcp_help.add_oauth",
+   "cli.mcp_help.list",
+   "cli.mcp_help.logout",
+   "cli.mcp_help.remove_name"
+  ]
+ },
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+ "cur_src": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+ "old_tgt": "6fd7827e5f1be31310b19cf1ebcacece8cfec1e9b488392e9220c17ebcdcf927",
+ "new_tgt": "6fd7827e5f1be31310b19cf1ebcacece8cfec1e9b488392e9220c17ebcdcf927",
+ "attest_sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 9,
+   "medium_40_80": 10,
+   "long_80_120": 0,
+   "over_120": 0
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 2,
+   "medium_40_80": 2,
+   "long_80_120": 0,
+   "over_120": 0
+  },
+  "all_over_120": [],
+  "all_plurals": [],
+  "keys_sampled": 4,
+  "fraction_of_namespace": 0.2105,
+  "selected": [
+   "cli.mcp_help.add_oauth",
+   "cli.mcp_help.list",
+   "cli.mcp_help.logout",
+   "cli.mcp_help.remove_name"
+  ]
+ },
+ "attest_verdict": "carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

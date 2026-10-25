@@ -1,0 +1,3 @@
+cli.model_help.model	Switch another running lop session's model (like /model there)	切换另一个运行中的lop会话的模型（相当于在该会话中使用/model）
+cli.model_help.session	target by exact session id	按确切会话ID指定目标
+cli.model_help.target	conversation-name / session-id / cwd substring (case-insensitive). Omit when addressing with --pid/--session.	conversation-name / session-id / cwd子串（不区分大小写）。用--pid/--session指定目标时省略。

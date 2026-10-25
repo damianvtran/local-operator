@@ -1,0 +1,7 @@
+# relay.library — sampled en/zh pairs for attestation zhca1
+# 1/1 keys; all >120 chars and all plurals included
+
+## relay.library.count  [47 chars, PLURAL]
+EN: {count, plural, one {# asset} other {# assets}}
+ZH: {count, plural, other {#项资源}}
+

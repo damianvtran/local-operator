@@ -1,0 +1,27 @@
+# cli.update_help — sampled en/zh pairs for attestation zhca1
+# 6/6 keys; all >120 chars and all plurals included
+
+## cli.update_help.allow_downgrade  [255 chars, LONG>120]
+EN: Allow --from-snapshot to install a build OLDER than the current install (a deliberate rollback; recorded in the install marker). Without --from-snapshot it is refused on the PyPI path, which only installs newer versions; the refresh flags take precedence.
+ZH: 允许--from-snapshot安装比当前安装更旧的构建（主动回滚；记录于安装标记）。不带--from-snapshot时，PyPI路径拒绝此选项，仅安装更新版本；刷新标志优先。
+
+## cli.update_help.check  [39 chars]
+EN: Print installed vs PyPI; do not install
+ZH: 打印已安装版本与PyPI版本，不安装
+
+## cli.update_help.from_snapshot  [295 chars, LONG>120]
+EN: Install a local source tree (a directory, or a git ref of the current repository) into its own install generation. On macOS, a ref that is exactly a published release installs the published wheel from PyPI — the only build carrying the macOS key agent — and every other ref is built from source.
+ZH: 将本地源码树（目录或当前仓库的git引用）安装为独立安装代次。在macOS上，恰好对应已发布版本的引用会安装PyPI上发布的wheel，这是唯一包含macOS密钥智能体的构建；其他引用均从源码构建。
+
+## cli.update_help.no_roll  [129 chars, LONG>120]
+EN: Do not queue a mesh rollout for this update, whatever `network.rollout_on_update` says; `lop network update` still rolls by hand.
+ZH: 无论`network.rollout_on_update`如何设置，都不将此次更新加入mesh分发队列；仍可用`lop network update`手动分发。
+
+## cli.update_help.no_services  [194 chars, LONG>120]
+EN: Do not bring the `lop serve` daemons onto the new build; the supervised daemons are still repaired. Use this only when something else will start the serves, e.g. a script that owns their launch.
+ZH: 不将`lop serve`守护进程切换至新构建；仍会修复受监督的守护进程。仅在其他机制将启动serve进程时使用，例如负责启动它们的脚本。
+
+## cli.update_help.update  [119 chars]
+EN: Upgrade this install from PyPI. Not the lop-update script, which rebuilds the global runtime from a local git checkout.
+ZH: 从PyPI升级此安装。并非lop-update脚本，后者从本地git检出重建全局运行时。
+

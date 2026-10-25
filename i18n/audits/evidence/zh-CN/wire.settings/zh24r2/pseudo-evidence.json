@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "method": "Deterministic wide-substitution fit probe: every placeholder is replaced with a deliberately generous representative value and the result measured in display cells against the en sidecar maxCells. zh-CN is LTR CJK, so the ur bundle's Arabic tatweel stretch probe has no counterpart here; this is the analogue. No source or catalogue files are written. This is a synthetic fit probe, not native or rendered proof.",
+  "argument_parity_errors": [],
+  "plural_render_count": 0,
+  "plural_render_errors": [],
+  "width_rows": [
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.help",
+      "maxCells": 58,
+      "zh_cells": 40,
+      "zh_rendered_cells": 40,
+      "zh_wide_cells": 40,
+      "over": -18
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "maxCells": 29,
+      "zh_cells": 16,
+      "zh_rendered_cells": 16,
+      "zh_wide_cells": 16,
+      "over": -13
+    },
+    {
+      "key": "wire.settings.session_compression.title",
+      "maxCells": 34,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "zh_wide_cells": 8,
+      "over": -26
+    },
+    {
+      "key": "wire.settings.session_compression_after_days.label",
+      "maxCells": 29,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "zh_wide_cells": 18,
+      "over": -11
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.label",
+      "maxCells": 29,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "zh_wide_cells": 14,
+      "over": -15
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "maxCells": 12,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "zh_wide_cells": 6,
+      "over": -6
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "maxCells": 29,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "zh_wide_cells": 18,
+      "over": -11
+    }
+  ],
+  "static_or_reserved_over_budget": []
+}

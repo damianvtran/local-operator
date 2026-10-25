@@ -1,0 +1,19 @@
+Independent zh-CN audit (translation-auditor, lopdev team), 2026-10-24.
+Read-only over the worktree; no catalogue, ledger or eligibility file was edited.
+Audit id zh24a1; namespace tui.notices; audited catalogue revision c4ba95919dbea27fcf990101f9e48ed21e977e10; assembly revision 5b5367be1b4acef44d564dcf8cbc1c7c06b209e8.
+
+$ git -C /Users/damian/local-operator/.worktrees/zh-cn-core rev-parse c4ba95919dbea27fcf990101f9e48ed21e977e10 HEAD
+c4ba95919dbea27fcf990101f9e48ed21e977e10
+5b5367be1b4acef44d564dcf8cbc1c7c06b209e8
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+$ python scratchpad/zh_ns_summary.py tui.notices
+namespace=tui.notices
+keys=30 en_keys=30 delta_added=1 delta_modified=0
+arg_parity_failures=0
+rendered=30 render_failures=0
+maxCells_rows=0 width_over_budget=0
+hard_token_failures=0
+punctuation_failures=0
+register_nin_occurrences=0

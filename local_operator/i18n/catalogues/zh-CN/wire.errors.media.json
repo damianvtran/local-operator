@@ -1,0 +1,22 @@
+{
+  "wire.errors.media.media_refusal": "{error}",
+  "wire.errors.media.provider_model_pair": "provider和model必须同时提供，或均不提供。",
+  "wire.errors.media.radient_key_missing": "服务器未配置Radient API密钥。",
+  "wire.errors.media.save_audio_failed": "保存上传的音频文件失败：{error}",
+  "wire.errors.media.speech_generate_failed": "生成语音失败：{error}",
+  "wire.errors.media.speech_no_credential": "在设置中登录Radient以启用朗读。",
+  "wire.errors.media.speech_radient_credit_low": "Radient余额不足以生成语音。在Radient Console充值后继续。",
+  "wire.errors.media.speech_radient_sign_in_failed": "Radient登录已失效。在设置中重新登录。",
+  "wire.errors.media.speech_temporarily_unavailable": "语音暂时不可用。稍后重试。",
+  "wire.errors.media.speech_unavailable": "语音目前不可用。稍后重试。",
+  "wire.errors.media.speech_unknown_agent": "此会话的智能体已不可用。",
+  "wire.errors.media.speech_upstream_no_response": "上游语音生成失败：上游未响应：{error}",
+  "wire.errors.media.speech_upstream_reported_error": "上游语音生成失败：Radient报告错误（HTTP {status}）：{error}",
+  "wire.errors.media.speech_upstream_responded": "上游语音生成失败：上游返回{status}：{error}",
+  "wire.errors.media.speech_vendor_credit_low": "{vendor}余额不足以生成语音。在{vendor}充值后继续。",
+  "wire.errors.media.speech_vendor_key_refused": "{vendor}拒绝了你的API密钥。更换密钥。",
+  "wire.errors.media.temp_audio_missing": "保存后未找到临时音频文件。",
+  "wire.errors.media.transcription_unexpected": "转录时发生意外错误：{error}",
+  "wire.errors.media.unknown_model": "未知模型{provider}/{model}：{error}",
+  "wire.errors.media.unknown_provider": "未知提供商{provider}。"
+}

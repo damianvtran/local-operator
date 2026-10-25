@@ -1,0 +1,31 @@
+Attestation verifier output — newly executed for this record; no historical claim.
+Original catalogue check, run in the worktree at c4ba95919dbea27fcf990101f9e48ed21e977e10:
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+
+$ python build_evidence.py --verify cli.send_help
+namespace=cli.send_help
+prior_ledger_status=passed
+prior_auditor=i18n-auditor date=2026-10-19 model=openai/gpt-6.1-sol result=passed findings=0
+prior_row_source_sha256=ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9
+held_source_sha256=ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9
+current_source_sha256=ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9
+source_equal=true
+prior_row_target_sha256=<not recorded by the held-candidate ledger schema>
+held_target_sha256=7a3a05cf2bb1519507764a1b6de4981c76ddc327e074125582a25e2b462f9d6f
+current_target_sha256=7a3a05cf2bb1519507764a1b6de4981c76ddc327e074125582a25e2b462f9d6f
+target_equal=true
+context_sidecar_held_sha256=cc8f29b50b4a841a2d88200c8c033b6da90e31f6d934c94e49cb92c7ac3ad193
+context_sidecar_current_sha256=cc8f29b50b4a841a2d88200c8c033b6da90e31f6d934c94e49cb92c7ac3ad193
+context_sidecar_equal=true
+key_count_en=7 key_count_zh=7
+key_set_equal=true key_order_equal=true
+duplicate_keys_en=0 duplicate_keys_zh=0
+icu_messages_checked=7 parse_or_argument_failures=0
+plural_category_failures=0
+technical_token_failures=0 kept_english_missing=0 emphasis_rendered_lexically=1
+icu_number_date_skeleton_keys_checked=0 skeleton_failures=0
+sample_keys_read=4 of 7 fraction=0.5714 all_over_120=2 all_plurals=0
+verdict=carried
+exit_code=0

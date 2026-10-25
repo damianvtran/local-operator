@@ -1,0 +1,1 @@
+cli.login_status_help.status_alias	Alias for login-status: list stored provider credentials	作为login-status的别名：列出已存储的提供商凭据

@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "relay.session.tags",
+  "fix_commit": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "source_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "method": "Read-only comparison of the pre-fix target at cb716031e3^, the current target at HEAD, and the exact proposed text parsed from the pre-fix zh24a1 report. ICU arguments and plural selectors are parsed by the repo's own runtime; width is measured in display cells with representative values.",
+  "changed_key_count": 1,
+  "all_values_match_proposal": true,
+  "all_values_changed": true,
+  "all_argument_sets_equal": true,
+  "all_renders_ok": true,
+  "over_budget": [],
+  "rows": [
+    {
+      "key": "relay.session.tags.limit_hint",
+      "pre_fix": "一个会话最多可有{count}个标签 — 移除一个才能再添加。",
+      "current": "每段对话最多可有{count}个标签 — 移除一个才能再添加。",
+      "proposed_by_pre_fix_audit": "每段对话最多可有{count}个标签 — 移除一个才能再添加。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "1a91dbf402b491c4eafe7148a8868abff500c148cb659fac8c1082b8e2ed1b25",
+      "current_sha256": "7ad27537692427c6b0bb744fc0bcbd90a7911f3cd2dab4845fe5237e2894613e",
+      "en_arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "zh_arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "每段对话最多可有3个标签 — 移除一个才能再添加。",
+      "render_error": null,
+      "rendered_cells": 46,
+      "maxCells": null,
+      "over_budget": null
+    }
+  ]
+}

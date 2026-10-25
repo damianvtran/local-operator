@@ -1,0 +1,15 @@
+# tui.status — sampled en/zh pairs for attestation zhca1
+# 3/7 keys; all >120 chars and all plurals included
+
+## tui.status.agents  [47 chars, PLURAL]
+EN: {count, plural, one {# agent} other {# agents}}
+ZH: {count, plural, other {# 个智能体}}
+
+## tui.status.band.working  [7 chars]
+EN: working
+ZH: 工作中
+
+## tui.status.jobs  [43 chars, PLURAL]
+EN: {count, plural, one {# job} other {# jobs}}
+ZH: {count, plural, other {# 个任务}}
+

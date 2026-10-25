@@ -1,0 +1,135 @@
+{
+ "namespace": "cli.config_help",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. 9 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round.",
+ "hash_equality": {
+  "source_sha256_prior_row": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+  "source_sha256_held_candidate": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+  "source_sha256_current": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "384100fa02cc33629a498cee3e675db5dad6bc2a5c8d30254add3b212452d92b",
+  "target_sha256_current": "384100fa02cc33629a498cee3e675db5dad6bc2a5c8d30254add3b212452d92b",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 9,
+  "zh_count": 9,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 9,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 2,
+   "medium_40_80": 3,
+   "long_80_120": 2,
+   "over_120": 2
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 1,
+   "medium_40_80": 1,
+   "long_80_120": 1,
+   "over_120": 2
+  },
+  "all_over_120": [
+   "cli.config_help.edit_key",
+   "cli.config_help.instructions_description"
+  ],
+  "all_plurals": [],
+  "keys_sampled": 5,
+  "fraction_of_namespace": 0.5556,
+  "selected": [
+   "cli.config_help.create",
+   "cli.config_help.edit_key",
+   "cli.config_help.instructions",
+   "cli.config_help.instructions_description",
+   "cli.config_help.open"
+  ]
+ },
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+ "cur_src": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+ "old_tgt": "384100fa02cc33629a498cee3e675db5dad6bc2a5c8d30254add3b212452d92b",
+ "new_tgt": "384100fa02cc33629a498cee3e675db5dad6bc2a5c8d30254add3b212452d92b",
+ "attest_sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 2,
+   "medium_40_80": 3,
+   "long_80_120": 2,
+   "over_120": 2
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 1,
+   "medium_40_80": 1,
+   "long_80_120": 1,
+   "over_120": 2
+  },
+  "all_over_120": [
+   "cli.config_help.edit_key",
+   "cli.config_help.instructions_description"
+  ],
+  "all_plurals": [],
+  "keys_sampled": 5,
+  "fraction_of_namespace": 0.5556,
+  "selected": [
+   "cli.config_help.create",
+   "cli.config_help.edit_key",
+   "cli.config_help.instructions",
+   "cli.config_help.instructions_description",
+   "cli.config_help.open"
+  ]
+ },
+ "attest_verdict": "carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

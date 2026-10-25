@@ -1,0 +1,4 @@
+cli.wake_help.create	schedule a wake for a session (installs the supervisor on demand)	为会话设置定时唤醒（按需安装监督者）
+cli.wake_help.create_notify	notify on completion of the wake's turn (default quiet: scripted arms match the contract; errored turns notify regardless)	唤醒轮次完成时通知（默认静默：脚本设置遵循约定；出错的轮次无论如何都会通知）
+cli.wake_help.json	machine-readable output	机器可读输出
+cli.wake_help.status_install	install the supervisor now rather than waiting for the next schedule	立即安装监督者，而非等待下次定时任务

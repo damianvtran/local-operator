@@ -648,17 +648,19 @@ def test_allowance_growth_permits_debt_for_an_untranslatable_locale(
     English copy: a deadlock rather than a ratchet.
     """
     base = {"pairs": []}
-    # Urdu now carries audited core catalogues, so it no longer satisfies the
-    # no-current-catalogue carve-out this fixture exercises. Chinese remains
-    # supported but absent while its candidate is security-held.
-    head = {"pairs": [{"locale": "zh-CN", "namespace": "demo", "missing": ["demo.fresh"]}]}
+    # A synthetic locale with no catalogue in the tree: the carve-out is about
+    # untranslatability, not about any one wave's status. Every SUPPORTED
+    # locale now carries catalogues (Chinese included after its disposition),
+    # so using one of them here would encode today's shipping state as the
+    # premise of a mechanism test.
+    head = {"pairs": [{"locale": "de", "namespace": "demo", "missing": ["demo.fresh"]}]}
     monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
     got = i18n_check.allowance_growth(
         base,
         head,
         ref="BASE",
         base_english={"demo.existing"},
-        inactive_locales={"zh-CN"},
+        inactive_locales={"de"},
     )
     assert got == set()
 

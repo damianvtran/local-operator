@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "cli.exec_remote_help",
+  "fix_commit": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "source_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "method": "Read-only comparison of the pre-fix target at cb716031e3^, the current target at HEAD, and the exact proposed text parsed from the pre-fix zh24a1 report. ICU arguments and plural selectors are parsed by the repo's own runtime; width is measured in display cells with representative values.",
+  "changed_key_count": 1,
+  "all_values_match_proposal": true,
+  "all_values_changed": true,
+  "all_argument_sets_equal": true,
+  "all_renders_ok": true,
+  "over_budget": [],
+  "rows": [
+    {
+      "key": "cli.exec_remote_help.idempotency_key",
+      "pre_fix": "复用此幂等键而不生成新键，使已提交运行的重试不会运行两次",
+      "current": "要复用的幂等键（而非新生成的键），以免已提交的运行在重试时执行两次",
+      "proposed_by_pre_fix_audit": "要复用的幂等键（而非新生成的键），以免已提交的运行在重试时执行两次",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "3ce03e81bdc02436f99fe2629d727d1fd9a9956b8537a75d103ccc35bf2d3010",
+      "current_sha256": "e4ca32963350c136d0fd2e91cbcb89d7cdb6ffdc43369ac2bd402b82ea81f5e4",
+      "en_arguments": [],
+      "zh_arguments": [],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "要复用的幂等键（而非新生成的键），以免已提交的运行在重试时执行两次",
+      "render_error": null,
+      "rendered_cells": 66,
+      "maxCells": null,
+      "over_budget": null
+    }
+  ]
+}

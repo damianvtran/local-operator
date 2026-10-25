@@ -1,0 +1,502 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "audit_kind": "independent_carried_namespace_attestation_summary",
+ "locale": "zh-CN",
+ "audit_date": "2026-10-24",
+ "attested_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+ "held_candidate_revision": "ebb70df3a887aa7e9b448560e0546c2cf817b133",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session": "d9e49690d15d",
+  "model": "deepseek/deepseek-flash",
+  "independent_from_translator": true
+ },
+ "method": "Per prior zh-CN ledger row: compare the current English source sha256 with the row's source_sha256; compare the current target sha256 with the held candidate's committed target bytes (the row records no target hash); verify key set/order, ICU argument tuples and plural categories with local_operator.i18n.runtime; verify technical tokens and number/date skeletons; read a stratified sample of at least 15% of keys, including every message over 120 characters and every plural.",
+ "totals": {
+  "prior_ledger_rows": 72,
+  "byte_carried": 64,
+  "carried_attested": 63,
+  "withheld": 1,
+  "not_carried": 8,
+  "keys_mechanically_checked_all_rows": 2619,
+  "keys_mechanically_checked_carried": 1428,
+  "keys_sampled": 390
+ },
+ "carried_namespaces": [
+  "cli.agents_help",
+  "cli.aida_help",
+  "cli.browser",
+  "cli.browser_help",
+  "cli.config_help",
+  "cli.credential_help",
+  "cli.exec_help",
+  "cli.exec_runtime",
+  "cli.exec_worker_help",
+  "cli.global_help",
+  "cli.hub_help",
+  "cli.hub_shared_help",
+  "cli.install_help",
+  "cli.login_help",
+  "cli.login_status_help",
+  "cli.logout_help",
+  "cli.mcp_help",
+  "cli.memory_help",
+  "cli.mobile_help",
+  "cli.model_help",
+  "cli.monitor_help",
+  "cli.qwencloud_help",
+  "cli.refresh_help",
+  "cli.resume_click_help",
+  "cli.send_help",
+  "cli.serve_help",
+  "cli.services_help",
+  "cli.stop_help",
+  "cli.teams_help",
+  "cli.update_help",
+  "cli.wake_help",
+  "mobile.setup",
+  "relay.library",
+  "relay.login",
+  "relay.session",
+  "relay.shell",
+  "tui.analytics",
+  "tui.app",
+  "tui.hub_links",
+  "tui.import",
+  "tui.library",
+  "tui.projects",
+  "tui.projects_edit",
+  "tui.review",
+  "tui.schedule",
+  "tui.status",
+  "tui.transcript",
+  "tui.usage",
+  "tui.welcome",
+  "wire.aida_cadence",
+  "wire.console",
+  "wire.errors",
+  "wire.errors.agents",
+  "wire.errors.auth",
+  "wire.errors.files",
+  "wire.errors.media",
+  "wire.errors.settings",
+  "wire.exec",
+  "wire.host_speed",
+  "wire.incidents",
+  "wire.notices",
+  "wire.slash.library",
+  "wire.tunnel_setup"
+ ],
+ "withheld_namespaces": [
+  {
+   "namespace": "wire.slash",
+   "prior_status": "failed",
+   "prior_note": "zh-CN core held-candidate wave 2026-10-19. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Preserved 51 values byte-identical to held/i18n-w3-zh-candidate-4773bb87; 1 new key wire.slash.hub. Full audit coverage 51/52: wire.slash.credential is unreadable under ordinary tool-output redaction and was NOT extracted, reread or bypassed; the 51 readable values and the new hub key are clean (0 findings). Namespace WITHHELD at 51/52; status failed until an approved security disposition covers the unreadable value. Independent auditor i18n-auditor openai/gpt-6.1-sol, 2026-10-19.",
+   "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+   "held_target_sha256": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+   "current_target_sha256": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11"
+  }
+ ],
+ "not_carried_namespaces": [
+  {
+   "namespace": "cli.sessions_help",
+   "prior_status": "passed",
+   "prior_row_source_sha256": "81b18d3d6b7e10419262b2ea97a4dfc423779be6d82b872dbf04209704c2bfe3",
+   "current_source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
+   "held_target_sha256": "3b859a0e1f9f5a244b41e14aab9ea4be5319dabed46caaa0b825be5fca410cac",
+   "current_target_sha256": "d8e41d97fdbfdf890e14088ebdd44f87aeb3c2efb49a6401b430f45e51914bf8",
+   "fresh_audit_required": true
+  },
+  {
+   "namespace": "tui.authoring",
+   "prior_status": "passed",
+   "prior_row_source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+   "current_source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+   "held_target_sha256": "d233ce0bfe19bfbc60495f39a87ea9a6165578bf3efda85b9ca94c485320d3e9",
+   "current_target_sha256": "b26f3ab6cddbf93beff849976a2f453feaa4ee4a828474a2f30e37e9410c7470",
+   "fresh_audit_required": true
+  },
+  {
+   "namespace": "tui.notices",
+   "prior_status": "passed",
+   "prior_row_source_sha256": "2eaf4097197ee0257cfcf7d9d0f450e06fb496db67a92edb21e6f6b1122aaef1",
+   "current_source_sha256": "4a159689628113c32a2df75a9e3d98d74aab790c9946848307bb267318731510",
+   "held_target_sha256": "035b9df1c4d6c2e124c7ffab6f2e49eb310f6508f08a6957ba042d3964e90ebe",
+   "current_target_sha256": "40af781ff575e4571fbb4caa7f2ae55443f1bdb2c344c2e04137d59198c77c61",
+   "fresh_audit_required": true
+  },
+  {
+   "namespace": "tui.small",
+   "prior_status": "passed",
+   "prior_row_source_sha256": "7cd74d45ada43efceba846a9c5d29a0aa90e0567e1f137778300e1742a6adfec",
+   "current_source_sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75",
+   "held_target_sha256": "a05ee9e08e560ddb5bbaf999875e20e53a9eb7e58d73ffbc1712c119ac8a92d7",
+   "current_target_sha256": "5b7e05905402a7713dee3dd0ffa3df8048bae23e6b18108cfcec1c6cd4567ca6",
+   "fresh_audit_required": true
+  },
+  {
+   "namespace": "wire.errors.desktop",
+   "prior_status": "passed",
+   "prior_row_source_sha256": "30312c2052a41da6f580f00dce8daf9babbc0b25c0462c1f2658817cd51f391c",
+   "current_source_sha256": "9a164be42a80d9bf0f60ad2a9f1d76fd1601855a4d19ffac3bf35d6bef11f76d",
+   "held_target_sha256": "cf2fbad491db3452ce9ef80f9764e1e4937a352ed66eb2f99cc1d151e2f2daf1",
+   "current_target_sha256": "a8cb0db6bbc8a33ef041c082d68b9c06dd0b3168a303e447e0f40e0334fc89f4",
+   "fresh_audit_required": true
+  },
+  {
+   "namespace": "wire.memory",
+   "prior_status": "passed",
+   "prior_row_source_sha256": "8732c8a8ab1572a39bf81ff94d80c8ea02f146d7da933db6eb41ee3c73062a00",
+   "current_source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+   "held_target_sha256": "304e44b834272be678bdcacc57b48b18810690e9a2d283156d419f5c58098fc1",
+   "current_target_sha256": "4e39d2bacb0ea88a16f7de720a5ae2208a580ea789ecc135a1c4368d2f3d1e28",
+   "fresh_audit_required": true
+  },
+  {
+   "namespace": "wire.settings",
+   "prior_status": "passed",
+   "prior_row_source_sha256": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
+   "current_source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+   "held_target_sha256": "b5bcb8ebfaa674d31b155ed64130f4a7a256c40b2c7833cfa1f901d12c5c8138",
+   "current_target_sha256": "d0df5e3e6975719b39d3e81171b2d9416844a1df8a5498f81f398476eb284b55",
+   "fresh_audit_required": true
+  },
+  {
+   "namespace": "wire.settings.hub_defaults",
+   "prior_status": "passed",
+   "prior_row_source_sha256": "9e785003bab2f7c01f32bae9b2cb114a240a82bac509c05bc55266585a41241d",
+   "current_source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+   "held_target_sha256": "2ba72847cff17089eaf641666b2ea7602a4e27bbc585a97da01d1e400ef25197",
+   "current_target_sha256": "b547b9730d78a81e840746de723e8a44597a3dcb175cd7e0200a143bb4972c13",
+   "fresh_audit_required": true
+  }
+ ],
+ "findings": [
+  {
+   "id": "ZHC-01",
+   "severity": "minor",
+   "scope": "corpus",
+   "title": "'credit' drifts between 点数, 积分 and 余额",
+   "reason": "The same English billing term is rendered three ways: 点数 in mobile.setup and relay.shell.usage.unit_credits, 积分 in tui.usage.paid.continue, and bare 余额 (dropping the credit noun) in the two speech errors. 点数 is the dominant rendering and matches 'Add credit'/'account credit'; standardise on 点数, keeping 余额 only as the compound 点数余额.",
+   "keys": [
+    {
+     "namespace": "tui.usage",
+     "key": "tui.usage.paid.continue",
+     "current": "包含的配额已用尽；将继续使用积分",
+     "proposed": "包含的配额已用尽；将继续使用点数"
+    },
+    {
+     "namespace": "wire.errors.media",
+     "key": "wire.errors.media.speech_radient_credit_low",
+     "current": "Radient余额不足以生成语音。在Radient Console充值后继续。",
+     "proposed": "Radient点数余额不足，无法生成语音。请在Radient Console充值后继续。"
+    },
+    {
+     "namespace": "wire.errors.media",
+     "key": "wire.errors.media.speech_vendor_credit_low",
+     "current": "{vendor}余额不足以生成语音。在{vendor}充值后继续。",
+     "proposed": "{vendor}点数余额不足，无法生成语音。请在{vendor}充值后继续。"
+    },
+    {
+     "namespace": "mobile.setup",
+     "key": "mobile.setup.balance",
+     "current": "自行前往https://console.radienthq.com/dashboard/tunnels充值；设置绝不会购买点数。之后重试。",
+     "proposed": null
+    },
+    {
+     "namespace": "mobile.setup",
+     "key": "mobile.setup.consent",
+     "current": "激活将为此Radient账户开通月费为USD {amount}的隧道订阅，预留手机地址，并安装和启动后台连接器。此操作不会购买点数。",
+     "proposed": null
+    },
+    {
+     "namespace": "mobile.setup",
+     "key": "mobile.setup.title_balance",
+     "current": "手机访问需要账户点数",
+     "proposed": null
+    },
+    {
+     "namespace": "relay.shell",
+     "key": "relay.shell.usage.unit_credits",
+     "current": "{count, plural, other {点数}}",
+     "proposed": null
+    }
+   ]
+  },
+  {
+   "id": "ZHC-02",
+   "severity": "minor",
+   "scope": "corpus",
+   "title": "'quota' drifts between 配额 and 额度, and one sentence is translated twice",
+   "reason": "The same English sentence family ('Included quota used; credits will continue.') is 包含的配额已用尽；将继续使用积分 in tui.usage and 已用完内含额度；将继续使用点数 in relay.shell. 配额 is the dominant rendering (wire.settings, wire.slash.usage), so relay.shell should use 配额 and 包含的.",
+   "keys": [
+    {
+     "namespace": "relay.shell",
+     "key": "relay.shell.usage.continue",
+     "current": "已用完内含额度；将继续使用点数。",
+     "proposed": "包含的配额已用尽；将继续使用点数。"
+    },
+    {
+     "namespace": "tui.usage",
+     "key": "tui.usage.paid.continue",
+     "current": "包含的配额已用尽；将继续使用积分",
+     "proposed": "包含的配额已用尽；将继续使用点数"
+    }
+   ]
+  },
+  {
+   "id": "ZHC-03",
+   "severity": "minor",
+   "scope": "corpus",
+   "title": "Aida 'check-in' drifts between 问候 and 回访",
+   "reason": "The carried cadence namespace says 问候 (wire.aida_cadence), while the TUI status surface says 回访 (tui.app.aida). The settings namespace that is not carried (wire.settings) says 检查. One feature term should have one rendering; 问候 matches the cadence labels that name the setting.",
+   "keys": [
+    {
+     "namespace": "tui.app",
+     "key": "tui.app.aida.next_checkin",
+     "current": "下次回访{when}",
+     "proposed": "下次问候{when}"
+    },
+    {
+     "namespace": "tui.app",
+     "key": "tui.app.aida.extras_used",
+     "current": "今日额外回访已用：{used} / {maximum}",
+     "proposed": "今日额外问候已用：{used} / {maximum}"
+    },
+    {
+     "namespace": "wire.aida_cadence",
+     "key": "wire.aida_cadence.interval_hours.label",
+     "current": "问候间隔（小时）",
+     "proposed": null
+    },
+    {
+     "namespace": "wire.aida_cadence",
+     "key": "wire.aida_cadence.interval_hours.help",
+     "current": "0保留每日本地问候时间。1–168按经过的小时数计时；4表示每四小时问候一次。更改会保留已到期应执行的问候。",
+     "proposed": null
+    }
+   ]
+  },
+  {
+   "id": "ZHC-04",
+   "severity": "minor",
+   "scope": "corpus",
+   "title": "The Library feature is 资料库, 资源库 and 资产库",
+   "reason": "tui.library consistently calls the feature 资料库; the slash help calls the same Library 资产库, and the (not-carried) desktop errors call it 资源库. One feature name is needed; 资料库 is the rendering the TUI title and the Librarian settings both use.",
+   "keys": [
+    {
+     "namespace": "wire.slash.library",
+     "key": "wire.slash.library.help",
+     "current": "浏览全局资产库",
+     "proposed": "浏览全局资料库"
+    },
+    {
+     "namespace": "tui.library",
+     "key": "tui.library.title",
+     "current": "资料库",
+     "proposed": null
+    },
+    {
+     "namespace": "tui.library",
+     "key": "tui.library.loading",
+     "current": "正在读取资料库……",
+     "proposed": null
+    }
+   ]
+  },
+  {
+   "id": "ZHC-05",
+   "severity": "minor",
+   "scope": "namespace",
+   "title": "'key agent' rendered as an AI agent (智能体)",
+   "reason": "'the macOS key agent' is the signed helper app lop-keyagent.app (local_operator/update.py), not an LLM agent. 智能体 is this locale's fixed rendering of 'agent' in the AI sense (glossary), so 密钥智能体 misstates what the wheel carries; use 密钥代理应用.",
+   "keys": [
+    {
+     "namespace": "cli.update_help",
+     "key": "cli.update_help.from_snapshot",
+     "current": "将本地源码树（目录或当前仓库的git引用）安装为独立安装代次。在macOS上，恰好对应已发布版本的引用会安装PyPI上发布的wheel，这是唯一包含macOS密钥智能体的构建；其他引用均从源码构建。",
+     "proposed": "将本地源码树（目录或当前仓库的git引用）安装为独立安装代次。在macOS上，恰好对应已发布版本的引用会安装PyPI上发布的wheel，这是唯一包含macOS密钥代理应用的构建；其他引用均从源码构建。"
+    }
+   ]
+  },
+  {
+   "id": "ZHC-06",
+   "severity": "nit",
+   "scope": "namespace",
+   "title": "Bare Latin 'operator' left in a prose sentence",
+   "reason": "Everywhere else the person is 操作员 and the product is Local Operator. '运行operator的工作目录' reads as an untranslated token; name the product or the role.",
+   "keys": [
+    {
+     "namespace": "cli.global_help",
+     "key": "cli.global_help.run_in",
+     "current": "运行operator的工作目录。  必须是有效目录。",
+     "proposed": "运行Local Operator的工作目录。  必须是有效目录。"
+    }
+   ]
+  },
+  {
+   "id": "ZHC-07",
+   "severity": "nit",
+   "scope": "namespace",
+   "title": "ASCII colon in Chinese prose",
+   "reason": "The zh-CN style guide requires full-width punctuation in prose. These are the only two Chinese-prose strings in the carried corpus that use an ASCII colon and a following space.",
+   "keys": [
+    {
+     "namespace": "tui.projects",
+     "key": "tui.projects.form.readback_hint",
+     "current": "{label}提示: {hint}",
+     "proposed": "{label}提示：{hint}"
+    },
+    {
+     "namespace": "tui.projects",
+     "key": "tui.projects.form.readback_error",
+     "current": "{label}错误: {error}",
+     "proposed": "{label}错误：{error}"
+    }
+   ]
+  },
+  {
+   "id": "ZHC-08",
+   "severity": "nit",
+   "scope": "corpus",
+   "title": "Plural counter spacing is split '# 个' vs '#个'",
+   "reason": "Four carried strings put a space between # and the classifier while 26 do not. The style guide's plural example shows a space, but its punctuation rule forbids a space between Chinese and digit runs; either way the corpus should not be split. Proposed: follow the majority and the punctuation rule.",
+   "keys": [
+    {
+     "namespace": "tui.status",
+     "key": "tui.status.agents",
+     "current": "{count, plural, other {# 个智能体}}",
+     "proposed": "{count, plural, other {#个智能体}}"
+    },
+    {
+     "namespace": "tui.status",
+     "key": "tui.status.jobs",
+     "current": "{count, plural, other {# 个任务}}",
+     "proposed": "{count, plural, other {#个任务}}"
+    },
+    {
+     "namespace": "tui.transcript",
+     "key": "tui.transcript.attach.receipt",
+     "current": "↑ 已附加 {count, plural, other {# 张图像}}",
+     "proposed": "↑ 已附加 {count, plural, other {#张图像}}"
+    },
+    {
+     "namespace": "tui.transcript",
+     "key": "tui.transcript.catchup.missed",
+     "current": "{count, plural, other {# 次错过的唤醒}}",
+     "proposed": "{count, plural, other {#次错过的唤醒}}"
+    }
+   ]
+  },
+  {
+   "id": "ZHC-09",
+   "severity": "nit",
+   "scope": "namespace",
+   "title": "'provider census' rendered with 普查",
+   "reason": "Here 'census' is the enumeration of configured providers that the credential store is needed for; 普查 (a statistical census) is not the idiomatic software term. 清点 keeps the counting sense without the demographic register.",
+   "keys": [
+    {
+     "namespace": "wire.errors.auth",
+     "key": "wire.errors.auth.store_unreadable",
+     "current": "无法读取凭据存储——提供商普查需要读取它。",
+     "proposed": "无法读取凭据存储——提供商清点需要读取它。"
+    }
+   ]
+  },
+  {
+   "id": "ZHC-10",
+   "severity": "nit",
+   "scope": "namespace",
+   "title": "Projects summary is 24% wider than English in cells",
+   "reason": "{open}项未完成 / {total}项 is 26 cells against the English 21, in a narrow summary row with no declared maxCells. The shorter form keeps the open/total meaning and fits; flag for a rendered check rather than assert a break.",
+   "keys": [
+    {
+     "namespace": "tui.projects",
+     "key": "tui.projects.render.open_over_total",
+     "current": "{open}项未完成 / {total}项",
+     "proposed": "{open}/{total}项未完成"
+    }
+   ]
+  }
+ ],
+ "finding_counts": {
+  "minor": 5,
+  "nit": 5
+ },
+ "key_count_by_namespace": {
+  "cli.agents_help": 21,
+  "cli.aida_help": 4,
+  "cli.browser": 64,
+  "cli.browser_help": 20,
+  "cli.config_help": 9,
+  "cli.credential_help": 5,
+  "cli.exec_help": 20,
+  "cli.exec_runtime": 11,
+  "cli.exec_worker_help": 11,
+  "cli.global_help": 17,
+  "cli.hub_help": 12,
+  "cli.hub_shared_help": 12,
+  "cli.install_help": 5,
+  "cli.login_help": 2,
+  "cli.login_status_help": 2,
+  "cli.logout_help": 2,
+  "cli.mcp_help": 19,
+  "cli.memory_help": 1,
+  "cli.mobile_help": 15,
+  "cli.model_help": 5,
+  "cli.monitor_help": 6,
+  "cli.qwencloud_help": 5,
+  "cli.refresh_help": 7,
+  "cli.resume_click_help": 1,
+  "cli.send_help": 7,
+  "cli.serve_help": 5,
+  "cli.services_help": 9,
+  "cli.sessions_help": 47,
+  "cli.stop_help": 9,
+  "cli.teams_help": 34,
+  "cli.update_help": 6,
+  "cli.wake_help": 17,
+  "mobile.setup": 76,
+  "relay.library": 1,
+  "relay.login": 4,
+  "relay.session": 17,
+  "relay.shell": 44,
+  "tui.analytics": 98,
+  "tui.app": 46,
+  "tui.authoring": 49,
+  "tui.hub_links": 56,
+  "tui.import": 87,
+  "tui.library": 108,
+  "tui.notices": 30,
+  "tui.projects": 97,
+  "tui.projects_edit": 35,
+  "tui.review": 73,
+  "tui.schedule": 61,
+  "tui.small": 137,
+  "tui.status": 7,
+  "tui.transcript": 17,
+  "tui.usage": 21,
+  "tui.welcome": 30,
+  "wire.aida_cadence": 2,
+  "wire.console": 8,
+  "wire.errors": 0,
+  "wire.errors.agents": 44,
+  "wire.errors.auth": 12,
+  "wire.errors.desktop": 84,
+  "wire.errors.files": 11,
+  "wire.errors.media": 20,
+  "wire.errors.settings": 12,
+  "wire.exec": 17,
+  "wire.host_speed": 2,
+  "wire.incidents": 0,
+  "wire.memory": 17,
+  "wire.notices": 0,
+  "wire.settings": 818,
+  "wire.settings.hub_defaults": 9,
+  "wire.slash": 52,
+  "wire.slash.library": 2,
+  "wire.tunnel_setup": 5
+ },
+ "claimed_scope": "Byte carry against the held-candidate audit row plus a sampled semantic read. No re-translation, native/rendered UI evidence or design sign-off."
+}

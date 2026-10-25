@@ -1,0 +1,1 @@
+cli.memory_help.memory	Inspect and correct scoped memory	检查和修正限定范围的记忆

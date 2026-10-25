@@ -1,0 +1,7 @@
+# cli.resume_click_help — sampled en/zh pairs for attestation zhca1
+# 1/1 keys; all >120 chars and all plurals included
+
+## cli.resume_click_help.session  [20 chars]
+EN: session id to reopen
+ZH: 要重新打开的会话ID
+

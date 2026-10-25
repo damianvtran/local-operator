@@ -1,0 +1,36 @@
+tui.team_authoring.create | new team | 新建团队
+tui.team_authoring.edit | edit team · {name} | 编辑团队 · {name}
+tui.team_authoring.name | name | 名称
+tui.team_authoring.label | label | 标签
+tui.team_authoring.description | when to use | 使用场景
+tui.team_authoring.manager | manager | 管理者
+tui.team_authoring.members | members | 成员
+tui.team_authoring.aliases | aliases | 别名
+tui.team_authoring.instructions | instructions | 指令
+tui.team_authoring.project | project brief | 项目简报
+tui.team_authoring.members_hint | comma-separated: coder, coder:2, team:pod | 逗号分隔：coder、coder:2、team:pod
+tui.team_authoring.aliases_hint | comma-separated names · empty clears aliases | 逗号分隔的名称 · 留空即清除别名
+tui.team_authoring.instructions_hint | standing team guidance · Tab moves to the next field | 常驻团队指引 · Tab跳至下一字段
+tui.team_authoring.overrides_hint | Existing member overrides are preserved. Edit overrides on the desktop. | 现有成员覆盖项将保留。在桌面端编辑覆盖项。
+tui.team_authoring.legend | ctrl+s save · tab move · esc cancel | ctrl+s保存 · tab移动 · esc取消
+tui.team_authoring.discard | Discard changes? y discard · n keep editing | 放弃更改？y放弃 · n继续编辑
+tui.team_authoring.invalid_name | Use a team name without spaces or path separators. | 团队名称不能含空格或路径分隔符。
+tui.team_authoring.required_manager | A manager is required. | 必须指定管理者。
+tui.team_authoring.required_instructions | Instructions are required for a new team. | 新团队必须填写指令。
+tui.team_authoring.invalid_members | Use comma-separated role, role:2 or team:pod entries. | 成员项用逗号分隔，格式为role、role:2或team:pod。
+tui.team_authoring.invalid_aliases | Use comma-separated names without spaces or empty entries. | 别名用逗号分隔，不能含空格或空项。
+tui.team_authoring.saved | saved team {name} | 已保存团队{name}
+tui.team_authoring.no_change | no changes to save | 没有更改需要保存
+tui.team_authoring.revision_changed | Someone else changed this team; reopen to edit. | 其他人已修改此团队，重新打开后再编辑。
+tui.team_authoring.missing | No installed team named {name}. | 未安装名为{name}的团队。
+tui.team_authoring.usage_edit | Use /team edit <name>. | 使用/team edit <name>。
+tui.team_authoring.usage_new | Use /team new with no extra arguments. | 使用/team new，不带额外参数。
+tui.team_authoring.registry_missing | No team registry is attached to this session. | 本会话未连接团队注册表。
+tui.team_authoring.footer | /team chart <name> · /team new · /team edit <name> | /team chart <name> · /team new · /team edit <name>
+tui.team_authoring.save_error | Could not save: {reason} | 无法保存：{reason}
+tui.team_authoring.notice_read_only | Read-only: this conversation’s runtime is on another device, so team changes are not available here. | 只读：本会话的运行时位于另一台设备，因此此处无法修改团队。
+tui.team_authoring.new_hint | Create a team | 创建团队
+tui.team_authoring.edit_hint | Edit an installed team | 编辑已安装的团队
+tui.team_authoring.subcommand | subcommand | 子命令
+tui.team_authoring.talk_hint | talk to team · {detail} | 与团队对话 · {detail}
+tui.team_authoring.promote_hint | Copy this conversation's team into your account | 将本会话的团队复制到你的账户
