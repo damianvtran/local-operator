@@ -1473,8 +1473,7 @@ class DesktopFeed:
             # read, and the unclaimed filter lives in SQL: a post-read filter
             # would starve the oldest item once the newest ones were claimed.
             return [
-                dict(row)
-                for row in store.undelivered(priority="high", limit=BURST_ITEMS_PER_TICK)
+                dict(row) for row in store.undelivered(priority="high", limit=BURST_ITEMS_PER_TICK)
             ]
 
         try:

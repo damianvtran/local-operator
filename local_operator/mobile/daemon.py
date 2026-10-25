@@ -8296,9 +8296,7 @@ def build_app(daemon: MobileDaemon):
         if not isinstance(evidence, dict):
             return JSONResponse({"error": "evidence is required"}, status_code=422)
         try:
-            answer = await asyncio.to_thread(
-                inbox.apply_seen, config_dir(), items, evidence
-            )
+            answer = await asyncio.to_thread(inbox.apply_seen, config_dir(), items, evidence)
         except (TypeError, ValueError) as error:
             return JSONResponse({"error": str(error)}, status_code=422)
         return JSONResponse(answer)

@@ -89,6 +89,10 @@ def deliver_item(
     """
     if str(priority) != "high":
         return DeliveryResult(rung=RUNG_PRIORITY)
+    # ONE Path at the boundary: callers pass either spelling (the session hands
+    # a str, the tests a tmp_path), and `desktop_presence` keys its cache on
+    # `Path`. Passing the str through made the lease read type-unsound.
+    config_dir = Path(config_dir)
     store = store or NotificationStore(config_dir)
     row = store.get(item_id)
     if row is None:
