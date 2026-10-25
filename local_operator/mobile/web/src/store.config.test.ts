@@ -182,3 +182,27 @@ describe("retainConfigStream", () => {
 		}
 	});
 });
+
+// An auth failure during capability negotiation is not a transient lack of
+// config-stream support. Concurrent probes/streams share one page-wide reload.
+it("config probe 401 clears private state once and stops before streaming", async () => {
+	vi.useFakeTimers(); vi.resetModules();
+	const fresh = await import("./store");
+	const { handleUnauthorized } = await import("./api");
+	const reload = vi.fn(); vi.stubGlobal("location", { reload });
+	localStorage.setItem("lo-mobile-draft:expired", "private");
+	localStorage.setItem("local-operator-models", "keep");
+	const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 401 }));
+	vi.stubGlobal("fetch", fetchMock);
+	const release = fresh.retainConfigStream();
+	try {
+		await vi.advanceTimersByTimeAsync(60000);
+		handleUnauthorized(); // another concurrent request was already in flight
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(reload).toHaveBeenCalledTimes(1);
+		expect(localStorage.getItem("lo-mobile-draft:expired")).toBeNull();
+		expect(localStorage.getItem("local-operator-models")).toBe("keep");
+	} finally {
+		release(); vi.useRealTimers(); vi.unstubAllGlobals();
+	}
+});

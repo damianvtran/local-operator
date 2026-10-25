@@ -34,13 +34,13 @@ describe("fetch SSE transport", () => {
 		expect(hooks.disconnected).not.toHaveBeenCalled();
 		expect(hooks.opened).toHaveBeenCalledTimes(2);
 	});
-	it("coalesces raw frames before parsing/application and ignores retired readers", async () => {
+	it("delivers frames in order before batching paints and ignores retired readers", async () => {
 		const hooks = connect(); await settleStream();
 		Stream.instances[0].emit("projection", "superseded");
 		Stream.instances[0].emit("projection", "latest"); await settleStream();
-		expect(hooks.data.mock.calls).toEqual([["latest"]]);
+		expect(hooks.data.mock.calls).toEqual([["superseded", true], ["latest", true]]);
 		close?.(); Stream.instances[0].emit("projection", "closed"); await settleStream();
-		expect(hooks.data).toHaveBeenCalledTimes(1);
+		expect(hooks.data).toHaveBeenCalledTimes(2);
 	});
 	it("detects byte silence and immediately resynchronizes", async () => {
 		const hooks = connect(); await settleStream();
@@ -48,7 +48,7 @@ describe("fetch SSE transport", () => {
 		await vi.advanceTimersByTimeAsync(35001);
 		expect(Stream.instances).toHaveLength(2);
 		Stream.instances[1].emit("projection", "resynced"); await settleStream();
-		expect(hooks.data).toHaveBeenLastCalledWith("resynced");
+		expect(hooks.data).toHaveBeenLastCalledWith("resynced", true);
 		expect(hooks.disconnected).not.toHaveBeenCalled();
 	});
 	it("counts keepalive comment bytes as liveness", async () => {
@@ -68,7 +68,7 @@ describe("fetch SSE transport", () => {
 		connect(); await settleStream(); window.dispatchEvent(new Event("online"));
 		await settleStream(); expect(Stream.instances).toHaveLength(1);
 	});
-	it("backs off early EOF, reports sustained outage once, resets on a frame", async () => {
+	it("backs off early EOF, reports sustained outage once, resets after a stable recovery", async () => {
 		const hooks = connect(); await settleStream();
 		for (let index = 0; index < 5; index++) {
 			Stream.instances.at(-1)!.end();
@@ -76,6 +76,7 @@ describe("fetch SSE transport", () => {
 		}
 		expect(hooks.disconnected).toHaveBeenCalledTimes(1);
 		Stream.instances.at(-1)!.emit("projection", "recovered"); await settleStream();
+		await vi.advanceTimersByTimeAsync(2000);
 		Stream.instances.at(-1)!.fail(); await vi.advanceTimersByTimeAsync(250);
 		expect(hooks.disconnected).toHaveBeenCalledTimes(1);
 	});
@@ -111,11 +112,11 @@ describe("list stream", () => {
 			Stream.instances[0].emit("sessions", { sessions: [{ session_id: "b" }] });
 			await settleStream();
 		});
-		expect(result.current.revision).toBe(revision + 1);
+		expect(result.current.revision).toBe(revision + 2);
 		expect(result.current.sessions[0].session_id).toBe("b");
 		close(); close = undefined; await vi.advanceTimersByTimeAsync(9000);
 		close = retainSessionListStream(); expect(Stream.instances).toHaveLength(1);
 		await act(async () => { Stream.instances[0].emit("sessions", "{"); await settleStream(); });
-		expect(result.current.revision).toBe(revision + 1); unmount();
+		expect(result.current.revision).toBe(revision + 2); unmount();
 	});
 });

@@ -199,17 +199,24 @@ seconds), resets a 35-second silence watchdog. A stalled socket is aborted and
 reopened. Returning to a visible page, a `pageshow`, or an `online` event also
 reopens a stream silent for twenty seconds, or skips pending error backoff.
 Only an outage lasting 2.5 seconds marks the view disconnected; the last good
-projection stays visible. Each connection's first snapshot resets its version
-fence, so a restarted daemon's lower counter is still authoritative.
+projection stays visible. Recovery requires an accepted snapshot and a leg
+continuously open for two seconds, so repeated seed-then-EOF failures retain
+both their exponential backoff and truthful outage state. A bare HTTP 200 or
+malformed snapshot cannot restore connectivity. Each connection's first snapshot
+resets its version fence, so a restarted daemon's lower counter is still
+authoritative.
 
 Frames are full snapshots, not event deltas. The daemon retains one pending
 projection per subscriber and sends at most ten per second, including the
 trailing snapshot after a burst. List frames are spaced by 400 ms, shared
 between subscribers where possible, and byte-identical frames are suppressed;
 keepalives continue even when busy sessions cause only identical list frames.
-The web applies only the latest raw frame per animation frame and batches
-store notifications. Event names and JSON shapes are unchanged for native
-clients; transient reasoning rows are previews, not one-shot commands.
+The web validates snapshots in receive order before batching store notifications
+per animation frame. In particular, version 9 followed by version 8 in one
+paint must retain version 9; raw last-arrival coalescing would bypass that
+version fence. The daemon's rate limits bound this parsing work. Event names and
+JSON shapes are unchanged for native clients; transient reasoning rows are
+previews, not one-shot commands.
 
 List subscriptions linger ten seconds after their final mount and projection
 subscriptions five seconds, avoiding navigation churn. After the last phone
