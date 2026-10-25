@@ -2466,21 +2466,39 @@ that have not added per-item stamps; a mixed batch is judged row by row (D13).
 **Banners (`high` only) and the `update` feed branch.** `normal` and `low`
 never raise a native notification; they are the badge and the page. A `high`
 item is claimed at most once per revision by any banner producer
-(`claim_delivery`), and only while the row is still unread — a receipt that
-lands between the write and the tick is the one thing that cancels a banner it
-has made redundant. The claim is released when a delivery attempt produces
-nothing (`release_delivery`), so an owed banner is never lost, and a later
-content change bumps `revision`, which makes the row claimable again.
+(`claim_delivery`), and only while the row is still unread AND still
+UNDISMISSED — a dismissed row is never claimed, which is what keeps a keyed
+update to something the operator put away out of view (contract §1.3). The
+claim is released when a delivery attempt produces nothing
+(`release_delivery`), so an owed banner is never lost, and a later content
+change bumps `revision`, which makes the row claimable again.
+
+EVERY RUNG HOLDS A REVISION FOR `delivery.BANNER_GRACE_MS` (2500 ms) from its
+last content change before claiming it. The desktop's in-view receipt needs a
+1 s dwell after a fresh input (`POST .../notifications/seen`), so a raise at the
+write could never be cancelled by the operator already looking at the item;
+the hold is bounded, it only ever suppresses a banner for a revision ALREADY
+READ when it expires, and an unread revision always raises. An unchanged
+or dismissed update (`action` `unchanged`/`absorbed`) never raises and so never
+suppresses its run's completion banner.
 
 The desktop leg raises it on the `notification` frame with `kind: "update"`
 (`notification_contract` stays `1`; a renderer that does not know the kind
 renders it as text):
 `{kind, notification_id, item_revision, priority, title, body, session_id,
 focus_policy, dedupe_key}`. It is published only while a live desktop lease
-advertises `update` in `can_notify_kinds`, `BURST_LIMIT` per tick, and the
-overflow becomes ONE frame `{kind, overflow: true, count, notification_ids,
-priority, dedupe_key}` — the rest drains on the following ticks, each claimed
-once. A runtime run that raised (or handed off) an item banner does not also
+advertises `update` in `can_notify_kinds` — and only to the subscriptions of
+THIS feed that advertised it, never to every subscriber on the machine.
+
+The burst ceiling is a WINDOW, not a tick: at most `desktop_feed.BURST_LIMIT`
+(3) individual banners per `ITEM_BURST_WINDOW_S` (10 s), then ONE digest frame
+`{kind, overflow: true, count, notification_ids, priority, dedupe_key}` which
+claims the WHOLE remainder of that window in the same pass. A per-tick ceiling
+re-armed every 100 ms, so ten items became ten banners in a third of a second;
+a window is what makes "one interruption that says ten" true. The same two
+gates the completion leg applies — the `display.notifications` switch and the
+identity guard — refuse before any claim, so a gated revise is neither published
+nor stranded. A runtime run that raised (or handed off) an item banner does not also
 raise its own completion banner; `error` ends always do.
 
 **All means the entire explicitly requested scope, not the first 50 rows.** On

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
+import pytest
 from starlette.testclient import TestClient
 
 from local_operator.mobile.daemon import MobileDaemon, build_app
@@ -87,19 +89,17 @@ def test_list_detail_patch_and_seen_round_trip() -> None:
     ).json()
     assert read["changed"] == [item.item_id] and read["unread_count"] == 0
 
+    # R6 / contract §6.4: NO RELAY AUTO-READ IN V1. The phone cannot measure a
+    # foreground window, an uncovered pane or a decided dwell, so a receipt it
+    # asserts would mint "Seen live" provenance the desktop's own presence rules
+    # explicitly refuse to invent. The route answers a vetted refusal, and the
+    # item it named is untouched — explicit read via PATCH above is the only way.
     seen_item = _store().notify(SID, title="in view", anchor_id="call_view")
-    # The receipt is EVIDENCE, and the store re-checks it: the desktop rung
-    # waits a second after the visibility edge, and no edge may predate the
-    # row's last content change. So the fixture makes the row, waits out the
-    # dwell, and then claims an input edge that happened after the row existed
-    # -- the real ordering, not a timestamp picked to pass.
     time.sleep(1.3)
     visible_since = int(time.time() * 1000) - 1_100
     input_at = int(time.time() * 1000)
-    # ...and the receipt itself lands one dwell later, which is the rule the
-    # store reads: visibility, then a fresh input edge, then a second of it.
     time.sleep(1.1)
-    receipt = client.post(
+    refusal = client.post(
         "/api/notifications/seen",
         json={
             "items": [{"id": seen_item.item_id, "revision": 1, "anchor_id": "call_view"}],
@@ -110,8 +110,12 @@ def test_list_detail_patch_and_seen_round_trip() -> None:
                 "visible_since_ms": visible_since,
             },
         },
-    ).json()
-    assert receipt["changed"] == [seen_item.item_id], receipt
+    )
+    assert refusal.status_code == 422, refusal.text
+    body = refusal.json()
+    assert body["code"] == "relay_seen_unsupported" and body["error"]
+    row = _store().get(seen_item.item_id)
+    assert row is not None and row["read_via"] is None and row["read_rev"] == 0
 
 
 def test_bulk_writes_need_the_observed_tokens_and_never_widen() -> None:
@@ -200,3 +204,122 @@ def test_the_scan_doorbell_wakes_the_list_when_the_inbox_moves() -> None:
     assert scan() == 0, "a quiet pass repaints nothing"
     _store().notify(SID, title="doorbell", priority="high")
     assert scan() == 1, "a write wakes the list exactly once"
+
+
+# -- round 1 remediation: transport parity (R7, Q5) --------------------------
+
+#: The bodies the desktop route refuses with 422 (reviewer R7, QA R23-R31/R33),
+#: and the queries it refuses with 422. Each is listed as the client would send
+#: it, so the test reads as the wire contract rather than as a model API.
+BAD_PATCH_BODIES: list[tuple[str, dict[str, object]]] = [
+    (
+        "observed revision 0",
+        {
+            "op": "read",
+            "all": True,
+            "through_seq": 3,
+            "observed": [{"id": "n_aaaaaaaaaaaaaaaa", "revision": 0}],
+        },
+    ),
+    ("malformed id in ids", {"op": "read", "ids": [{"id": "n_BAD", "revision": 1}]}),
+    (
+        "malformed id in observed",
+        {"op": "read", "all": True, "through_seq": 3, "observed": [{"id": "n_BAD", "revision": 1}]},
+    ),
+    ("negative through_seq", {"op": "read", "session_id": SID, "through_seq": -5, "observed": []}),
+    (
+        "malformed session_id",
+        {"op": "read", "session_id": "../etc", "through_seq": 3, "observed": []},
+    ),
+]
+
+BAD_LIST_QUERIES: list[tuple[str, dict[str, str]]] = [
+    ("limit 0", {"limit": "0"}),
+    ("limit 500", {"limit": "500"}),
+    ("negative through_seq", {"through_seq": "-5"}),
+    ("cursor of 200 characters", {"cursor": "9" * 200}),
+]
+
+
+def _models() -> Any:
+    from local_operator.server.routes import desktop_notifications
+
+    return desktop_notifications
+
+
+def test_the_relay_refuses_what_the_desktop_route_refuses() -> None:
+    """R7: ONE validation for both transports.
+
+    The relay used to answer 200 where the desktop answered 422 for these nine
+    requests. What is asserted is the parity itself: the same model the desktop
+    route validates with rejects each one, and the relay's wire refuses it.
+    """
+    from pydantic import ValidationError
+
+    models = _models()
+    client = _client()
+    for label, body in BAD_PATCH_BODIES:
+        with pytest.raises(ValidationError):
+            models.NotificationsPatch.model_validate(body)
+        response = client.patch("/api/notifications", json=body)
+        assert response.status_code == 422, (label, response.status_code, response.text)
+    for label, query in BAD_LIST_QUERIES:
+        with pytest.raises(ValidationError):
+            models.NotificationsQuery.model_validate(query)
+        response = client.get("/api/notifications", params=query)
+        assert response.status_code == 422, (label, response.status_code, response.text)
+    # The bodies the shared validator ACCEPTS still work over the wire, so the
+    # test above is not passing because the relay refuses everything.
+    assert client.get("/api/notifications", params={"limit": "5"}).status_code == 200
+
+
+def test_the_relay_detail_carries_the_transcript_anchor(tmp_path: Path) -> None:
+    """R7: ``anchor_excerpt`` reached the desktop detail and not the relay's.
+
+    Without it the phone's detail always painted ``anchor: null`` for a call the
+    desktop could show in context.
+    """
+    import json as jsonlib
+
+    session_dir = Path(str(config_dir())) / "sessions" / SID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    row = {
+        "type": "message",
+        "payload": {
+            "role": "tool",
+            "tool_call_id": "call_anchor",
+            "content": [{"text": "Notified (id n_fixture)."}],
+        },
+    }
+    (session_dir / "transcript.jsonl").write_text(jsonlib.dumps(row) + "\n")
+    item = _store().notify(SID, title="with anchor", priority="high", anchor_id="call_anchor")
+    detail = _client().get(f"/api/notifications/{item.item_id}").json()
+    assert detail["anchor"] == {
+        "id": "call_anchor",
+        "excerpt": "Notified (id n_fixture).",
+    }
+
+
+def test_an_unreadable_store_answers_the_desktops_refusal() -> None:
+    """Q5: a store failure is a classified refusal, never a bare 500.
+
+    The phone needs the code to word it (``store_unavailable``), and the raw
+    Python message -- which names a filesystem path -- must not be echoed.
+    """
+    store = _store()
+    item = store.notify(SID, title="x", priority="high")
+    client = _client()
+    store.path.chmod(0o000)
+    try:
+        response = client.get("/api/notifications")
+        detail = client.get(f"/api/notifications/{item.item_id}")
+    finally:
+        store.path.chmod(0o600)
+    assert response.status_code == 500, response.text
+    body = response.json()
+    assert body["code"] == "store_unavailable"
+    assert body["error"] and "sqlite" not in body["error"].lower()
+    assert detail.status_code == 500 and detail.json()["code"] == "store_unavailable"
+
+
+# -- round 1 remediation: transport parity (R7, Q5) --------------------------

@@ -1078,11 +1078,18 @@ class NotificationStore:
 
         def body(conn: sqlite3.Connection) -> bool:
             row = conn.execute(
-                "SELECT revision, delivered_rev, read_rev FROM items WHERE id=?", (item_id,)
+                "SELECT revision, delivered_rev, read_rev, dismissed_at FROM items WHERE id=?",
+                (item_id,),
             ).fetchone()
             if row is None or int(row["delivered_rev"]) >= int(row["revision"]):
                 return False
             if int(row["read_rev"]) >= int(row["revision"]):
+                return False
+            # DISMISSED IS NOT CLAIMABLE (round-1 R1): a keyed update to a
+            # dismissed row is absorbed "silently … no banner" (contract §1.3);
+            # `undelivered` already filters it, and the claim must agree with
+            # it, or a direct caller re-banners what the operator dismissed.
+            if row["dismissed_at"] is not None:
                 return False
             seq = self._next_seq(conn)
             conn.execute(

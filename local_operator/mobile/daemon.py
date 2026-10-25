@@ -48,7 +48,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, P
 
 if TYPE_CHECKING:
     from starlette.requests import Request
-    from starlette.responses import JSONResponse
+
+    # Both names serve ANNOTATIONS here and neither is redundant: this block is
+    # `TYPE_CHECKING`-only, so the runtime objects come from the function-local
+    # imports (`JSONResponse` at :2963, `Response` at :5529), while the
+    # annotations spell the wider `Response` for the notification refusal helper
+    # and `JSONResponse` for the rest of the module.
+    from starlette.responses import JSONResponse, Response
 
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.mobile.push_worker import PushWorker
@@ -5465,6 +5471,48 @@ _SUPPLEMENT_POLICY: dict[str, str] = {
 }
 
 
+def _notification_models() -> Any:
+    """The desktop route module, imported lazily for its shared models.
+
+    ONE VALIDATION, TWO TRANSPORTS (round-1 R7/Q5). The relay used to
+    hand-roll these checks, and the two drifted exactly where a phone
+    client would notice: five PATCH bodies and four list queries answered
+    422 on the desktop and 200 here. The models, the item-id check, the
+    transcript-anchor reader and the store-failure sentence now come from
+    ``server/routes/desktop_notifications`` — server-tier, so imported at
+    call time, the same rule the other relay adapters follow.
+    """
+    from local_operator.server.routes import desktop_notifications
+
+    return desktop_notifications
+
+
+def _notification_refusal(error: BaseException) -> Response | None:
+    """This relay's answer for a classified store failure, or None (Q5).
+
+    The same ``store_unavailable`` code and sentence the desktop route sends,
+    so the phone can word it instead of painting a bare "Internal Server
+    Error". ``None`` means "not a store failure": the caller re-raises rather
+    than inventing a disposition.
+    """
+    from starlette.responses import JSONResponse
+
+    from local_operator.paths import config_dir
+    from local_operator.server.routes.desktop_notifications import notifications_refusal
+    from local_operator.session.store_failures import store_failure
+
+    failure = store_failure(error, config_dir())
+    if failure is None:
+        return None
+    return JSONResponse(
+        {
+            "error": notifications_refusal(failure, config_dir()),
+            "code": failure.code,
+        },
+        status_code=failure.status,
+    )
+
+
 def build_app(daemon: MobileDaemon):
     """The Starlette app. Imported inside the function so ``lop`` without the
     server extra never pays for starlette at startup."""
@@ -8115,58 +8163,51 @@ def build_app(daemon: MobileDaemon):
         the ``observed`` id/revision tokens a bulk write must echo, and the
         ``waiting_count``/``waiting_unread_count`` split all come from there.
 
+        The QUERY is validated by the desktop route's own model (round-1 R7), so
+        a bound the app refuses is refused here with the same status.
+
         PER-ROW LIVENESS, like ``/api/asks``: the index knows an item is durable,
         not whether the conversation behind it can answer now, so each row carries
         ``runtime_live`` (this process's dial table) and ``durable`` (a session
         directory that survives a restart). A row with neither is a receipt the
-        phone can read and cannot open, which is what the two flags are for.
+        reader can see and cannot open, which is what the two fields are for.
         """
         denied = gate(request)
         if denied is not None:
             return denied
+        from pydantic import ValidationError
+
         from local_operator.notifications import items as inbox
         from local_operator.paths import config_dir
 
-        query = request.query_params
+        models = _notification_models()
         try:
-            limit = int(query.get("limit") or inbox.LIST_LIMIT_DEFAULT)
-        except ValueError:
-            return JSONResponse({"error": "limit must be an integer"}, status_code=422)
-        through = query.get("through_seq")
-        try:
-            through_seq = int(through) if through not in (None, "") else None
-        except ValueError:
-            return JSONResponse({"error": "through_seq must be an integer"}, status_code=422)
-        state = query.get("state") or "unread"
-        if state not in ("unread", "all", "dismissed"):
+            query = models.NotificationsQuery.model_validate(dict(request.query_params))
+        except ValidationError as error:
             return JSONResponse(
-                {"error": "state must be unread, all or dismissed"}, status_code=422
+                {"error": error.errors()[0].get("msg", "invalid query")}, status_code=422
             )
-        source = query.get("source") or None
-        if source not in (None, "notify", "ask"):
-            return JSONResponse({"error": "source must be notify or ask"}, status_code=422)
-        priority = query.get("priority") or None
-        if priority not in (None, "high", "normal", "low"):
-            return JSONResponse({"error": "priority must be high, normal or low"}, status_code=422)
-        session_id = request.query_params.get("session_id") or None
-        if session_id is not None and not re.fullmatch(r"[0-9a-f]{12}", session_id):
-            return JSONResponse({"error": "invalid session id"}, status_code=422)
         try:
             window = _lapsed_window(config_dir())
             page = await asyncio.to_thread(
                 inbox.list_page,
                 config_dir(),
-                state=state,
-                source=source,
-                priority=priority,
-                session_id=session_id,
-                cursor=query.get("cursor") or None,
-                limit=limit,
+                state=query.state,
+                source=query.source,
+                priority=query.priority,
+                session_id=query.session_id,
+                cursor=query.cursor,
+                limit=query.limit,
                 lapsed_visible_ms=window,
-                through_seq=through_seq,
+                through_seq=query.through_seq,
             )
         except ValueError:
             return JSONResponse({"error": "invalid cursor"}, status_code=422)
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
         for row in list(page.get("items") or []) + list(page.get("waiting") or []):
             # The row carries its conversation as a NESTED object (the desktop
             # answer's shape), so reading a top-level id marked every row
@@ -8189,12 +8230,25 @@ def build_app(daemon: MobileDaemon):
         from local_operator.notifications import items as inbox
         from local_operator.paths import config_dir
 
+        models = _notification_models()
         item_id = str(request.path_params["item_id"])
-        if not re.fullmatch(r"n_[a-z2-7]{16}", item_id) and not item_id.startswith("ask:"):
+        if not models.valid_item_id(item_id):
             return JSONResponse({"error": "invalid item id"}, status_code=422)
-        answer = await asyncio.to_thread(
-            inbox.detail, config_dir(), item_id, lapsed_visible_ms=_lapsed_window(config_dir())
-        )
+        try:
+            answer = await asyncio.to_thread(
+                inbox.detail,
+                config_dir(),
+                item_id,
+                lapsed_visible_ms=_lapsed_window(config_dir()),
+                # Round-1 R7: the transcript anchor the desktop detail carries.
+                # Without it the phone's detail always showed ``anchor: null``.
+                anchor_excerpt=models.anchor_excerpt,
+            )
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
         if answer is None:
             return JSONResponse({"error": "unknown notification"}, status_code=404)
         session_key = str((answer.get("item") or {}).get("session_id") or "")
@@ -8205,101 +8259,84 @@ def build_app(daemon: MobileDaemon):
     async def api_notifications_patch(request: Request) -> Response:
         """``PATCH /api/notifications``: the desktop write, byte for byte.
 
-        The body is the desktop body (``op`` plus exactly one target, and the
-        bounded ``observed`` tokens a bulk target must echo). Validation lives in
-        ``inbox.apply_patch`` and the desktop model, so an unsafe request is
-        refused with the SAME 422 here rather than with a relay-shaped second
-        opinion about what is safe.
+        The BODY is ``NotificationsPatch`` itself (round-1 R7): one validator,
+        so the phone and the app refuse the same bodies for the same reasons.
         """
         denied = gate(request)
         if denied is not None:
             return denied
+        from pydantic import ValidationError
+
         from local_operator.notifications import items as inbox
         from local_operator.paths import config_dir
 
+        models = _notification_models()
         try:
             body = await request.json()
         except (ValueError, UnicodeDecodeError):
             return JSONResponse({"error": "a JSON body is required"}, status_code=422)
         if not isinstance(body, dict):
             return JSONResponse({"error": "a JSON object is required"}, status_code=422)
-        op = body.get("op")
-        if op not in ("read", "unread", "dismiss", "undismiss"):
-            return JSONResponse({"error": "unknown op"}, status_code=422)
-        ids = body.get("ids")
-        session_id = body.get("session_id")
-        all_items = bool(body.get("all"))
-        through_seq = body.get("through_seq")
-        observed = body.get("observed")
-        if sum((ids is not None, body.get("session_id") is not None, bool(body.get("all")))) != 1:
-            return JSONResponse({"error": "name exactly one target"}, status_code=422)
-        if ids is not None:
-            if not isinstance(ids, list) or not ids or len(ids) > 500:
-                return JSONResponse({"error": "ids must hold 1..500 tokens"}, status_code=422)
-            for entry in ids:
-                if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
-                    return JSONResponse({"error": "malformed id token"}, status_code=422)
-                if not isinstance(entry.get("revision"), int) or entry["revision"] < 1:
-                    return JSONResponse({"error": "malformed revision token"}, status_code=422)
-            if observed is not None:
-                return JSONResponse({"error": "observed belongs to bulk targets"}, status_code=422)
-        else:
-            if not isinstance(through_seq, int):
-                return JSONResponse(
-                    {"error": "bulk writes require through_seq and observed"}, status_code=422
-                )
-            if not isinstance(observed, list) or len(observed) > 500:
-                return JSONResponse(
-                    {"error": "bulk writes require 0..500 observed tokens"}, status_code=422
-                )
-            for entry in observed:
-                if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
-                    return JSONResponse({"error": "malformed observed token"}, status_code=422)
+        try:
+            patch = models.NotificationsPatch.model_validate(body)
+        except ValidationError as error:
+            return JSONResponse(
+                {"error": error.errors()[0].get("msg", "invalid body")}, status_code=422
+            )
         try:
             answer = await asyncio.to_thread(
                 inbox.apply_patch,
                 config_dir(),
-                op,
-                ids=ids,
-                session_id=session_id,
-                through_seq=through_seq,
-                all_items=all_items,
-                observed=observed,
+                patch.op,
+                ids=[entry.model_dump() for entry in patch.ids] if patch.ids is not None else None,
+                session_id=patch.session_id,
+                through_seq=patch.through_seq,
+                all_items=patch.all,
+                observed=(
+                    [entry.model_dump() for entry in patch.observed]
+                    if patch.observed is not None
+                    else None
+                ),
             )
         except ValueError as error:
             return JSONResponse({"error": str(error)}, status_code=422)
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
         return JSONResponse(answer)
 
     async def api_notifications_seen(request: Request) -> Response:
-        """``POST /api/notifications/seen``: in-view receipt, per item and bounded.
+        """``POST /api/notifications/seen`` — refused in v1 (contract §3 of §7).
 
-        The evidence is the desktop's (surface, session, input edge, visibility
-        start) and the store re-checks every claim it can, so a phone that is
-        merely mounted cannot acknowledge anything by asking.
+        A READ RECEIPT IS A CLAIM ABOUT WHAT THE USER SAW, and this surface has
+        no way to know: the relay cannot measure a foreground window, an
+        uncovered pane, a dwell or an input edge on the phone's screen, and
+        none of that is in the request either — the client asserts every part
+        of it. Contract §6.4 therefore ships "no relay/native auto-read in
+        v1: explicit read only", and accepting the assertion would mint
+        ``read_via: in_view`` provenance the desktop's own presence rules
+        explicitly refuse to invent (round-1 R6 reproduced exactly that).
+
+        The route stays, so a shipped phone build gets a vetted refusal (code
+        and sentence) rather than a 405 that reads as a broken app. Explicit
+        read via ``PATCH`` is unaffected.
         """
         denied = gate(request)
         if denied is not None:
             return denied
-        from local_operator.notifications import items as inbox
-        from local_operator.paths import config_dir
-
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError):
-            return JSONResponse({"error": "a JSON body is required"}, status_code=422)
-        if not isinstance(body, dict):
-            return JSONResponse({"error": "a JSON object is required"}, status_code=422)
-        items = body.get("items")
-        evidence = body.get("evidence")
-        if not isinstance(items, list) or not items or len(items) > 100:
-            return JSONResponse({"error": "items must hold 1..100 receipts"}, status_code=422)
-        if not isinstance(evidence, dict):
-            return JSONResponse({"error": "evidence is required"}, status_code=422)
-        try:
-            answer = await asyncio.to_thread(inbox.apply_seen, config_dir(), items, evidence)
-        except (TypeError, ValueError) as error:
-            return JSONResponse({"error": str(error)}, status_code=422)
-        return JSONResponse(answer)
+        # A plain literal, like every other refusal in this file (the gate's
+        # "authentication required", the 422s below): the relay's error copy is
+        # its own wire vocabulary, not the desktop plane's catalogued
+        # sentences, and a second style here would be the defect.
+        return JSONResponse(
+            {
+                "error": "read receipts are not available on the relay",
+                "code": "relay_seen_unsupported",
+            },
+            status_code=422,
+        )
 
     async def api_schedules(request: Request) -> Response:
         """What is ARMED on this machine: the machine-wide wake and monitor

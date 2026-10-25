@@ -34,7 +34,7 @@ import re
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.i18n.keys import wire_errors_notifications as _wn
 from local_operator.i18n.messages import render
@@ -93,6 +93,26 @@ def _lapsed_window(root: pathlib.Path) -> int:
     return lapsed_visible_ms(root, poll_now=True)
 
 
+class NotificationsQuery(BaseModel):
+    """The list route's query, as ONE model both transports validate with.
+
+    The relay (``mobile/daemon.py``) validates its query string through this
+    same class, so the phone and the app refuse exactly the same requests
+    (round-1 R7: four queries answered 200 on the relay and 422 here). Unknown
+    query keys are ignored, as FastAPI ignores them on this route.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    state: Literal["unread", "all", "dismissed"] = "unread"
+    source: Literal["notify", "ask"] | None = None
+    priority: Literal["high", "normal", "low"] | None = None
+    session_id: Annotated[str | None, Field(pattern=r"^[a-f0-9]{12}$")] = None
+    cursor: Annotated[str | None, Field(max_length=80)] = None
+    through_seq: Annotated[int | None, Field(ge=0)] = None
+    limit: Annotated[int, Field(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT
+
+
 @router.get("/v1/desktop/notifications", response_model=CRUDResponse[dict[str, Any]])
 async def list_notifications(
     request: Request,
@@ -131,7 +151,7 @@ async def count_notifications(request: Request):
         return reply(await asyncio.to_thread(inbox.counts, root))
 
 
-def _anchor_excerpt(session_dir: pathlib.Path, anchor_id: str) -> str:
+def anchor_excerpt(session_dir: pathlib.Path, anchor_id: str) -> str:
     """The notify call's own transcript row, as the operator would read it.
 
     The anchor is the ``tool_call_id`` of the ``notify`` call. Its result row
@@ -190,7 +210,7 @@ def _row_text(row: Any, anchor_id: str) -> str:
 @router.get("/v1/desktop/notifications/{item_id}", response_model=CRUDResponse[dict[str, Any]])
 async def notification_detail(item_id: str, request: Request):
     """One item with its history, session, anchor, projects and the session's asks."""
-    if not _valid_item_id(item_id):
+    if not valid_item_id(item_id):
         raise HTTPException(422, _wn.unknown_item().envelope())
     async with errors(request, notifications_refusal):
         root = _config_dir(request)
@@ -200,15 +220,21 @@ async def notification_detail(item_id: str, request: Request):
             root,
             item_id,
             lapsed_visible_ms=window,
-            anchor_excerpt=_anchor_excerpt,
+            anchor_excerpt=anchor_excerpt,
         )
     if answer is None:
         raise HTTPException(404, _wn.unknown_item().envelope())
     return reply(answer)
 
 
-def _valid_item_id(value: str) -> bool:
-    """The PATCH models' own shape rule, so both transports refuse the same ids."""
+def valid_item_id(value: str) -> bool:
+    """The PATCH models' own shape rule, shared by BOTH transports (CD8).
+
+    Public because the relay validates detail ids through this module rather
+    than hand-rolling a second predicate (R7); strict because the loose
+    prefix/length check accepted ``n_................`` and ``ask:..:x`` while
+    the write AND seen models refused them.
+    """
     return _ITEM_ID_RE.match(value) is not None
 
 

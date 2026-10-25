@@ -629,11 +629,20 @@ id/revision tokens a bulk write must echo, and the
   `ids[{id, revision}]`, or `session_id`+`through_seq`, or `all`+`through_seq`;
   every bulk target also needs the `observed` tokens, at most 500 per batch. A
   missing observation is `422`, never a legacy sweep.
-- `POST /api/notifications/seen` — the in-view receipt (1..100 items). The store
-  re-checks the evidence: the surface must be `desktop` or `tui`, visibility must
-  precede the input edge, no edge may predate the row's last change, and the
-  desktop rung waits one second of dwell. An unqualified receipt is skipped, not
-  applied.
+- `POST /api/notifications/seen` — **REFUSED in v1** (`422`,
+  `code: "relay_seen_unsupported"`), per contract §6.4's "no relay/native
+  auto-read in v1: explicit read only". A read receipt is a claim about what the
+  operator saw, and this surface cannot measure any part of it: no foreground
+  window, no uncovered pane, no dwell, and the input edge is the client's own
+  assertion. Accepting it would mint `read_via: in_view` provenance the desktop's
+  presence rules exist to refuse. The route stays so a shipped phone build gets a
+  vetted refusal rather than a `405`; explicit read is `PATCH` above.
+
+Every query the resource takes is validated by the DESKTOP route's own model
+(`NotificationsQuery`) and every PATCH body by `NotificationsPatch`, so a bound
+the app refuses is refused here with the same status. A store that cannot be read
+answers `500 {code: "store_unavailable", error}`, the desktop route's own code
+and sentence, never a bare "Internal Server Error".
 
 Every route carries the cookie gate and answers `401` without it. The badge rides
 the existing list stream: `notifications: {unread_count, waiting_unread_count,

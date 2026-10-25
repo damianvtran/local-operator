@@ -280,7 +280,7 @@ async def test_factory_prompt_uses_session_notify_membership(tmp_path):
 def test_detail_anchor_reads_archived_transcript(tmp_path):
     import gzip
 
-    from local_operator.server.routes.desktop_notifications import _anchor_excerpt
+    from local_operator.server.routes.desktop_notifications import anchor_excerpt
 
     row = {
         "type": "message",
@@ -292,4 +292,4 @@ def test_detail_anchor_reads_archived_transcript(tmp_path):
     }
     archive = tmp_path / "transcript.jsonl.gz"
     archive.write_bytes(gzip.compress((json.dumps(row) + "\n").encode()))
-    assert _anchor_excerpt(tmp_path, "archived-anchor") == "Notified (id n_fixture)."
+    assert anchor_excerpt(tmp_path, "archived-anchor") == "Notified (id n_fixture)."

@@ -3583,6 +3583,10 @@ class Session:
         #: already put a banner on the operator's screen does not also raise the
         #: completion banner for itself (contract §3.4).
         self._run_notified_banner: bool = False
+        #: Background raises of this run's held `high` item banners (the
+        #: runtime rung's grace), settled before the run's end is judged.
+        self._pending_item_banners: list[asyncio.Task[Any]] = []
+        self._item_banner_generation = 0
         #: The raw ``custom_type`` of every INTERNAL-class input this run
         #: consumed, beside the trigger record and reset with it. The class
         #: vocabulary deliberately collapses all of them into "internal", and
@@ -16393,38 +16397,107 @@ class Session:
         )
         self._run_notified = True
         # THE BANNER, decided here because this is the only place that knows
-        # the write's revision and priority. Best-effort and off-loop: a banner
-        # is chrome, and the item is already durable, so a delivery failure
-        # leaves an unread row rather than failing the tool the model called.
-        if outcome.priority == "high" and not outcome.read:
-            from local_operator.notifications.delivery import deliver_item
-
-            try:
-                delivery = await asyncio.to_thread(
-                    deliver_item,
-                    root,
-                    item_id=outcome.item_id,
-                    revision=int(outcome.revision),
-                    priority=outcome.priority,
-                    session_id=self.session_id,
-                    title=title,
-                    body=body,
-                    store=store,
-                )
-            except Exception:  # noqa: BLE001 — chrome must not fail the write
-                logger.debug("notify: banner delivery failed", exc_info=True)
-                delivery = None
-            if delivery is not None and delivery.spoken_for:
-                # One banner per event: the completion banner for this run is
-                # suppressed by ``_finalize_attention_notify`` (contract §3.4).
-                self._run_notified_banner = True
-                logger.info(
-                    "notify: item %s banner rung=%s for %s",
-                    outcome.item_id,
-                    delivery.rung,
-                    self.session_id,
-                )
+        # the write's action, revision and priority. Best-effort: a banner is
+        # chrome and the item is already durable, so a delivery failure leaves
+        # an unread row rather than failing the tool call the model made.
+        if outcome.priority == "high":
+            await self._route_item_banner(root, store, outcome, title=title, body=body)
         return _notify_sentence(outcome)
+
+    async def _route_item_banner(
+        self, root: Path, store: Any, outcome: Any, *, title: str, body: str
+    ) -> None:
+        """Decide a `high` revision's banner now; raise it after its grace.
+
+        TWO HALVES, because the grace cannot run inside the tool call (round-1
+        N2/Q4). The in-view receipt that may cancel the banner needs the
+        notify call's own result row ON SCREEN (its anchor), and that row only
+        renders once this call has returned. So:
+        - the ROUTE is decided here, synchronously and uncached: nothing to
+          raise (normal/low, unchanged/absorbed, a gated switch), or handed to
+          an advertising desktop (whose feed holds the grace itself);
+        - the runtime rung's hold-then-claim runs as a background task, and
+          the run's end waits for it, bounded, before deciding the completion
+          banner (:meth:`_settle_item_banners`). That way the one-banner-per-
+          event rule sees what really happened (round-1 R1).
+        """
+        from local_operator.notifications import delivery as _delivery
+
+        try:
+            route = await asyncio.to_thread(
+                _delivery.route_item, root, action=outcome.action, priority=outcome.priority
+            )
+        except Exception:  # noqa: BLE001 — chrome must not fail the write
+            logger.debug("notify: banner routing failed", exc_info=True)
+            return
+        logger.info(
+            "notify: item %s %s banner rung=%s (%s) for %s",
+            outcome.item_id,
+            outcome.action,
+            route.rung,
+            route.detail,
+            self.session_id,
+        )
+        if route.spoken_for:
+            # Handed to an advertising desktop: the feed raises it (contract
+            # §3.4 suppression applies now — the handoff is the banner).
+            self._run_notified_banner = True
+            return
+        if route.rung != _delivery.RUNG_DETACHED:
+            return
+
+        generation = self._item_banner_generation
+
+        async def raise_after_grace() -> None:
+            result = await asyncio.to_thread(
+                _delivery.deliver_item,
+                root,
+                item_id=outcome.item_id,
+                revision=int(outcome.revision),
+                priority=outcome.priority,
+                action=outcome.action,
+                session_id=self.session_id,
+                title=title,
+                body=body,
+                store=store,
+            )
+            logger.info(
+                "notify: item %s banner after grace rung=%s (%s)",
+                outcome.item_id,
+                result.rung,
+                result.detail,
+            )
+            # Recorded HERE, not read back from the task: ``_spawn_background``
+            # wraps the coroutine and discards its return value. Only for the
+            # run that wrote it: a raise that outlived its run's bounded settle
+            # must not suppress the NEXT run's completion banner.
+            if result.spoken_for and generation == self._item_banner_generation:
+                self._run_notified_banner = True
+
+        task = self._spawn_background(raise_after_grace())
+        if task is not None:
+            self._pending_item_banners.append(task)
+
+    async def _settle_item_banners(self) -> None:
+        """Wait (bounded) for this run's held item banners before its end is judged.
+
+        The completion banner is suppressed only for an item banner that
+        actually went out (round-1 R1), so the run's end must know the outcome.
+        Bounded by the grace plus slack: a hung notifier must not hold a turn
+        end hostage, and an unfinished raise counts as "not raised" — the
+        conservative direction, which at worst costs a second banner rather
+        than none.
+        """
+        pending, self._pending_item_banners = self._pending_item_banners, []
+        if not pending:
+            self._item_banner_generation += 1
+            return
+        from local_operator.notifications.delivery import BANNER_GRACE_MS
+
+        # The raise itself sets ``_run_notified_banner``; this only bounds the
+        # wait so a hung notifier cannot hold the turn's end.
+        await asyncio.wait(pending, timeout=BANNER_GRACE_MS / 1000 + 3.0)
+        self._item_banner_generation += 1
 
     def _notify_tui_evidence(self) -> Any:
         """The attached TUI's input evidence, when the runtime reports one (L1b/L2).
@@ -17345,6 +17418,9 @@ class Session:
             # publish) does the right thing without being taught a new field. A
             # deliberate stop is left exactly as it was.
             event = self._classify_cut_off(event)
+            # A held item banner decides whether this run's completion banner
+            # is redundant, so it settles first (bounded; see the method).
+            await self._settle_item_banners()
             # §14.2's ONE notify computation for the run this end closes,
             # stamped here so it rides the EMITTED end on both exit paths —
             # the immediate error/abort emission and the held end flushed from
