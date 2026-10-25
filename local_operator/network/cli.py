@@ -8287,6 +8287,15 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 }
             )
+            # The restart grant is a LOCAL membership fact, not a probe of the
+            # offline peer. Keep its recovery remedy visible on the fallback too.
+            checks.append(
+                readiness_mod.peer_restart_row(
+                    member,
+                    record=record,
+                    peer_label=member.name or member.device_id,
+                )
+            )
             checks.extend(
                 readiness_mod.not_asked_rows(
                     member,

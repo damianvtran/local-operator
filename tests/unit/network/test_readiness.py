@@ -2896,6 +2896,51 @@ def test_equipment_note_names_failed_mcp_rows_and_nothing_else() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_peer_restart_grant_is_visible_even_when_the_peer_cannot_be_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local grant predicts peer restart without weakening its enforcement."""
+    own = SimpleNamespace(device_id=VIEWER, active=True, capabilities=["list"])
+    record = SimpleNamespace(
+        network_id="n_restart_grant",
+        self_device_id=VIEWER,
+        self_member=lambda: own,
+    )
+    monkeypatch.setattr(readiness, "_reachability_rows", lambda *a, **k: ([], None))
+
+    rows = readiness._peer_checks(  # noqa: SLF001
+        _member(),
+        record=record,
+        server=SimpleNamespace(build={}),
+        viewer=_FakeViewer(),
+        deadline=None,
+    )
+    row = next(row for row in rows if row["capability"] == "peer_restart")
+    assert row["ok"] is False, row
+    assert row["code"] == "update_grant_missing", row
+    assert "cannot restart" in row["detail"]
+    assert "'update'" in row["detail"]
+    assert row["remedies"] == [
+        f"on cloud-node-1, run `lop network member grant n_restart_grant {VIEWER} update`"
+    ]
+    assert readiness.row_state(row) == "warn", row
+    rendered = "\n".join(readiness.render_check_lines(rows))
+    assert "peer_restart" in rendered, rendered
+    assert row["remedies"][0] in rendered, rendered
+
+    own.capabilities.append("update")
+    rows = readiness._peer_checks(  # noqa: SLF001
+        _member(),
+        record=record,
+        server=SimpleNamespace(build={}),
+        viewer=_FakeViewer(),
+        deadline=None,
+    )
+    row = next(row for row in rows if row["capability"] == "peer_restart")
+    assert row["ok"] is True, row
+    assert row["remedies"] == [], row
+
+
 def test_not_asked_and_too_old_rows_cover_the_checklist() -> None:
     member = _member()
     not_asked = readiness.not_asked_rows(member, detail="not asked: the peer did not answer")

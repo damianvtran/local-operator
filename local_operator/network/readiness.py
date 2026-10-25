@@ -72,6 +72,9 @@ CAPABILITY_MCP_SERVERS = "mcp_servers"
 CAPABILITY_MODEL_CREDENTIAL = "model_credential"
 CAPABILITY_MCP_CREDENTIAL = "mcp_credential"
 CAPABILITY_TOOLING = "tooling"
+#: Local recovery authority: whether this device may ask the peer to restart
+#: its relay. This predicts the net_restart grant check; it never widens it.
+CAPABILITY_PEER_RESTART = "peer_restart"
 #: (h) memory resilience: whether the peer has the RAM/swap headroom to host
 #: offloaded sessions without the kernel OOM killer reaching its mesh relay
 #: (2026-10-21: a 2 GB, swapless cloud-node-1 OOM-killed its own relay).
@@ -112,6 +115,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # remedy, and the admission gate (``memory_guard.admission_check``) is
         # its point of use.
         CAPABILITY_RESILIENCE,
+        # Restart authority is deliberately least-privilege. Its absence is a
+        # recovery limitation to name, not a peer-offload readiness failure.
+        CAPABILITY_PEER_RESTART,
     }
 )
 
@@ -156,6 +162,9 @@ CODE_NOT_ON_PATH = "not_on_path"
 CODE_NOT_AUTHENTICATED = "not_authenticated"
 #: Resilience (2026-10-21): under :data:`RESILIENCE_MIN_RAM_MB` of RAM and no swap.
 CODE_LOW_MEMORY = "low_memory"
+#: The peer has not granted this device the lifecycle capability net_restart
+#: requires. The remedy is a grant ON THE PEER, never a local gate bypass.
+CODE_UPDATE_GRANT_MISSING = "update_grant_missing"
 
 #: Rows read from the peer's own state carry ``source: "peer"``; rows about a
 #: fact that could not be established carry ``"unknown"``. ``"local"`` is kept
@@ -1282,6 +1291,45 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
         ),
         source=SOURCE_PEER,
         observed={"total_mb": total, "swap_total_mb": swap},
+    )
+
+
+def peer_restart_row(member: Any, *, record: Any, peer_label: str) -> dict[str, Any]:
+    """Can THIS device ask this peer to restart its relay for recovery?
+
+    The answer comes from this device's own member row, the same admission
+    capability set the peer's authorizer applies to `net_restart`. It is a
+    local, read-only prediction and remains visible when the peer is offline;
+    the remote grant check stays authoritative when a restart is attempted.
+    """
+    from local_operator.network.types import OP_CAPABILITY
+
+    required = OP_CAPABILITY["net_restart"]
+    own = record.self_member()
+    granted = bool(own is not None and own.active and required in own.capabilities)
+    remedy = (
+        f"on {peer_label}, run `lop network member grant "
+        f"{record.network_id} {record.self_device_id} {required}`"
+    )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_PEER_RESTART,
+        ok=granted,
+        code="" if granted else CODE_UPDATE_GRANT_MISSING,
+        detail=(
+            f"{peer_label} grants this device {required!r}; peer relay restart is permitted"
+            if granted
+            else f"this device cannot restart {peer_label}'s relay because it lacks "
+            f"the {required!r} grant there"
+        ),
+        remedies=[] if granted else [remedy],
+        source=SOURCE_LOCAL,
+        observed={
+            "network_id": record.network_id,
+            "device_id": record.self_device_id,
+            "update_granted": granted,
+        },
     )
 
 
@@ -3731,6 +3779,9 @@ def _peer_checks(
     rows, link = _reachability_rows(
         member, record=record, server=server, deadline=deadline, since=since
     )
+    # This grant is a LOCAL membership fact, so an offline or old peer must not
+    # hide the recovery limitation behind `not_asked` rows.
+    rows.append(peer_restart_row(member, record=record, peer_label=peer_label))
     selected_row: dict[str, Any] | None = None
     if selector:
         selected_row = selected_model_row(

@@ -14574,6 +14574,42 @@ def refresh_unit_if_stale() -> Any:
             if str(result.get("reason") or "") == "not_restarted":
                 why = "the restart it accepted did not take"
             return launchd.build_move_failure(name, recovery, stale, why=why)
+        restarted_pid = _managed_service_pid()
+        restarted_stale = (
+            update.generation_staleness_of_process(restarted_pid)
+            if restarted_pid is not None
+            else None
+        )
+        if restarted_stale is not False:
+            # A fresh PID proves replacement, not the image that PID loaded. A
+            # generation-pinned unit can therefore satisfy the supervisor check
+            # while leaving the mesh on the pre-update build. The update must
+            # fail this step loudly unless the RUNNING process and `current`
+            # were both read and match; an unreadable comparison is not success.
+            loaded = (
+                update.generation_of_process(restarted_pid)
+                if restarted_pid is not None
+                else None
+            )
+            current_generation = update.current_generation()
+            if restarted_stale is True:
+                actual = loaded.name if loaded is not None else "an unreadable generation"
+                expected = (
+                    current_generation.name
+                    if current_generation is not None
+                    else "an unreadable current generation"
+                )
+                detail = (
+                    "the restarted relay process still loaded "
+                    f"{actual} instead of current generation {expected}"
+                )
+            else:
+                detail = "could not verify the restarted relay process's loaded generation"
+            return launchd.PlistRefresh(
+                name=name,
+                kind="failed",
+                detail=f"{detail} — run `{recovery}` to reinstall and restart the relay",
+            )
         return launchd.PlistRefresh(
             name=name,
             kind="restarted",
@@ -16180,6 +16216,21 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
                     reading["relay_generation_stale"] = update.generation_staleness_of_process(pid)
             else:
                 reading["installed_build"] = update.version_of_image(target_image) or None
+                if _names_a_generation(target_image):
+                    # A restart re-executes this fixed image, so the ordinary
+                    # "restart the relay" remedy cannot move it onto `current`.
+                    # Keep the condition tri-state: only a readable pointer can
+                    # prove that the pinned generation differs.
+                    current = update.current_generation()
+                    if current is None:
+                        reading["relay_unit_generation_pinned"] = None
+                    else:
+                        resolved_image = target_image.resolve()
+                        resolved_current = current.resolve()
+                        reading["relay_unit_generation_pinned"] = not (
+                            resolved_image != resolved_current
+                            and resolved_current in resolved_image.parents
+                        )
     except Exception:  # noqa: BLE001 — a probe must never fail the payload it decorates
         pass
     return reading
@@ -16196,7 +16247,7 @@ def generation_words(facts: Mapping[str, Any]) -> str:
     pruned tree whose process still runs, which is the drill's own incident —
     because dropping it there would leave the row saying nothing.
 
-    FOUR ANSWERS (F10 slice A; the third is design round 1's D1 correction).
+    FIVE ANSWERS (F10 slice A; the third is design round 1's D1 correction).
     ``""``: nothing on either side can be named (no generation layout, no unit,
     no shim — the question cannot exist, and a pip/pipx machine keeps its block
     byte-for-byte). ``"not reported"``: the running build could not be read at
@@ -16204,7 +16255,9 @@ def generation_words(facts: Mapping[str, Any]) -> str:
     is current"``: the build WAS read and the comparison could not be proven.
     That read-but-unproven case is the steady state of a flow-install node, and
     withholding a value the surface holds made the row information-free exactly
-    where the drill ran (D1): name what was read, decline the verdict. The bare
+    where the drill ran (D1): name what was read, decline the verdict. A unit
+    pinned to another generation instead names that condition and its install
+    remedy, because a restart would load the same fixed image again. The bare
     version only when the shipped comparison proves the process current, and the
     flagged form only when it proves the move.
 
@@ -16225,6 +16278,11 @@ def generation_words(facts: Mapping[str, Any]) -> str:
     stale = facts.get("relay_generation_stale")
     if not running:
         return "not reported"
+    if facts.get("relay_unit_generation_pinned") is True:
+        # This unit re-executes an older fixed generation; restarting it cannot
+        # apply the install. Name the condition and the command that re-renders
+        # the unit through the stable shim, within the family's 80-column row.
+        return f"{running} — pinned generation; run lop network install"
     if not isinstance(stale, bool):
         return f"{running} — cannot confirm it is current"
     if not stale:

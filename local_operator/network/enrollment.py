@@ -317,6 +317,9 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
         "mcp_credential",
         "tooling",
         "resilience",
+        # Local recovery authority rides the same ready report; it is evidence
+        # about the viewer's grant, never positive peer equipment evidence.
+        "peer_restart",
         "selected_model_credential",
     }
     required: set[str] = set()
@@ -412,6 +415,7 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
                 "mcp_credential",
                 "tooling",
                 "resilience",
+                "peer_restart",
                 "selected_model_credential",
             }
             and row.get("code", "") in codes

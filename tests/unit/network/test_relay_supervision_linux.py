@@ -984,6 +984,7 @@ def test_refresh_unit_restarts_exactly_once_on_a_proven_move(
         "stale_generation_of_process",
         lambda pid: generation if pid == 111 else None,
     )
+    monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: False)
 
     outcome = relay.refresh_unit_if_stale()
 
@@ -997,6 +998,47 @@ def test_refresh_unit_restarts_exactly_once_on_a_proven_move(
     ), line
     assert len(line) <= 80, line
     assert outcome.warning() == ""
+
+
+def test_refresh_unit_restart_must_verify_the_loaded_generation(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new PID still running the old generation is a failed update step.
+
+    The supervisor receipt proves replacement, not which build the replacement
+    loaded. The update child must not turn that receipt into a success while the
+    relay keeps serving the pre-update generation.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(relay.render_systemd(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(111, 111, 222),
+        record=_RelayRecordScript(111, 222),
+    )
+    old = tmp_path / "lop" / "generations" / "20261025T122513Z-0.90.1"
+    current = tmp_path / "lop" / "generations" / "20261025T123000Z-0.90.2"
+    monkeypatch.setattr(
+        update_mod,
+        "stale_generation_of_process",
+        lambda pid: old if pid == 111 else None,
+    )
+    monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: True)
+    monkeypatch.setattr(update_mod, "generation_of_process", lambda pid: old)
+    monkeypatch.setattr(update_mod, "current_generation", lambda: current)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",), ("restart", relay.SYSTEMD_UNIT)], calls
+    assert outcome.kind == "failed", outcome
+    assert old.name in outcome.detail
+    assert current.name in outcome.detail
+    assert "lop network install" in outcome.detail
 
 
 def test_refresh_unit_does_not_bounce_a_current_build(
@@ -1145,6 +1187,8 @@ def test_refresh_unit_retries_the_loaded_policy_after_a_failed_reload(
         record=_RelayRecordScript(111, 222),
     )
     monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: tmp_path / _GEN)
+
+    monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: False)
 
     first = relay.refresh_unit_if_stale()
     assert first.kind == "failed", first
