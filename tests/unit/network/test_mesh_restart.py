@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import threading
 from typing import Any
 
 import pytest
@@ -181,33 +182,73 @@ def test_busy_receipt_through_the_real_local_control_socket(
     assert calls == []
 
 
-def test_a_turn_starting_after_acceptance_blocks_the_supervisor_call(
+def test_a_turn_admitted_between_final_scan_and_supervisor_is_serialized(
     devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
+    """Reviewer R1-B1's exact interleaving, with no mock at the registry/fence seam."""
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
-    calls = _restart_calls(monkeypatch)
+    monkeypatch.setattr(meshrestart, "RESTART_CONFIRM_WINDOW_S", 0.4)
+    monkeypatch.setattr(meshrestart, "RESTART_POLL_S", 0.02)
     probes = 0
+    calls: list[str] = []
+    publisher_attempted = threading.Event()
+    publisher_done = threading.Event()
+    publisher_errors: list[BaseException] = []
+    observations: dict[str, Any] = {}
     real_busy_sessions = meshrestart.meshupdate.busy_sessions
+    real_publish = registry.publish
 
-    def _busy_then_publish(root: Any, *, include_names: bool = False) -> tuple[int, str]:
+    def _observed_publish(record: Any, root: Any = None, dirname: Any = None) -> Any:
+        publisher_attempted.set()
+        try:
+            if dirname is None:
+                return real_publish(record, root)
+            return real_publish(record, root, dirname)
+        except BaseException as exc:
+            publisher_errors.append(exc)
+            raise
+        finally:
+            publisher_done.set()
+
+    def _busy_then_admit(root: Any, *, include_names: bool = False) -> tuple[int, str]:
         nonlocal probes
+        result = real_busy_sessions(root, include_names=include_names)
         probes += 1
         if probes == 2:
-            # The first probe accepted an idle member. The second is the member's
-            # last gate before launchd/systemd, after a turn has started.
-            _publish_busy(server_a)
-        return real_busy_sessions(root, include_names=include_names)
+            # The final scan has returned idle. Admission starts NOW, before the
+            # supervisor seam, which is the window R1-B1 proved was unguarded.
+            publisher.start()
+            assert publisher_attempted.wait(2.0), "the admission never reached its registry write"
+        return result
 
-    monkeypatch.setattr(meshrestart.meshupdate, "busy_sessions", _busy_then_publish)
+    def _supervisor(action: str) -> dict[str, Any]:
+        calls.append(action)
+        # Fixed fence: the publisher is still excluded, so this wait expires and
+        # the action linearizes first. Unfenced code lets publication finish here
+        # and fails the busy-at-supervisor assertion below.
+        observations["publisher_done_before_action"] = publisher_done.wait(0.5)
+        observations["busy_at_action"] = real_busy_sessions(server_a.root)[0]
+        return {"ok": True}
+
+    monkeypatch.setattr(registry, "publish", _observed_publish)
+    monkeypatch.setattr(meshrestart.meshupdate, "busy_sessions", _busy_then_admit)
+    monkeypatch.setattr(relay, "service_action", _supervisor)
+    publisher = threading.Thread(target=_publish_busy, args=(server_a,), daemon=True)
 
     detail = meshrestart.restart_peer(server_b, server_a.identity.device_id)
+    publisher.join(2.0)
 
-    assert detail["ok"] is False, detail
-    assert detail["state"] == detail["code"] == "busy", detail
-    assert "offloaded training turn (bu5y-restart-01)" in detail["message"]
-    assert calls == [], "a turn starting after acceptance must stop the actual restart"
-    assert probes >= 2
+    assert not publisher.is_alive(), "the admitted turn did not leave the fence"
+    assert publisher_errors == []
+    assert probes == 2
+    assert calls == ["restart"]
+    assert observations == {"publisher_done_before_action": False, "busy_at_action": 0}
+    assert publisher_done.is_set(), "admission must proceed after the restart decision"
+    assert real_busy_sessions(server_a.root)[0] == 1
+    # The supervisor reported ok without replacing the instance, so the origin
+    # remains honestly unconfirmed; this cell is about admission ordering.
+    assert detail["ok"] is False and detail["code"] == "restart_unconfirmed", detail
 
 
 def test_absent_update_grant_is_refused_by_name(

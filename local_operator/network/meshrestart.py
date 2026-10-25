@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from local_operator.network import meshupdate, wire
+from local_operator.session.runtime import restart_fence
 
 if TYPE_CHECKING:
     from local_operator.network.relay import PeerLink, RelayServer
@@ -36,6 +37,7 @@ RESTART_CONFIRM_WINDOW_S = 15.0
 RESTART_REQUEST_TIMEOUT_S = 5.0
 RESTART_EVIDENCE_TIMEOUT_S = 2.0
 RESTART_REPLY_GRACE_S = 2.0
+RESTART_ADMISSION_WAIT_S = 1.0
 RESTART_POLL_S = 0.1
 
 # A failed supervisor call or the second busy probe happens after ``accepted``;
@@ -104,19 +106,31 @@ def restart_after_reply(server: RelayServer, link: PeerLink) -> None:
         while link.alive and time.monotonic() < deadline:
             time.sleep(0.02)
 
-        # A turn may have started while the accepted reply drained. The member's
-        # own live registry, not the earlier admission snapshot, decides again.
-        busy = _member_busy(server)
-        if busy is not None:
-            _put_outcome(
-                server,
-                "busy",
-                str(busy["reason"]),
-                str(busy["code"]),
-            )
-            return
+        # A turn may have started while the accepted reply drained. The exclusive
+        # cross-process fence makes the final idle read and supervisor call ONE
+        # admission ordering: a turn either publishes busy first (and is refused)
+        # or proceeds only after this restart decision has completed.
         try:
-            result = relay.service_action("restart")
+            with restart_fence.exclusive(server.root, timeout_s=RESTART_ADMISSION_WAIT_S):
+                busy = _member_busy(server)
+                if busy is not None:
+                    _put_outcome(
+                        server,
+                        "busy",
+                        str(busy["reason"]),
+                        str(busy["code"]),
+                    )
+                    return
+                result = relay.service_action("restart")
+        except restart_fence.AdmissionConflict:
+            busy = _member_busy(server)
+            reason = (
+                str(busy["reason"])
+                if busy is not None
+                else "a turn admission is still settling; restart waits for idle"
+            )
+            _put_outcome(server, "busy", reason, "busy")
+            return
         except Exception as exc:  # noqa: BLE001 — the old process must report the failure
             _put_outcome(server, "failed", f"relay restart failed: {exc}", "restart_failed")
             return
