@@ -21668,6 +21668,39 @@ class Session:
 
     # -- compaction ------------------------------------------------------------
 
+    def _clear_aged_results(
+        self, history: Sequence[Message], settings: Any, compaction_api: Any
+    ) -> int:
+        """Run the aged tool-result clearing pass over ``history`` in place.
+
+        Returns how many results it blanked; the caller journals them (the
+        post-turn path already journals every prune of its pass at once).
+        ``getattr`` on both the settings and the API because hosts and the
+        test suite inject duck-typed stand-ins that predate the knob: a
+        missing field means the pass's own default, a missing function means
+        no pass — the same posture ``_plan_compaction`` takes for pruning.
+        """
+        if not getattr(settings, "enabled", True) or not getattr(
+            settings, "aged_clear_enabled", True
+        ):
+            return 0
+        clear = getattr(compaction_api, "clear_aged_tool_results", None)
+        if clear is None:
+            return 0
+        knobs = {
+            name: value
+            for name, field in (
+                ("after_calls", "aged_clear_after_calls"),
+                ("min_tokens", "aged_clear_min_tokens"),
+                ("batch_tokens", "aged_clear_batch_tokens"),
+            )
+            if isinstance(value := getattr(settings, field, None), int)
+        }
+        _, cleared = clear(history, **knobs)
+        if cleared:
+            logger.debug("aged tool-result clearing blanked %d result(s)", cleared)
+        return int(cleared)
+
     async def _journal_prunes(
         self, llm_history: Sequence[AgentMessage], pruned_before: set[str]
     ) -> None:
@@ -21922,10 +21955,27 @@ class Session:
         # mid-turn compaction off.
         self._note_usage(messages)
         try:
+            from local_operator.compaction import api as boundary_api
             from local_operator.compaction.api import CompactionSettings
         except ImportError:
             return None
         settings = self._compaction_settings or CompactionSettings()
+        # Aged tool-result clearing runs at EVERY continuing boundary, ahead of
+        # the threshold gates below, because the relief it exists for is the
+        # one a run needs BELOW the trigger: a delegated child's single launch
+        # turn (~46 calls) never reaches the compaction threshold, so without
+        # this boundary it would re-send every file view it ever took on every
+        # call. After ``_persist_progress`` on purpose: the prune journal
+        # targets a row, and the row must already be on disk for a resume to
+        # replay the stub. In place on the very objects the loop's context
+        # holds (the loop renders ``context.messages`` afresh per request), so
+        # the NEXT provider request carries the stubs without a replacement
+        # list — returning one would also make the loop re-filter its run
+        # accumulator for no reason.
+        boundary_history = [m for m in messages if isinstance(m, Message)]
+        pruned_before = _pruned_ids(boundary_history)
+        if self._clear_aged_results(boundary_history, settings, boundary_api):
+            await self._journal_prunes(boundary_history, pruned_before)
         # getattr: hosts (and the test suite) may inject a duck-typed
         # settings model that predates the knob; absence means the §C default
         # (on), same posture as _resolve_strategy's capability probes.
@@ -22599,6 +22649,11 @@ class Session:
             compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_provider_request_ms)
         except (ImportError, AttributeError):
             pass  # optional pruning hook absent; degrade to no pruning
+        # (1a) Aged tool results, the post-turn half of the same pass the
+        # mid-turn boundary runs (see ``_on_turn_end``): a turn that ended
+        # before a boundary could fire still sheds before the next one starts.
+        # Journalled by the shared ``_journal_prunes`` below.
+        self._clear_aged_results(llm_history, settings, compaction_api)
         # (1b) Stale frames ride the same boundary, behind a session gate:
         # only a session that has CAPTURED browser views can own frames a
         # newer view of a surface supersedes, so every other session type is

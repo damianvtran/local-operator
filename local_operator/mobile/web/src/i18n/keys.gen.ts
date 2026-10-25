@@ -615,6 +615,16 @@ export type MessageParams = {
   "wire.settings.classification_waitms.label": undefined;
   "wire.settings.compaction.description": undefined;
   "wire.settings.compaction.title": undefined;
+  "wire.settings.compaction_aged_clear_after_calls.help": undefined;
+  "wire.settings.compaction_aged_clear_after_calls.label": undefined;
+  "wire.settings.compaction_aged_clear_batch_tokens.help": undefined;
+  "wire.settings.compaction_aged_clear_batch_tokens.label": undefined;
+  "wire.settings.compaction_aged_clear_enabled.choice.false.description": undefined;
+  "wire.settings.compaction_aged_clear_enabled.choice.true.description": undefined;
+  "wire.settings.compaction_aged_clear_enabled.help": undefined;
+  "wire.settings.compaction_aged_clear_enabled.label": undefined;
+  "wire.settings.compaction_aged_clear_min_tokens.help": undefined;
+  "wire.settings.compaction_aged_clear_min_tokens.label": undefined;
   "wire.settings.compaction_auto_continue.choice.false.description": undefined;
   "wire.settings.compaction_auto_continue.choice.true.description": undefined;
   "wire.settings.compaction_auto_continue.help": undefined;
