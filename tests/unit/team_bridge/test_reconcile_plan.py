@@ -244,40 +244,34 @@ def test_only_the_removal_hold_may_carry_a_missing_membership_revision() -> None
     genuine removal hold is HOLD + TENANT_REMOVED and is the only shape allowed
     to omit the revision.
     """
-    fields = dict(
-        hub=HUB,
-        account_id="acc_a",
-        device_id="dev_1",
-        snapshot_id="snapshot-10",
-        tenant_id="tnt_1",
-        receiver=None,
-        owner=None,
-        generation=None,
-        pre_enable_head=None,
-        receipt_version=None,
-    )
+
+    def build(kind: IntentKind, reason: Reason, membership_revision: str | None) -> Intent:
+        # Explicit keyword arguments, not a `**dict`: a dict literal widens every
+        # parameter to one inferred value type and the checker then rejects the
+        # constructor calls the test exists to make.
+        return Intent(
+            kind=kind,
+            reason=reason,
+            hub=HUB,
+            account_id="acc_a",
+            device_id="dev_1",
+            snapshot_id="snapshot-10",
+            tenant_id="tnt_1",
+            membership_revision=membership_revision,
+            receiver=None,
+            owner=None,
+            generation=None,
+            pre_enable_head=None,
+            receipt_version=None,
+        )
+
     # The reviewer's exact hole: a mismatched kind/reason pair with no revision.
     with pytest.raises(ValueError):
-        Intent(
-            kind=IntentKind.ATTACH_CURRENT,
-            reason=Reason.TENANT_REMOVED,
-            membership_revision=None,
-            **fields,
-        )
+        build(IntentKind.ATTACH_CURRENT, Reason.TENANT_REMOVED, None)
     # Even with a revision, the pair itself is illegal.
     with pytest.raises(ValueError):
-        Intent(
-            kind=IntentKind.HOLD,
-            reason=Reason.CURRENT_BINDING,
-            membership_revision="membership-7",
-            **fields,
-        )
-    removed = Intent(
-        kind=IntentKind.HOLD,
-        reason=Reason.TENANT_REMOVED,
-        membership_revision=None,
-        **fields,
-    )
+        build(IntentKind.HOLD, Reason.CURRENT_BINDING, "membership-7")
+    removed = build(IntentKind.HOLD, Reason.TENANT_REMOVED, None)
     assert removed.membership_revision is None
 
 
