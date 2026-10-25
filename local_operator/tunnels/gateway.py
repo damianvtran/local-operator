@@ -674,12 +674,34 @@ class Gateway:
             # SSE is deliberately streamed with backpressure. Reconnects at
             # most every minute recheck edge policy; a backend revoke
             # also stops reads after the next origin chunk (keepalives are 15s).
+            #
+            # THE LEASE BOUNDS THE UPSTREAM READ, NEVER THE DOWNSTREAM WRITE.
+            # An `asyncio.timeout` around this whole loop also covered the time
+            # the task spends inside Starlette's `send` between yields, and on a
+            # slow phone link (backpressure: uvicorn parks `send` on drain) the
+            # deadline cancelled the task THERE, outside this generator — so the
+            # TimeoutError was never caught here, the response never sent its
+            # final empty chunk, and uvicorn logged "ASGI callable returned
+            # without completing response". The phone saw a truncated chunked
+            # body: a network ERROR instead of the clean end-of-stream its
+            # rotation rule expects. Measured: a reader that stalls past the
+            # deadline gets no terminator with the old shape and a complete
+            # body with this one. The deadline is unchanged; it is checked
+            # before every read and bounds each wait.
+            deadline = time.monotonic() + MAX_STREAM_SECONDS
+            chunks = upstream.aiter_raw()
             try:
-                async with asyncio.timeout(MAX_STREAM_SECONDS):
-                    async for chunk in upstream.aiter_raw():
-                        if self.revoked or time.monotonic() >= self.authorized_until:
-                            break
-                        yield chunk
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        chunk = await asyncio.wait_for(anext(chunks), remaining)
+                    except StopAsyncIteration:
+                        break
+                    if self.revoked or time.monotonic() >= self.authorized_until:
+                        break
+                    yield chunk
             except (TimeoutError, httpx.HTTPError):
                 pass
             finally:

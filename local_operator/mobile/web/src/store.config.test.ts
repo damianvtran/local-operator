@@ -12,22 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BUNDLED_OWNED } from "./i18n/bundled.gen";
 import { initializeLocaleMetadata, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
 
-class FakeEventSource {
-	static instances: FakeEventSource[] = [];
-	onopen: (() => void) | null = null;
-	onerror: (() => void) | null = null;
-	listeners = new Map<string, (event: MessageEvent) => void>();
-	closed = false;
-	constructor(readonly url: string) {
-		FakeEventSource.instances.push(this);
-	}
-	addEventListener(name: string, listener: EventListenerOrEventListenerObject) {
-		this.listeners.set(name, listener as (event: MessageEvent) => void);
-	}
-	close() {
-		this.closed = true;
-	}
-}
+import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
 const configOk = () =>
 	new Response(null, {
@@ -73,16 +58,16 @@ describe("retainConfigStream", () => {
 		expect(fetchMock).not.toHaveBeenCalled(); unmount();
 	});
 	it("keeps backend fr separate from English UI and publishes same-locale registration via existing subscription", async () => {
-		vi.stubGlobal("EventSource", FakeEventSource);
-		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(configOk()));
+		vi.useFakeTimers(); Stream.instances = [];
+		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch));
 		initializeLocaleMetadata();
 		const languageHook = renderHook(() => useLanguage());
 		const snapshotHook = renderHook(() => useLocaleSnapshot());
 		const close = retainConfigStream();
 		try {
-			await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-			const source = FakeEventSource.instances[0];
-			act(() => { source.listeners.get("config")?.({ data: JSON.stringify({ language: "fr" }) } as MessageEvent); });
+			await settleStream(); expect(Stream.instances).toHaveLength(1);
+			const source = Stream.instances[0];
+			await act(async () => { source.emit("config", JSON.stringify({ language: "fr" })); await settleStream(); });
 			expect(languageHook.result.current).toBe("fr");
 			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "en", direction: "ltr" });
 			expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
@@ -90,7 +75,7 @@ describe("retainConfigStream", () => {
 			act(() => { messageRuntime.registerWire("wire.exec", "fr", { "wire.exec.error_line": "Fixture {error}" }); });
 			expect(snapshotHook.result.current.revision).toBe(previous.revision + 1);
 			const registered = snapshotHook.result.current;
-			for (const invalid of ["auto", "fr-CA", "bogus", ""]) act(() => { source.listeners.get("config")?.({ data: JSON.stringify({ language: invalid }) } as MessageEvent); });
+			for (const invalid of ["auto", "fr-CA", "bogus", ""]) await act(async () => { source.emit("config", JSON.stringify({ language: invalid })); await settleStream(); });
 			expect(snapshotHook.result.current).toBe(registered);
 			expect(languageHook.result.current).toBe("fr");
 		} finally { close(); languageHook.unmount(); snapshotHook.unmount(); }
@@ -101,24 +86,20 @@ describe("retainConfigStream", () => {
 	});
 	afterEach(() => {
 		vi.useRealTimers();
-		FakeEventSource.instances = [];
+		Stream.instances = [];
 		vi.unstubAllGlobals();
 		document.documentElement.lang = "en";
 	});
 
 	it("applies a frame to the store and mirrors it onto <html lang>", async () => {
-		vi.stubGlobal("EventSource", FakeEventSource);
-		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(configOk()));
+		vi.useFakeTimers(); Stream.instances = [];
+		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch));
 		const { result, unmount } = renderHook(() => useLanguage());
 		const close = retainConfigStream();
 		try {
-			await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-			const source = FakeEventSource.instances[0];
-			act(() => {
-				source.listeners.get("config")?.({
-					data: JSON.stringify({ changed_keys: ["language"], language: "en" }),
-				} as MessageEvent);
-			});
+			await settleStream(); expect(Stream.instances).toHaveLength(1);
+			const source = Stream.instances[0];
+			await act(async () => { source.emit("config", JSON.stringify({ changed_keys: ["language"], language: "en" })); await settleStream(); });
 			expect(result.current).toBe("en");
 			expect(document.documentElement.lang).toBe("en");
 		} finally {
@@ -128,23 +109,17 @@ describe("retainConfigStream", () => {
 	});
 
 	it("drops a malformed frame without touching the language", async () => {
-		vi.stubGlobal("EventSource", FakeEventSource);
-		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(configOk()));
+		vi.useFakeTimers(); Stream.instances = [];
+		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch));
 		const { result, unmount } = renderHook(() => useLanguage());
 		const close = retainConfigStream();
 		try {
-			await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-			const source = FakeEventSource.instances[0];
+			await settleStream(); expect(Stream.instances).toHaveLength(1);
+			const source = Stream.instances[0];
 			/* A KNOWN value first — the module store is shared across this file's
 			   tests, so "unchanged" is the assertion, not "null". */
-			act(() => {
-				source.listeners.get("config")?.({
-					data: JSON.stringify({ changed_keys: [], language: "en" }),
-				} as MessageEvent);
-			});
-			act(() => {
-				source.listeners.get("config")?.({ data: "not json" } as MessageEvent);
-			});
+			await act(async () => { source.emit("config", JSON.stringify({ changed_keys: [], language: "en" })); await settleStream(); });
+			await act(async () => { source.emit("config", "not json"); await settleStream(); });
 			expect(result.current).toBe("en");
 		} finally {
 			close();
@@ -154,7 +129,7 @@ describe("retainConfigStream", () => {
 
 	it("treats an older daemon's 404 as ABSENT: probed ONCE, no subscription, no retries", async () => {
 		vi.useFakeTimers();
-		vi.stubGlobal("EventSource", FakeEventSource);
+		vi.useFakeTimers(); Stream.instances = [];
 		const fetchMock = vi.fn().mockResolvedValue(new Response("not found", { status: 404 }));
 		vi.stubGlobal("fetch", fetchMock);
 		const close = retainConfigStream();
@@ -163,7 +138,7 @@ describe("retainConfigStream", () => {
 			/* Exactly ONE probe (CI round 1, MINOR-2): a re-probing regression
 			   must fail here, not just the "no subscription" half. */
 			expect(fetchMock).toHaveBeenCalledTimes(1);
-			expect(FakeEventSource.instances).toHaveLength(0);
+			expect(Stream.instances).toHaveLength(0);
 		} finally {
 			close();
 		}
@@ -171,17 +146,18 @@ describe("retainConfigStream", () => {
 
 	it("self-heals a transient 5xx: retry, then subscribe — only 404 is absence", async () => {
 		vi.useFakeTimers();
-		vi.stubGlobal("EventSource", FakeEventSource);
+		vi.useFakeTimers(); Stream.instances = [];
 		const fetchMock = vi
 			.fn()
 			.mockResolvedValueOnce(new Response("boom", { status: 503 }))
-			.mockResolvedValue(configOk());
+			.mockResolvedValueOnce(configOk())
+			.mockImplementation(Stream.fetch);
 		vi.stubGlobal("fetch", fetchMock);
 		const close = retainConfigStream();
 		try {
 			await vi.advanceTimersByTimeAsync(1200);
-			expect(fetchMock).toHaveBeenCalledTimes(2);
-			expect(FakeEventSource.instances).toHaveLength(1);
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(Stream.instances).toHaveLength(1);
 		} finally {
 			close();
 		}
@@ -189,17 +165,18 @@ describe("retainConfigStream", () => {
 
 	it("retries a transient probe failure with backoff, then subscribes", async () => {
 		vi.useFakeTimers();
-		vi.stubGlobal("EventSource", FakeEventSource);
+		vi.useFakeTimers(); Stream.instances = [];
 		const fetchMock = vi
 			.fn()
 			.mockRejectedValueOnce(new Error("offline"))
-			.mockResolvedValue(configOk());
+			.mockResolvedValueOnce(configOk())
+			.mockImplementation(Stream.fetch);
 		vi.stubGlobal("fetch", fetchMock);
 		const close = retainConfigStream();
 		try {
 			await vi.advanceTimersByTimeAsync(1200);
-			expect(fetchMock).toHaveBeenCalledTimes(2);
-			expect(FakeEventSource.instances).toHaveLength(1);
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(Stream.instances).toHaveLength(1);
 		} finally {
 			close();
 		}

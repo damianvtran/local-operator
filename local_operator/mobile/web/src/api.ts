@@ -69,7 +69,7 @@ export function isAuthorityRefusalCode(code: string): boolean {
     dead and every further call fails the same way, so the page reloads and the
     server 303s to /login. The multipart upload below is NOT the JSON helper but
     must not invent a second answer to this. */
-function handleUnauthorized(): void {
+export function handleUnauthorized(): void {
 
 	/* A replaced/login-expired browser session must not expose drafts or
 	   retry envelopes to whoever authenticates next on this device. */

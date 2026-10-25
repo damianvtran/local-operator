@@ -10,22 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearSessionUnseen, retainSessionListStream, useRouteTitle } from "./store";
 import type { SessionSummary } from "./types";
 
-class FakeEventSource {
-	static instances: FakeEventSource[] = [];
-	onopen: (() => void) | null = null;
-	onerror: (() => void) | null = null;
-	listeners = new Map<string, (event: MessageEvent) => void>();
-	closed = false;
-	constructor(readonly url: string) {
-		FakeEventSource.instances.push(this);
-	}
-	addEventListener(name: string, listener: EventListenerOrEventListenerObject) {
-		this.listeners.set(name, listener as (event: MessageEvent) => void);
-	}
-	close() {
-		this.closed = true;
-	}
-}
+import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
 function summary(over: Partial<SessionSummary>): SessionSummary {
 	return {
@@ -47,23 +32,23 @@ function summary(over: Partial<SessionSummary>): SessionSummary {
 
 let release: (() => void) | null = null;
 
-function emitSessions(rows: SessionSummary[]) {
-	const es = FakeEventSource.instances[0];
-	const listener = es.listeners.get("sessions")!;
-	listener({ data: JSON.stringify({ sessions: rows }) } as MessageEvent);
+async function emitSessions(rows: SessionSummary[]) {
+	await settleStream();
+	Stream.instances[0].emit("sessions", { sessions: rows });
+	await settleStream();
 }
 
-afterEach(() => {
-	release?.();
-	release = null;
-	FakeEventSource.instances = [];
+afterEach(async () => {
+	release?.(); release = null;
+	await vi.advanceTimersByTimeAsync(10001);
+	vi.useRealTimers(); vi.unstubAllGlobals();
 });
 
 describe("tab title aggregate", () => {
-	it("counts unseen and needs-decision sessions on every emit", () => {
-		vi.stubGlobal("EventSource", FakeEventSource);
+	it("counts unseen and needs-decision sessions on every emit", async () => {
+		vi.useFakeTimers(); Stream.install();
 		release = retainSessionListStream();
-		emitSessions([
+		await emitSessions([
 			summary({ session_id: "a", unseen: true }),
 			summary({ session_id: "b", needs_attention: true, pending_kind: "approval" }),
 			summary({ session_id: "c" }),
@@ -71,19 +56,19 @@ describe("tab title aggregate", () => {
 		expect(document.title).toBe("(2) local operator");
 
 		/* A session that is BOTH unseen and blocked counts once. */
-		emitSessions([
+		await emitSessions([
 			summary({ session_id: "a", unseen: true, needs_attention: true, pending_kind: "ask" }),
 		]);
 		expect(document.title).toBe("(1) local operator");
 
-		emitSessions([]);
+		await emitSessions([]);
 		expect(document.title).toBe("local operator");
 	});
 
-	it("clears the mark optimistically when the session is opened", () => {
-		vi.stubGlobal("EventSource", FakeEventSource);
+	it("clears the mark optimistically when the session is opened", async () => {
+		vi.useFakeTimers(); Stream.install();
 		release = retainSessionListStream();
-		emitSessions([summary({ session_id: "a", unseen: true })]);
+		await emitSessions([summary({ session_id: "a", unseen: true })]);
 		expect(document.title).toBe("(1) local operator");
 
 		clearSessionUnseen("a");
@@ -95,10 +80,10 @@ describe("tab title aggregate", () => {
 		expect(document.title).toBe("local operator");
 	});
 
-	it("lets a route title compose over the count, and releases it on unmount (U4, batch 2)", () => {
-		vi.stubGlobal("EventSource", FakeEventSource);
+	it("lets a route title compose over the count, and releases it on unmount (U4, batch 2)", async () => {
+		vi.useFakeTimers(); Stream.install();
 		release = retainSessionListStream();
-		emitSessions([summary({ session_id: "a", unseen: true })]);
+		await emitSessions([summary({ session_id: "a", unseen: true })]);
 		expect(document.title).toBe("(1) local operator");
 
 		/* A session route claims the title while it is mounted — the task
@@ -109,7 +94,7 @@ describe("tab title aggregate", () => {
 		expect(document.title).toBe("Ship the settings pane — local operator");
 
 		/* The list keeps counting underneath, without fighting the route... */
-		emitSessions([
+		await emitSessions([
 			summary({ session_id: "a", unseen: true }),
 			summary({ session_id: "b", unseen: true }),
 		]);

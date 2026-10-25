@@ -138,14 +138,57 @@ _PINS_UNREAD = object()
 #: buys nothing.
 REDIAL_BACKOFF_S = 5.0
 
-#: SSE keepalive cadence — under the 60 s idle cutoff of common proxies.
-SSE_KEEPALIVE_S = 25.0
+#: SSE keepalive cadence — under the 60 s idle cutoff of common proxies, and
+#: well under BOTH clients' 35 s silence watchdogs (the web relay's
+#: ``openEventStream`` and the native app's ``relay/sse.ts``). At 25 s one
+#: delayed keepalive was enough to trip a watchdog on a healthy stream; 15 s
+#: leaves two chances inside the window. The tunnel gateway's own comment
+#: already assumed 15 s for how quickly a backend revoke stops reads.
+SSE_KEEPALIVE_S = 15.0
 
 # Startup is acknowledged only after the authenticated welcome and control
 # connection. The separate handoff lease bounds an abandoned HTTP response;
 # it is NOT a session deadline. A real SSE subscriber holds its own viewer.
 SESSION_START_TIMEOUT_S = 30.0
 PHONE_HANDOFF_S = 60.0
+
+#: How long a conversation stays VIEWED after its last phone stream closes.
+#:
+#: A closed stream is usually not a phone that left. The tunnel gateway ends
+#: every proxied response at its 60 s lease (``tunnels/gateway.py``
+#: ``MAX_STREAM_SECONDS``, a security property that stays), a network change
+#: drops the socket, and a list-to-session navigation closes one stream and
+#: opens the next. Each of those used to run the whole last-viewer teardown —
+#: release the attach client, ``unwatch`` the runtime, prune the projection
+#: generation — and then the reconnect re-dialled and re-``watch``ed it, once a
+#: minute per open conversation over a tunnel. Holding the view for a grace
+#: makes a reconnect inside it a no-op on the runtime side. 20 s covers the
+#: rotation reopen (<1 s), the web client's 5 s stream linger and a phone's
+#: network handover, while staying far inside the runtime's own idle clocks
+#: (``docs/design-idle-reap.md``: minutes), so a phone that really left still
+#: releases the session promptly. ``0`` restores the immediate teardown.
+PHONE_VIEW_GRACE_S = 20.0
+
+#: Minimum spacing between projection frames on ONE ``/events`` stream.
+#:
+#: A streaming runtime pushes ~30 repaints/s and every one is a FULL capped
+#: projection (repaints, never deltas). Forwarding each one saturated a phone
+#: link behind a tunnel — the stream fell behind its own producer and the
+#: phone showed stale text. Frames are full snapshots, so only the newest one
+#: carries information: the stream sends the first frame at once, then at most
+#: one frame per interval, and always flushes the trailing one. 100 ms is
+#: below what a reader perceives as lag on streaming prose.
+PROJECTION_FRAME_INTERVAL_S = 0.1
+
+#: Minimum spacing between list frames on ONE ``/api/sessions/events`` stream.
+#:
+#: Every projection push from EVERY live session rings the list doorbell
+#: (``notify_list_changed``), so K streaming sessions rang it ~30·K times a
+#: second, and each ring rebuilt and re-sent the whole list. The list shows
+#: badges and ordering, not streaming text; 400 ms keeps a badge change
+#: prompt while bounding the stream to 2.5 builds/s however busy the
+#: machine is. A frame byte-identical to the last one sent is suppressed too.
+LIST_FRAME_INTERVAL_S = 0.4
 
 #: Default daemon port. Loopback only; remote access is a tunnel's job.
 DEFAULT_PORT = 4098
@@ -721,6 +764,11 @@ class SessionTable:
     def __init__(self) -> None:
         self.entries: dict[int, SessionEntry] = {}  # by pid
         self.list_subscribers: set[asyncio.Queue[None]] = set()
+        #: Bumped by every ``notify_list_changed`` ring. A list frame built
+        #: after ring N reflects every change up to N, which is what lets two
+        #: subscribers woken by the same ring share ONE build (see
+        #: ``api_list_events``) instead of each rebuilding the whole list.
+        self.list_revision = 0
         # Durable conversation identity owns viewers across zero or many host
         # generations. Entries route watch commands but never own these queues.
         self.session_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
@@ -1558,6 +1606,7 @@ class SessionTable:
         (registration, death, wake, seen) call
         :meth:`invalidate_summaries_cache` themselves.
         """
+        self.list_revision += 1
         for queue in self.list_subscribers:
             try:
                 queue.put_nowait(None)
@@ -2434,7 +2483,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     continue
                 entry.projection = captured
                 entry.ready.set()
-                if op == "welcome" and daemon.table.session_subscribers.get(record.session_id):
+                if op == "welcome" and daemon.phone_viewing(record.session_id):
                     # A route can subscribe before registration. Replay only
                     # after the writer can actually accept the control op.
                     daemon.notify_watch_transition(record.pid, watching=True)
@@ -3139,12 +3188,19 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
     """Push a repaint to durable session viewers, never one pid generation."""
     if entry.projection is None:
         return
-    frame = _projection_frame(entry.projection)
     queues = (
         daemon.table.session_subscribers.get(entry.record.session_id, set())
         if daemon is not None
         else entry.subscribers
     )
+    if not queues:
+        # Every live session pushes ~30x/s while streaming and a phone views at
+        # most one of them; capping a frame nobody reads is pure loop time
+        # under exactly the load that made the phone lag. The re-date inside
+        # ``_projection_frame`` is recomputed from its reference at the next
+        # serialization, so skipping it here loses nothing.
+        return
+    frame = _projection_frame(entry.projection)
     for queue in queues:
         while True:
             try:
@@ -3155,6 +3211,54 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break  # racing consumer drained it; retry the put
+
+
+class _LatestProjectionQueue(asyncio.Queue[dict[str, Any]]):
+    """One pending full snapshot, shared by every producer of projection frames.
+
+    Producers also include disk rebuilds and wake/health repaints, not just
+    `_fan_out`. Centralizing replacement here keeps a full slot from dropping
+    the final repaint merely because one of those producers cannot retry.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(maxsize=1)
+
+    def put_nowait(self, item: dict[str, Any]) -> None:
+        if self.full():
+            previous = self.get_nowait()
+            if previous.get("version", 0) > item.get("version", 0):
+                item = previous
+        super().put_nowait(item)
+
+
+def _latest_projection_frame(
+    queue: "asyncio.Queue[dict[str, Any]]", frame: dict[str, Any]
+) -> dict[str, Any]:
+    """Drain ``queue`` and return the one frame the phone would have ended on.
+
+    Projection frames are FULL snapshots (``SessionProjection``: repaints, never
+    deltas), so a superseded frame carries nothing the later one lacks — the
+    transcript, the pending card, the attention token and the asks all ride
+    every frame whole. That is also why the queue's drop-oldest overflow was
+    always safe; this makes the drop deliberate rather than an overflow.
+
+    The pick is the phone's OWN rule, not merely "the last one": within a
+    connection the web store and the native client both ignore a frame whose
+    ``version`` is lower than the one they hold (``store.ts``
+    ``retainProjectionStream``). Folding the drained run with that same
+    ``>=`` rule reproduces exactly the frame sequential delivery would have left
+    on screen, so a late, lower-versioned durable repaint queued behind a live
+    frame cannot win just by arriving last.
+    """
+    best = frame
+    while True:
+        try:
+            candidate = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return best
+        if candidate.get("version", 0) >= best.get("version", 0):
+            best = candidate
 
 
 def _mirror_dial_health(entry: SessionEntry) -> None:
@@ -3256,6 +3360,13 @@ class MobileDaemon:
         self._phone_generations: dict[str, tuple[int, str]] = {}
         self._phone_attach_tasks: dict[str, asyncio.Task[None]] = {}
         self._phone_handoffs: dict[str, asyncio.TimerHandle] = {}
+        #: Conversations whose LAST phone stream closed less than
+        #: ``PHONE_VIEW_GRACE_S`` ago, keyed to the timer that finishes the
+        #: release. While a session is here it is still VIEWED for every
+        #: decision that asks "is a phone looking?" (``phone_viewing``), so a
+        #: reconnect inside the window resumes the same attach client and the
+        #: runtime's watch count without a teardown or a redial.
+        self._phone_view_graces: dict[str, asyncio.TimerHandle] = {}
         self._session_starts: dict[str, asyncio.Task[int]] = {}
         # The daemon's display-settings subscription (see
         # :meth:`watch_display_settings`); ``None`` until attached.
@@ -3516,7 +3627,7 @@ class MobileDaemon:
 
     def _projection_route_owned(self, session_id: str) -> bool:
         """Whether an epoch can still be observed by a process or browser."""
-        return bool(self.table.session_subscribers.get(session_id)) or any(
+        return self.phone_viewing(session_id) or any(
             entry.record.session_id == session_id and not entry.ended
             for entry in self.table.entries.values()
         )
@@ -3873,7 +3984,7 @@ class MobileDaemon:
                 # Durable viewers predate this process generation after a
                 # Previous wake. Rebind only the reaper signal to the new host;
                 # the SSE queues remain owned by session_id in the daemon.
-                if self.table.session_subscribers.get(record.session_id):
+                if self.phone_viewing(record.session_id):
                     self.notify_watch_transition(record.pid, watching=True)
             else:
                 # Re-adopt record updates (model label, name, /resume's new
@@ -3957,7 +4068,7 @@ class MobileDaemon:
                     record.pid not in self._dial_tasks or self._dial_tasks[record.pid].done()
                 ):
                     self._dial_tasks[record.pid] = asyncio.ensure_future(_dial(self, entry))
-            if not entry.ended and self.table.session_subscribers.get(record.session_id):
+            if not entry.ended and self.phone_viewing(record.session_id):
                 self._schedule_phone_attach(record)
         # Reap entries whose record vanished entirely.
         for pid in list(self.table.entries):
@@ -4342,9 +4453,26 @@ class MobileDaemon:
 
     # -- owned sessions ---------------------------------------------------------
 
+    def phone_viewing(self, session_id: str) -> bool:
+        """Whether a phone is looking at this conversation, grace included.
+
+        THE ONE ANSWER to "is a phone viewing?" for every decision that
+        follows a viewer (the attach client, the runtime's watch count, a new
+        generation's re-watch, the projection-generation ledger). A session in
+        its release grace (``PHONE_VIEW_GRACE_S``) has no SSE queue for a
+        moment, but its phone is reconnecting rather than gone; deciding
+        from the queues alone would unwatch a runtime the phone is about to
+        re-watch, or leave a new generation un-watched when the phone returns
+        and skips the duplicate ``watch``. Frame fan-out still reads the
+        queues: there is nobody to send a frame to during the grace.
+        """
+        return bool(self.table.session_subscribers.get(session_id)) or (
+            session_id in self._phone_view_graces
+        )
+
     def _phone_wanted(self, session_id: str) -> bool:
         return bool(
-            self.table.session_subscribers.get(session_id)
+            self.phone_viewing(session_id)
             or session_id in self._phone_handoffs
             or session_id in self._session_starts
         )
@@ -4483,8 +4611,14 @@ class MobileDaemon:
             self._schedule_phone_attach(entry.record)
 
     def release_phone_view(self, session_id: str) -> None:
-        """Drop readiness ownership after the LAST phone leaves; never abort work."""
-        if self.table.session_subscribers.get(session_id):
+        """Drop readiness ownership after the LAST phone leaves; never abort work.
+
+        A session in its release grace is still viewed (``phone_viewing``):
+        only the grace's own expiry (``_expire_phone_view_grace``, which pops
+        the grace first) may release it, so a startup lease or an attach that
+        lands mid-grace cannot tear down the view the phone is returning to.
+        """
+        if self.phone_viewing(session_id):
             return
         timer = self._phone_handoffs.pop(session_id, None)
         if timer is not None:
@@ -4497,8 +4631,70 @@ class MobileDaemon:
         if client is not None:
             client.close()
 
+    def leave_phone_view(self, session_id: str) -> None:
+        """The LAST phone stream for a conversation closed: release it LATER.
+
+        A closed stream is mostly a reconnect in progress (the gateway's 60 s
+        lease, a network change, a navigation) — see ``PHONE_VIEW_GRACE_S``.
+        So the teardown (release the attach client, ``unwatch`` the runtime,
+        prune the projection generation) is deferred, and a stream that
+        opens inside the window cancels it via ``return_phone_view`` with no
+        second ``watch``: the runtime never saw the phone leave.
+
+        THE COST, accepted deliberately: for up to the grace after a phone
+        really leaves, the runtime still counts it as watching, so a desktop
+        toast for a card raised in that window is routed as if the phone
+        were looking (``watching_surfaces``) and the idle reaper waits that
+        much longer. Before, every rotation produced the opposite error — an
+        unwatch/watch gap once a minute while the phone WAS looking.
+        """
+        prior = self._phone_view_graces.pop(session_id, None)
+        if prior is not None:
+            prior.cancel()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # a generator finalized off-loop: nothing can return
+            loop = None
+        if PHONE_VIEW_GRACE_S <= 0 or loop is None:
+            self._release_phone_view_now(session_id)
+            return
+        self._phone_view_graces[session_id] = loop.call_later(
+            PHONE_VIEW_GRACE_S, self._expire_phone_view_grace, session_id
+        )
+
+    def return_phone_view(self, session_id: str) -> bool:
+        """A stream opened while the conversation was in its release grace.
+
+        Returns True when a grace was cancelled — the runtime still counts
+        this phone as watching, so the caller must NOT send ``watch`` again
+        (a second ``watch`` would leave a count the single eventual
+        ``unwatch`` cannot clear).
+        """
+        timer = self._phone_view_graces.pop(session_id, None)
+        if timer is None:
+            return False
+        timer.cancel()
+        return True
+
+    def _expire_phone_view_grace(self, session_id: str) -> None:
+        self._phone_view_graces.pop(session_id, None)
+        self._release_phone_view_now(session_id)
+
+    def _release_phone_view_now(self, session_id: str) -> None:
+        """The last-viewer teardown, once nobody is viewing any more."""
+        if self.phone_viewing(session_id):
+            return
+        self.release_phone_view(session_id)
+        live = _entry_for_session(self, session_id)
+        if live is not None:
+            self.notify_watch_transition(live.record.pid, watching=False)
+        self._prune_projection_generation(session_id)
+
     async def close_phone_views(self) -> None:
         """Retire only this relay's owned startup/viewer resources on shutdown."""
+        for grace in self._phone_view_graces.values():
+            grace.cancel()
+        self._phone_view_graces.clear()
         tasks: list[asyncio.Task[Any]] = [
             *self._session_starts.values(),
             *self._phone_attach_tasks.values(),
@@ -4533,7 +4729,7 @@ class MobileDaemon:
         prior = self._phone_handoffs.pop(session_id, None)
         if prior is not None:
             prior.cancel()
-        if not self.table.session_subscribers.get(session_id):
+        if not self.phone_viewing(session_id):
             self._phone_handoffs[session_id] = asyncio.get_running_loop().call_later(
                 PHONE_HANDOFF_S, self.release_phone_view, session_id
             )
@@ -5324,14 +5520,19 @@ def build_app(daemon: MobileDaemon):
         async def stream():
             # A response whose headers fail to send never began viewing. Own
             # the queue only inside the iterator, paired with its finally.
-            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
+            queue: asyncio.Queue[dict[str, Any]] = _LatestProjectionQueue()
             subscribers = daemon.table.session_subscribers.setdefault(session_id, set())
             first_watcher = not subscribers
             subscribers.add(queue)
+            # A reconnect inside the release grace (the gateway's lease
+            # rotation, a network blip) finds the runtime still counting this
+            # phone: the grace's cancellation IS the watch, and a second one
+            # would leave a count the one eventual ``unwatch`` cannot clear.
+            resumed = first_watcher and daemon.return_phone_view(session_id)
             try:
                 daemon.claim_phone_view(session_id)
                 live = _entry_for_session(daemon, session_id)
-                if live is not None and first_watcher:
+                if live is not None and first_watcher and not resumed:
                     # Notification routing is distinct from idle readiness;
                     # mixed-version registrants may reject this optional op.
                     daemon.notify_watch_transition(live.record.pid, watching=True)
@@ -5357,25 +5558,38 @@ def build_app(daemon: MobileDaemon):
                         ended=ended,
                         degraded=live is not None and bool(live.degraded),
                     )
+                loop = asyncio.get_running_loop()
+                sent_at: float | None = None
                 if projection is not None:
                     yield _sse("projection", _projection_frame(projection))
+                    sent_at = loop.time()
                 while True:
                     try:
                         frame = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
-                        yield _sse("projection", frame)
                     except TimeoutError:
                         yield ": keepalive\n\n"
+                        continue
+                    # Rate cap (``PROJECTION_FRAME_INTERVAL_S``): the first frame
+                    # after a quiet spell goes at once; inside a burst the wait
+                    # lets the producer's later repaints pile up behind this
+                    # one, and only the winner is sent — so the trailing frame
+                    # of every burst is always delivered.
+                    if sent_at is not None:
+                        wait = PROJECTION_FRAME_INTERVAL_S - (loop.time() - sent_at)
+                        if wait > 0:
+                            await asyncio.sleep(wait)
+                    yield _sse("projection", _latest_projection_frame(queue, frame))
+                    sent_at = loop.time()
             finally:
                 current = daemon.table.session_subscribers.get(session_id)
                 if current is not None:
                     current.discard(queue)
                     if not current:
                         daemon.table.session_subscribers.pop(session_id, None)
-                        daemon.release_phone_view(session_id)
-                        live = _entry_for_session(daemon, session_id)
-                        if live is not None:
-                            daemon.notify_watch_transition(live.record.pid, watching=False)
-                        daemon._prune_projection_generation(session_id)
+                        # Deferred by ``PHONE_VIEW_GRACE_S``: the release,
+                        # ``unwatch`` and generation prune run only if no
+                        # stream for this conversation opens meanwhile.
+                        daemon.leave_phone_view(session_id)
 
         return SessionEventResponse(
             stream(),
@@ -5491,6 +5705,38 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
+    #: The newest serialized list event per ``include_peers`` flag, with the
+    #: ring revision observed BEFORE its build began: ``(revision, event)``.
+    list_events: dict[bool, tuple[int, str]] = {}
+    list_event_locks = {False: asyncio.Lock(), True: asyncio.Lock()}
+
+    async def _shared_list_event(include_peers: bool, needed: int | None) -> str:
+        """One serialized ``sessions`` event that reflects ring ``needed``.
+
+        A cached build is reusable iff its build began at or after that ring
+        (``list_revision`` is read before the await, so a ring landing mid-build
+        makes the cached copy too old for its own subscriber, never too new).
+        Serializing once per ring rather than once per subscriber is what
+        keeps a second open phone, or a phone holding both screens, from
+        doubling the daemon's list work.
+
+        ``needed=None`` always builds: a NEW connection's first frame is the
+        phone's authoritative resync, and the durable half of a listing can
+        change without a ring (a terminal session's files written elsewhere,
+        aged out of the summaries TTL), so a reopened stream must not be seeded
+        from a build made before it existed.
+        """
+        async with list_event_locks[include_peers]:
+            cached = list_events.get(include_peers)
+            if needed is not None and cached is not None and cached[0] >= needed:
+                return cached[1]
+            revision = daemon.table.list_revision
+            event = _sse("sessions", await _list_frame(include_peers=include_peers))
+            newest = list_events.get(include_peers)
+            if newest is None or newest[0] <= revision:
+                list_events[include_peers] = (revision, event)
+            return event
+
     async def api_list_events(request: Request) -> Response:
         """SSE for the session LIST, so the home screen needs no polling.
 
@@ -5505,22 +5751,50 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         include_peers = _query_flag(request, "include_peers")
-        queue: asyncio.Queue[None] = asyncio.Queue(maxsize=4)
-        daemon.table.list_subscribers.add(queue)
+        queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
 
         async def stream():
+            daemon.table.list_subscribers.add(queue)
             try:
-                yield _sse("sessions", await _list_frame(include_peers=include_peers))
+                loop = asyncio.get_running_loop()
+                last = await _shared_list_event(include_peers, None)
+                yield last
+                sent_at = wrote_at = loop.time()
                 while True:
+                    # The keepalive clock runs from the last WRITE, not from
+                    # the last ring: with identical frames suppressed, a busy
+                    # machine can ring this queue constantly while writing
+                    # nothing, and a stream silent past the clients' 35 s
+                    # watchdog is torn down as stalled.
+                    idle = SSE_KEEPALIVE_S - (loop.time() - wrote_at)
                     try:
-                        await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
-                        yield _sse("sessions", await _list_frame(include_peers=include_peers))
+                        await asyncio.wait_for(queue.get(), timeout=max(idle, 0.0))
                     except TimeoutError:
                         yield ": keepalive\n\n"
+                        wrote_at = loop.time()
+                        continue
+                    # Coalesce (``LIST_FRAME_INTERVAL_S``): wait out the spacing,
+                    # then drop every ring that arrived meanwhile — the ONE
+                    # build below happens after all of them, so it answers
+                    # them all.
+                    wait = LIST_FRAME_INTERVAL_S - (loop.time() - sent_at)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    while not queue.empty():
+                        queue.get_nowait()
+                    event = await _shared_list_event(include_peers, daemon.table.list_revision)
+                    sent_at = loop.time()
+                    if event == last:
+                        # A ring is "something MAY have changed"; most rings
+                        # during streaming move nothing the list renders.
+                        continue
+                    last = event
+                    yield event
+                    wrote_at = loop.time()
             finally:
                 daemon.table.list_subscribers.discard(queue)
 
-        return StreamingResponse(
+        return SessionEventResponse(
             stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},

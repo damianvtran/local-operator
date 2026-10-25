@@ -3725,3 +3725,88 @@ def test_rearm_starts_the_windows_task_too(tmp_path, monkeypatch, connection) ->
     # exactly as on the others.
     monkeypatch.setattr(install.supervisors, "config_lives_in_real_home", lambda _base: False)
     assert install.rearm_if_parked(provider="radient", credential_id=7) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_lease_ending_under_backpressure_still_completes_the_response(
+    connection, signing_key, monkeypatch
+):
+    """The 60 s stream lease must END a slow phone's stream, never truncate it.
+
+    The lease used to be an ``asyncio.timeout`` around the whole proxy loop, so
+    it also covered the time spent inside uvicorn's ``send`` waiting for a slow
+    reader to drain. A deadline firing THERE cancelled the response outside the
+    generator's ``except``: no terminating chunk, uvicorn's "ASGI callable
+    returned without completing response" (348 of them in the operator's
+    ``tunnel/service.log``), and a phone that saw a network error instead of the
+    clean end its rotation rule expects. The rig is the real path: the real
+    gateway under real uvicorn on a real socket whose reader stops reading until
+    the (shortened) lease has passed, then reads to the end.
+    """
+    import uvicorn
+
+    from local_operator.tunnels import gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "MAX_STREAM_SECONDS", 0.5)
+
+    class Endless(httpx.AsyncByteStream):
+        """An origin SSE body that never ends on its own, like the relay's."""
+
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0)
+                yield b"data: " + b"x" * 65536 + b"\n\n"
+
+    def origin(request):
+        return httpx.Response(
+            200, stream=Endless(), headers={"content-type": "text/event-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        server = uvicorn.Server(
+            uvicorn.Config(gateway.app(), host="127.0.0.1", port=0, log_level="critical")
+        )
+        serving = asyncio.create_task(server.serve())
+        try:
+            async with asyncio.timeout(20):
+                while not server.started:
+                    await asyncio.sleep(0.01)
+                port = server.servers[0].sockets[0].getsockname()[1]
+                proof_value = proof(signing_key, target="/api/sessions/events")
+
+                def stalled_reader() -> bytes:
+                    with closing(socket.create_connection(("127.0.0.1", port))) as sock:
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                        sock.sendall(
+                            b"GET /api/sessions/events HTTP/1.1\r\nHost: "
+                            + HOST.encode()
+                            + b"\r\n"
+                            + PROOF_HEADER.encode()
+                            + b": "
+                            + proof_value.encode()
+                            + b"\r\n\r\n"
+                        )
+                        time.sleep(1.5)  # past the lease, with send() parked on drain
+                        sock.settimeout(5)
+                        received = b""
+                        while True:
+                            try:
+                                chunk = sock.recv(1 << 20)
+                            except TimeoutError:
+                                break
+                            if not chunk:
+                                break
+                            received += chunk
+                            if received.endswith(b"0\r\n\r\n"):
+                                break
+                        return received
+
+                received = await asyncio.to_thread(stalled_reader)
+        finally:
+            server.should_exit = True
+            await serving
+    assert received.startswith(b"HTTP/1.1 200")
+    # The chunked terminator is the clean end-of-stream: present only when the
+    # response COMPLETED rather than being abandoned mid-body.
+    assert received.endswith(b"0\r\n\r\n")
