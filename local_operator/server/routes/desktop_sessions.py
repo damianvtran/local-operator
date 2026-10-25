@@ -6021,11 +6021,13 @@ async def events(
     # ``release_once`` -- which the generator's teardown and the response's
     # background task both reach on a disconnect or a never-consumed body. The
     # release is idempotent, and the index module's ceiling bounds a leak.
-    # Keyed by the config root ``host()`` builds the pool from -- the same root
-    # every ``start_refresh`` caller on this plane passes (``bridge.root``).
-    release_paint = transcript_index.hold_paint(
-        request.app.state.config_manager.config_dir, session_id
-    )
+    # Keyed by the POOL's root: `host()` builds that pool from the app's config
+    # dir, and every `start_refresh` on this plane keys by the bridge's root --
+    # which is this same value. Read off the pool rather than off `app.state`
+    # because the reduction some callers build is a request whose state carries
+    # only the pool (`SimpleNamespace`), and the app-state attribute is not part
+    # of what this route needs.
+    release_paint = transcript_index.hold_paint(pool.root, session_id)
     context = pool.session(session_id, read=True, allow_draft=True)
     try:
         async with errors(request):
