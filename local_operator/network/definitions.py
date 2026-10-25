@@ -2415,13 +2415,37 @@ def stop_syncer(server: "RelayServer", *, timeout: float = SYNCER_STOP_JOIN_S) -
     that waited on a peer would make every caller's stop cost depend on another
     machine. The thread is a daemon, so the bound is a promptness claim, not an
     unreachable leak.
+
+    THE REGISTRY ENTRY IS WHAT MAKES THE SURVIVOR FINDABLE, so it is removed only
+    once the thread is known stopped: ``Thread.join(timeout)`` returns nothing
+    either way, and popping before the join left a still-running syncer with no
+    handle any caller could reach (``ensure_syncer`` could start a second one
+    beside it, and nothing named the first). A syncer still alive at the deadline
+    is reported in a warning and its entry is KEPT, so a subsequent
+    ``ensure_syncer`` reuses the survivor rather than doubling the cadence. A
+    thread that ignores its stop cannot be killed from here; this makes the
+    condition visible instead of impossible.
     """
     with _syncer_lock:
-        syncer = _syncers.pop(id(server), None)
+        syncer = _syncers.get(id(server))
     if syncer is None:
         return
     syncer.stop()
     syncer.join(timeout=timeout)
+    if syncer.is_alive():
+        logger.warning(
+            "mesh definitions: syncer thread did not stop within the %.1fs "
+            "timeout and is still running — it was not killed; its registry "
+            "entry is kept so ensure_syncer reuses it rather than starting a "
+            "second one",
+            timeout,
+        )
+        return
+    with _syncer_lock:
+        # Identity-checked: a concurrent ensure_syncer may have replaced a thread
+        # that looked dead, and this must not unregister its replacement.
+        if _syncers.get(id(server)) is syncer:
+            del _syncers[id(server)]
 
 
 def install(server: "RelayServer") -> None:
