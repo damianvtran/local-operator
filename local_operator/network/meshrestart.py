@@ -319,13 +319,14 @@ def _confirm_restart(
     device_id: str,
     before: Mapping[str, Any],
 ) -> dict[str, Any]:
+    from local_operator.resume import peer_reason_words
+
     label = _label(server, device_id)
     deadline = time.monotonic() + RESTART_CONFIRM_WINDOW_S
-    last_reason = ""
+    suffix = ""
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            suffix = f": {last_reason}" if last_reason else ""
             return _result(
                 server,
                 device_id,
@@ -343,7 +344,7 @@ def _confirm_restart(
         link, reason = server._ensure_link_with_reason(  # noqa: SLF001 — relay dial helper
             device_id, probe_timeout_s=min(1.0, remaining)
         )
-        last_reason = reason
+        suffix = f" ({peer_reason_words(reason)})" if reason else ""
         if link is None:
             time.sleep(min(RESTART_POLL_S, max(0.0, deadline - time.monotonic())))
             continue
@@ -376,9 +377,10 @@ def _confirm_restart(
             parsed = _evidence_from_reply(reply)
             if parsed is None:
                 if isinstance(reply, Mapping) and reply.get("op") == "error":
-                    last_reason = str(reply.get("message") or "evidence request refused")
+                    detail = str(reply.get("message") or "evidence request refused")
+                    suffix = f" ({peer_reason_words(detail)})"
                 else:
-                    last_reason = "the peer did not answer the evidence request"
+                    suffix = " (the peer did not answer the evidence request)"
             else:
                 after, outcome = parsed
                 if str(after.get("instance_id") or "") == str(before.get("instance_id") or ""):
@@ -398,7 +400,7 @@ def _confirm_restart(
                 elif _confirmed(before, after, link.instance_id):
                     return _success(server, device_id, before, after)
                 else:
-                    last_reason = "the new instance did not supply matching pid or uptime evidence"
+                    suffix = " (the new instance did not supply matching pid or uptime evidence)"
         finally:
             # Never let the next probe reuse a cached link to the old instance.
             link.close("peer-restart-evidence-complete")
@@ -407,10 +409,12 @@ def _confirm_restart(
 
 def restart_peer(server: RelayServer, device_id: str) -> dict[str, Any]:
     """Ask one member to restart its relay; report success only after fresh evidence."""
+    from local_operator.resume import peer_reason_words
+
     label = _label(server, device_id)
     link, reason = server._ensure_link_with_reason(device_id)  # noqa: SLF001
     if link is None:
-        suffix = f": {reason}" if reason else ""
+        suffix = f" ({peer_reason_words(reason)})" if reason else ""
         return _result(
             server,
             device_id,
