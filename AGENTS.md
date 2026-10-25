@@ -1542,7 +1542,13 @@ git -C ~/local-operator update-ref refs/heads/main origin/main
 #    Then tag + GitHub Release on the bump's merge commit. --target creates
 #    the tag on that exact SHA; the publish workflow triggers on the release.
 $EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # public copy only; no authoring/checklist section
-gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
+
+# Resolve the target in its OWN command, print it, and check it is the bump's
+# merge commit you expect -- then pass the literal SHA. Do not embed the
+# substitution in the release command: see "Branch-moving commands".
+git -C ~/local-operator fetch --tags origin main
+git -C ~/local-operator rev-parse origin/main          # copy this SHA after checking it
+gh release create vX.Y.Z --target <the SHA you just checked> \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
 # 5. Install and verify — REQUIRED: the release is not complete until this
@@ -1663,8 +1669,8 @@ unchanged, advance the clone's own `main` first.
 ### A green run is a function of the tree it was computed against
 
 **The tag target is the bump's MERGE commit** — which is what "Mechanics, in
-order" step 4 already does with
-`--target "$(git -C ~/local-operator rev-parse origin/main)"`, once the bump
+order" step 4 already does: resolve `origin/main` in its own command, check it is
+the bump's merge commit, then pass that literal SHA to `--target`, once the bump
 has merged and `origin/main` has been fetched. **Never the bump
 branch's own head**, which is a different SHA and is not what ships.
 
@@ -2327,6 +2333,38 @@ of its own — a heap cap on node (`--max-old-space-size`), a worker count sized
 available memory — and run in its own process group, because the guard can only end
 a group it owns. Do not hand-roll an unbounded runner when the repo already has a
 bounded one (the pytest worker cap above is the pattern).
+
+## Branch-moving commands: one target, one invocation
+
+Anything that moves a ref — `git push`, `git update-ref`, `git tag -f`,
+`gh pr merge`, `gh release create` — is issued as **one command with one literal
+target**: the PR number, the ref name, the SHA or the tag written out in the
+invocation, and the resulting state read back afterwards.
+
+Never assemble such a command inside a loop, alongside unrelated commands in one
+batch, or from a target another step computed by substitution (`--target
+"$(...)"`, `$PR`, `$SHA`). A batch that is malformed should fail to parse; it
+must not resolve to a plausible-looking target.
+
+**Resolving a value is not the same as deriving it in place.** The release
+procedure needs `~/.local-operator`'s new head, and the release instructions
+above require it. Resolve it in its own command, print it, check it against
+what you expect, and then put the literal value in the merge and release
+commands. Three visible steps — freeze, verify, use — satisfy this rule; one
+embedded `$(...)` does not, because nobody sees the value until it has already
+been acted on.
+
+This rule exists because of a real near-miss. On 2026-10-24 (local; 2026-10-25 UTC) a
+malformed multi-command batch fired `gh pr merge --squash` at an unrelated,
+unreviewed pull request. Nothing merged: the repository's required-review
+control refused it, exactly as designed. But that control was the only thing
+between the mistake and an unreviewed merge — `--admin`, used routinely here for
+PRs that *have* passed review, would have completed it. The rule is about not
+needing that control to catch a typo.
+
+It applies to every automated lane, not just interactive work. The release rules
+above still govern *who* takes a window and *what* the window contains; this
+governs *how* each of those steps is issued.
 
 ## Who may merge: two tiers
 
