@@ -1556,7 +1556,12 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
             hosts.append(text)
 
     for host in (*declared, *settings.advertise_hosts):
-        add(host)
+        text = str(host or "").strip()
+        reason = addresses.stale_declared_address_reason(text)
+        if reason is not None:
+            logger.warning("Skipping advertised address %s: %s.", text, reason)
+            continue
+        add(text)
     live = _own_relay_listen(settings.root)
     for endpoint in live.get("advertised") or []:
         add(endpoint)

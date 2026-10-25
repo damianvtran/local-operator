@@ -202,10 +202,20 @@ def validate(record: Mapping[str, Any], *, approval_id: str | None = None) -> No
     require(isinstance(anchor, dict) and set(anchor) == {"key_id", "spki_fp", "statement_digest"})
     require(all(isinstance(v, str) and 0 < len(v) <= 256 for v in anchor.values()))
     target = _object(record.get("device"))
+    required_target = {
+        "device_id",
+        "name",
+        "fingerprint",
+        "host",
+        "user",
+        "transport",
+        "host_key_fp",
+    }
     require(
         isinstance(target, dict)
-        and set(target)
-        == {"device_id", "name", "fingerprint", "host", "user", "transport", "host_key_fp"}
+        # Cards approved before advertise_host existed remain valid; new cards
+        # carry the field in the same digest-bound target block.
+        and required_target <= set(target) <= required_target | {"advertise_host"}
     )
     require(
         all(

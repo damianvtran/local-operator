@@ -100,6 +100,7 @@ class OnboardRequest(BaseModel):
     network_id: str = Field(min_length=1, max_length=128)
     credential_ref: str = Field(min_length=1, max_length=512, pattern=r"^[^\r\n]+$")
     host_key_fp: str = Field(min_length=1, max_length=128, pattern=r"^SHA256:[A-Za-z0-9+/=]+$")
+    advertise_host: str = Field(default="", max_length=512, pattern=r"^[^\r\n]*$")
     unattended: bool = True
     grant: list[str] = Field(default_factory=lambda: ["approve"], max_length=32)
 
