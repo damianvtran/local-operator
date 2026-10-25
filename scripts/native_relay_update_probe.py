@@ -167,6 +167,12 @@ def _systemd_binary() -> str | None:
     return None
 
 
+def _log_tail(log: Any) -> str:
+    """Bounded manager diagnostics; this log contains no application credentials."""
+    log.flush()
+    return Path(log.name).read_text(encoding="utf-8", errors="replace")[-2000:].strip()
+
+
 def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     """Start and prove the private manager BEFORE any install/service work."""
     xdg = scratch / "xdg"
@@ -193,14 +199,18 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            raise ProbeBlocked(f"private systemd --user exited with {proc.returncode}")
+            detail = _log_tail(log) or "no manager log"
+            raise ProbeBlocked(
+                f"private systemd --user exited with {proc.returncode}: {detail}"
+            )
         ready = _run(["systemctl", "--user", "daemon-reload"], env=env, timeout=3.0)
         if ready.returncode == 0:
             return proc
         time.sleep(0.1)
     proc.terminate()
     proc.wait(timeout=5)
-    raise ProbeBlocked("private systemd --user did not answer within 15s")
+    detail = _log_tail(log) or "no manager log"
+    raise ProbeBlocked(f"private systemd --user did not answer within 15s: {detail}")
 
 
 def _install_source(source: Path, sha: str, version: str, ref: str) -> Path:
