@@ -113,7 +113,7 @@ from local_operator.server.utils.store_failures import (
     sqlite_store_failure,
     store_failure,
 )
-from local_operator.session import open_trace
+from local_operator.session import open_trace, transcript_index
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
     SUPERSEDED_TOKEN_CODE,
@@ -3684,12 +3684,15 @@ async def checkpoints(session_id: str, request: Request):
     what tells the rail to keep polling while a name is being generated
     (``sessions.checkpoints.warm`` is BE-2's op and is not part of this
     route).
+
+    NO BRIDGE (CORE-PROFILE L1): ``DesktopSessions.checkpoints`` asks the
+    door's own questions -- the 404, the draft admission, the retiring latch,
+    the peer placement -- without building the cold facade or taking the
+    bridge lock, so a cold open's parallel ``/events`` no longer waits behind
+    this read. See that method for the one-by-one equivalence with the door.
     """
-    async with (
-        errors(request),
-        host(request).session(session_id, read=True, allow_draft=True) as bridge,
-    ):
-        return reply(await bridge.checkpoints())
+    async with errors(request):
+        return reply(await host(request).checkpoints(session_id))
 
 
 @router.post(
@@ -6005,35 +6008,52 @@ async def events(
     # draft across its engage — the pane opens this stream before it warms, and
     # the warm is cancelled on detach precisely because this is the user whose
     # absence would leave a runtime with nobody to serve (spec §1.3).
-    context = host(request).session(session_id, read=True, allow_draft=True)
-    async with errors(request):
-        bridge: DesktopSessionBridge = await context.__aenter__()
-        try:
-            # ADDITIVE NEGOTIATION (contract §C). ``frontend_replace=1`` says
-            # this renderer can consume the desktop-only ``frontend.replace``
-            # frame; an older client sends nothing, the parameter defaults to 0,
-            # and the move path then refuses rather than leaving that mounted
-            # viewer stale. The flag is retained on the subscription so the
-            # fence in ``subscribe`` can refuse a LEGACY mount during a move.
-            #
-            # ``supplements=1`` is the same kind of declaration for the
-            # ``supplements-v1`` family (memo §2.7): only a subscriber that
-            # sends it is handed ``supplement_progress`` frames -- live or from
-            # replay -- so an older renderer never meets the family. The rows
-            # themselves are journaled either way; this gates the live carriage,
-            # not the record.
-            sub = bridge.subscribe(
-                frontend_replace=bool(frontend_replace),
-                supplements=bool(supplements),
-                journal_order=bool(journal_order),
-                peer_journal_source=bool(peer_journal_source),
-            )
-        except LegacySubscriberDuringMove as error:
-            await context.__aexit__(None, None, None)
-            raise HTTPException(409, str(error)) from None
-        except BaseException:
-            await context.__aexit__(None, None, None)
-            raise
+    pool = host(request)
+    # THE PAINT HOLD (CORE-PROFILE L2; ``transcript_index``'s "The paint hold"):
+    # from here until the snapshot frame below has been written, a refresh that
+    # would be a cold, unpayable full scan of this journal -- started by this
+    # open's own frame read, its journal-order correction, or the parallel
+    # ``/checkpoints`` -- waits instead of competing with the first paint for
+    # the GIL. Taken BEFORE the acquire, because the cold facade build is part
+    # of what the first frame waits on. Released on EVERY exit: the snapshot
+    # written, an acquire/subscribe failure (the ``except`` just below), and
+    # ``release_once`` -- which the generator's teardown and the response's
+    # background task both reach on a disconnect or a never-consumed body. The
+    # release is idempotent, and the index module's ceiling bounds a leak.
+    release_paint = transcript_index.hold_paint(pool.root, session_id)
+    context = pool.session(session_id, read=True, allow_draft=True)
+    try:
+        async with errors(request):
+            bridge: DesktopSessionBridge = await context.__aenter__()
+            try:
+                # ADDITIVE NEGOTIATION (contract §C). ``frontend_replace=1`` says
+                # this renderer can consume the desktop-only ``frontend.replace``
+                # frame; an older client sends nothing, the parameter defaults to 0,
+                # and the move path then refuses rather than leaving that mounted
+                # viewer stale. The flag is retained on the subscription so the
+                # fence in ``subscribe`` can refuse a LEGACY mount during a move.
+                #
+                # ``supplements=1`` is the same kind of declaration for the
+                # ``supplements-v1`` family (memo §2.7): only a subscriber that
+                # sends it is handed ``supplement_progress`` frames -- live or from
+                # replay -- so an older renderer never meets the family. The rows
+                # themselves are journaled either way; this gates the live carriage,
+                # not the record.
+                sub = bridge.subscribe(
+                    frontend_replace=bool(frontend_replace),
+                    supplements=bool(supplements),
+                    journal_order=bool(journal_order),
+                    peer_journal_source=bool(peer_journal_source),
+                )
+            except LegacySubscriberDuringMove as error:
+                await context.__aexit__(None, None, None)
+                raise HTTPException(409, str(error)) from None
+            except BaseException:
+                await context.__aexit__(None, None, None)
+                raise
+    except BaseException:
+        release_paint()
+        raise
 
     # The bridge is acquired ABOVE, before any response exists, so that an
     # invalid session or a full subscriber table is a JSON error rather than a
@@ -6053,6 +6073,7 @@ async def events(
         if released:
             return
         released = True
+        release_paint()
         await context.__aexit__(None, None, None)
 
     async def stream():
@@ -6103,6 +6124,10 @@ async def events(
                                 chars=len(text),
                             )
                         yield text
+                        if isinstance(frame, dict) and frame.get("type") == "snapshot":
+                            # Written: the first paint no longer needs the GIL to
+                            # itself, so a deferred scan may start now.
+                            release_paint()
                 finally:
                     # STAMPED BEFORE THE GENERATOR IS CLOSED, AND THE ORDER IS
                     # LOAD-BEARING RATHER THAN TIDY (F-B). Closing it arms the
