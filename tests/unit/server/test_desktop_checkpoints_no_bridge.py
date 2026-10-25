@@ -379,11 +379,16 @@ async def test_cancellation_at_response_start_releases_before_generator_entry(ap
             raise asyncio.CancelledError
 
     scope = {
-        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
-        "http_version": "1.1", "method": "GET", "scheme": "http",
-        "path": f"/v1/desktop/sessions/{SID}/events", "query_string": b"",
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": f"/v1/desktop/sessions/{SID}/events",
+        "query_string": b"",
         "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
-        "server": ("localhost", 80), "client": ("127.0.0.1", 1234),
+        "server": ("localhost", 80),
+        "client": ("127.0.0.1", 1234),
     }
     with pytest.raises(asyncio.CancelledError):
         await app(scope, receive, send)

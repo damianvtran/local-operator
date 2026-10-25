@@ -9209,10 +9209,7 @@ class DesktopSessions:
             # #1110 wrote the coverage for a malformed marker and found the
             # strict read behind it (R3).
             stored = read_desktop_marker(path)
-            if (
-                not (path / DESKTOP_MARKER_NAME).exists()
-                and session_activity(path) is None
-            ):
+            if not (path / DESKTOP_MARKER_NAME).exists() and session_activity(path) is None:
                 # M1's SECOND LEG (round-1 review): a directory with NO
                 # marker document at all, no transcript and no mail
                 # spool must not open as a session. That is what a
@@ -9251,10 +9248,7 @@ class DesktopSessions:
             # backward and never creates the directory.
             checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
             return _LocatedSession(
-                str(
-                    (checkpoint or {}).get("state", {}).get("cwd")
-                    or self.root.parent
-                ),
+                str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
                 None,
             )
         from local_operator.session.remote_open import (
@@ -9842,9 +9836,10 @@ class DesktopSessions:
             draft = self._draft_for(session_id)
             bridge = self.bridges.get(session_id)
             if bridge is not None and draft is None and bridge.draft is not None:
-                if session_id not in self._materialising and not (
-                    self.root / "sessions" / session_id / DESKTOP_MARKER_NAME
-                ).is_file():
+                if (
+                    session_id not in self._materialising
+                    and not (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file()
+                ):
                     raise KeyError("Unknown session")
             if bridge is not None:
                 self.assert_admitting()
