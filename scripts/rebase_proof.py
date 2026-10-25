@@ -123,7 +123,9 @@ def prove(repo: Path, old: str, new: str, base: str) -> tuple[bool, str]:
             delta = (old_patch - new_patch) + (new_patch - old_patch)
             reasons.append(f"patch lines differ ({sum(delta.values())} lines)")
         files = ", ".join(f"`{f}`" for f in overlap) or "none overlapping"
-        verdict = f"CONVERGENCE REVIEW NEEDED — files: {files}; " + "; ".join(reasons or ["overlap"])
+        verdict = f"CONVERGENCE REVIEW NEEDED — files: {files}; " + "; ".join(
+            reasons or ["overlap"]
+        )
 
     short = lambda sha: sha[:10]  # noqa: E731 — display only
     block = "\n".join(
