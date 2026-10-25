@@ -1504,6 +1504,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 def _show_lines(payload: dict[str, Any]) -> list[str]:
     from local_operator.network.relay import membership_lines
+    from local_operator.resume import UNNAMED_DEVICE
 
     lines = [
         f"{payload.get('name')}  {payload.get('network_id')}  epoch {payload.get('epoch')}  "
@@ -1524,8 +1525,19 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
     for member in payload.get("members_detail") or []:
         mark = "active" if member["active"] else "REMOVED"
         suspect = "  [suspect: key may be copied]" if member.get("suspect") else ""
+        # Names are unauthenticated labels, so the full device id stays in its own
+        # leading column; putting the variable-length name after it keeps duplicate
+        # or crafted names from hiding the only field that distinguishes members.
+        # JSON-quoting every present name reserves the unquoted fallback for absent
+        # metadata: no literal stored spelling can impersonate that fallback.
+        stored_name = str(member.get("name") or "")
+        name = (
+            json.dumps(stored_name, ensure_ascii=False)
+            if stored_name.strip()
+            else f"({UNNAMED_DEVICE})"
+        )
         lines.append(
-            f"  {mark:7} {member['device_id']}  {member['role']:5}  "
+            f"  {mark:7} {member['device_id']}  {name}  {member['role']:5}  "
             f"{', '.join(member['capabilities'])}{suspect}"
         )
     for invite in payload.get("invites") or []:
