@@ -21680,9 +21680,14 @@ class Session:
         missing field means the pass's own default, a missing function means
         no pass — the same posture ``_plan_compaction`` takes for pruning.
         """
-        if not getattr(settings, "enabled", True) or not getattr(
-            settings, "aged_clear_enabled", True
+        if (
+            not getattr(settings, "enabled", True)
+            or not getattr(settings, "aged_clear_enabled", True)
+            or self._resolve_strategy(settings) == "off"
         ):
+            # ``strategy=off`` is the other supported compaction kill switch.
+            # This shared gate runs before the mid-turn threshold pre-gate,
+            # so the planner's later strategy check cannot protect it.
             return 0
         clear = getattr(compaction_api, "clear_aged_tool_results", None)
         if clear is None:

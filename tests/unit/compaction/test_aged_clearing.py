@@ -14,10 +14,19 @@ from local_operator.compaction.pruning import (
     AGED_CLEAR_PROTECTED_TOOLS,
     USELESS_NOTICE,
     aged_clear_notice,
-    clear_aged_tool_results,
+)
+from local_operator.compaction.pruning import (
+    clear_aged_tool_results as _clear_aged_tool_results,
 )
 from local_operator.compaction.tokens import estimate_tokens
 from local_operator.harness.types import Message, TextContent, ToolCall
+
+
+def clear_aged_tool_results(messages, **kwargs):
+    # Isolate the age/batch/protection contracts below from the independent
+    # rewrite guard, which has its own production-default tests at the end.
+    return _clear_aged_tool_results(messages, min_saving_ratio=0, **kwargs)
+
 
 _FILLER = "data " * 1_000  # ~1k estimated tokens
 
@@ -217,3 +226,22 @@ def test_stub_is_deterministic():
 def test_non_positive_age_disables_the_pass():
     history = _aged(_pair(0), 40)
     assert clear_aged_tool_results(history, after_calls=0, batch_tokens=0)[1] == 0
+
+
+def test_rewrite_guard_defers_a_small_batch_with_a_large_recent_suffix():
+    history = _pair(0) + _aged([], 40) + _pair(1, text=_FILLER * 5)
+    assert _clear_aged_tool_results(history, batch_tokens=0)[1] == 0
+    assert all(not m.text.startswith("[Older result cleared") for m in _results(history))
+
+
+def test_rewrite_guard_clears_the_whole_batch_once_net_savings_cover_the_suffix():
+    history = _pair(0, text=_FILLER * 5) + _aged([], 40) + _pair(1)
+    assert _clear_aged_tool_results(history, batch_tokens=0)[1] == 1
+    assert _results(history)[0].text.startswith("[Older result cleared")
+    assert _results(history)[1].text == _FILLER
+
+
+def test_rewrite_guard_counts_the_actual_stub_size():
+    history = _aged(_pair(0, arguments={"path": "long/" * 2000}), 40)
+    # A pathological locator larger than the saved body cannot save context.
+    assert _clear_aged_tool_results(history, batch_tokens=0)[1] == 0

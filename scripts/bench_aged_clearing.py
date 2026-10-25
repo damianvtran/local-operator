@@ -21,9 +21,12 @@ Per arm it reports: total context tokens sent; modeled billed cost with cache
 reads at 0.1x and uncached/written input at 1.0x and 1.25x (the cached prefix
 of a request ends at the first message index changed since the previous
 request, so a clear pays the write rate on everything after it); the number
-of clear events; and the share of cleared results the transcript later
-re-fetched (the same read path, bash command or grep pattern+scope issued
-again after the clear).
+of clear events; and historical later same-key calls (read path, bash command or grep
+pattern+scope). The recorded models NEVER saw the stubs: these are historical
+repeats, NOT induced re-fetches. Only matched live runs measure the latter.
+An additional conservative Anthropic model credits only previously WRITTEN
+markers within 20 blocks and charges the configured 1h/2x write tier.
+Per-length buckets and per-session deltas expose short-run regressions.
 
 Read-only by construction: point ``--corpus`` at a COPY of the transcripts
 (``cp -c`` clones on APFS cost nothing), never at the live session store.
@@ -49,13 +52,18 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from local_operator.compaction.pruning import (  # noqa: E402
+    AGED_CLEAR_MIN_SAVING_RATIO,
     DEFAULT_AGED_CLEAR_AFTER_CALLS,
     DEFAULT_AGED_CLEAR_BATCH_TOKENS,
     DEFAULT_AGED_CLEAR_MIN_TOKENS,
     clear_aged_tool_results,
     prune_tool_outputs,
 )
-from local_operator.compaction.tokens import estimate_tokens  # noqa: E402
+from local_operator.compaction.tokens import (  # noqa: E402
+    clear_estimate_cache,
+    estimate_tokens,
+)
+from local_operator.harness.replay_bound import bound_replay_payloads  # noqa: E402
 from local_operator.harness.types import Message  # noqa: E402
 
 #: Price multipliers, relative to one uncached input token.
@@ -76,8 +84,107 @@ class ArmResult:
     clear_events: int = 0
     cleared_items: int = 0
     cleared_tokens: int = 0
-    refetched_items: int = 0
-    refetched_tokens: int = 0
+    historical_repeat_items: int = 0
+    historical_repeat_tokens: int = 0
+    anthropic_cost: float = 0.0
+
+
+@dataclass
+class BreakpointCache:
+    """Conservative text-history cache simulator, not arbitrary-prefix reuse.
+
+    Only prefixes a previous request explicitly WROTE can be read. Lookup is
+    limited to the 20 content blocks preceding either current marker (tail
+    and previous-user; production's text-only marker layout). We use message
+    ends as potential hits: a real intra-message block hit is ignored rather
+    than invented. Images/re-rendering, provider minimum-cache sizes, wall
+    clock expiry, schemas and system-block splits are not reconstructible
+    here; the fixed system head is assumed cacheable after its first write.
+    These are assumptions, NOT provider-accurate invoice claims. Long-context
+    writes cost 2x (1h), smaller writes 1.25x (5m), cache reads 0.1x. The TTL
+    choice uses the previous request's size, like the live provider hint.
+    """
+
+    written: set[int] = field(default_factory=set)
+    system_written: bool = False
+    previous_size: int = 0
+
+    def price(self, messages, tokens, system_tokens, threshold) -> float:
+        ends, fingerprints, prefix_tokens = [], [], []
+        blocks, fingerprint, subtotal = 0, 0, 0
+        for message, size in zip(messages, tokens):
+            blocks += max(1, len(message.content) + len(message.tool_calls))
+            fingerprint = hash(
+                (fingerprint, message.id, bool((message.provider_payload or {}).get("pruned")))
+            )
+            subtotal += size
+            ends.append(blocks)
+            fingerprints.append(fingerprint)
+            prefix_tokens.append(subtotal)
+        targets = [len(messages) - 1] if messages else []
+        # Anthropic maps tool results to user/tool_result blocks before
+        # selecting its previous-user marker (not just typed user messages).
+        users = [i for i, m in enumerate(messages) if m.role in ("user", "tool")]
+        if len(users) >= 2:
+            targets.append(users[-2])
+        cached = system_tokens if self.system_written else 0
+        for target in targets:
+            for index in range(target, -1, -1):
+                if ends[target] - ends[index] >= 20:
+                    break
+                if fingerprints[index] in self.written:
+                    cached = max(cached, system_tokens + prefix_tokens[index])
+                    break
+        total = system_tokens + subtotal
+        write_rate = 2.0 if threshold > 0 and self.previous_size >= threshold else 1.25
+        cost = cached * CACHE_READ + (total - cached) * write_rate
+        for target in targets:
+            self.written.add(fingerprints[target])
+        self.system_written = True
+        self.previous_size = total
+        return cost
+
+
+def distribution(pairs) -> dict[str, Any]:
+    """Report every session and length buckets; an aggregate can hide losers."""
+    rows = [
+        {
+            "session_index": index,
+            "requests": b.requests,
+            "clear_events": a.clear_events,
+            "delta": a.anthropic_cost / b.anthropic_cost - 1 if b.anthropic_cost else 0.0,
+            "baseline_cost": b.anthropic_cost,
+            "aged_cost": a.anthropic_cost,
+        }
+        for index, (b, a) in enumerate(pairs)
+    ]
+    buckets = {}
+    for label, lo, hi in (
+        ("1-40", 1, 40),
+        ("41-80", 41, 80),
+        ("81-160", 81, 160),
+        ("161+", 161, float("inf")),
+    ):
+        subset = [r for r in rows if lo <= r["requests"] <= hi]
+        old = sum(r["baseline_cost"] for r in subset)
+        new = sum(r["aged_cost"] for r in subset)
+        buckets[label] = {
+            "sessions": len(subset),
+            "clearing": sum(r["clear_events"] > 0 for r in subset),
+            "regressions": sum(r["delta"] > 1e-9 for r in subset),
+            "cost_delta": new / old - 1 if old else 0.0,
+        }
+    deltas = sorted(r["delta"] for r in rows)
+    quantiles = {
+        name: deltas[min(len(deltas) - 1, int(q * (len(deltas) - 1)))] if deltas else 0
+        for name, q in (("min", 0), ("p10", 0.1), ("p50", 0.5), ("p90", 0.9), ("max", 1))
+    }
+    return {
+        "buckets": buckets,
+        "quantiles": quantiles,
+        "regressions": sum(r["delta"] > 1e-9 for r in rows),
+        "sessions": rows,
+    }
 
 
 def _refetch_key(name: str | None, arguments: dict[str, Any]) -> str | None:
@@ -115,10 +222,12 @@ def _load(path: str) -> list[tuple[str, Any]]:
 
 
 def _replay(events: list[tuple[str, Any]], aged: bool, args: argparse.Namespace) -> ArmResult:
+    clear_estimate_cache()  # IDs repeat across arms; their content must not share estimates.
     result = ArmResult()
+    cache = BreakpointCache()
     context: list[Message] = []
     previous: list[tuple[str, bool]] = []
-    cleared_keys: dict[str, int] = {}  # refetch key -> tokens cleared under it
+    cleared_keys: dict[str, list[int]] = {}  # same-key historical results, not induced re-fetches
     call_keys: dict[str, str] = {}  # tool_call_id -> refetch key
 
     # Per-arm memo keyed (id, pruned): within one arm a message is blanked at
@@ -134,6 +243,9 @@ def _replay(events: list[tuple[str, Any]], aged: bool, args: argparse.Namespace)
         return memo[key]
 
     def prices(request: list[Message]) -> None:
+        # Same non-mutating, derived-ID wire bound as AgentLoop._stream_once.
+        # Clearing still sees the durable unbounded history, as in Session.
+        request = bound_replay_payloads(request)
         tokens = [tokens_of(m) for m in request]
         signature = [(m.id, bool((m.provider_payload or {}).get("pruned"))) for m in request]
         first_change = next(
@@ -141,11 +253,14 @@ def _replay(events: list[tuple[str, Any]], aged: bool, args: argparse.Namespace)
             min(len(signature), len(previous)),
         )
         total = args.system_tokens + sum(tokens)
-        cached = args.system_tokens + sum(tokens[:first_change])
+        cached = (args.system_tokens + sum(tokens[:first_change])) if previous else 0
         result.requests += 1
         result.context_tokens += total
         for rate in WRITE_RATES:
             result.cost[str(rate)] += cached * CACHE_READ + (total - cached) * rate
+        result.anthropic_cost += cache.price(
+            request, tokens, args.system_tokens, args.cache_1h_threshold
+        )
         previous[:] = signature
 
     for kind, data in events:
@@ -172,8 +287,9 @@ def _replay(events: list[tuple[str, Any]], aged: bool, args: argparse.Namespace)
                     continue
                 call_keys[call.id] = key
                 if key in cleared_keys:
-                    result.refetched_items += 1
-                    result.refetched_tokens += cleared_keys.pop(key)
+                    sizes = cleared_keys.pop(key)
+                    result.historical_repeat_items += len(sizes)
+                    result.historical_repeat_tokens += sum(sizes)
         context.append(message)
     return result
 
@@ -183,7 +299,7 @@ def _clear(
     result: ArmResult,
     args: argparse.Namespace,
     call_keys: dict[str, str],
-    cleared_keys: dict[str, int],
+    cleared_keys: dict[str, list[int]],
 ) -> None:
     before = {m.id: estimate_tokens(m) for m in context if m.role == "tool"}
     pruned = {m.id for m in context if (m.provider_payload or {}).get("pruned")}
@@ -192,6 +308,7 @@ def _clear(
         after_calls=args.after_calls,
         min_tokens=args.min_tokens,
         batch_tokens=args.batch_tokens,
+        min_saving_ratio=args.min_saving_ratio,
     )
     if not cleared:
         return
@@ -206,7 +323,7 @@ def _clear(
         result.cleared_tokens += freed
         key = call_keys.get(message.tool_call_id or "")
         if key is not None:
-            cleared_keys[key] = cleared_keys.get(key, 0) + before[message.id]
+            cleared_keys.setdefault(key, []).append(freed)
 
 
 def _one(path: str, args: argparse.Namespace) -> tuple[ArmResult, ArmResult] | None:
@@ -219,6 +336,7 @@ def _one(path: str, args: argparse.Namespace) -> tuple[ArmResult, ArmResult] | N
 def _sum(results: list[ArmResult]) -> ArmResult:
     total = ArmResult()
     for r in results:
+        total.anthropic_cost += r.anthropic_cost
         total.requests += r.requests
         total.context_tokens += r.context_tokens
         for rate in total.cost:
@@ -226,8 +344,8 @@ def _sum(results: list[ArmResult]) -> ArmResult:
         total.clear_events += r.clear_events
         total.cleared_items += r.cleared_items
         total.cleared_tokens += r.cleared_tokens
-        total.refetched_items += r.refetched_items
-        total.refetched_tokens += r.refetched_tokens
+        total.historical_repeat_items += r.historical_repeat_items
+        total.historical_repeat_tokens += r.historical_repeat_tokens
     return total
 
 
@@ -237,10 +355,12 @@ def main() -> int:
     )
     parser.add_argument("--corpus", required=True, help="glob of COPIED transcript.jsonl files")
     parser.add_argument("--after-calls", type=int, default=DEFAULT_AGED_CLEAR_AFTER_CALLS)
+    parser.add_argument("--min-saving-ratio", type=float, default=AGED_CLEAR_MIN_SAVING_RATIO)
     parser.add_argument("--min-tokens", type=int, default=DEFAULT_AGED_CLEAR_MIN_TOKENS)
     parser.add_argument("--batch-tokens", type=int, default=DEFAULT_AGED_CLEAR_BATCH_TOKENS)
     parser.add_argument("--system-tokens", type=int, default=DEFAULT_SYSTEM_TOKENS)
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
+    parser.add_argument("--cache-1h-threshold", type=int, default=150_000)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -259,19 +379,23 @@ def main() -> int:
         "transcripts": len(pairs),
         "params": {
             "after_calls": args.after_calls,
+            "min_saving_ratio": args.min_saving_ratio,
             "min_tokens": args.min_tokens,
             "batch_tokens": args.batch_tokens,
             "system_tokens": args.system_tokens,
+            "cache_1h_threshold": args.cache_1h_threshold,
         },
         "baseline": asdict(base),
         "aged": asdict(aged),
+        "anthropic_cost_delta": delta(aged.anthropic_cost, base.anthropic_cost),
+        "distribution": distribution(pairs),
         "context_delta": delta(aged.context_tokens, base.context_tokens),
         "cost_delta": {r: delta(aged.cost[r], base.cost[r]) for r in base.cost},
-        "refetch_share_items": (
-            (aged.refetched_items / aged.cleared_items) if aged.cleared_items else 0.0
+        "historical_repeat_share_items": (
+            (aged.historical_repeat_items / aged.cleared_items) if aged.cleared_items else 0.0
         ),
-        "refetch_share_tokens": (
-            (aged.refetched_tokens / aged.cleared_tokens) if aged.cleared_tokens else 0.0
+        "historical_repeat_share_tokens": (
+            (aged.historical_repeat_tokens / aged.cleared_tokens) if aged.cleared_tokens else 0.0
         ),
     }
     if args.json:
@@ -295,9 +419,11 @@ def main() -> int:
     )
     print(
         f"cleared  {aged.cleared_items:,} results / {aged.cleared_tokens:,} tokens;"
-        f" re-fetched later: {report['refetch_share_items']:.1%} of items,"
-        f" {report['refetch_share_tokens']:.1%} of tokens"
+        f" historical later same-key calls: {report['historical_repeat_share_items']:.1%} of items,"
+        f" {report['historical_repeat_share_tokens']:.1%} of tokens"
     )
+    print(f"Anthropic breakpoint/20-block/TTL model delta: {report['anthropic_cost_delta']:+.1%}")
+    print(json.dumps(report["distribution"], indent=2))
     return 0
 
 

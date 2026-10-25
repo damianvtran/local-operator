@@ -66,6 +66,7 @@ __all__ = [
     "SUPERSEDED_NOTICE",
     "USELESS_NOTICE",
     "AGED_CLEAR_PROTECTED_TOOLS",
+    "AGED_CLEAR_MIN_SAVING_RATIO",
     "DEFAULT_AGED_CLEAR_AFTER_CALLS",
     "DEFAULT_AGED_CLEAR_BATCH_TOKENS",
     "DEFAULT_AGED_CLEAR_MIN_TOKENS",
@@ -1211,10 +1212,12 @@ def prune_tool_outputs(
 # call and lose; hence the BATCH threshold: nothing fires until the eligible
 # total reaches ``batch_tokens`` (30k by default), then EVERY eligible result
 # goes in that one rewrite, so the write premium is paid once per ~30k of
-# relief. Offline replay of 500 real transcripts with K=30 / MIN=500 /
-# T=30000: modeled billed cost -15% (-11% even if 30% of the cleared content
-# is re-fetched), context -19..-22%. ``scripts/bench_aged_clearing.py`` runs
-# the same replay through THIS function.
+# relief. The original fixed-trajectory simulation suggested ~15% savings,
+# but a provider-aware replay exposed short-run regressions: a last-call
+# rewrite never has time to repay. The net-saving/suffix guard below defers
+# those least economical batches. ``scripts/bench_aged_clearing.py`` reports
+# both provider assumptions and per-session/length-bucket regressions; only
+# matched live trials can measure re-fetch calls induced by the stubs.
 #
 # The age is counted in ASSISTANT messages after the result (one per model
 # call), not wall-clock: the cost of residency is per request, and a result
@@ -1238,6 +1241,17 @@ AGED_CLEAR_PROTECTED_TOOLS = frozenset(
 #: How much of a bash command the stub quotes. Enough to recognise and re-run
 #: the command; a heredoc body is not worth carrying into every later request.
 _AGED_CLEAR_COMMAND_CHARS = 100
+
+# A 30k batch can still lose when a short child ends just after clearing: the
+# remaining warm suffix is rewritten at 1.25x (or 2x for 1h), instead of read
+# at 0.1x. Require the NET saving to cover at least TWICE the surviving suffix
+# before paying that cost. On a seeded 400-session replay this removed the
+# unguarded 41–80-request bucket's +5.4% cost regression (guarded: -0.26%)
+# and all >0.1% per-session regressions, trading aggregate savings for safety.
+# This is a bounded-payback guard, NOT a promise that a run ending on the very
+# next request breaks even. The replay benchmark exposes
+# the remaining per-session regressions; aggregate savings do not erase them.
+AGED_CLEAR_MIN_SAVING_RATIO = 2.0
 
 
 def _clip(text: str, limit: int) -> str:
@@ -1315,6 +1329,7 @@ def clear_aged_tool_results(
     after_calls: int = DEFAULT_AGED_CLEAR_AFTER_CALLS,
     min_tokens: int = DEFAULT_AGED_CLEAR_MIN_TOKENS,
     batch_tokens: int = DEFAULT_AGED_CLEAR_BATCH_TOKENS,
+    min_saving_ratio: float = AGED_CLEAR_MIN_SAVING_RATIO,
 ) -> tuple[list[Message], int]:
     """Blank, in place and all at once, every aged tool result — or none.
 
@@ -1322,9 +1337,10 @@ def clear_aged_tool_results(
     old, at least ``min_tokens`` estimated tokens, prunable (never an error,
     never a skill/guide read), not already pruned, and not from a
     coordination tool (:data:`AGED_CLEAR_PROTECTED_TOOLS`). Fires only when
-    the eligible total reaches ``batch_tokens``; then clears ALL of them, so a
-    second call over the same history is a no-op until enough newer results
-    age in. Returns ``(messages, cleared_count)``. Messages are never removed,
+    the eligible total reaches ``batch_tokens`` AND the net token saving
+    covers twice the surviving suffix (the rewrite-cost guard); then clears ALL of
+    them, so a second call over the same history is a no-op until enough newer
+    results age in. Returns ``(messages, cleared_count)``. Messages are never removed,
     so every tool-call/result pair survives.
 
     Cost when nothing qualifies is one structural walk: the estimator (and its
@@ -1348,9 +1364,24 @@ def clear_aged_tool_results(
         if message.role == "assistant":
             for call in message.tool_calls:
                 arguments[call.id] = call.arguments
+    notices = {
+        i: aged_clear_notice(messages[i], arguments.get(messages[i].tool_call_id or ""))
+        for i, _ in eligible
+    }
+    # Delay suffix/token work until BOTH the age and batch gates passed. Count
+    # the actual stubs too: a very long locator must not manufacture savings.
+    stub_tokens = sum(
+        estimate_tokens(Message(role="tool", content=[TextContent(text=notice)]))
+        for notice in notices.values()
+    )
+    net_saved = sum(tokens for _, tokens in eligible) - stub_tokens
+    suffix_tokens = sum(estimate_tokens(m) for m in messages[eligible[0][0] :])
+    remaining = suffix_tokens - net_saved
+    if net_saved <= 0 or net_saved < min_saving_ratio * remaining:
+        return list(messages), 0
     for i, _ in eligible:
         message = messages[i]
-        _blank(message, aged_clear_notice(message, arguments.get(message.tool_call_id or "")))
+        _blank(message, notices[i])
     return list(messages), len(eligible)
 
 

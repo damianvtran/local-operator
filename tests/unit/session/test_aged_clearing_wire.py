@@ -1,7 +1,7 @@
 """Aged tool-result clearing at the WIRE: the request the provider receives.
 
 No provider: a scripted stream records every ``ChatRequest`` a real
-``Session`` builds while one prompt drives ~45 tool calls of ~2k tokens each.
+``Session`` builds while one prompt drives ~95 tool calls of ~2k tokens each.
 That is the shape the pass exists for — a delegated child's single launch
 turn, which never reaches the compaction threshold — and what matters is the
 request bytes, not the in-memory list:
@@ -17,6 +17,7 @@ request bytes, not the in-memory list:
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import pytest
 
@@ -40,7 +41,7 @@ from .test_session import ScriptedStream
 # A window big enough that ~90k of history never approaches the compaction
 # trigger: anything this test sees is the aged pass, not a compaction pass.
 MODEL = ModelSpec(provider="test", model_id="m", context_window=1_000_000)
-CALLS = 45
+CALLS = 95
 AFTER = 30
 STUB_PREFIX = "[Older result cleared to save context"
 
@@ -79,7 +80,13 @@ def _script() -> ScriptedStream:
     return ScriptedStream(turns)
 
 
-def _session(directory, stream, *, enabled: bool) -> Session:
+def _session(
+    directory,
+    stream,
+    *,
+    enabled: bool,
+    strategy: Literal["auto", "context-full", "snapcompact", "off"] = "auto",
+) -> Session:
     return Session(
         model=MODEL,
         stream_fn=stream,
@@ -87,6 +94,7 @@ def _session(directory, stream, *, enabled: bool) -> Session:
         transcript=Transcript(directory),
         system_blocks_provider=lambda: ["stable", "env"],
         compaction_settings=CompactionSettings(
+            strategy=strategy,
             aged_clear_enabled=enabled,
             aged_clear_after_calls=AFTER,
             aged_clear_min_tokens=500,
@@ -166,17 +174,24 @@ async def test_the_request_after_a_clear_carries_stubs_and_keeps_its_prefix(tmp_
         if m.role == "tool"
     }
     assert replayed == session_texts
-    assert sum(STUB_PREFIX in t for t in replayed.values()) >= CALLS - AFTER
+    assert sum(STUB_PREFIX in t for t in replayed.values()) > 0
     await resumed.dispose()
 
 
 @pytest.mark.asyncio
-async def test_negative_control_with_the_knob_off_sends_no_stub(tmp_path):
+@pytest.mark.parametrize("enabled,strategy", [(False, "auto"), (True, "off")])
+async def test_negative_controls_send_no_stub(tmp_path, enabled, strategy):
     stream = _script()
-    session = _session(tmp_path / "sess", stream, enabled=False)
+    session = _session(tmp_path / "sess", stream, enabled=enabled, strategy=strategy)
     await session.prompt("survey the repo")
     assert len(stream.requests) == CALLS + 1
     assert not any(STUB_PREFIX in "".join(_wire(r)) for r in stream.requests)
+    # Also inspect AFTER the terminal boundary: the post-turn planner must
+    # honor the same off switch, not just the continuing request path.
+    assert not any(
+        isinstance(m, Message) and m.text.startswith(STUB_PREFIX)
+        for m in session._context.messages
+    )
     # Every view is still there, full, in the last request.
     texts = _tool_texts(stream.requests[-1])
     assert len(texts) == CALLS
