@@ -588,6 +588,64 @@ def _allocated(path: Path) -> int:
     return path.lstat().st_blocks * 512
 
 
+def test_a_write_below_the_soft_threshold_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Routine scratch stays silent: one byte below 75% has not crossed it."""
+    root = _pad(tmp_path)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+
+    assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 3071) is None
+
+
+def test_a_write_crossing_the_soft_threshold_returns_the_advisory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly 75% is the crossing: the line names usage, cap, headroom and remedy."""
+    root = _pad(tmp_path)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+
+    advisory = check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 3072)
+
+    assert advisory == (
+        "[scratch] The pad is at 75% of its 4,096-byte cap, with 1,024 bytes of "
+        "headroom — build output / dependency trees belong outside the pad; "
+        "lop sessions cleanup --dry-run shows what is reclaimable."
+    )
+    assert "\n" not in advisory
+
+
+def test_a_write_already_above_the_soft_threshold_does_not_advise_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later write above 75% is silent because the CROSSING already happened.
+
+    The real allocated total starts at 80% of the patched cap, leaving enough
+    headroom for this write to succeed; only the missing warning is under test.
+    """
+    root = _pad(tmp_path)
+    held = _allocated(_fill_pad(root, 4096))
+    budget = held + held // 4
+    assert held > 0 and held * 100 >= budget * 75
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
+
+    assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 1) is None
+
+
+def test_a_crossing_that_would_exceed_the_hard_cap_still_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The soft line never softens the existing refusal: over-cap raises first."""
+    root = _pad(tmp_path)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 4097)
+
+    assert "over the 4,096-byte ceiling" in str(excinfo.value)
+    assert "75%" not in str(excinfo.value)
+
+
 def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -600,11 +658,15 @@ def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(
     """
     root = _pad(tmp_path)
     filled = _fill_pad(root, 4096)
-    monkeypatch.setattr(
-        scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", _allocated(filled) + 4096
-    )
+    budget = _allocated(filled) + 4096
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
 
-    assert check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 4096) is None
+    advisory = check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 4096)
+
+    assert advisory is not None
+    assert advisory.startswith("[scratch] The pad is at 100% of its ")
+    assert f"{budget:,}-byte cap" in advisory
+    assert "with 0 bytes of headroom" in advisory
 
 
 def test_a_write_one_byte_over_the_pad_total_is_refused(
@@ -1148,7 +1210,10 @@ def test_a_write_at_the_configured_boundary_is_allowed_and_one_over_is_refused(
     _write_pad_cap(tmp_path / "cfg", cap)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
 
-    assert check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4096) is None
+    advisory = check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4096)
+    assert advisory is not None
+    assert "100%" in advisory
+    assert "with 0 bytes of headroom" in advisory
 
     with pytest.raises(ScratchpadContentError) as excinfo:
         check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4097)
