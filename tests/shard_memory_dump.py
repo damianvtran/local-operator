@@ -141,7 +141,7 @@ OVERCOMMIT_SYSCTLS = ("overcommit_memory", "overcommit_ratio")
 OVERCOMMIT_POLICIES = {
     "0": "heuristic overcommit (the kernel guesses)",
     "1": "always overcommit (no commit limit is enforced)",
-    "2": "strict (refuses once CommitTotal reaches CommitLimit)",
+    "2": "strict (refuses once Committed_AS reaches CommitLimit)",
 }
 
 #: cgroup v1 exposes its memory controller one directory below the mount root.
@@ -150,6 +150,11 @@ OVERCOMMIT_POLICIES = {
 CGROUP_V1_DIR = "memory"
 CGROUP_V1_FILES = ("memory.limit_in_bytes", "memory.usage_in_bytes")
 CGROUP_V1_STAT_KEYS = ("hierarchical_memory_limit", "total_rss")
+
+#: cgroup v1 writes this near-``LONG_MAX`` page count when a group has no
+#: ceiling. Rendering it as ``unlimited`` matches how the v2 block renders
+#: ``max``; a reader must not have to recognize a sentinel to see "no limit".
+CGROUP_V1_UNLIMITED = 9223372036854771712
 
 #: Base for local runs. CI overrides the whole directory through
 #: :data:`ENV_RUN_DIR`; ``TMPDIR`` is the platform-correct scratch root and is
@@ -384,8 +389,8 @@ def build_report(
     lines.extend(_commit_lines(proc_root))
     lines.extend(_loadavg_lines(proc_root))
     lines.extend(_process_lines(proc_root, current_pid, processes, root_pid))
-    lines.extend(_cgroup_lines(cgroup_root))
-    lines.extend(_cgroup_v1_lines(cgroup_root))
+    lines.extend(_cgroup_lines(proc_root, current_pid, cgroup_root))
+    lines.extend(_cgroup_v1_lines(proc_root, current_pid, cgroup_root))
     return "\n".join(lines) + "\n"
 
 
@@ -796,15 +801,76 @@ def _process_lines(
     return lines
 
 
-def _cgroup_lines(cgroup_root: Path) -> list[str]:
-    lines = ["", f"-- cgroup v2 memory ({cgroup_root}) --"]
-    found = False
+def _cgroup_relpath(proc_root: Path, pid: int, hierarchy: str) -> tuple[str | None, str | None]:
+    """The memory-controller path from ``/proc/<pid>/cgroup``.
+
+    ``0::<path>`` is the unified (v2) entry; ``<id>:memory:<path>`` is the v1
+    entry whose controller list names ``memory``. The path is relative to that
+    hierarchy's mount point -- the caller joins it under the root it knows --
+    so a container or systemd scope resolves to the group that actually
+    constrains this worker rather than always to the mount root.
+    """
+    source = proc_root / str(pid) / "cgroup"
+    raw, read_error = _read_text(source)
+    if raw is None:
+        return None, f"{source} unreadable: {read_error}"
+    for line in raw.splitlines():
+        fields = line.split(":", 2)
+        if len(fields) != 3:
+            continue
+        hierarchy_id, controllers, path = fields
+        if hierarchy == "v2":
+            if hierarchy_id == "0" and controllers == "":
+                return path or "/", None
+        elif "memory" in controllers.split(","):
+            return path or "/", None
+    return None, f"no {hierarchy} memory entry in {source}"
+
+
+def _cgroup_memory_dir(
+    proc_root: Path, pid: int, root_dir: Path, hierarchy: str
+) -> tuple[Path, str, str | None]:
+    """The most specific existing memory-cgroup directory, and why it was read.
+
+    The process's own cgroup path carries the ceiling a container or scope
+    sets; preferring it is what makes a nested slice visible. The provenance
+    string says which directory was chosen, because a silent fallback to the
+    mount root would hide that the nested one was missing. The third value is
+    the resolution error for the caller to state, or ``None``.
+    """
+    rel, rel_error = _cgroup_relpath(proc_root, pid, hierarchy)
+    if rel is not None:
+        nested = root_dir / rel.lstrip("/")
+        if nested.is_dir():
+            return nested, f"nested {hierarchy} group {rel}", None
+        return root_dir, f"mount root (nested {hierarchy} group {rel} not present)", None
+    return root_dir, "mount root", rel_error
+
+
+def _cgroup_lines(proc_root: Path, pid: int, cgroup_root: Path) -> list[str]:
+    """The cgroup v2 memory files, from this process's own group when present.
+
+    Every file is reported individually: a failed read is ``unavailable:
+    <reason>``, and only a missing hierarchy is reported as an absence.
+    Collapsing a failed read into "no files" would turn the exact case this
+    probe exists to catch -- a ceiling that exists but cannot be read -- into a
+    false negative.
+    """
+    base, provenance, resolution_error = _cgroup_memory_dir(proc_root, pid, cgroup_root, "v2")
+    lines = ["", f"-- cgroup v2 memory ({base}) --"]
+    source = f"cgroup source: {provenance}"
+    if resolution_error is not None:
+        source += f"; {resolution_error}"
+    lines.append(source)
+    if not cgroup_root.exists():
+        lines.append(f"(no cgroup v2 hierarchy at {cgroup_root}; cgroup v1 or none)")
+        return lines
     for name in CGROUP_FILES:
-        path = cgroup_root / name
+        path = base / name
         raw, read_error = _read_text(path)
         if raw is None:
+            lines.append(f"{name}: unavailable: {read_error}")
             continue
-        found = True
         value = raw.strip()
         if name == "memory.max" and value == "max":
             lines.append(f"{name}: max (unlimited)")
@@ -812,57 +878,68 @@ def _cgroup_lines(cgroup_root: Path) -> list[str]:
         try:
             byte_count = int(value)
         except ValueError:
-            lines.append(f"{name}: {_one_line(value, 80)} (unparsed; {read_error or 'raw'})")
+            lines.append(f"{name}: {_one_line(value, 80)} (unparsed)")
             continue
         lines.append(f"{name}: {byte_count} bytes ({_format_mib(byte_count)})")
-    if not found:
-        lines.append("(no cgroup v2 memory.max/memory.current/memory.peak; cgroup v1 or none)")
     return lines
 
 
-def _cgroup_v1_lines(cgroup_root: Path) -> list[str]:
+def _cgroup_v1_lines(proc_root: Path, pid: int, cgroup_root: Path) -> list[str]:
     """The cgroup v1 memory ceiling, beside the v2 files that v1 lacks.
 
     A v1 host has nothing at the v2 paths, so without this block a v1 ceiling
-    is invisible while the v2 block honestly says it found nothing. The
-    ``memory.stat`` values ``hierarchical_memory_limit`` and ``total_rss`` are
-    the effective ceiling and current charge when a nested group sets them.
+    is invisible. The process's own v1 memory path is preferred when present.
+    ``memory.stat``'s ``hierarchical_memory_limit`` and ``total_rss`` are the
+    effective ceiling and current charge of a nested group. A missing or
+    unreadable file is stated per file, never folded into "no files": a
+    permission error on the limit must not read as an absent controller.
     """
-    memory_dir = cgroup_root / CGROUP_V1_DIR
-    lines = ["", f"-- cgroup v1 memory ({memory_dir}) --"]
-    found = False
+    root_dir = cgroup_root / CGROUP_V1_DIR
+    base, provenance, resolution_error = _cgroup_memory_dir(proc_root, pid, root_dir, "v1")
+    lines = ["", f"-- cgroup v1 memory ({base}) --"]
+    source = f"cgroup source: {provenance}"
+    if resolution_error is not None:
+        source += f"; {resolution_error}"
+    lines.append(source)
+    if not base.exists():
+        lines.append(f"(no cgroup v1 memory controller at {base}; v2 or none)")
+        return lines
     for name in CGROUP_V1_FILES:
-        path = memory_dir / name
-        raw, _read_error = _read_text(path)
+        path = base / name
+        raw, read_error = _read_text(path)
         if raw is None:
+            lines.append(f"{name}: unavailable: {read_error}")
             continue
-        found = True
         value = raw.strip()
         try:
             byte_count = int(value)
         except ValueError:
             lines.append(f"{name}: {_one_line(value, 80)} (unparsed)")
             continue
+        if name == "memory.limit_in_bytes" and byte_count == CGROUP_V1_UNLIMITED:
+            lines.append(f"{name}: unlimited")
+            continue
         lines.append(f"{name}: {byte_count} bytes ({_format_mib(byte_count)})")
-    stat_raw, _stat_error = _read_text(memory_dir / "memory.stat")
-    if stat_raw is not None:
-        found = True
-        stats: dict[str, int] = {}
-        for line in stat_raw.splitlines():
-            key, _, rest = line.partition(" ")
-            if key not in CGROUP_V1_STAT_KEYS or not rest.strip():
-                continue
-            try:
-                stats[key] = int(rest.strip())
-            except ValueError:
-                continue
-        for key in CGROUP_V1_STAT_KEYS:
-            if key in stats:
-                lines.append(f"memory.stat {key}: {stats[key]} bytes ({_format_mib(stats[key])})")
-            else:
-                lines.append(f"memory.stat {key}: <missing>")
-    if not found:
-        lines.append("(no cgroup v1 memory controller files; v2 or none)")
+    stat_raw, stat_error = _read_text(base / "memory.stat")
+    if stat_raw is None:
+        lines.append(f"memory.stat: unavailable: {stat_error}")
+        return lines
+    stats: dict[str, int] = {}
+    for line in stat_raw.splitlines():
+        key, _, rest = line.partition(" ")
+        if key not in CGROUP_V1_STAT_KEYS or not rest.strip():
+            continue
+        try:
+            stats[key] = int(rest.strip())
+        except ValueError:
+            continue
+    for key in CGROUP_V1_STAT_KEYS:
+        if key not in stats:
+            lines.append(f"memory.stat {key}: <missing>")
+        elif key == "hierarchical_memory_limit" and stats[key] == CGROUP_V1_UNLIMITED:
+            lines.append(f"memory.stat {key}: unlimited")
+        else:
+            lines.append(f"memory.stat {key}: {stats[key]} bytes ({_format_mib(stats[key])})")
     return lines
 
 

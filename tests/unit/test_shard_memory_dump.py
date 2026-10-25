@@ -170,6 +170,10 @@ def fake_proc(tmp_path: Path) -> Path:
     (root / "101" / "fd").mkdir()
     for descriptor in range(3):
         (root / "101" / "fd" / str(descriptor)).write_text("")
+    # The process's own cgroup path: a nested group, so the resolver has a
+    # path to prefer (the tests that exercise nesting create it) and the
+    # fallback tests have something concrete to report as not present.
+    (root / "101" / "cgroup").write_text("0::/nested/group\n4:memory:/nested/group\n")
     with (root / "101" / "status").open("a") as status_file:
         status_file.write(
             "VmPeak:\t 3145728 kB\nVmSize:\t 2097152 kB\n"
@@ -245,7 +249,7 @@ def test_the_dump_records_every_field_the_next_measurement_needs(
     assert "message: [Errno 12] Cannot allocate memory" in text
 
     # cgroup v2 absent is stated, not silently blank.
-    assert "no cgroup v2 memory.max/memory.current/memory.peak" in text
+    assert "no cgroup v2 hierarchy" in text
 
 
 def test_the_worker_ceilings_are_read_from_the_failing_worker(
@@ -329,6 +333,7 @@ def test_commit_overcommit_and_cgroup_v1_ceilings_are_recorded(
     assert "memory.usage_in_bytes: 104857600 bytes (100.0 MiB)" in text
     assert "memory.stat hierarchical_memory_limit: 524288000 bytes (500.0 MiB)" in text
     assert "memory.stat total_rss: 104857600 bytes (100.0 MiB)" in text
+    assert "cgroup source: mount root (nested v1 group /nested/group not present)" in text
 
 
 def test_a_zero_commit_limit_does_not_produce_a_ratio(tmp_path: Path) -> None:
@@ -428,6 +433,206 @@ def test_cgroup_v2_peak_is_included_when_the_files_exist(tmp_path: Path) -> None
     assert "memory.max: 1073741824 bytes (1024.0 MiB)" in text
     assert "memory.current: 536870912 bytes (512.0 MiB)" in text
     assert "memory.peak: 805306368 bytes (768.0 MiB)" in text
+    # The process's cgroup file is unreadable here, and the block says it
+    # fell back to the mount root.
+    assert "cgroup source: mount root;" in text
+
+
+def test_one_unreadable_cgroup_v1_file_is_rendered_as_unavailable(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """A failed read on the limit must not read as an absent controller.
+
+    Mutation that must fail this: ``continue`` on a failed read (the shipped
+    round-1 behaviour), which printed the usage line and never mentioned the
+    limit.
+    """
+    memory_dir = tmp_path / "cgroup-one" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "memory.limit_in_bytes").mkdir()
+    (memory_dir / "memory.usage_in_bytes").write_text("123\n")
+    (memory_dir / "memory.stat").write_text("hierarchical_memory_limit 456\ntotal_rss 123\n")
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup-one",
+        pid=101,
+    )
+
+    assert "memory.limit_in_bytes: unavailable: IsADirectoryError" in text
+    assert "memory.usage_in_bytes: 123 bytes (0.0 MiB)" in text
+    assert "no cgroup v1 memory controller" not in text
+
+
+def test_all_unreadable_cgroup_v1_files_are_not_reported_as_absent(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """Every file failing is still four stated reads, not a missing controller."""
+    memory_dir = tmp_path / "cgroup-all" / "memory"
+    memory_dir.mkdir(parents=True)
+    for name in ("memory.limit_in_bytes", "memory.usage_in_bytes", "memory.stat"):
+        (memory_dir / name).mkdir()
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup-all",
+        pid=101,
+    )
+
+    assert "memory.limit_in_bytes: unavailable: IsADirectoryError" in text
+    assert "memory.usage_in_bytes: unavailable: IsADirectoryError" in text
+    assert "memory.stat: unavailable: IsADirectoryError" in text
+    assert "no cgroup v1 memory controller" not in text
+
+
+def test_a_file_where_the_cgroup_v1_directory_belongs_is_not_absence(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """``memory`` occupied by a regular file is an error, not a missing controller."""
+    root = tmp_path / "cgroup-file"
+    root.mkdir()
+    (root / "memory").write_text("")
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=root,
+        pid=101,
+    )
+
+    assert "memory.limit_in_bytes: unavailable: NotADirectoryError" in text
+    assert "memory.usage_in_bytes: unavailable: NotADirectoryError" in text
+    assert "memory.stat: unavailable: NotADirectoryError" in text
+    assert "no cgroup v1 memory controller" not in text
+
+
+def test_a_missing_cgroup_v1_controller_is_reported_as_absent(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """Only a controller directory that does not exist is an absence."""
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup-absent",
+        pid=101,
+    )
+
+    assert "(no cgroup v1 memory controller at" in text
+    assert "unavailable" not in text.split("-- cgroup v1 memory", 1)[1].split("--", 1)[0]
+
+
+def test_cgroup_v2_read_errors_are_reported_per_file(tmp_path: Path) -> None:
+    """The v2 block states each failed read instead of dropping it."""
+    root = tmp_path / "cgroup-v2-broken"
+    root.mkdir()
+    (root / "memory.max").mkdir()
+    (root / "memory.current").write_text("100\n")
+    (root / "memory.peak").mkdir()
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=tmp_path / "no-proc",
+        cgroup_root=root,
+        pid=101,
+    )
+
+    assert "memory.max: unavailable: IsADirectoryError" in text
+    assert "memory.current: 100 bytes (0.0 MiB)" in text
+    assert "memory.peak: unavailable: IsADirectoryError" in text
+    assert "no cgroup v2 hierarchy" not in text
+
+
+def test_a_nested_cgroup_v2_ceiling_is_preferred_over_the_mount_root(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """A container or scope ceiling is lower than the root's; read the nested one."""
+    root = tmp_path / "cgroup-v2-nested"
+    nested = root / "nested" / "group"
+    nested.mkdir(parents=True)
+    (root / "memory.max").write_text("max\n")
+    (nested / "memory.max").write_text("536870912\n")
+    (nested / "memory.current").write_text("1048576\n")
+    (nested / "memory.peak").write_text("2097152\n")
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=root,
+        pid=101,
+    )
+
+    assert f"-- cgroup v2 memory ({nested}) --" in text
+    assert "cgroup source: nested v2 group /nested/group" in text
+    assert "memory.max: 536870912 bytes (512.0 MiB)" in text
+    assert "memory.current: 1048576 bytes (1.0 MiB)" in text
+    assert "memory.peak: 2097152 bytes (2.0 MiB)" in text
+
+
+def test_a_nested_cgroup_v1_ceiling_is_preferred_over_the_mount_root(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """The v1 memory controller resolves the same nested path."""
+    root = tmp_path / "cgroup-v1-nested"
+    nested = root / "memory" / "nested" / "group"
+    nested.mkdir(parents=True)
+    (root / "memory" / "memory.limit_in_bytes").write_text("555\n")
+    (nested / "memory.limit_in_bytes").write_text("524288000\n")
+    (nested / "memory.usage_in_bytes").write_text("104857600\n")
+    (nested / "memory.stat").write_text(
+        "hierarchical_memory_limit 524288000\ntotal_rss 104857600\n"
+    )
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=root,
+        pid=101,
+    )
+
+    assert f"-- cgroup v1 memory ({nested}) --" in text
+    assert "cgroup source: nested v1 group /nested/group" in text
+    assert "memory.limit_in_bytes: 524288000 bytes (500.0 MiB)" in text
+    assert "memory.limit_in_bytes: 555 bytes" not in text
+
+
+def test_the_v1_unlimited_sentinel_renders_as_unlimited(fake_proc: Path, tmp_path: Path) -> None:
+    """The near-LONG_MAX page count is a no-limit value, like v2's ``max``."""
+    memory_dir = tmp_path / "cgroup-unlimited" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "memory.limit_in_bytes").write_text("9223372036854771712\n")
+    (memory_dir / "memory.usage_in_bytes").write_text("1234\n")
+    (memory_dir / "memory.stat").write_text(
+        "hierarchical_memory_limit 9223372036854771712\ntotal_rss 1234\n"
+    )
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "boom"),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup-unlimited",
+        pid=101,
+    )
+
+    assert "memory.limit_in_bytes: unlimited" in text
+    assert "memory.stat hierarchical_memory_limit: unlimited" in text
+    assert "9223372036854771712" not in text
 
 
 def test_the_process_list_is_capped_and_reports_the_omitted_count(tmp_path: Path) -> None:
@@ -506,7 +711,8 @@ def test_missing_and_unreadable_files_are_reported_not_raised(tmp_path: Path) ->
     assert "commit readings unavailable: IsADirectoryError" in text
     assert "Committed_AS / CommitLimit: unavailable (a reading is missing)" in text
     assert "vm.overcommit_memory: unavailable: FileNotFoundError" in text
-    assert "(no cgroup v1 memory controller files; v2 or none)" in text
+    assert "(no cgroup v1 memory controller at" in text
+    assert "memory.stat: unavailable: IsADirectoryError" not in text
     # The process is still represented by its stat line, with no RSS.
     assert "processes in tree: 1" in text
     assert re.search(r"^\s*101\s+100\s+-", text, re.MULTILINE)
