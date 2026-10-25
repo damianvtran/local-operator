@@ -3277,6 +3277,158 @@ def test_a_failed_wheel_route_reports_step_publish_and_kind_publication(
     assert report["target"] == "0.89.0"
 
 
+def _fake_generation(root: Path, version: str = "0.90.0") -> Path:
+    """A generation root whose OWN dist-info answers ``generation_version``.
+
+    Real layout, real reader: nothing here patches the metadata probe, so a
+    regression in the promoted path's shape fails the test rather than passing
+    against a stub.
+    """
+    generation = root / "generations" / f"20261024T234457Z-{version}"
+    site = generation / "tools" / "local-operator" / "lib" / "python3.12" / "site-packages"
+    dist = site / f"local_operator-{version}.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n",
+        encoding="utf-8",
+    )
+    return generation
+
+
+def _drive_snapshot_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    wheel: bool,
+    install_result: Path | None = None,
+    install_error: Exception | None = None,
+) -> Path:
+    """Point ``_snapshot_command`` at one route with the install seam replaced.
+
+    Everything before the install is real except the network/index answers
+    (which a test cannot own) and the installer (which would build a venv).
+    """
+    from local_operator import update
+
+    source_dir = tmp_path / "src"
+    source_dir.mkdir(exist_ok=True)
+    source = update.SnapshotSource(
+        path=source_dir, commit="c" * 12, ref="v0.90.0", version="0.90.0"
+    )
+    monkeypatch.setattr(update, "install_kind", lambda **kwargs: update.InstallKind.UV_TOOL)
+    monkeypatch.setattr(update, "resolve_snapshot", lambda value: source)
+    monkeypatch.setattr(
+        update,
+        "classify_snapshot_downgrade",
+        lambda snapshot, allow_downgrade=False: update.SnapshotDowngrade(),
+    )
+    monkeypatch.setattr(
+        update,
+        "classify_snapshot_install",
+        lambda snapshot: (
+            update.SnapshotRoute(
+                install_from_wheel=True, version="0.90.0", artifact="local_operator-0.90.0.whl"
+            )
+            if wheel
+            else update.SnapshotRoute()
+        ),
+    )
+    monkeypatch.setattr(update, "disk_build", lambda: None)
+    monkeypatch.setattr(update, "refresh_daemons_after_upgrade", lambda: [])
+    monkeypatch.setattr(update, "_roll_after_update", lambda **kwargs: None)
+
+    def install(*_args: object, **_kwargs: object) -> Path:
+        if install_error is not None:
+            raise install_error
+        assert install_result is not None
+        return install_result
+
+    monkeypatch.setattr(update, "install_into_generation", install)
+    return install_result if install_result is not None else source_dir
+
+
+@pytest.mark.parametrize("wheel", [True, False], ids=["wheel-route", "source-route"])
+def test_a_snapshot_install_reports_the_candidate_it_promoted(
+    wheel: bool,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both ``--from-snapshot`` routes must pass the promoted tree to the report.
+
+    2026-10-24, v0.90.0 wheel route: the install landed (pointer, ``.lop-source``
+    and serve all said 0.90.0) while the report said ``core_installed: false``
+    and ``promoted`` was empty, because ``_snapshot_command`` discarded
+    ``install_into_generation``'s return value. The PyPI path already passed it.
+    """
+    from local_operator import update
+
+    generation = _fake_generation(tmp_path)
+    _drive_snapshot_route(monkeypatch, tmp_path, wheel=wheel, install_result=generation)
+    # The pointer a successful install leaves behind: the promoted tree.
+    monkeypatch.setattr(update, "current_generation", lambda: generation)
+
+    assert update_command(from_snapshot="v0.90.0", services=False) == 0
+
+    report = _reported_failure(capsys.readouterr())
+    assert report["ok"] is True
+    rolling = report["rolling"]
+    assert rolling["core_installed"] is True
+    assert rolling["promoted"]["generation"] == str(generation)
+    assert rolling["promoted"]["version"] == "0.90.0"
+    assert rolling["now_current"]["generation"] == str(generation)
+    assert rolling["now_current"]["version"] == "0.90.0"
+    # The frozen success fields stay exactly as they were.
+    assert {"schema", "ok", "install_version", "target", "serve", "daemons"} <= set(report)
+
+
+@pytest.mark.parametrize("wheel", [True, False], ids=["wheel-route", "source-route"])
+def test_a_failed_snapshot_install_claims_no_core(
+    wheel: bool,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused install has no promoted candidate, and must not pretend to."""
+    from local_operator import update
+
+    _drive_snapshot_route(
+        monkeypatch,
+        tmp_path,
+        wheel=wheel,
+        install_error=update.UpdateError("installer exited 2"),
+    )
+
+    assert update_command(from_snapshot="v0.90.0", services=False) == 1
+
+    report = _reported_failure(capsys.readouterr())
+    assert report["ok"] is False
+    assert report["failure"]["error"] == "installer exited 2"
+    assert "rolling" not in report
+    assert update._rolling_receipt(None, update.StageReport())["core_installed"] is False
+
+
+def test_the_success_payload_keeps_every_frozen_key(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ok``/``rolling`` are additive; no existing success key moved."""
+    # The base payload has no ``rolling`` on a mutable install; pin that shape
+    # here so the assertion does not depend on the host having a generation.
+    monkeypatch.setattr(update_mod, "_is_generation_install", lambda _root=None: False)
+    stage = update_mod.StageReport(daemons=(update_mod.DaemonStatus("mobile", "refreshed"),))
+    update_mod._emit_update_report(install_version="0.90.0", target="0.90.0", stage=stage)
+    report = _reported_failure(capsys.readouterr())
+    assert set(report) == {
+        "schema",
+        "ok",
+        "install_version",
+        "target",
+        "serve",
+        "daemons",
+    }
+    assert report["schema"] == "update.report.v1"
+
+
 def test_a_dead_index_at_the_publish_gate_is_network_not_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5056,6 +5208,7 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         roll=True,
         before_version="1.2.2",
         via="snapshot",
+        promoted_generation=None,
     )
 
 
@@ -5270,6 +5423,7 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         roll=True,
         before_version="0.9.9",
         via="snapshot",
+        promoted_generation=None,
     )
     captured = capsys.readouterr()
     assert (
