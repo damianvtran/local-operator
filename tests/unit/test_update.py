@@ -1509,6 +1509,133 @@ def test_rolling_receipt_rejects_a_status_less_daemon_entry(
     )
 
 
+def _write_namespace_record(directory: Path, name: str, payload: dict[str, Any]) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _session_payload(
+    *, pid: int, session_id: str, install_root: Path, busy: bool
+) -> dict[str, Any]:
+    from local_operator.session.runtime.types import SessionRecord
+
+    return SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="census",
+        cwd="/tmp",
+        model_label="model",
+        control_port=0,
+        control_key="key",
+        install_root=str(install_root),
+        busy=busy,
+    ).to_json()
+
+
+def _boot_payload(*, pid: int, session_id: str, install_root: Path) -> dict[str, Any]:
+    from local_operator.session.runtime.journal import BootRecord
+
+    return BootRecord(pid=pid, session_id=session_id, install_root=str(install_root)).to_json()
+
+
+def test_rolling_receipt_measures_the_runtime_census_within_its_namespaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE REGRESSION (2026-10-24): the listing named ``run``, the scan ``run/mobile``.
+
+    The old code compared ``<root>/run/*.json`` (0) with the rows
+    ``registry.scan`` parsed (13) and always answered "unreadable" on a host with
+    sessions, so ``central_services_complete`` could never be true. This root has
+    one live mobile record and two boot records: the mobile record and its own
+    boot record are ONE runtime (deduped by session id), the second boot record is
+    a runtime in its pre-heartbeat window and is counted once.
+    """
+    from local_operator import update
+
+    stable = tmp_path / "lop"
+    image = stable / "generations" / "20261024T000000Z-0.90.0"
+    old = stable / "generations" / "20261024T121337Z-0.88.4"
+    for generation in (image, old):
+        (generation / "tools" / "local-operator").mkdir(parents=True)
+    config_root = tmp_path / "config"
+    live = os.getpid()  # this process is alive: the registry will call it live
+    _write_namespace_record(
+        config_root / "run" / "mobile",
+        f"{live}.json",
+        _session_payload(
+            pid=live,
+            session_id="session-busy",
+            install_root=old / "tools" / "local-operator",
+            busy=True,
+        ),
+    )
+    # Same session's boot record: one runtime, not two.
+    _write_namespace_record(
+        config_root / "run" / "host",
+        f"{live}.json",
+        _boot_payload(
+            pid=live, session_id="session-busy", install_root=old / "tools" / "local-operator"
+        ),
+    )
+    # A runtime that has not heartbeated yet: visible only in run/host.
+    _write_namespace_record(
+        config_root / "run" / "host",
+        f"{live}-booting.json",
+        _boot_payload(
+            pid=live, session_id="session-booting", install_root=old / "tools" / "local-operator"
+        ),
+    )
+    monkeypatch.setattr(update, "_config_roots", lambda: [config_root])
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(stable))
+    monkeypatch.setattr(update, "current_generation", lambda: image)
+
+    rolling = update._rolling_receipt(image, update.StageReport())
+
+    runtimes = rolling["runtimes"]
+    assert runtimes["measured"] is True
+    assert runtimes["known_old_busy"] == 1, "the live busy session on the old generation"
+    assert runtimes["known_old_idle"] == 1, "the pre-heartbeat runtime, deduped from the mobile row"
+    assert runtimes["unknown"] == 0
+
+
+def test_rolling_receipt_names_each_unreadable_runtime_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A torn record is a gap the reason can locate, not a silent zero."""
+    from local_operator import update
+
+    stable = tmp_path / "lop"
+    image = stable / "generations" / "20261024T000000Z-0.90.0"
+    (image / "tools" / "local-operator").mkdir(parents=True)
+    config_root = tmp_path / "config"
+    live = os.getpid()
+    _write_namespace_record(
+        config_root / "run" / "mobile",
+        f"{live}.json",
+        _session_payload(
+            pid=live,
+            session_id="session-live",
+            install_root=image / "tools" / "local-operator",
+            busy=False,
+        ),
+    )
+    _write_namespace_record(config_root / "run" / "mobile", "torn.json", {"pid": "not-a-pid"})
+    monkeypatch.setattr(update, "_config_roots", lambda: [config_root])
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(stable))
+    monkeypatch.setattr(update, "current_generation", lambda: image)
+
+    rolling = update._rolling_receipt(image, update.StageReport())
+
+    assert rolling["runtimes"]["measured"] is False
+    assert rolling["runtimes"]["known_old_busy"] is None
+    reason = rolling["central_services_incomplete_reason"]
+    assert "runtime census unreadable" in reason
+    assert "run/mobile" in reason, "the reason names the namespace to look at"
+
+
 def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

@@ -8418,6 +8418,101 @@ def _run_services_tail(*, services: bool) -> StageReport:
     return StageReport(daemons=_collect_daemon_statuses(refreshes))
 
 
+def _runtime_census(image: Path | None) -> tuple[dict[str, int], bool, tuple[str, ...]]:
+    """Count live session runtimes by the tree they name, and whether the read was whole.
+
+    THE NAMESPACE BUG THIS REPLACES (2026-10-24, `lop-update v0.90.0` report):
+    the listing asked for ``"run"`` while ``registry.scan`` reads ``RUN_DIRNAME``
+    (``run/mobile``), so the verdict compared **0 names against 13 parsed rows**
+    and answered "unreadable" on every host with a session. ``measured`` was
+    therefore always false and ``central_services_complete`` could never be true
+    there, whatever the machine actually looked like.
+
+    WHY NOT ``_records_under``: that reader answers a PRUNE's question — which
+    trees are named by ANY artifact — and deliberately merges the reaped sidecars
+    (records whose process is dead; that is why they were moved there) and the
+    boot records (whose own contract says they are NOT liveness evidence, being
+    left behind by unclean exits too). A runtime CENSUS must not count a dead
+    session or an unclean exit's leftover as a live runtime, so it uses the
+    registry's own ``(record, state)`` pairs — the one place liveness is answered
+    — and brackets them with the listing of the SAME namespace.
+
+    ``run/host`` IS READ TOO, for the ~1.2 s window in which a runtime has a boot
+    record and no heartbeat yet: it appears nowhere else. A boot record is counted
+    ONLY while its pid is alive, and deduped by session id against the live
+    records (a healthy session eventually appears in both namespaces). Its own
+    docstring forbids reading the record as liveness evidence on its own; the pid
+    check is what makes this a measurement rather than a belief.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import (
+        HOST_RUN_DIRNAME,
+        RUN_DIRNAME,
+        SessionRecord,
+    )
+
+    counts = {"known_old_busy": 0, "known_old_idle": 0, "unknown": 0}
+    measured = True
+    reasons: list[str] = []
+
+    def count(record: Any) -> None:
+        pinned = str(getattr(record, "install_root", "") or "")
+        if not pinned or image is None:
+            counts["unknown"] += 1
+        elif not Path(pinned).resolve().is_relative_to(generations_dir().resolve()):
+            counts["unknown"] += 1
+        elif Path(pinned).resolve() != image.resolve():
+            busy = bool(getattr(record, "busy", False))
+            counts["known_old_busy" if busy else "known_old_idle"] += 1
+
+    for root in _config_roots():
+        seen: set[str] = set()
+        try:
+            # THE LISTING AND THE SCAN TAKE THE SAME NAME. ``RUN_DIRNAME`` is the
+            # namespace ``registry.scan`` actually reads; spelling anything else
+            # here is the defect this helper exists for.
+            before = _entry_names(root, RUN_DIRNAME)
+            rows = registry.scan(
+                root, parse=SessionRecord.from_json, reap=False, check_zombie=False
+            )
+            after = _entry_names(root, RUN_DIRNAME)
+            unreadable, note = _verdict_from_listing(root / RUN_DIRNAME, before, after, len(rows))
+            if unreadable:
+                measured = False
+                reasons.append(note or f"{root / RUN_DIRNAME} could not be read whole")
+            for record, state in rows:
+                if state != "live":
+                    continue
+                seen.add(str(getattr(record, "session_id", "")))
+                count(record)
+        except Exception:  # noqa: BLE001 — unreadable is a reason, never a zero
+            measured = False
+            reasons.append(f"{root / RUN_DIRNAME} could not be read")
+            logger.debug("runtime census unreadable under %s", root, exc_info=True)
+        # The pre-heartbeat window: a starting runtime is visible only here.
+        boot = _boot_records_under(root)
+        if boot.unreadable:
+            measured = False
+            reasons.append(boot.note or f"{root / HOST_RUN_DIRNAME} could not be read")
+        for record, _value in boot.entries:
+            try:
+                if not registry.pid_alive(record.pid):
+                    continue
+            except Exception:  # noqa: BLE001 — an unanswerable liveness check is a gap
+                measured = False
+                reasons.append(
+                    f"{root / HOST_RUN_DIRNAME} record {record.pid} has no readable liveness"
+                )
+                continue
+            session_id = str(getattr(record, "session_id", ""))
+            if session_id and session_id in seen:
+                continue
+            if session_id:
+                seen.add(session_id)
+            count(record)
+    return counts, measured, tuple(reasons)
+
+
 def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any]:
     """Loaded/serving/pending are measurements, never aliases for current.
 
@@ -8440,34 +8535,10 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
     False with a reason.
     """
     from local_operator import services
-    from local_operator.session.runtime import registry
-    from local_operator.session.runtime.types import SessionRecord
 
     current = current_generation()
     image = _generation_install_root(current) if current is not None else None
-    counts = {"known_old_busy": 0, "known_old_idle": 0, "unknown": 0}
-    measured = True
-    for root in _config_roots():
-        try:
-            before = _entry_names(root, "run")
-            rows = registry.scan(
-                root, parse=SessionRecord.from_json, reap=False, check_zombie=False
-            )
-            after = _entry_names(root, "run")
-            unreadable, _note = _verdict_from_listing(root / "run", before, after, len(rows))
-            measured = measured and not unreadable
-            for record, state in rows:
-                if state == "stale":
-                    continue
-                pinned = getattr(record, "install_root", "")
-                if state != "live" or not pinned or image is None:
-                    counts["unknown"] += 1
-                elif not Path(pinned).resolve().is_relative_to(generations_dir().resolve()):
-                    counts["unknown"] += 1
-                elif Path(pinned).resolve() != image.resolve():
-                    counts["known_old_busy" if record.busy else "known_old_idle"] += 1
-        except Exception:  # noqa: BLE001 — unknown never becomes []/zero
-            measured = False
+    counts, measured, census_reasons = _runtime_census(image)
     serving: list[dict[str, Any]] = []
     serving_measured = True
     # DISTINCT FROM ``serving_measured``: whether the census could be READ at
@@ -8544,7 +8615,13 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
             "serving census unreadable" if not serving_readable else "no serving rows discovered"
         )
     if not measured:
-        incomplete.append("runtime census unreadable")
+        # Name the namespace(s) the read could not finish: "unreadable" alone
+        # sends the reader to the wrong log (review: the 0-listed/13-parsed line
+        # named ``run`` while the records lived in ``run/mobile``).
+        detail = "; ".join(census_reasons)
+        incomplete.append(
+            f"runtime census unreadable: {detail}" if detail else "runtime census unreadable"
+        )
     return {
         "contract": "rolling-no-kill-v1",
         "mode": "rolling-immutable",
