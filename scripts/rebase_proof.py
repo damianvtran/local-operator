@@ -150,7 +150,7 @@ def prove(repo: Path, old: str, new: str, base: str) -> tuple[bool, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("old_head", help="PR head before the rebase (fetch it by SHA if gone)")
     parser.add_argument("new_head", help="PR head after the rebase")
     parser.add_argument("--base", default="origin/main", help="upstream ref (default origin/main)")
