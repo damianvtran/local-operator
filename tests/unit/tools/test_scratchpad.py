@@ -601,16 +601,15 @@ def test_a_write_below_the_soft_threshold_returns_none(
 def test_a_write_crossing_the_soft_threshold_returns_the_advisory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Exactly 75% is the crossing: the line names usage, cap, headroom and remedy."""
+    """Exactly 75% is the crossing: the line names usage, headroom and remedy."""
     root = _pad(tmp_path)
     monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
 
     advisory = check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 3072)
 
     assert advisory == (
-        "[scratch] The pad is at 75% of its 4,096-byte cap, with 1,024 bytes of "
-        "headroom — build output / dependency trees belong outside the pad; "
-        "lop sessions cleanup --dry-run shows what is reclaimable."
+        "[scratch] The pad is 75% full (1,024 bytes left) — remove the biggest file "
+        "first; build/dependency trees belong in a git worktree, not the pad."
     )
     assert "\n" not in advisory
 
@@ -664,9 +663,7 @@ def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(
     advisory = check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 4096)
 
     assert advisory is not None
-    assert advisory.startswith("[scratch] The pad is at 100% of its ")
-    assert f"{budget:,}-byte cap" in advisory
-    assert "with 0 bytes of headroom" in advisory
+    assert advisory.startswith("[scratch] The pad is 100% full (0 bytes left)")
 
 
 def test_a_write_one_byte_over_the_pad_total_is_refused(
@@ -1213,7 +1210,7 @@ def test_a_write_at_the_configured_boundary_is_allowed_and_one_over_is_refused(
     advisory = check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4096)
     assert advisory is not None
     assert "100%" in advisory
-    assert "with 0 bytes of headroom" in advisory
+    assert "(0 bytes left)" in advisory
 
     with pytest.raises(ScratchpadContentError) as excinfo:
         check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4097)
