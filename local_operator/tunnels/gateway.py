@@ -33,6 +33,24 @@ from local_operator.tunnels.config import validate_connection
 MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_STREAM_SECONDS = 60
 AUTHORIZATION_LEASE_SECONDS = 30
+
+
+class RelayStreamResponse(StreamingResponse):
+    """Finalize a proxy generator even when ASGI cancels its response task."""
+
+    async def stream_response(self, send) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            # Starlette's task-group cancellation does not reliably finalize
+            # an async-for body blocked between sends. Without this explicit
+            # close, the origin stream and its connection outlive the cancelled
+            # request until garbage collection (and can hold server shutdown).
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                await close()
+
+
 PROOF_HEADER = "x-radient-tunnel-assertion"
 # Why the gateway refused a relayed request, and what each surface says about it.
 #
@@ -707,7 +725,7 @@ class Gateway:
             finally:
                 await upstream.aclose()
 
-        return StreamingResponse(
+        return RelayStreamResponse(
             stream(), status_code=upstream.status_code, headers=response_headers
         )
 

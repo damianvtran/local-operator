@@ -3728,6 +3728,78 @@ def test_rearm_starts_the_windows_task_too(tmp_path, monkeypatch, connection) ->
 
 
 @pytest.mark.asyncio
+async def test_cancelling_a_stream_closes_the_upstream_body(connection, signing_key):
+    """Cancellation must finalize the proxy generator, not only the ASGI task.
+
+    Starlette cancels a streaming response while its downstream send is blocked.
+    The generator's own finally is not guaranteed to run on that path, which
+    leaves the origin response open until garbage collection. Close it from the
+    response's finally as well; this is independent of the stream lease and
+    exercises the same response used by the real uvicorn/socket regression.
+    """
+    closed = asyncio.Event()
+
+    class Endless(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0)
+                yield b"data: " + b"x" * 65536 + b"\n\n"
+
+        async def aclose(self):
+            closed.set()
+
+    def origin(request):
+        return httpx.Response(
+            200, stream=Endless(), headers={"content-type": "text/event-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/sessions/events",
+            "raw_path": b"/api/sessions/events",
+            "query_string": b"",
+            "headers": [
+                (b"host", HOST.encode()),
+                (
+                    PROOF_HEADER.encode(),
+                    proof(signing_key, target="/api/sessions/events").encode(),
+                ),
+            ],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 1),
+            "root_path": "",
+        }
+        body_read = False
+
+        async def receive():
+            nonlocal body_read
+            if not body_read:
+                body_read = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Future()
+
+        first = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first.set()
+                await asyncio.Future()
+
+        task = asyncio.create_task(gateway.app()(scope, receive, send))
+        await asyncio.wait_for(first.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set(), "cancelled streaming response left its upstream body open"
+
+
+@pytest.mark.asyncio
 async def test_a_lease_ending_under_backpressure_still_completes_the_response(
     connection, signing_key, monkeypatch
 ):
