@@ -604,7 +604,7 @@ def test_show_renders_a_member_name_after_its_full_device_id(
 
     row = next(line for line in out.splitlines() if device_id in line)
     # A name longer than a terminal must not displace or abbreviate the identity.
-    assert f"{device_id}  {name}" in row, row
+    assert f"{device_id}  {json.dumps(name)}" in row, row
     assert row.index(device_id) < row.index(name), row
 
 
@@ -614,6 +614,8 @@ def test_show_marks_a_nameless_member_without_borrowing_another_members_name(
     named_id = "d_" + "1" * 32
     nameless_id = "d_" + "2" * 32
     literal_id = "d_" + "3" * 32
+    fallback_literal_id = "d_" + "4" * 32
+    fallback_literal = f"({resume.UNNAMED_DEVICE})"
     out = _show_with_members(
         root,
         monkeypatch,
@@ -622,6 +624,7 @@ def test_show_marks_a_nameless_member_without_borrowing_another_members_name(
             types.MemberRecord(device_id=named_id, name="laptop"),
             types.MemberRecord(device_id=nameless_id, name=""),
             types.MemberRecord(device_id=literal_id, name=resume.UNNAMED_DEVICE),
+            types.MemberRecord(device_id=fallback_literal_id, name=fallback_literal),
         ],
     )
 
@@ -629,8 +632,12 @@ def test_show_marks_a_nameless_member_without_borrowing_another_members_name(
     assert f"{nameless_id}  ({resume.UNNAMED_DEVICE})" in row, row
     assert "laptop" not in row, row
     literal_row = next(line for line in out.splitlines() if literal_id in line)
-    assert f"{literal_id}  {resume.UNNAMED_DEVICE}  drive" in literal_row, literal_row
-    assert f"({resume.UNNAMED_DEVICE})" not in literal_row, literal_row
+    expected_literal = json.dumps(resume.UNNAMED_DEVICE)
+    assert f"{literal_id}  {expected_literal}  drive" in literal_row, literal_row
+    fallback_literal_row = next(line for line in out.splitlines() if fallback_literal_id in line)
+    expected_fallback_literal = json.dumps(fallback_literal)
+    assert f"{fallback_literal_id}  {expected_fallback_literal}  drive" in fallback_literal_row
+    assert fallback_literal_row.split(maxsplit=2)[2] != row.split(maxsplit=2)[2]
 
 
 def test_show_keeps_same_named_members_distinguishable_by_full_device_id(
@@ -652,7 +659,7 @@ def test_show_keeps_same_named_members_distinguishable_by_full_device_id(
     assert len(rows) == 2, out
     # This is the anti-spoof contract: the label may collide, the identity may not.
     assert {row.split()[1] for row in rows} == {first_id, second_id}, rows
-    assert all(row.split()[2] == "shared-laptop" for row in rows), rows
+    assert all(row.split()[2] == json.dumps("shared-laptop") for row in rows), rows
 
 
 def test_show_json_carries_each_member_name_and_device_id(
