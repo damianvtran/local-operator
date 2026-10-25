@@ -388,8 +388,8 @@ def test_every_supervisor_arm_carries_the_store(monkeypatch, tmp_path) -> None: 
     unit = install.render_systemd(4098)
     environment_lines = [line for line in unit.splitlines() if line.startswith("Environment=")]
     assert environment_lines, unit
-    assert f"{CONFIG_DIR_ENV}=" in environment_lines[0]
-    assert store in environment_lines[0], environment_lines[0]
+    config_environment = next(line for line in environment_lines if f"{CONFIG_DIR_ENV}=" in line)
+    assert store in config_environment, config_environment
 
     task = install.render_task_xml(4098)
     assert store in task, "Task Scheduler has no env element; the launcher must carry it"

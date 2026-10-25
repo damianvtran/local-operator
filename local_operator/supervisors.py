@@ -327,6 +327,23 @@ def output_redirect_lines(log: Path) -> list[str]:
     return [f"StandardOutput=append:{log}", f"StandardError=append:{log}"]
 
 
+def systemd_path() -> str:
+    """The executable search path shared by every rendered Linux user unit.
+
+    A user manager does not inherit the installer's shell PATH, so a uv tool
+    installed under ``~/.local/bin`` is otherwise invisible to supervised
+    updates. Preserve the installer's additional directories rather than
+    replacing them with a fixed allowlist, and append the system directories
+    a clean user manager would have supplied.
+    """
+    directories = [str(Path.home() / ".local" / "bin")]
+    directories.extend(os.environ.get("PATH", "").split(os.pathsep))
+    directories.extend(
+        ("/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin")
+    )
+    return os.pathsep.join(dict.fromkeys(directory for directory in directories if directory))
+
+
 def render_systemd_unit(
     *,
     description: str,
@@ -400,7 +417,7 @@ def render_systemd_unit(
         # above the manager's ``oom_score_adj_min`` take effect, and a lower one
         # is dropped by systemd without failing the unit.
         lines.append(f"OOMScoreAdjust={int(oom_score_adjust)}")
-    lines += list(post_lines)
+    lines += [f"Environment={quoted(f'PATH={systemd_path()}')}", *post_lines]
     if separate_sections:
         lines.append("")
     lines += ["[Install]", f"WantedBy={wanted_by}"]
