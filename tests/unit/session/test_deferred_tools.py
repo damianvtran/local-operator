@@ -182,10 +182,9 @@ async def test_deferred_schema_leaves_the_array_but_not_the_inventory(tmp_path) 
         "console",
     ]
     # ``no_reply`` joined the merge set in S0a and rides the deferral set too,
-    # so a session that holds it lists it here — and ``notify`` (the inbox,
-    # docs/design/notifications-inbox.md §3.3) does the same; the cell's
-    # subject stays the declared pair (console deferred, read published).
-    assert session.deferred_tool_names() == {"console", "no_reply", "notify"}
+    # so a session that holds it lists it here. notify stays published after
+    # the live deferred pilot failed discovery (notifications-inbox.md §3.3).
+    assert session.deferred_tool_names() == {"console", "no_reply"}
     # ``context_breakdown`` counts what is SENT — the latched array — so the
     # kill switch moves it only from the next publish (the turn boundary
     # clears the latch, reproduced here).

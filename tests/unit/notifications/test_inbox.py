@@ -13,11 +13,11 @@ import json
 import multiprocessing
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, TypeVar
 
 import pytest
 
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import TextContent, ToolContext
 from local_operator.notifications import presence
 from local_operator.notifications.items import apply_patch, counts, detail, list_page
 from local_operator.notifications.store import (
@@ -34,6 +34,17 @@ from local_operator.tools.registry import create_tools
 SYNTHETIC_TOKEN = "-".join(("synthetic", "inbox", "bearer"))
 SID = "a1" * 6
 OTHER = "b2" * 6
+
+
+_T = TypeVar("_T")
+
+
+def _run_awaitable(value: Awaitable[_T]) -> _T:
+    # Tools promise Awaitable, while asyncio.run takes a coroutine on 3.12.
+    async def run() -> _T:
+        return await value
+
+    return asyncio.run(run())
 
 
 def _store(tmp_path: Path) -> NotificationStore:
@@ -73,11 +84,13 @@ def test_a_dismissed_key_absorbs_silently_and_an_escalation_revives_it(tmp_path:
     store.apply("dismiss", ids=[(item.item_id, 1)])
     absorbed = store.notify(SID, title="Fraud attempts", body_md="4", key="fraud")
     assert absorbed.action == "absorbed"
-    assert store.get(item.item_id)["dismissed_at"] is not None
+    absorbed_row = store.get(item.item_id)
+    assert absorbed_row is not None and absorbed_row["dismissed_at"] is not None
     assert store.counts()[0] == 0
     revived = store.notify(SID, title="Fraud attempts", body_md="40", key="fraud", priority="high")
     assert revived.action == "revived"
     row = store.get(item.item_id)
+    assert row is not None
     assert row["dismissed_at"] is None and row["priority"] == "high"
     assert store.counts()[0] == 1
 
@@ -201,7 +214,8 @@ def test_an_open_ask_is_waiting_and_dismiss_skips_it_as_live(tmp_path: Path) -> 
     assert index.read_bytes() == before, "the reel never writes the ask log"
     marked = apply_patch(tmp_path, "read", ids=[{"id": ask_ref(SID, "ask_1"), "revision": 1}])
     assert marked["changed"] == [ask_ref(SID, "ask_1")]
-    assert list_page(tmp_path, state="unread")["waiting"] == []
+    waiting = list_page(tmp_path, state="unread")["waiting"]
+    assert len(waiting) == 1 and waiting[0]["read"] is True
 
 
 def test_a_bulk_dismiss_names_the_open_asks_it_left_in_scope(tmp_path: Path) -> None:
@@ -213,15 +227,32 @@ def test_a_bulk_dismiss_names_the_open_asks_it_left_in_scope(tmp_path: Path) -> 
     store.notify(SID, title="campaign numbers")
     before = (tmp_path / "asks" / f"{SID}.json").read_bytes()
     _, high_water = store.counts()
-    by_session = apply_patch(tmp_path, "dismiss", session_id=SID, through_seq=high_water)
+    by_session = apply_patch(
+        tmp_path,
+        "dismiss",
+        session_id=SID,
+        through_seq=high_water,
+        observed=list_page(tmp_path, state="all")["observed"],
+    )
     assert len(by_session["changed"]) == 1
     assert by_session["skipped"] == [{"id": ask_ref(SID, "ask_1"), "reason": "live_ask"}]
-    everything = apply_patch(tmp_path, "dismiss", all_items=True, through_seq=high_water)
+    everything = apply_patch(
+        tmp_path,
+        "dismiss",
+        all_items=True,
+        through_seq=high_water,
+        observed=list_page(tmp_path, state="all")["observed"],
+    )
     assert sorted(entry["id"] for entry in everything["skipped"]) == sorted(
         [ask_ref(SID, "ask_1"), ask_ref("0ther0000001", "ask_2")]
     )
     # A bulk READ moves no ask mark and names none: asks are read by rendered id.
-    assert apply_patch(tmp_path, "read", all_items=True, through_seq=high_water)["skipped"] == []
+    assert (
+        apply_patch(tmp_path, "read", all_items=True, through_seq=high_water, observed=[])[
+            "skipped"
+        ]
+        == []
+    )
     assert (tmp_path / "asks" / f"{SID}.json").read_bytes() == before
 
 
@@ -335,7 +366,7 @@ def test_the_tool_scrubs_and_forwards_and_reports_the_door_sentence() -> None:
     variables.register_redaction(secret)
     context = ToolContext(cwd=".", notify_inbox=door, variables=variables)
     tool = create_tools(context, enabled=["notify"])[0]
-    result = asyncio.run(
+    result = _run_awaitable(
         tool.execute(
             "call_1",
             {"title": f"token {secret} leaked", "body": "b", "priority": "high", "key": "k"},
@@ -345,6 +376,7 @@ def test_the_tool_scrubs_and_forwards_and_reports_the_door_sentence() -> None:
         )
     )
     assert not result.is_error
+    assert isinstance(result.content[0], TextContent)
     assert result.content[0].text == "Notified (id n_x)."
     assert secret not in seen["title"] and seen["title"].startswith("token ")
     assert seen["anchor_id"] == "call_1"
@@ -356,7 +388,7 @@ def test_a_non_http_link_is_refused_as_invalid_arguments() -> None:
 
     context = _context(door)
     tool = create_tools(context, enabled=["notify"])[0]
-    result = asyncio.run(
+    result = _run_awaitable(
         tool.execute(
             "c",
             {"title": "t", "links": [{"label": "x", "url": "file:///etc"}]},
@@ -374,7 +406,8 @@ def test_the_cap_refusal_reaches_the_model_as_a_sentence() -> None:
 
     context = _context(door)
     tool = create_tools(context, enabled=["notify"])[0]
-    result = asyncio.run(tool.execute("c", {"title": "t"}, None, None, context))
+    result = _run_awaitable(tool.execute("c", {"title": "t"}, None, None, context))
+    assert isinstance(result.content[0], TextContent)
     assert result.is_error and "key" in result.content[0].text
 
 
@@ -399,15 +432,14 @@ def test_a_delegated_child_or_hidden_session_gets_no_door(tmp_path: Path) -> Non
     assert hidden._notify_inbox_callable() is None
 
 
-def test_the_session_door_never_reads_a_new_item_from_presence(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_the_session_door_never_reads_a_new_item_from_presence(tmp_path: Path, monkeypatch) -> None:
     from tests.unit.session.test_session import ScriptedStream, make_session
 
     session = make_session(tmp_path, ScriptedStream([]))
     session._config_dir = tmp_path / "root"
     door = session._notify_inbox_callable()
-    sentence = asyncio.run(
+    assert door is not None
+    sentence = _run_awaitable(
         door(title="PR #9", body="b", priority="high", key="pr-9", links=[], anchor_id="call_9")
     )
     assert sentence.startswith("Notified (id n_")
@@ -420,7 +452,7 @@ def test_the_session_door_never_reads_a_new_item_from_presence(
         "watching_and_active",
         lambda *a, **k: presence.WatchingVerdict(True, "desktop", 3.0, "desktop_input"),
     )
-    watched = asyncio.run(
+    watched = _run_awaitable(
         door(title="Seen live", body="", priority="high", key="", links=[], anchor_id="call_10")
     )
     assert watched.startswith("Notified (id n_")
@@ -436,11 +468,6 @@ def test_a_notify_wake_may_end_quietly_once_an_item_was_posted(tmp_path: Path) -
 
     session = make_session(tmp_path, ScriptedStream([]))
     session._run_notify_requested = True
-    assert (
-        session._quiet_end_refusal_text() is not None
-        if hasattr(session, "_quiet_end_refusal_text")
-        else True
-    )
     refusal = asyncio.run(session._quiet_end_refusal())
     assert refusal is not None
     session._run_notified = True
@@ -476,12 +503,24 @@ def test_the_routes_need_the_bearer(client) -> None:
 
 def test_list_count_detail_patch_and_seen_round_trip(client, tmp_path: Path) -> None:
     store = _store(tmp_path)
-    item = store.notify(SID, title="PR #9", body_md="body", key="pr-9", anchor_id="call_9")
+    item = store.notify(
+        SID,
+        title="PR #9",
+        body_md="body",
+        key="pr-9",
+        anchor_id="call_9",
+        now=int(time.time() * 1000) - 3_000,
+    )
     page = client.get("/v1/desktop/notifications", headers=AUTH).json()["result"]
     assert [row["id"] for row in page["items"]] == [item.item_id]
     assert page["unread_count"] == 1 and page["waiting"] == []
     count = client.get("/v1/desktop/notifications/count", headers=AUTH).json()["result"]
-    assert count == {"unread_count": 1, "waiting_count": 0, "high_water": 1}
+    assert count == {
+        "unread_count": 1,
+        "waiting_count": 0,
+        "waiting_unread_count": 0,
+        "high_water": 1,
+    }
     one = client.get(f"/v1/desktop/notifications/{item.item_id}", headers=AUTH)
     assert one.status_code == 200 and one.json()["result"]["item"]["body_md"] == "body"
     assert (
@@ -499,7 +538,7 @@ def test_list_count_detail_patch_and_seen_round_trip(client, tmp_path: Path) -> 
                 "surface": "desktop",
                 "session_id": SID,
                 "input_kind": "pointerdown",
-                "input_at_ms": int(time.time() * 1000),
+                "input_at_ms": int(time.time() * 1000) - 1_500,
                 "visible_since_ms": int(time.time() * 1000) - 2_000,
             },
         },
@@ -540,7 +579,7 @@ def test_the_feed_publishes_one_notifications_frame_per_change(tmp_path: Path) -
     _tick(feed)
     frames = [frame for frame in _queued(subscription) if frame["type"] == "notifications"]
     assert [frame["payload"] for frame in frames] == [
-        {"revision": 1, "unread_count": 1, "waiting_count": 0}
+        {"revision": 1, "unread_count": 1, "waiting_count": 0, "waiting_unread_count": 0}
     ]
     _tick(feed)
     assert [f for f in _queued(subscription) if f["type"] == "notifications"] == []
@@ -550,4 +589,9 @@ def test_the_feed_publishes_one_notifications_frame_per_change(tmp_path: Path) -
 def test_counts_include_open_asks(tmp_path: Path) -> None:
     _open_ask(tmp_path)
     _store(tmp_path).notify(SID, title="x")
-    assert counts(tmp_path) == {"unread_count": 1, "waiting_count": 1, "high_water": 1}
+    assert counts(tmp_path) == {
+        "unread_count": 1,
+        "waiting_count": 1,
+        "waiting_unread_count": 1,
+        "high_water": 1,
+    }

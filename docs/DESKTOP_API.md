@@ -2433,10 +2433,10 @@ on save (an older core refuses it).
 
 | Route | Body / query | Answer (`result`) |
 |---|---|---|
-| `GET /v1/desktop/notifications` | `state=unread\|all\|dismissed` (default `unread`), `source=notify\|ask`, `priority=high\|normal\|low`, `session_id`, `cursor`, `limit` 1..100 (default 50) | `{items, next_cursor, unread_count, waiting_count, high_water, waiting?}` — `waiting` (open asks, not paged) rides the first page only |
-| `GET /v1/desktop/notifications/count` | — | `{unread_count, waiting_count, high_water}` |
+| `GET /v1/desktop/notifications` | `state=unread\|all\|dismissed` (default `unread`), `source=notify\|ask`, `priority=high\|normal\|low`, `session_id`, `cursor`, `through_seq` (freeze first-page boundary), `limit` 1..100 (default 50) | `{items, next_cursor, observed:[{id,revision}], unread_count, waiting_count, waiting_unread_count, high_water, waiting?}` — `waiting` (open asks, not paged) rides the first page only |
+| `GET /v1/desktop/notifications/count` | — | `{unread_count, waiting_count, waiting_unread_count, high_water}` |
 | `GET /v1/desktop/notifications/{id}` | `id` = `n_<16 base32>` or `ask:<session_id>:<ask_id>` | `{item, history, session, anchor, projects, asks}`; 404 `wire.errors.notifications.unknown_item`, 422 for a malformed id |
-| `PATCH /v1/desktop/notifications` | `{op: read\|unread\|dismiss\|undismiss}` plus EXACTLY ONE target: `ids:[{id, revision}]` (1..500), or `session_id`+`through_seq`, or `all:true`+`through_seq` | `{changed, skipped:[{id, reason}], unread_count, high_water}` |
+| `PATCH /v1/desktop/notifications` | `{op: read\|unread\|dismiss\|undismiss}` plus EXACTLY ONE target: `ids:[{id, revision}]` (1..500), or `session_id`+`through_seq`+`observed`, or `all:true`+`through_seq`+`observed` (0..500 tokens) | `{changed, skipped:[{id, reason}], unread_count, waiting_count, waiting_unread_count, high_water}` |
 | `POST /v1/desktop/notifications/seen` | `{items:[{id, revision, anchor_id}] (1..100), evidence:{surface, session_id, input_kind, input_at_ms, visible_since_ms}}` | same shape as PATCH |
 
 **Item shape** (`notifications/items.py`, one shape for both sources): `id`,
@@ -2450,13 +2450,38 @@ status}]`, `ask` (the open ask's question/dismissibility, else `null`) and
 
 **Writes are token-bound (R10), never sweeps.** A by-id write names the
 `revision` it rendered — a newer revision is `skipped: stale_revision` and stays
-unread. A by-session or all-items write must carry `through_seq`, the
-`high_water` the surface last painted, and touches only rows at or below it. An
+unread. A by-session or all-items write must carry `through_seq` AND the
+`observed:[{id,revision}]` tokens the list returned. Tokens bound both source
+stores and the rendered filters/page; the scalar bound alone cannot identify
+asks. Missing observations are 422, not a legacy sweep. Session scope only
+narrows that set. Concurrent new revisions are skipped, never silently cleared.
+
+**All means the entire explicitly requested scope, not the first 50 rows.** On
+an explicit mark-all/dismiss-session gesture, clients enumerate every page of
+that state/source/priority/session scope with progress/count feedback, freeze
+the FIRST response's `high_water`, pass it as `through_seq` on every later GET,
+and union each page's `observed` tokens. Keep the first page's ask refs; do not
+refresh them into a later ask set. Then PATCH batches of at most 500 tokens with
+the same boundary. A filtered action must name its filtered scope; it never
+silently widens to the whole inbox. Read/unread applies to observed live ask
+marks as well as notify revisions, without touching ask logs.
+
+`waiting_count` is all pending asks (the group); `waiting_unread_count` is its
+unread subset. The sidebar badge is `unread_count + waiting_unread_count`.
+Reading an ask clears that badge half but never removes its pending group row.
+
+An
 ask id under `dismiss`/`undismiss` is `skipped: live_ask` and the ask log is not
 written; under `read`/`unread` only its reel-side mark moves. Other skip
 reasons: `unknown`, `already`. `seen` re-checks its evidence per item (see
 `docs/ATTENTION.md`, "Inbox items") and adds `anchor_mismatch` and
-`stale_evidence`.
+`stale_evidence`. Undo reuses the original by-id revision tokens, not the
+mutation receipt's newer high-water mark; an intervening content update makes
+that Undo `stale_revision`, not permission to affect a new revision.
+
+Consumers invalidate on EVERY `notifications` frame, not only a changed
+payload `revision`: replacing an ask can keep both SQLite high-water and all
+counts unchanged while the frame's envelope sequence advances.
 
 **Refusals** go through the shared classifier (`session/store_failures.py`)
 with this surface's own sentences (`wire.errors.notifications.*`, the
@@ -2508,7 +2533,7 @@ to.
 {"epoch":"…","seq":17,"type":"session_status","session_id":"<12 hex>",
  "payload":{"code":"approval","label":"Approval needed","revision":3}}
 {"epoch":"…","seq":18,"type":"notifications",
- "payload":{"revision":42,"unread_count":3,"waiting_count":1}}
+ "payload":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0}}
 {"epoch":"…","seq":19,"type":"heartbeat","payload":{"ts":1699999999.5}}
 {"epoch":"…","seq":19,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```

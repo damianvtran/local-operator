@@ -259,26 +259,31 @@ def waiting_items(
     return [ask_item(row, marks, sessions, projects) for row in rows]
 
 
-def unread_waiting_count(config_dir: Path | str, store: NotificationStore) -> int:
-    """Open asks without a reel-side read mark (the badge's ask half, design §11)."""
-    rows = open_asks(config_dir)
+def _waiting_counts(rows: Sequence[Mapping[str, Any]], store: NotificationStore) -> tuple[int, int]:
     refs = [ask_ref(str(r.get("session_id") or ""), str(r.get("ask_id") or "")) for r in rows]
     marks = store.ref_states(refs)
-    return sum(1 for ref in refs if (marks.get(ref) or {}).get("read_at") is None)
+    return len(refs), sum(1 for ref in refs if (marks.get(ref) or {}).get("read_at") is None)
+
+
+def unread_waiting_count(config_dir: Path | str, store: NotificationStore) -> int:
+    return _waiting_counts(open_asks(config_dir), store)[1]
 
 
 def counts(config_dir: Path | str, store: NotificationStore | None = None) -> dict[str, int]:
-    """``{unread_count, waiting_count, high_water}`` for badges and the feed frame.
+    """Total pending asks and their unread subset have different meanings.
 
-    ``waiting_count`` counts every OPEN ask (the "Waiting on you" group), and
-    ``unread_count`` counts unread, undismissed notify items. A badge shows
-    ``unread_count`` plus the asks the operator has not marked read; both
-    numbers are on the wire so each surface states the one it draws.
+    The group keeps every pending ask; the badge sums unread_count and
+    waiting_unread_count. Reading an ask never settles it.
     """
     store = store or NotificationStore(config_dir)
     unread, high_water = store.counts()
-    waiting = len(open_asks(config_dir))
-    return {"unread_count": unread, "waiting_count": waiting, "high_water": high_water}
+    waiting, waiting_unread = _waiting_counts(open_asks(config_dir), store)
+    return {
+        "unread_count": unread,
+        "waiting_count": waiting,
+        "waiting_unread_count": waiting_unread,
+        "high_water": high_water,
+    }
 
 
 def list_page(
@@ -291,6 +296,7 @@ def list_page(
     cursor: str | None = None,
     limit: int = LIST_LIMIT_DEFAULT,
     lapsed_visible_ms: int | None = None,
+    through_seq: int | None = None,
 ) -> dict[str, Any]:
     """``GET /v1/desktop/notifications`` (§5.2), as a plain dict."""
     store = NotificationStore(config_dir)
@@ -299,19 +305,33 @@ def list_page(
     limit = max(1, min(int(limit), LIST_LIMIT_MAX))
     items: list[dict[str, Any]] = []
     next_cursor = None
+    # Capture BEFORE rows: concurrent changes must never enlarge what this
+    # response authorizes. The explicit observed set also bounds filters/pages.
+    unread, high_water = store.counts()
+    if through_seq is not None:
+        high_water = min(high_water, through_seq)
     if source in (None, "", "notify"):
         rows, next_cursor = store.list_items(
-            state=state, priority=priority, session_id=session_id, cursor=cursor, limit=limit
+            state=state,
+            priority=priority,
+            session_id=session_id,
+            cursor=cursor,
+            limit=limit,
+            through_seq=high_water,
         )
         items = [notify_item(row, sessions, projects) for row in rows]
-    unread, high_water = store.counts()
+    waiting_count, waiting_unread = _waiting_counts(
+        open_asks(config_dir, lapsed_visible_ms=lapsed_visible_ms),
+        store,
+    )
     answer: dict[str, Any] = {
         "items": items,
         "next_cursor": next_cursor,
         "unread_count": unread,
         # Counted from the UNFILTERED open set, so a filter on this page never
         # shrinks the badge figure the same answer carries.
-        "waiting_count": len(open_asks(config_dir, lapsed_visible_ms=lapsed_visible_ms)),
+        "waiting_count": waiting_count,
+        "waiting_unread_count": waiting_unread,
         "high_water": high_water,
     }
     # ``waiting`` rides the FIRST page only (no cursor): asks are not paged, so
@@ -330,9 +350,14 @@ def list_page(
         )
         if priority and priority != ASK_PRIORITY:
             waiting = []
-        if state == "unread":
-            waiting = [item for item in waiting if not item["read"]]
+        # Pending is not unread: even on the unread-updates tab the waiting
+        # group keeps every live ask. Reading changes its badge/row treatment,
+        # never the fact that an agent is waiting for the operator.
         answer["waiting"] = waiting
+    answer["observed"] = [
+        {"id": item["id"], "revision": item["revision"]}
+        for item in items + answer.get("waiting", [])
+    ]
     return answer
 
 
@@ -420,23 +445,34 @@ def apply_patch(
     session_id: str | None = None,
     through_seq: int | None = None,
     all_items: bool = False,
+    observed: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """``PATCH /v1/desktop/notifications`` (§5.2): token-bound, never a sweep.
+    """Apply only explicitly observed revisions, across both source stores.
 
-    Ask ids are split off first. Under ``dismiss``/``undismiss`` an ask id is
-    ``skipped: live_ask`` and the ask log is not touched; under ``read`` /
-    ``unread`` only its reel-side mark moves. A by-session or all-items write
-    acts on notify rows only (asks are read individually, by the id the client
-    rendered) — but a bulk DISMISS still names every open ask in its scope as
-    ``skipped: live_ask`` (§2.3 "bulk, by-session"): the gesture said "clear
-    this pile", and a client told nothing would leave the operator wondering
-    why the asks are still there. Naming them is all it does; the ask log is
-    never touched.
+    Bulk targets echo the list's ``observed`` tokens. A scalar SQLite watermark
+    cannot identify an ask (which lives in another store), nor encode a page or
+    filter. Never repair missing tokens by discovering the current ask set:
+    that would silently include a new, unseen ask. ``session_id`` only narrows.
     """
     store = NotificationStore(config_dir)
     changed: list[str] = []
     skipped: list[dict[str, str]] = []
     notify_ids: list[tuple[str, int]] | None = None
+    bulk = ids is None
+    if bulk:
+        if observed is None or through_seq is None:
+            raise ValueError("bulk writes require observed tokens and through_seq")
+        bounded = []
+        for entry in observed:
+            item_id = str(entry.get("id") or "")
+            if item_id.startswith(ASK_REF_PREFIX):
+                belongs = item_id.split(":", 2)[1]
+            else:
+                row = store.get(item_id)
+                belongs = str(row["session_id"]) if row else ""
+            if all_items or belongs == session_id:
+                bounded.append(entry)
+        ids = bounded
     if ids is not None:
         notify_ids = []
         ask_refs: list[str] = []
@@ -463,31 +499,19 @@ def apply_patch(
             skipped.extend(
                 {"id": ref, "reason": "already"} for ref in ask_refs if ref not in set(moved)
             )
-    if notify_ids or ids is None:
+    if notify_ids:
         result = store.apply(
             op,
-            ids=notify_ids if ids is not None else None,
-            session_id=session_id,
-            through_seq=through_seq,
-            all_items=all_items,
+            ids=notify_ids,
+            through_seq=through_seq if bulk else None,
         )
         changed.extend(result.changed)
         skipped.extend(result.skipped)
-    if ids is None and op in ("dismiss", "undismiss"):
-        skipped.extend(
-            {
-                "id": ask_ref(str(r.get("session_id") or ""), str(r.get("ask_id") or "")),
-                "reason": "live_ask",
-            }
-            for r in open_asks(config_dir)
-            if all_items or str(r.get("session_id") or "") == session_id
-        )
-    unread, high_water = store.counts()
+    badge = counts(config_dir, store)
     return {
+        **badge,
         "changed": changed,
         "skipped": skipped,
-        "unread_count": unread,
-        "high_water": high_water,
     }
 
 
@@ -502,11 +526,12 @@ def apply_seen(
         list(items),
         session_id=str(evidence.get("session_id") or ""),
         input_at_ms=int(evidence.get("input_at_ms") or 0),
+        visible_since_ms=int(evidence.get("visible_since_ms") or 0),
+        surface=str(evidence.get("surface") or ""),
     )
-    unread, high_water = store.counts()
+    badge = counts(config_dir, store)
     return {
+        **badge,
         "changed": result.changed,
         "skipped": result.skipped,
-        "unread_count": unread,
-        "high_water": high_water,
     }

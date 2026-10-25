@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "locale": "ru",
+  "namespace": "wire.errors.notifications",
+  "record": "i18n/audits/evidence/ru/wire.errors.notifications/nt25a1/record.json",
+  "provenance": "Independent audit performed and bundle written by translation-auditor ffd16b7ff158, actual model openai/gpt-6.1-sol, 2026-10-25; actual command output retained, not reconstructed.",
+  "hashes": {
+    "record.json": "c86510b2e5e241b8accfa3ed2416921c543210c165a354c88b7481cf7b4ab4c6",
+    "report.md": "d7e64c21a43bdf00959641e774c1516f088105f11ea0eb13edc539caef0f2af3",
+    "audit.log": "c9cb6f65bf41299b59f197ebb31b52e48022fb781edbea446b64c5341c1e2545"
+  }
+}

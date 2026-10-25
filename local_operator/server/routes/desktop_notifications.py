@@ -92,6 +92,7 @@ async def list_notifications(
     priority: Literal["high", "normal", "low"] | None = None,
     session_id: Annotated[str | None, Query(pattern=r"^[a-f0-9]{12}$")] = None,
     cursor: Annotated[str | None, Query(max_length=80)] = None,
+    through_seq: Annotated[int | None, Query(ge=0)] = None,
     limit: Annotated[int, Query(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT,
 ):
     """One page of items, newest content first; ``waiting`` on the first page only."""
@@ -108,13 +109,14 @@ async def list_notifications(
             cursor=cursor,
             limit=limit,
             lapsed_visible_ms=window,
+            through_seq=through_seq,
         )
         return reply(page)
 
 
 @router.get("/v1/desktop/notifications/count", response_model=CRUDResponse[dict[str, Any]])
 async def count_notifications(request: Request):
-    """``{unread_count, waiting_count, high_water}`` for a poller without the feed."""
+    """Unread updates, pending asks and unread pending asks for a poller."""
     async with errors(request, notifications_refusal):
         root = _config_dir(request)
         return reply(await asyncio.to_thread(inbox.counts, root))
@@ -129,26 +131,25 @@ def _anchor_excerpt(session_dir: pathlib.Path, anchor_id: str) -> str:
     (the call is usually recent). Absent when it cannot be found — honest
     absence, never a guessed line.
     """
-    path = session_dir / "transcript.jsonl"
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return ""
-    budget = 4 * 1024 * 1024
-    with path.open("rb") as handle:
-        if size > budget:
-            handle.seek(size - budget)
-            handle.readline()
-        for raw in reversed(handle.read().splitlines()):
-            if anchor_id.encode() not in raw:
-                continue
-            try:
-                row = json.loads(raw)
-            except ValueError:
-                continue
-            text = _row_text(row, anchor_id)
-            if text:
-                return text
+    from local_operator.session.compression import read_tail_window
+
+    # A session may have an archived journal. Use the same bounded resolver
+    # as every other transcript reader; plain-name probes silently lose the
+    # context precisely when the conversation becomes old enough to archive.
+    raw_tail, truncated = read_tail_window(session_dir, 4 * 1024 * 1024)
+    lines = raw_tail.splitlines()
+    if truncated:
+        lines = lines[1:]
+    for raw in reversed(lines):
+        if anchor_id.encode() not in raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        text = _row_text(row, anchor_id)
+        if text:
+            return text
     return ""
 
 
@@ -220,14 +221,17 @@ class NotificationsPatch(Input):
     session_id: SessionID | None = None
     through_seq: int | None = Field(default=None, ge=0)
     all: bool = False
+    observed: list[ItemToken] | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def _one_target(self) -> "NotificationsPatch":
         targets = sum((self.ids is not None, self.session_id is not None, bool(self.all)))
         if targets != 1:
             raise ValueError("name exactly one target: ids, session_id or all")
-        if self.ids is None and self.through_seq is None:
-            raise ValueError("a by-session or all-items write needs through_seq")
+        if self.ids is None and (self.through_seq is None or self.observed is None):
+            raise ValueError("bulk writes require through_seq and observed tokens")
+        if self.ids is not None and self.observed is not None:
+            raise ValueError("observed tokens belong only to bulk targets")
         return self
 
 
@@ -244,6 +248,11 @@ async def patch_notifications(body: NotificationsPatch, request: Request):
             session_id=body.session_id,
             through_seq=body.through_seq,
             all_items=body.all,
+            observed=(
+                [entry.model_dump() for entry in body.observed]
+                if body.observed is not None
+                else None
+            ),
         )
         return reply(answer)
 

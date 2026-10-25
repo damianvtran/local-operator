@@ -4031,6 +4031,15 @@ class Session:
         #: this task instead — see :meth:`_spawn_selected_model_write`.
         self._selected_model_task: "asyncio.Future[None] | None" = None
         self._system_blocks_provider = system_blocks_provider
+        if getattr(system_blocks_provider, "session_notify_membership", False):
+            # Factory-created providers render before their warm tool snapshot
+            # gains session-owned doors. Membership is authoritative here; a
+            # child/one-shot/output-contract never acquires the notify clause.
+            setattr(
+                system_blocks_provider,
+                "notify_available",
+                lambda: any(tool.name == "notify" for tool in self._tools),
+            )
         self._frozen_system_blocks: list[str] | None = None
         self._last_system_blocks: list[str] | None = None
         self._system_state_message_id: str | None = None

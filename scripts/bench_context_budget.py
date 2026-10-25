@@ -1717,26 +1717,29 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # and the approval tier keys on the second.
 BUDGET_BILLED_TOKENS = 33_700
 #
-# THEN RAISED AGAIN, by the NOTIFICATIONS INBOX on the merged tree (`notify`,
-# docs/design/notifications-inbox.md §3.3-§4): the tool is DEFERRED and the
-# system.md clause is gated on `has_notify`, so the child arm does not move
-# (`notify` joins CHILD_NEVER_HOLDS). The delta is small and was measured with
-# THIS script on the rebased tree, one isolated HOME, top arm with and without
-# the tool in the surface:
-#   without notify   {WITHOUT} chars = ~{WITHOUT_BILLED} billed
-#   with notify      {WITH} chars = ~{WITH_BILLED} billed
-#   delta             +{DELTA_CHARS} chars = ~+{DELTA_BILLED} billed
-#     +{INSTR} instructions — the `has_notify` clause after the `ask` sentence;
-#      +{INV} tool_inventory — "notify (post to the operator's inbox)" on the
-#          schema-on-demand line;
-#       +0 tool_schemas — deferred; published it would cost 1,624 chars
-#          (~584 billed), which is why it is deferred.
-# The ceiling itself stays the browser surface's number: this delta fits inside
-# the headroom that raise left, so the inbox does not buy a ratchet of its own.
-# The adoption probe that guards the deferral (deferral.py's `notify` note) is
-# what decides whether this stays; un-deferring raises this ceiling by the
-# published delta in the same PR.
-
+# RAISED 33,466 -> 34,039 for the PUBLISHED notify schema. The completed
+# deferred live pilot (actual schema/nudge preflight) made 20 wrong todo calls,
+# falsely claimed delivery, and wrote no inbox row. We reject that strategy;
+# do not preserve a five-token headroom by sacrificing reliable tool discovery.
+# Same-tree isolated measurements, ONLY notify removed from the deferred set:
+#   deferred  93,021 chars / 33,461 billed / 36 published schemas
+#   published 94,615 chars / 34,034 billed / 37 published schemas
+#   delta +1,594 chars = +573 billed (+1,624 schema, -30 inventory).
+# The existing has_notify instruction is unchanged; child arm remains 83,752
+# chars / 30,127 billed and its ceiling is unchanged. New ceiling preserves
+# the previous five billed tokens of headroom, not a discretionary allowance.
+#
+# RE-MEASURED AFTER REBASING onto main 0823573fac (whose system.md lost the
+# `<repo-guidance>` bullet and reworded the subagent report clause), with an
+# isolated HOME and the same script, main's tree vs this tree:
+#   main         92,814 chars / 33,386 billed / 36 schemas   (child 30,123)
+#   this branch  94,604 chars / 34,030 billed / 37 schemas   (child 30,123)
+#   delta       +1,790 chars =   +644 billed: the published notify schema plus
+#               the has_notify clause and its inventory entry.
+# The ceiling stays 34,039: 9 billed tokens of headroom, inside the previous
+# allowance, so the measurement supports neither a raise nor a tightening.
+# The child arm is byte-identical to main's and its ceiling is unchanged.
+BUDGET_BILLED_TOKENS = 34_039
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "locale": "hi",
+  "namespace": "wire.slash.notifications_page",
+  "hashes": {
+    "record.json": "786e9a2c4dc1e798114cb96c4fa7716690f60d42aeb4880589380ae8eaa37d02",
+    "audit.log": "d315b212f2384825da7175aaa0fb1a32ccf5cc400e2367a87881b7eeb2a5315e",
+    "report.md": "b959f0c5d3e49645943e50bcdd4813b35eaf9a06aaf8bd29be0f66888a968bb2"
+  },
+  "record": "i18n/audits/evidence/hi/wire.slash.notifications_page/nt25a1/record.json",
+  "provenance": "Written by independent translation-auditor audit-hi-c9c5d8079e51, actual fallback model openai/gpt-6.1-sol, from its direct catalogue/context comparison and captured runtime-parser commands on 2026-10-25; not reconstructed by implementation agent."
+}

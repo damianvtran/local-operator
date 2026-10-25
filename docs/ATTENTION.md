@@ -350,15 +350,19 @@ and only per item: the item's own rendered `revision` and `anchor_id`, rendered,
 uncovered and visible in a focused foreground interface, with a fresh input
 edge. The server re-checks what it can — the item belongs to
 `evidence.session_id`, the revision and anchor are current, and
-`evidence.input_at_ms` is within 120 s AND later than the item's last change —
+`visible_since_ms` is not before the current revision, visibility precedes
+input, input is not future and is within 120 s, and the anchor has stayed
+visible after input for at least 1 s on desktop (positive elapsed time on TUI) —
 and answers `skipped` with the reason (`unknown`, `stale_revision`,
 `anchor_mismatch`, `stale_evidence`, `already`) otherwise. The desktop sends it through the foreground
 receipt guard (`notifications.seen`), like the existing receipt ops.
 
 **No automatic path may acknowledge in bulk** (R10). Mark-all-read and dismiss-
 by-session are explicit gestures, token-bound: they carry the `through_seq` the
-surface last painted (the answer's `high_water`), so an item written or updated
-after the paint stays unread. By-id writes carry the `revision` the surface
+surface first observed (the answer's `high_water`) PLUS exact `observed`
+id/revision tokens. Explicit All gestures enumerate the entire requested
+scope under that frozen boundary, then write batches of at most 500 tokens;
+neither late asks nor updated revisions enter the action. By-id writes carry the `revision` the surface
 rendered. An open ask is never dismissed through the reel (`skipped: live_ask`,
 ask log untouched); settling it goes through the existing reasoned door.
 

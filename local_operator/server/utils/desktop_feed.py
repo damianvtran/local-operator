@@ -685,7 +685,8 @@ class DesktopFeed:
         #: The last ``(revision, unread_count, waiting_count)`` published, so a
         #: doorbell that moved without changing the counts or the high-water
         #: mark (a WAL checkpoint, a no-op connect) publishes nothing.
-        self._notifications_seen: tuple[int, int, int] | None = None
+        self._notifications_seen: tuple[int, int, int, int] | None = None
+        self._asks_pending = False
         self._notifications_pending = False
 
         # -- the per-session status channel ------------------------------------
@@ -1963,7 +1964,8 @@ class DesktopFeed:
         rides the 1 s probe, because the badge also counts open asks and no
         other channel watches that directory. Either moving re-reads the counts
         (two indexed SQL reads and one index walk), and a frame is published
-        only when ``(revision, unread_count, waiting_count)`` actually changed.
+        when counts/revision changed OR the asks-index identity token moved.
+        Same-count replacement is not deduplicated away.
 
         INVALIDATION ONLY: the payload carries the counts a badge draws and the
         ``revision`` (the store's ``high_water``) a list compares against, never
@@ -1972,12 +1974,17 @@ class DesktopFeed:
         """
         fingerprint = await asyncio.to_thread(_db_fingerprint, self.notifications.path)
         moved = fingerprint != self._notifications_fingerprint or self._notifications_pending
+        # Ask identity/content can change without changing either count. Keep
+        # its dirty bit through a failed read; clearing it would lose the only
+        # invalidation for a same-cardinality replacement.
+        asks_moved = getattr(self, "_asks_pending", False)
         now = time.monotonic()
         if now - self._asks_probed_at >= CATALOGUE_PROBE_INTERVAL_S:
             self._asks_probed_at = now
             token = await asyncio.to_thread(self._asks_probe)
             if token != self._asks_token:
                 self._asks_token = token
+                self._asks_pending = asks_moved = True
                 moved = True
         if not moved:
             return
@@ -1990,21 +1997,32 @@ class DesktopFeed:
             raise
         self._notifications_pending = False
         self._notifications_fingerprint = fingerprint
-        if state == self._notifications_seen:
+        if state == self._notifications_seen and not asks_moved:
             return
+        self._asks_pending = False
         self._notifications_seen = state
-        revision, unread, waiting = state
+        revision, unread, waiting, waiting_unread = state
         self._publish(
             "notifications",
-            {"revision": revision, "unread_count": unread, "waiting_count": waiting},
+            {
+                "revision": revision,
+                "unread_count": unread,
+                "waiting_count": waiting,
+                "waiting_unread_count": waiting_unread,
+            },
         )
 
-    def _notifications_state(self) -> tuple[int, int, int]:
-        """``(high_water, unread_count, waiting_count)``, the frame's whole payload."""
-        from local_operator.notifications.items import open_asks
+    def _notifications_state(self) -> tuple[int, int, int, int]:
+        """Total pending and unread pending asks stay distinct on the wire."""
+        from local_operator.notifications.items import counts
 
-        unread, high_water = self.notifications.counts()
-        return high_water, unread, len(open_asks(self.root))
+        state = counts(self.root, self.notifications)
+        return (
+            state["high_water"],
+            state["unread_count"],
+            state["waiting_count"],
+            state["waiting_unread_count"],
+        )
 
     def _asks_probe(self) -> int:
         """One token over the asks index: a readdir plus one stat per entry.

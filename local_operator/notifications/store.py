@@ -625,6 +625,7 @@ class NotificationStore:
         session_id: str | None = None,
         cursor: str | None = None,
         limit: int = 50,
+        through_seq: int | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """One page of items, newest content first, and the next page's cursor.
 
@@ -636,6 +637,9 @@ class NotificationStore:
         limit = max(1, min(int(limit), 100))
         clauses = ["dismissed_at IS NOT NULL" if state == "dismissed" else "dismissed_at IS NULL"]
         params: list[Any] = []
+        if through_seq is not None:
+            clauses.append("seq <= ?")
+            params.append(through_seq)
         if state == "unread":
             clauses.append("read_rev < revision")
         if priority:
@@ -795,12 +799,14 @@ class NotificationStore:
             if ids is not None:
                 for item_id, revision in ids:
                     row = conn.execute(
-                        "SELECT id, revision, read_rev, dismissed_at FROM items WHERE id=?",
+                        "SELECT id, revision, seq, read_rev, dismissed_at FROM items WHERE id=?",
                         (item_id,),
                     ).fetchone()
                     if row is None:
                         result.skipped.append({"id": item_id, "reason": "unknown"})
                     elif int(row["revision"]) != int(revision):
+                        result.skipped.append({"id": item_id, "reason": "stale_revision"})
+                    elif through_seq is not None and int(row["seq"]) > through_seq:
                         result.skipped.append({"id": item_id, "reason": "stale_revision"})
                     elif not changes(row):
                         result.skipped.append({"id": item_id, "reason": "already"})
@@ -852,6 +858,8 @@ class NotificationStore:
         *,
         session_id: str,
         input_at_ms: int,
+        visible_since_ms: int = 0,
+        surface: str = "",
         now: int | None = None,
     ) -> ApplyResult:
         """In-view auto-read: per item, token-bound, evidence re-checked here.
@@ -865,7 +873,15 @@ class NotificationStore:
         """
         stamp = now if now is not None else now_ms()
         result = ApplyResult()
-        evidence_fresh = 0 <= stamp - int(input_at_ms) <= INPUT_EVIDENCE_MS
+        # Visibility must precede the input; the desktop additionally waits
+        # one second after it while the anchor stays visible. Unknown surface
+        # and zero/future visibility are not positive render evidence.
+        dwell_ms = 1000 if surface == "desktop" else 1
+        evidence_fresh = (
+            surface in ("desktop", "tui")
+            and 0 < visible_since_ms <= input_at_ms <= stamp
+            and dwell_ms <= stamp - input_at_ms <= INPUT_EVIDENCE_MS
+        )
 
         def body(conn: sqlite3.Connection) -> ApplyResult:
             for entry in items:
@@ -884,7 +900,7 @@ class NotificationStore:
                     or not row["anchor_id"]
                 ):
                     result.skipped.append({"id": item_id, "reason": "anchor_mismatch"})
-                elif not evidence_fresh or int(input_at_ms) < int(row["updated_at"]):
+                elif not evidence_fresh or visible_since_ms < int(row["updated_at"]):
                     result.skipped.append({"id": item_id, "reason": "stale_evidence"})
                 elif int(row["read_rev"]) >= int(row["revision"]):
                     result.skipped.append({"id": item_id, "reason": "already"})

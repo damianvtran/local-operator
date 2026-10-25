@@ -128,8 +128,7 @@ farewell).
 
 - Report honestly and briefly: done, in flight, blocked, on whom. Never report
   progress you have not verified - read the PR, the session, the job.
-- Raise a `notify` for findings the operator must act on (e.g. outside PRs
-  needing review) rather than relying on chat or banners.
+- `notify` action items.
 - Derive every number you relay, or name its source; a surprising first read
   gets one check further before you report it.
 - Say what you will change, even when small, before writing to anything the

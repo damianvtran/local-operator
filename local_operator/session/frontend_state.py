@@ -1211,6 +1211,7 @@ _FRONTEND_LOCAL_SLASHES = {
     # FAILS `tests/unit/session/runtime/test_capability_surface.py` unless the
     # runtime dispatches it.
     "notifications",
+    "unread",  # Same host-local completion receipt store under its renamed command.
     # FRONTEND-LOCAL because the command hosts a MASKED PASTE, and the user is
     # sitting at this terminal — routing the whole command would raise the
     # paste prompt on the runtime host's screen, which nobody is looking at. This is

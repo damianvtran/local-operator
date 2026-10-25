@@ -925,6 +925,7 @@ def build_system_blocks(
     host_has_console: bool | None = None,
     deferred_tools: Collection[str] = (),
     open_asks: str = "",
+    has_notify: bool | None = None,
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -1093,7 +1094,9 @@ def build_system_blocks(
             # true state of every session without the tool (children, hidden
             # and one-shot sessions), so there is no contradictory half to
             # derive. Gated on MEMBERSHIP so a child's prompt does not move.
-            "has_notify": any(tool.name == "notify" for tool in tools),
+            "has_notify": (
+                any(tool.name == "notify" for tool in tools) if has_notify is None else has_notify
+            ),
         },
     )
     instructions += (

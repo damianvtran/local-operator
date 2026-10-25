@@ -237,6 +237,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "tui.welcome",
         "wire.errors",
         "wire.errors.desktop",
+        "wire.errors.notifications",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
@@ -245,6 +246,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "wire.remote_compute",
         "wire.settings",
         "wire.slash",
+        "wire.slash.notifications_page",
     )
     assert catalogues.namespaces(locale) == namespaces
     for namespace in namespaces:

@@ -32789,10 +32789,10 @@ async def execute_no_reply(
 # createIf, footprint rung 3: the builder returns ``None`` unless the session
 # bound its inbox door (``ToolContext.notify_inbox``), which only a top-level
 # conversation the operator's listings show does (``Session.
-# _notify_inbox_callable``). DEFERRED (``tools/deferral.py``): measured at
-# ~500 billed tokens published against a context ceiling with ~76 to spare, so
-# the schema ships on first use, and the ``system.md`` clause gated on
-# ``has_notify`` is what names the moment to reach for it. Appended at the END
+# _notify_inbox_callable``). PUBLISHED: the completed deferred pilot confused
+# notify with todo and falsely claimed delivery. The measured 573-token cost
+# is explicit in bench_context_budget.py; discovery cannot be a budget trick.
+# The system.md has_notify clause names when to reach for it. Appended at END
 # of TOOL_BUILDERS/DEFAULT_TOOL_NAMES for the prompt-cache reason every other
 # append states.
 
@@ -32858,8 +32858,8 @@ class NotifyParams(BaseModel):
     links: list[NotifyLink] = Field(default_factory=list, max_length=5)
 
 
-#: The HOW, never the trigger: the schema is deferred, so this text is unseen
-#: until activation; the WHEN lives in the ``system.md`` clause.
+#: The HOW lives here; the WHEN also lives in the gated ``system.md`` clause.
+#: Published after the live deferred pilot failed reliable tool discovery.
 _NOTIFY_DESCRIPTION = (
     "Post an item to the operator's Notifications inbox: it stays listed until "
     "they read or dismiss it, across sessions and devices. Use for results, "
@@ -32917,9 +32917,31 @@ async def execute_notify(
         )
     title = _redact_tool_text(params.title, context)
     body = _redact_tool_text(params.body, context)
-    links = [
-        {"label": _redact_tool_text(link.label, context), "url": link.url} for link in params.links
-    ]
+    # A redacted URL is no longer necessarily the same destination. Drop the
+    # whole link rather than turn a credential-bearing URL into an ambiguous,
+    # actionable replacement. Decode every component too: encoded credentials
+    # in path/query/userinfo are just as sensitive as the raw spelling.
+    from urllib.parse import unquote, urlsplit
+
+    links = []
+    for link in params.links:
+        candidate = link.url
+        sensitive = False
+        for _ in range(len(candidate) + 1):
+            if _redact_tool_text(candidate, context) != candidate:
+                sensitive = True
+                break
+            decoded = unquote(candidate)
+            if decoded == candidate:
+                break
+            candidate = decoded
+        try:
+            parsed = urlsplit(link.url)
+            safe = bool(parsed.hostname) and parsed.username is None and parsed.password is None
+        except ValueError:
+            safe = False
+        if safe and not sensitive:
+            links.append({"label": _redact_tool_text(link.label, context), "url": link.url})
     try:
         sentence = await door(
             title=title,

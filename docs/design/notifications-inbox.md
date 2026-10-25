@@ -95,14 +95,26 @@ binds `ToolContext.notify_inbox` to `None` for a delegated child (it reports
 through `hub`; its parent decides), a session `resume.is_user_session` hides, a
 one-shot host, an output-contract session, and under `LOP_NOTIFY=0`.
 
-### 3.3 Footprint: deferred
+### 3.3 Footprint: published after a failed deferred pilot
 
-Published, the schema would cost ~584 billed tokens against a start-context
-ceiling with ~76 to spare. Deferred, the measured top-arm delta is +196 chars
-≈ +70.5 billed (the §4 clause, plus the purpose phrase on the schema-on-demand
-line); the child arm does not move. The adoption probe guards the choice: 20
-scripted wake turns per arm on a live model; under 80% correct calls, un-defer
-and raise the ceiling in the same PR.
+The completed live deferred pilot verified actual tool inventory, loaded nudge
+and effective deferral, then made 20 wrong `todo` calls and falsely claimed it
+had notified; no durable row existed. Its activation plus wake used 22 provider
+requests. This is not an adoption percentage. The earlier purported published
+control was INVALID: top-level `tools` config was ignored (settings belong
+under `values`). It provides no published/deferred comparison.
+
+The manager rejected deferred discovery. Only notify is now published;
+top-level createIf and the kill switch remain. Same-tree measurement:
+93,021 → 94,615 chars, +1,594 (+1,624 schema, −30 inventory) ≈ +573 billed.
+The top ratchet rises 33,466 → 34,039, preserving five tokens of headroom;
+the child arm is unchanged. No user tool settings or role pins change.
+
+The obsolete 20×2 deferred/published comparison is replaced by a bounded
+published scenario matrix: three meaningful outcomes and three routine/no-action
+cases, durable rows/tool receipts required. Run one positive and one negative
+first, stop on failure, and have independent QA repeat the discriminating pair.
+No fabricated statistical claim or positive-only flood-prevention claim.
 
 ### 3.4 Quiet ends
 
@@ -132,13 +144,13 @@ destination or feed branch.
 
 Five cold routes: list, count, detail, the token-bound PATCH (`read`, `unread`,
 `dismiss`, `undismiss` over `ids[{id, revision}]`, or `session_id`+`through_seq`,
-or `all`+`through_seq`), and the `seen` evidence door. A write naming a revision
+or `all`+`through_seq`, with exact `observed` tokens for either bulk target), and the `seen` evidence door. A write naming a revision
 the store has moved past is `skipped: stale_revision`, never applied.
 
 ### 5.3 Feed frame
 
 The `notifications` invalidation frame on `GET /v1/desktop/events`,
-`{revision, unread_count, waiting_count}`, at most once per tick, when either
+`{revision, unread_count, waiting_count, waiting_unread_count}`, at most once per tick, when either
 doorbell moved: the store's stat fingerprint (`notifications.db` and its two
 sidecars, on the 100 ms tick) or the asks index directory (the 1 s probe — the
 badge counts open asks and nothing else watches that directory). Invalidation
@@ -172,3 +184,17 @@ handler. The sidebar id is appended at the end of the wire vocabulary (D10).
   attached terminal satisfy rung 0 (L2). Until then a terminal never does.
 - Phone push: blocked on the cloud transport (S7). Off-desk reach in v1 is the
   relay/native inbox and its badge.
+
+## Round-one observation refinements
+
+Bulk actions echo list `observed` id/revision tokens (max 500 per PATCH).
+An explicit All action enumerates the full intended filtered scope, freezing
+first-page `high_water` as GET `through_seq`, unioning tokens across pages,
+then batching writes with progress/count feedback. It never means only the
+first page, and never discovers later asks at write time. `waiting_count`
+retains all pending asks; `waiting_unread_count` drives the ask half of the
+unread badge. See DESKTOP_API for exact request shapes.
+
+Release sequencing: L1 is not independently exposed before shipped read
+surfaces. D-C1 (interim TUI help versus receipt handler) is deferred to L2
+before release, not a claim that this PR contains the new TUI page.

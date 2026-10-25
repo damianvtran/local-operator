@@ -278,6 +278,11 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/notifications/store.py": (
+        1,
+        "notifications.db is the machine-wide config-root inbox, not a session "
+        "directory entry; session transfer must not copy every conversation's inbox.",
+    ),
     "local_operator/owned_process.py": (
         2,
         "``_OWNER_DIR`` ('owner'): the run-root segment a managed owner's lease and "
@@ -992,10 +997,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
     "local_operator/server/utils/desktop_feed.py": (
-        3,
+        4,
         "the agent and team directories the desktop app reads (the profile store), plus "
-        "``code_requests``: the derived per-session index the feed's 1 s probe stats to "
-        "invalidate one conversation's rows (review round 1, Q3)",
+        "``code_requests`` and ``asks``: config-root derived indexes the feed's 1 s "
+        "probe stats, not entries inside one session directory",
     ),
     "local_operator/tui/sidebar_pins.py": (
         3,
