@@ -53,6 +53,7 @@ change to the wire format.
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import socket
 import sys
 from typing import Any
@@ -314,6 +315,36 @@ def is_advertisable_ipv4(text: str) -> bool:
     if first >= 224:  # multicast (224-239) and the limited broadcast 255.255.255.255
         return False
     return True
+
+
+_RFC1918_IPV4_NETWORKS = tuple(
+    ipaddress.ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+
+
+def stale_declared_address_reason(endpoint: str) -> str | None:
+    """Why a declared endpoint is stale, or ``None`` when it remains advertisable.
+
+    Only an RFC1918 IPv4 literal can go stale in the sense that matters here: it
+    purports to be an address on this host's private network, so a readable live
+    interface table can disprove that claim. Public/NAT-facing addresses and
+    tunnel hostnames are deliberately not required to be local interfaces; the
+    operator declares those precisely because the OS cannot discover them.
+    """
+    host = str(endpoint or "").rsplit(":", 1)[0].strip("[]")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if address.version != 4 or not any(address in network for network in _RFC1918_IPV4_NETWORKS):
+        return None
+    entries = _interface_ipv4s()
+    if entries is None:
+        # An unobservable table cannot disprove an explicit declaration.
+        return None
+    if any(held == str(address) for _name, _flags, held in entries):
+        return None
+    return f"{address} is a private address absent from this host's live interface table"
 
 
 def local_ipv4_addresses() -> list[str]:

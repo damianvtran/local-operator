@@ -338,6 +338,14 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     approval_request.add_argument(
         "--host-key-fp", default="", help="the observed host key fingerprint"
     )
+    approval_request.add_argument(
+        "--advertise-host",
+        default="",
+        help=(
+            "host:port peers should use to reach the onboarded device "
+            "(for example its public or NAT address)"
+        ),
+    )
     approval_request.add_argument("--network", default="", help="the network to join (name or id)")
     approval_request.add_argument(
         "--network-only",
@@ -8906,6 +8914,7 @@ def _cmd_approvals_request(args: argparse.Namespace) -> int:
         device_id=args.device,
         fingerprint=args.fingerprint,
         host_key_fp=args.host_key_fp,
+        advertise_host=args.advertise_host,
         network=args.network,
         role=args.role,
         credential_ref=args.credential_ref,
