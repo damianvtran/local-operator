@@ -144,3 +144,49 @@ def test_wrong_scope_is_never_signaled(root: Path) -> None:
         wait "$child" || true
         """,
     )
+
+
+def test_missing_populated_record_fails_closed(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        shopt -s nullglob globstar
+        source "$LIB"
+        expected_cgroup="$EXPECTED"
+        cgroup_dir="$FIXTURE/cgroup"
+        mkdir -p "$cgroup_dir/init.scope"
+        printf '' >"$cgroup_dir/cgroup.procs"
+        printf '' >"$cgroup_dir/init.scope/cgroup.procs"
+        printf 'populated 0\n' >"$cgroup_dir/cgroup.events"
+        # An empty processes file plus no populated record is NOT proof of an
+        # empty subtree. The old collector returned three empty values here.
+        printf 'other 0\n' >"$cgroup_dir/init.scope/cgroup.events"
+        collect_cgroup "$cgroup_dir"
+        [ -z "$remaining" ] && [ -z "$populated" ]
+        [ -n "$read_error" ]
+        """,
+    )
+
+
+def test_already_reaped_child_is_a_noop_not_a_wrapper_failure(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        shopt -s nullglob globstar
+        source "$LIB"
+        expected_cgroup="$EXPECTED"
+        NATIVE_PROC_ROOT=/proc
+        sleep 0.01 &
+        child=$!
+        wait "$child" || true
+        if kill -0 "$child" 2>/dev/null || [ -d "/proc/$child" ]; then
+          printf 'child is unexpectedly still present\n' >&2
+          exit 1
+        fi
+        # Disappearance before the signal is success: there is no descendant to
+        # clean. Existing-but-unreadable/wrong-scope PIDs keep their failures.
+        signal_payload_pid "$child" TERM
+        """,
+    )

@@ -70,6 +70,9 @@ def test_generation_child_ignores_driver_python_paths_and_imports_its_own_tree(
     env["PYTHONHOME"] = str(driver)
     work = root / "work"
     work.mkdir()
+    sanitized = probe._generation_environment(env)  # noqa: SLF001
+    assert "PYTHONPATH" not in sanitized and "PYTHONHOME" not in sanitized
+    assert sanitized["LOCAL_OPERATOR_NO_NOTIFICATIONS"] == "1"
 
     receipt = probe._assert_generation_imports(generation, env, work, "base")  # noqa: SLF001
 

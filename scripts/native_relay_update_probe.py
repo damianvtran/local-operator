@@ -95,6 +95,9 @@ def _generation_environment(env: dict[str, str] | None = None) -> dict[str, str]
     clean = (os.environ if env is None else env).copy()
     clean.pop("PYTHONPATH", None)
     clean.pop("PYTHONHOME", None)
+    # This fixture drives real local-operator children on an isolated runner;
+    # none may put a test reply on the operator's actual desktop/lock screen.
+    clean["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = "1"
     return clean
 
 

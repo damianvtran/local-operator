@@ -36,8 +36,8 @@ jobs:
         env:
           EXPECTED_HEAD: ${{ github.event.label.name }}
           EXPECTED_WRAPPER_SHA256: bf76296966a9a5b942796e2c8a5d23d0a04f0b7ad6cab7f35d60fe51a74f5083
-          EXPECTED_PROBE_SHA256: 3963bdad593da823723035bac69264e8905b9e166cb09614d1e4520f119fe463
-          EXPECTED_SCOPE_LIB_SHA256: ef92d8d7b34c8ea2d7e4e63e3a18201f58d4bcc3137ac6436a33d27915abc7ee
+          EXPECTED_PROBE_SHA256: bd22408a6fedb81b8f766669241d189cd6bd459303a7803daa22f593bdd19c68
+          EXPECTED_SCOPE_LIB_SHA256: 1f7ad6a655ab1b4f28686262dc1da1126ab5f872aeaebb27beee5c83512e25b6
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/native-delegated-once-wrapper.sh
       - name: Upload scope and native receipts

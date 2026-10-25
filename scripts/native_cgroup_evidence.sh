@@ -17,7 +17,7 @@ read_pid_cgroup() {
 }
 
 collect_cgroup() {
-  local directory=$1 file pid key value extra fd path
+  local directory=$1 file pid key value extra fd path seen_populated
   local -A seen=()
   remaining=""
   populated=""
@@ -72,6 +72,7 @@ collect_cgroup() {
     read_error+="${read_error:+; }no cgroup.events beneath $directory"
   fi
   for file in "${event_files[@]}"; do
+    seen_populated=false
     if [ ! -r "$file" ]; then
       read_error+="${read_error:+; }unreadable $file"
       continue
@@ -82,6 +83,7 @@ collect_cgroup() {
     fi
     while IFS=' ' read -r -u "$fd" key value extra || [ -n "$key" ]; do
       [ "$key" = populated ] || continue
+      seen_populated=true
       case $value in
         0) ;;
         1) populated+="$file"$'\n' ;;
@@ -89,6 +91,9 @@ collect_cgroup() {
       esac
     done
     exec {fd}<&-
+    if [ "$seen_populated" != true ]; then
+      read_error+="${read_error:+; }missing populated value in $file"
+    fi
   done
 }
 
@@ -146,12 +151,21 @@ collect_payload_cgroup() {
 signal_payload_pid() {
   local pid=$1 signal=$2 pid_cgroup pid_owner
   [ "$pid" != "$$" ] || return 0
-  pid_cgroup=$(read_pid_cgroup "$pid") || return 1
+  # An already reaped PID is proof there is nothing left to signal, not an
+  # authorization failure. An existing but unreadable/wrong-scope PID still fails.
+  [ -d "$NATIVE_PROC_ROOT/$pid" ] || return 0
+  if ! pid_cgroup=$(read_pid_cgroup "$pid"); then
+    [ ! -d "$NATIVE_PROC_ROOT/$pid" ] && return 0
+    return 1
+  fi
   if [ "$pid_cgroup" != "$expected_cgroup" ] && [[ "$pid_cgroup" != "$expected_cgroup/"* ]]; then
     return 1
   fi
   pid_owner=$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')
-  [ "$pid_owner" = "$(id -u)" ] || return 1
+  if [ "$pid_owner" != "$(id -u)" ]; then
+    [ ! -d "$NATIVE_PROC_ROOT/$pid" ] && return 0
+    return 1
+  fi
   kill "-$signal" "$pid" 2>/dev/null || [ ! -d "$NATIVE_PROC_ROOT/$pid" ]
 }
 
