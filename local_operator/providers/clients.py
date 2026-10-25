@@ -1714,7 +1714,9 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
         measured_hint = request.context_tokens_hint_measured
         return hint, measured_hint if measured_hint is not None else hint
 
-    local = estimate_messages_tokens(request.messages)
+    # The provider-bound estimate must measure the same raw tool row the wire
+    # encoder will send; analytics and durable history keep using the receipt.
+    local = estimate_messages_tokens(request.wire_messages())
 
     extra_chars = sum(len(block) for block in request.system_blocks)
     for tool in request.tools:
@@ -3020,13 +3022,14 @@ class OpenAICompatClient:
         )
         chat_document_budget = document_budget_for_request(chat_document_form, request)
         messages = self._system_messages(request)
+        wire_messages = request.wire_messages()
         # DeepSeek's thinking mode refuses the shape this builds when the echo is
         # missing (see ``ModelSpec.requires_reasoning_echo`` for what is measured
         # and what its counter-shapes are), so the fill is applied here, at the
         # one boundary where the wire history is rendered, and real recorded
         # reasoning always wins over the placeholder.
         echo_turns = 0
-        for message in _without_unrenderable_tool_calls(request.messages):
+        for message in _without_unrenderable_tool_calls(wire_messages):
             entry = self._replay_chat_message(
                 message, request.model, endpoint, scope, chat_document_budget
             )
@@ -3359,11 +3362,12 @@ class OpenAICompatClient:
             scope,
             _estimate_slope(request.model),
         )
+        wire_messages = request.wire_messages()
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
             "input": _messages_to_openai_responses(
-                request.messages,
+                wire_messages,
                 request.model,
                 endpoint or f"{self._base_url}/responses",
                 scope,
@@ -4629,7 +4633,8 @@ class AnthropicClient:
         )
         doc_budget = document_budget_for_request(doc_form, request)
         messages: list[dict[str, Any]] = []
-        for message in _without_unrenderable_tool_calls(request.messages):
+        wire_messages = request.wire_messages()
+        for message in _without_unrenderable_tool_calls(wire_messages):
             # Anthropic 400s on an assistant message whose content array is
             # empty, which is exactly what an errored/aborted model turn
             # replays as. Same drop as the OpenAI paths; see
@@ -4999,7 +5004,8 @@ class GoogleClient:
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
-        for message in _without_unrenderable_tool_calls(request.messages):
+        wire_messages = request.wire_messages()
+        for message in _without_unrenderable_tool_calls(wire_messages):
             if message.role != "tool":
                 last_tool_result = False
             native = replay_items(message, request.model, self._base_url, "google-content", scope)
@@ -5407,11 +5413,15 @@ class MockClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
+        # Resolve once per stream, exactly like a production wire build. Safe
+        # request history remains untouched; only this provider-bound view can
+        # carry an armed value.
+        messages = request.wire_messages()
         # Mirror the real clients: the boundary leads every stream, including
         # the refusal path, so anything exercised against the mock sees the
         # same event shape a provider produces.
         yield StreamStartEvent(response_id="mock-response-id")
-        if any("[refuse]" in message.text for message in request.messages):
+        if any("[refuse]" in message.text for message in messages):
             yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=0))
             yield StreamEndEvent(
                 stop_reason="refusal",
@@ -5425,7 +5435,7 @@ class MockClient:
         # fresh runaway and a follow-up after Esc looped identically (round 2,
         # U6/N2). A real provider decides per request; the mock's closest
         # analogue is the newest instruction.
-        last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+        last_user = next((m for m in reversed(messages) if m.role == "user"), None)
         # ``[hang]``: a request that NEVER returns. The one shape that leaves a
         # runtime busy with nothing this process can read as a step — the
         # parent's own provider request is not a term of
@@ -5440,8 +5450,8 @@ class MockClient:
         # transcript would hang every later request of the session.
         hangs = (
             last_user is not None
-            and request.messages
-            and request.messages[-1] is last_user
+            and messages
+            and messages[-1] is last_user
             and "[hang]" in last_user.text
         )
         if hangs:
@@ -5458,7 +5468,7 @@ class MockClient:
         # instead of sleeping again forever.
         sleep_for = (
             _mock_bash_sleep(last_user.text)
-            if last_user is not None and request.messages and request.messages[-1] is last_user
+            if last_user is not None and messages and messages[-1] is last_user
             else None
         )
         if sleep_for is not None:

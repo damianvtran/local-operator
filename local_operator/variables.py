@@ -402,6 +402,10 @@ class VariableStore:
         # scrubbing must never make it readable or injectable, which is why
         # this is a separate set rather than another entry in `_credentials`.
         self._redactions: set[str] = set()
+        # Short-lived values have independent OWNERS, unlike the value-keyed set
+        # above. Releasing one owner must neither unregister a parallel owner's
+        # identical value nor remove a pre-existing broker registration.
+        self._scoped_redactions: dict[str, str] = {}
         # PER-SESSION span authority (LOH-28). A static OPEN/CLOSE pair is
         # forgeable: a tool result or a prompt could print the bare markers
         # around a credential and suppress its mask. The render prefix carries
@@ -544,12 +548,35 @@ class VariableStore:
         self._redactions.add(trimmed)
         return True
 
+    def acquire_scoped_redaction(self, value: str) -> str:
+        """Register one owned, memory-only redaction lease.
+
+        The opaque token is the only ownership handle. It is never derived from
+        the value, and releasing it is idempotent so run cleanup can be
+        unconditional without disturbing another lease or a long-term registration.
+        """
+        if not isinstance(value, str) or not value:
+            raise ValueError("Scoped redaction value must be a non-empty string.")
+        token = secrets.token_urlsafe(24)
+        while token in self._scoped_redactions:
+            token = secrets.token_urlsafe(24)
+        self._scoped_redactions[token] = value
+        return token
+
+    def release_scoped_redaction(self, token: str) -> bool:
+        """Release only the caller's lease; return whether it was still live."""
+        return self._scoped_redactions.pop(token, None) is not None
+
     def redaction_values(self) -> list[str]:
         """Every value to scrub: session credentials plus §6 registrations.
 
         Values only, never names — the caller is a filter, not a reader.
         """
-        return [*self._credentials.values(), *self._redactions]
+        return [
+            *self._credentials.values(),
+            *self._redactions,
+            *self._scoped_redactions.values(),
+        ]
 
     def redact_arguments(self, text: str) -> str:
         """``LoopConfig.redact_tool_arguments``: mask credentials typed into CODE.

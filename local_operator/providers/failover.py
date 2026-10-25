@@ -43,6 +43,7 @@ from local_operator.harness.types import (
     ChatRequest,
     ImageContent,
     ModelSpec,
+    OneTurnSecretScopeError,
     RenderedStreamError,
     StreamEndEvent,
     StreamEvent,
@@ -1442,6 +1443,10 @@ def _next_input_refusal_degrade(
     names in ``applied`` are the tokens recorded on the end event and mapped
     to user-facing copy by the harness loop.
     """
+    if request.has_one_turn_secrets:
+        # Input narrowing is a NEW request, not an identical transport retry.
+        # The raw overlay is authorized only for the original safe template.
+        raise OneTurnSecretScopeError("An armed one-turn secret request cannot be degraded.")
     if "screenshots_removed" not in applied:
         stripped = _request_without_images(request)
         if stripped is not None:
@@ -1465,6 +1470,8 @@ def _request_with_degradations(request: ChatRequest, applied: Sequence[str]) -> 
     ladder-order prefixes (its producer appends as rungs run), so a rung that
     no longer applies on the rebuilt request simply keeps the prior state.
     """
+    if applied and request.has_one_turn_secrets:
+        raise OneTurnSecretScopeError("An armed one-turn secret request cannot be degraded.")
     for name in applied:
         if name == "screenshots_removed":
             stripped = _request_without_images(request)

@@ -51,6 +51,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    SecretStr,
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
@@ -685,6 +686,19 @@ class ToolCall(BaseModel):
     raw_arguments: str | None = None
 
 
+ONE_TURN_SECRET_RECEIPT = (
+    "Secret resolved for one model request; value redacted from session history."
+)
+
+
+class OneTurnSecretSerializationError(ValueError):
+    """An armed one-turn secret reached generic serialization."""
+
+
+class OneTurnSecretScopeError(ValueError):
+    """An armed one-turn secret escaped its exact request scope."""
+
+
 class ToolResult(BaseModel):
     """The outcome of executing one ``ToolCall``.
 
@@ -716,6 +730,62 @@ class ToolResult(BaseModel):
     duration_s: float | None = None
     is_error: bool = False
     useless: bool = False
+
+    # Private by construction: JSON/MCP producers cannot inject this marker, and
+    # the native loop must consume it before hooks or events can publish the row.
+    _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
+
+    @classmethod
+    def one_turn_secret(
+        cls,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        value: str,
+        duration_s: float | None = None,
+    ) -> "ToolResult":
+        """Build the internal, not-yet-public form of a one-request secret.
+
+        Only the native loop may turn this into a provider overlay. The fixed
+        receipt prevents a producer from smuggling the value through public text
+        or renderer details; the serializer guard makes an unconsumed marker a
+        loud failure instead of a misleading redacted dump.
+        """
+        if not isinstance(value, str) or not value:
+            raise ValueError("One-turn secret value must be a non-empty string.")
+        result = cls(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            content=[TextContent(text=ONE_TURN_SECRET_RECEIPT)],
+            details=None,
+            duration_s=duration_s,
+            is_error=False,
+            useless=False,
+        )
+        result._one_turn_secret = SecretStr(value)
+        return result
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secret is not None:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret result cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_unconsumed_secret(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    # Pydantic wraps exceptions raised INSIDE a wrap serializer. These direct
+    # guards preserve the API's static exception type; the serializer above is
+    # still required for nested event/model serialization.
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
 
     @property
     def text(self) -> str:
@@ -784,6 +854,30 @@ class Message(BaseModel):
     provider_payload: dict[str, Any] | None = None
     # Stable id for transcript entries and cache memoization.
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+
+    # Set only on the ephemeral raw copies returned by ChatRequest.wire_messages.
+    # Explicit provider encoders may read the content; generic serialization may
+    # not silently turn this raw-bearing row into apparently safe public JSON.
+    _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secret is not None:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret message cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_unconsumed_secret(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
 
     @property
     def text(self) -> str:
@@ -1286,6 +1380,10 @@ class VariableStoreProtocol(Protocol):
     def credential_env(self) -> dict[str, str]: ...
 
     def redact(self, text: str) -> str: ...
+
+    def acquire_scoped_redaction(self, value: str) -> str: ...
+
+    def release_scoped_redaction(self, token: str) -> bool: ...
 
 
 @runtime_checkable
@@ -4176,7 +4274,74 @@ class ChatRequest(BaseModel):
         update: dict[str, Any] = {"model": spec}
         if self._max_tokens_from_policy:
             update["max_tokens"] = turn_output_budget(spec)
-        return self.model_copy(update=update)
+        candidate = self.model_copy(update=update)
+        if self.has_one_turn_secrets and (
+            candidate.model != self.model or candidate.max_tokens != self.max_tokens
+        ):
+            # A secret overlay is authorized for one exact model/budget request.
+            # Failover and fast-mode downgrade must not re-aim or rewrite it.
+            raise OneTurnSecretScopeError(
+                "An armed one-turn secret request cannot change model or generation budget."
+            )
+        return candidate
+
+    _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
+
+    @property
+    def has_one_turn_secrets(self) -> bool:
+        return bool(self._one_turn_secrets)
+
+    def arm_one_turn_secrets(self, values: Mapping[str, SecretStr]) -> None:
+        """Attach the request-private values resolved only by wire builders."""
+        self._one_turn_secrets = dict(values)
+
+    def wire_messages(self) -> list[Message]:
+        """Return public history, or narrowly scoped raw provider-bound copies.
+
+        With no overlay this is the historical zero-cost path: the original list
+        and message objects are returned untouched. An armed request instead
+        proves that every id identifies exactly one tool row before making only
+        those ephemeral copies; ambiguity fails before any provider call.
+        """
+        if not self._one_turn_secrets:
+            return self.messages
+        messages = list(self.messages)
+        for call_id, secret in self._one_turn_secrets.items():
+            matches = [
+                index
+                for index, message in enumerate(messages)
+                if message.role == "tool" and message.tool_call_id == call_id
+            ]
+            if len(matches) != 1:
+                raise OneTurnSecretScopeError(
+                    "An armed one-turn secret must resolve to exactly one tool message."
+                )
+            index = matches[0]
+            raw = messages[index].model_copy(
+                update={"content": [TextContent(text=secret.get_secret_value())]}
+            )
+            raw._one_turn_secret = secret
+            messages[index] = raw
+        return messages
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secrets:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret request cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_armed_request_serialization(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
 
     #: True when ``max_tokens`` was filled from :func:`turn_output_budget`
     #: because the caller named nothing, False when a caller named a value --
