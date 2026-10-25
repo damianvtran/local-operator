@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import stat
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
@@ -973,14 +974,18 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
     which is where the material belongs instead.
 
     An allowed write returns ``None`` below the soft threshold. It returns one
-    ``[scratch]`` advisory only when ``held`` was below 75% and ``would_hold``
-    reaches or exceeds it: a stateless CROSSING, not a flag or a warning on every
-    later write, so the agent gets one nudge rather than repeat nagging. The 75%
+    ``[scratch]`` advisory only when the true pre-write total was below 75% and
+    ``would_hold`` reaches or exceeds it: a stateless CROSSING, not a flag or a
+    warning on every later write, so the agent gets one nudge rather than repeat
+    nagging. The 75%
     threshold leaves a quarter of the cap as cleanup runway before the hard
-    refusal. Both comparisons use the same integer byte totals and budget as the
-    refusal, and the advisory is built only after the over-cap arm has raised;
-    its percentage and remaining headroom therefore cannot disagree with the
-    refusal thresholds, and an exactly-full allowed pad reports zero headroom.
+    refusal. ``would_hold`` and the budget are the same integer byte totals the
+    refusal uses. The soft left side adds the replaced file's allocated bytes
+    back to ``held`` — which the hard cap deliberately excludes — so an overwrite
+    cannot masquerade as a fresh crossing. The advisory is built only after the
+    over-cap arm has raised; its percentage and remaining headroom therefore
+    cannot disagree with the refusal thresholds, and an exactly-full allowed pad
+    reports zero headroom.
 
     ``size`` is the payload's length in BYTES. It is optional for an edit's
     address/name preflight, before its hunks have been applied. Once the final
@@ -1037,8 +1042,20 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
             f"{would_hold:,} — over the {budget:,}-byte ceiling for a "
             f"pad. {SCRATCHPAD_ELSEWHERE}"
         )
+    try:
+        replaced_stat = replaced.stat(follow_symlinks=False)
+        replaced_allocated = (
+            0 if stat.S_ISDIR(replaced_stat.st_mode) else replaced_stat.st_blocks * 512
+        )
+    except OSError:
+        # The budget walk likewise treats an entry it cannot stat as zero.
+        replaced_allocated = 0
+    # Keep the refusal's replacement exclusion above, but reconstruct the actual
+    # pad-before total for the soft left side. Without these bytes, overwriting
+    # one large file on an already-warned pad looks like a NEW crossing each time.
+    held_before = held + replaced_allocated
     if (
-        held * 100 < budget * SCRATCHPAD_SOFT_WARNING_PERCENT
+        held_before * 100 < budget * SCRATCHPAD_SOFT_WARNING_PERCENT
         and would_hold * 100 >= budget * SCRATCHPAD_SOFT_WARNING_PERCENT
     ):
         percent = would_hold * 100 // budget

@@ -1625,6 +1625,52 @@ async def test_scratchpad_write_appends_the_soft_crossing_advisory(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_scratchpad_overwrites_above_the_soft_threshold_do_not_nag_again(
+    tmp_path, monkeypatch
+) -> None:
+    """An existing large file is already IN the pad-before total.
+
+    The first write really crosses (0% to 80%) and advises once. A same-size
+    edit and an identical-content rewrite then stay silent: excluding the old
+    file for the hard cap must not make either look like a fresh 0% to 80% cross.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 10240)
+    content = "x" * 8191 + "z"
+
+    crossed = await tools["write"].execute(
+        "c", {"path": "scratchpad://large.md", "content": content}, None, None, context
+    )
+
+    target = pad / "large.md"
+    assert crossed.is_error is False
+    assert crossed.text.count("[scratch] ") == 1
+    assert "The pad is at 80% of its 10,240-byte cap" in crossed.text
+    assert target.stat().st_blocks * 512 >= 8192
+
+    updated = "x" * 8191 + "y"
+    edited = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://large.md", "old_text": "z", "new_text": "y"},
+        None,
+        None,
+        context,
+    )
+
+    assert edited.is_error is False
+    assert "[scratch] " not in edited.text
+    assert target.read_text(encoding="utf-8") == updated
+
+    rewritten = await tools["write"].execute(
+        "c", {"path": "scratchpad://large.md", "content": updated}, None, None, context
+    )
+
+    assert rewritten.is_error is False
+    assert "[scratch] " not in rewritten.text
+    assert target.read_text(encoding="utf-8") == updated
+
+
+@pytest.mark.asyncio
 async def test_scratchpad_edit_appends_the_measured_soft_crossing_advisory(
     tmp_path, monkeypatch
 ) -> None:
@@ -1633,8 +1679,10 @@ async def test_scratchpad_edit_appends_the_measured_soft_crossing_advisory(
     pad.mkdir(parents=True)
     target = pad / "notes.md"
     target.write_text("seed\n", encoding="utf-8")
-    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
-    replacement = "x" * 3072
+    # The existing file's allocated block is part of pad-before: 4,096 / 8,192
+    # starts at 50%, so the final 6,144-byte payload still tests the 75% crossing.
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 8192)
+    replacement = "x" * 6144
 
     result = await tools["edit"].execute(
         "c",
@@ -1647,7 +1695,7 @@ async def test_scratchpad_edit_appends_the_measured_soft_crossing_advisory(
     assert result.is_error is False
     assert result.text == (
         f"Edited scratchpad://notes.md -> {target}: 1 hunk(s), 1 replacement(s) applied.\n"
-        "[scratch] The pad is at 75% of its 4,096-byte cap, with 1,024 bytes of "
+        "[scratch] The pad is at 75% of its 8,192-byte cap, with 2,048 bytes of "
         "headroom — build output / dependency trees belong outside the pad; "
         "lop sessions cleanup --dry-run shows what is reclaimable."
     )
