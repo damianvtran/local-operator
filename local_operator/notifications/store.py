@@ -1032,21 +1032,57 @@ class NotificationStore:
 
         return self._write(body, "seen")
 
+    def undelivered(self, *, priority: str | None = None, limit: int = 4) -> list[dict[str, Any]]:
+        """Items a banner leg may still raise: unread, undismissed, unclaimed.
+
+        THE FILTER IS SQL, not a post-read pass: a caller that fetched N unread
+        rows and filtered `delivered_rev` afterwards could starve the oldest
+        item for ever once the newest N had been claimed, which is the one
+        failure a drain-by-ticks design has to avoid.
+        """
+        clauses = ["dismissed_at IS NULL", "read_rev < revision", "delivered_rev < revision"]
+        params: list[Any] = []
+        if priority is not None:
+            clauses.append("priority = ?")
+            params.append(str(priority))
+        params.append(max(1, int(limit)))
+
+        def body(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [
+                _row_dict(row)
+                for row in conn.execute(
+                    f"SELECT {_ITEM_COLUMNS} FROM items WHERE {' AND '.join(clauses)} "
+                    "ORDER BY created_at, id LIMIT ?",
+                    params,
+                )
+            ]
+
+        return self._read(body, [], "undelivered")
+
     def claim_delivery(self, item_id: str, by: str) -> bool:
-        """Claim the banner for an item's current revision, machine-wide, once.
+        """Claim the banner for an item's current revision, once, machine-wide.
 
         ``delivered_rev`` is the watermark a banner leg (desktop feed, TUI, the
         runtime's own OS banner, and a future phone push) claims before raising,
         so one revision raises at most one banner. Separate from the read mark
         on purpose: notifying is not reading (``attention.py``'s two-watermark
         rule).
+
+        THE READ STATE IS PART OF THE CLAIM. A receipt that lands before the
+        raise (the feed claims on its next tick) means the surface already
+        showed the operator this content, so a banner would be redundant — the
+        one suppression the grace allows. It suppresses nothing permanently: a
+        later content change bumps ``revision``, which makes the row unread and
+        claimable again (``notifications/delivery.py`` states the rule).
         """
 
         def body(conn: sqlite3.Connection) -> bool:
             row = conn.execute(
-                "SELECT revision, delivered_rev FROM items WHERE id=?", (item_id,)
+                "SELECT revision, delivered_rev, read_rev FROM items WHERE id=?", (item_id,)
             ).fetchone()
             if row is None or int(row["delivered_rev"]) >= int(row["revision"]):
+                return False
+            if int(row["read_rev"]) >= int(row["revision"]):
                 return False
             seq = self._next_seq(conn)
             conn.execute(
@@ -1056,6 +1092,27 @@ class NotificationStore:
             return True
 
         return self._write(body, "claim")
+
+    def release_delivery(self, item_id: str, revision: int, by: str) -> bool:
+        """Give back a claim whose raise never happened (a spawn that reported nothing).
+
+        Scoped to the exact revision AND claimant: a stale release must not
+        wipe a newer revision's claim, and nothing may undo another surface's
+        banner. True when a claim was actually released.
+        """
+
+        def body(conn: sqlite3.Connection) -> bool:
+            released = conn.execute(
+                "UPDATE items SET delivered_rev=0, delivered_by='' "
+                "WHERE id=? AND delivered_rev=? AND delivered_by=?",
+                (item_id, int(revision), by),
+            )
+            if not released.rowcount:
+                return False
+            conn.execute("UPDATE items SET seq=? WHERE id=?", (self._next_seq(conn), item_id))
+            return True
+
+        return self._write(body, "release")
 
     # -- retention ------------------------------------------------------------
 

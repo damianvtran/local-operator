@@ -323,6 +323,10 @@ UNATTRIBUTED_PROBE_MIN_INTERVAL_S = STATUS_PROBE_INTERVAL_S
 #: hand-maintained 3s are one edit away from disagreeing about it.
 BURST_LIMIT = 3
 
+#: Items this leg inspects per tick. One more than the banner ceiling so the
+#: overflow arm is reachable from a single read; it is not a second cap.
+BURST_ITEMS_PER_TICK = BURST_LIMIT + 1
+
 
 def _authoring_projection(text: str, volatile: frozenset[str]) -> str:
     """The AUTHORED lines of one registry row, with the volatile ones dropped.
@@ -696,6 +700,14 @@ class DesktopFeed:
         #: minute instead of once per 100 ms tick.
         self._inbox_warned_at = 0.0
         self._asks_pending = False
+        #: This tick's presence reading, shared by the completion and item
+        #: banner legs. The read is a mkdir + chmod + readdir + one read per
+        #: record, so a tick takes ONE (review round 2, R14) and both legs ask
+        #: the same answer -- a second ask in one tick is the multiplier that
+        #: review removed.
+        self._presence_this_tick: DesktopPresence | None = None
+        #: Whether the inbox doorbell moved in this tick (set by the badge pass).
+        self._notifications_moved = False
         self._notifications_pending = False
 
         # -- the per-session status channel ------------------------------------
@@ -1206,6 +1218,11 @@ class DesktopFeed:
                 self._position_seen[session_id] = position
 
     async def _tick(self) -> None:
+        # A fresh presence answer per tick: both banner legs share this one
+        # (``_tick_presence``), and a stale one from the previous pass would
+        # decide a banner about a window that has already moved.
+        self._presence_this_tick = None
+        self._notifications_moved = False
         # The tick's own number, so a frame that may only be published once per
         # tick can say which tick it is in (the catalogue invalidation, finding 8).
         self._tick_index += 1
@@ -1380,6 +1397,128 @@ class DesktopFeed:
         # three stats per tick on ``notifications.db`` and its two sidecars —
         # the documented eight-stat tick — and the asks index on the 1 s probe.
         await self._maybe_emit_notifications()
+        # 9. THE ITEM BANNER LEG (docs/design/notifications-inbox.md §5.3/rung 2):
+        # only while a live desktop lease advertises the `update` kind, and only
+        # for revisions nothing has claimed yet.
+        await self._emit_item_notifications()
+
+    # -- the item banner leg (contract §3.5, rung 2) -------------------------
+
+    def _item_banner_payload(self, row: dict[str, Any]) -> dict[str, Any]:
+        """One ``notification`` frame body for an item revision (kind ``update``).
+
+        The type stays ``notification`` and ``notification_contract`` stays 1:
+        ``kind`` is the additive half, and the contract already promises that an
+        unknown kind renders as text (``ui:desktop-session-contract.ts``), so an
+        older renderer shows the words instead of a banner it cannot focus.
+        """
+        session_id = str(row.get("session_id") or "")
+        return {
+            "kind": "update",
+            "notification_id": str(row.get("id") or ""),
+            "item_revision": int(row.get("revision") or 0),
+            "priority": str(row.get("priority") or ""),
+            "title": str(row.get("title") or ""),
+            "body": str(row.get("body_md") or ""),
+            "session_id": session_id,
+            "focus_policy": "open-session",
+            "dedupe_key": f"item:{row.get('id')}:{row.get('revision')}",
+        }
+
+    def _tick_presence(self) -> DesktopPresence:
+        """This tick's presence answer, read once and shared across both legs.
+
+        Completions and inbox items decide from the same machine state, and the
+        reading is a directory walk, so one pass takes it and both ask the same
+        object. UNCACHED, because a banner must not be decided by a lease that
+        moved inside the 2 s cache window; ``_tick`` clears it at the start of
+        every pass so a tick cannot inherit the previous one's answer.
+        """
+        if self._presence_this_tick is None:
+            self._presence_this_tick = desktop_presence(self.root, cached=False)
+        return self._presence_this_tick
+
+    async def _emit_item_notifications(self) -> None:
+        """RUNG 2: raise unread ``high`` items to an app that advertises ``update``.
+
+        This is the desktop half of the banner ladder. It runs ONLY while a live
+        desktop lease advertises the ``update`` kind — the capability the
+        contract requires before an item may be delivered here at all — so an
+        older app (or none) sees no extra frames and the runtime's own OS-banner
+        rung stays the fallback.
+
+        Each revision is claimed in the store before its frame is published, so
+        two backends (or a backend and a runtime) cannot both banner it. The
+        claim requires the row to be STILL UNREAD, which is what lets an in-view
+        receipt landing between the write and this tick suppress the banner
+        without any timer. ``BURST_LIMIT`` applies; the overflow becomes ONE
+        digest frame carrying the count and ids, because five banners at once is
+        the same interruption as one that says five.
+        """
+        from local_operator.notifications.store import NotificationStore
+
+        # NOTHING MOVED, NOTHING TO RAISE: the badge pass already took the
+        # doorbell this tick, and a quiet tick must cost no SQL and no extra
+        # stat. A claim, a release and every write move this store's
+        # fingerprint, so an owed banner is always re-examined on the tick
+        # after the one that owed it.
+        if not self._notifications_moved:
+            return
+        if not self._tick_presence().delivers("update"):
+            return
+        store = NotificationStore(self.root)
+
+        def candidates() -> list[dict[str, Any]]:
+            # ONE extra row so the overflow arm is observable without a second
+            # read, and the unclaimed filter lives in SQL: a post-read filter
+            # would starve the oldest item once the newest ones were claimed.
+            return [
+                dict(row)
+                for row in store.undelivered(priority="high", limit=BURST_ITEMS_PER_TICK)
+            ]
+
+        try:
+            pending = await asyncio.to_thread(candidates)
+        except Exception:  # noqa: BLE001 - a banner never breaks the feed
+            return
+        if not pending:
+            return
+        claimed: list[dict[str, Any]] = []
+        for row in pending[:BURST_ITEMS_PER_TICK]:
+            try:
+                got = await asyncio.to_thread(store.claim_delivery, str(row["id"]), "feed")
+            except Exception:  # pragma: no cover - claim failure is a skipped banner
+                claimed = []
+                break
+            if got:
+                claimed.append(row)
+        if not claimed:
+            return
+        per_tick, overflow = claimed[:BURST_LIMIT], claimed[BURST_LIMIT:]
+        for row in per_tick:
+            self._publish("notification", self._item_banner_payload(row))
+        if overflow:
+            # The digest stands in for the rows the ceiling held back THIS tick;
+            # everything still unclaimed drains on the next ones, so the queue
+            # empties without a second, larger cap.
+            self._publish("notification", self._item_banner_digest(overflow))
+
+    def _item_banner_digest(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """One frame standing in for the items the per-tick ceiling held back.
+
+        Deliberately copy-free: it names no sentence, only the count and the
+        ids, so the surface that advertises ``update`` words it (that renderer
+        owns the copy, and a second English string here would be a second thing
+        to translate).
+        """
+        return {
+            "kind": "update",
+            "overflow": True,
+            "count": len(rows),
+            "notification_ids": [str(row.get("id") or "") for row in rows],
+            "priority": "high",
+            "dedupe_key": "item:digest:" + ";".join(str(row.get("id") or "") for row in rows),
+        }
 
     async def _maybe_probe_unattributed(self) -> None:
         """The doorbell's unattributed-move fallback, RATE-LIMITED (NIT 1).
@@ -1560,7 +1699,7 @@ class DesktopFeed:
             # per candidate made a fleet burst — the scenario this channel
             # exists for — pay N of them inside one tick against 1 before.
             if presence is None:
-                presence = desktop_presence(self.root, cached=False)
+                presence = self._tick_presence()
             policy = self._focus_policy_for(self._session_id(identity), presence)
             if policy is None:
                 continue
@@ -1997,6 +2136,10 @@ class DesktopFeed:
                 self._asks_token = token
                 self._asks_pending = asks_moved = True
                 moved = True
+        # The badge pass publishes this so the BANNER leg can decide without a
+        # second fingerprint: a quiet tick must stay stat-free and SQL-free,
+        # and every write, claim and release moves this store's fingerprint.
+        self._notifications_moved = moved
         if not moved:
             return
         state = await asyncio.to_thread(self._notifications_state_or_none)

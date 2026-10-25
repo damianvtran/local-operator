@@ -2354,6 +2354,41 @@ def _optional_capabilities() -> dict[str, Any]:
     return flags
 
 
+def _lapsed_window(config_dir: Path) -> int:
+    """``asks.lapsed_visible_for``, polled once per request (the desktop route's rule).
+
+    Reading it here, on the event loop, is the same choice the runtime-facing
+    desktop route documents: the window is a config read plus an expiry, and the
+    request that follows is the only consumer.
+    """
+    from local_operator.asks.visibility import lapsed_visible_ms
+
+    return lapsed_visible_ms(config_dir, poll_now=True)
+
+
+def _notifications_block() -> dict[str, Any]:
+    """The list payload's ``notifications`` block: the inbox badge, one read.
+
+    A SIBLING of ``unread`` on the list payload, for that block's own reason: a
+    missing key must read as "this relay has no inbox", never as a zero the
+    phone could paint over a perfectly real badge. So a store that cannot be
+    read answers ``{}`` -- unknown -- rather than zeros.
+
+    The numbers are the desktop's own (``notifications.items.counts``), never
+    recomputed here: ``waiting_unread_count`` is the ask half of the badge and
+    ``waiting_count`` is every pending ask, and a second implementation of that
+    split is a second thing that can disagree with the reel.
+    """
+    from local_operator.notifications.items import counts as inbox_counts
+    from local_operator.paths import config_dir
+
+    try:
+        return dict(inbox_counts(config_dir()))
+    except Exception:  # noqa: BLE001 -- absent means unknown, never zero
+        logger.debug("relay: notifications block unavailable", exc_info=True)
+        return {}
+
+
 def _feature_flags() -> dict[str, Any]:
     """The lifted feature-flag dict for the mobile capabilities payload.
 
@@ -4167,6 +4202,7 @@ class MobileDaemon:
         from local_operator.session.attention import AttentionStore
 
         await self._refresh_pins_if_changed()
+        await self._refresh_notifications_if_changed()
         await self.refresh_tags_if_changed()
         revision = await asyncio.to_thread(AttentionStore().revision)
         if revision != getattr(self, "_attention_revision", None):
@@ -4368,6 +4404,41 @@ class MobileDaemon:
                 )
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push worker tick failed", exc_info=True)
+
+    async def _refresh_notifications_if_changed(self) -> None:
+        """Wake the list stream when the INBOX store moved.
+
+        The badge travels on the list payload (``_notifications_block``), and the
+        store is written by every runtime and by the desktop routes -- processes
+        this daemon never hears from. Without this pass the phone's badge only
+        moved when an unrelated session event happened to repaint the list, which
+        is the same defect ``_refresh_pins_if_changed`` was added for.
+
+        ONE fingerprint per scan tick over ``notifications.db`` and its ``-wal``,
+        not a watcher and not a poll of the inbox: the store is SQLite in WAL
+        mode, so an in-flight writer moves the sidecar before the database does
+        and a single-file stat would miss the tick that matters.
+        """
+        from local_operator.notifications.store import store_path
+        from local_operator.paths import config_dir
+
+        def fingerprint() -> tuple[Any, ...]:
+            database = store_path(config_dir())
+            out: list[Any] = []
+            for path in (database, database.with_name(database.name + "-wal")):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    out.append(None)
+                    continue
+                out.append((stat.st_ino, stat.st_size, stat.st_mtime_ns))
+            return tuple(out)
+
+        current = await asyncio.to_thread(fingerprint)
+        if current == getattr(self, "_notifications_fingerprint", None):
+            return
+        self._notifications_fingerprint = current
+        self.table.notify_list_changed()
 
     async def _refresh_pins_if_changed(self) -> None:
         """Wake the list stream when ANOTHER surface changed the shared pins.
@@ -5646,6 +5717,10 @@ def build_app(daemon: MobileDaemon):
             # computed (see ``unread_snapshot``), so the block cannot be served
             # from a later rebuild than the rows it sits beside.
             "unread": daemon.table.unread_block(),
+            # The inbox badge (docs/design/notifications-inbox.md §5.4), read
+            # per frame like ``unread``: a stale badge is the one thing a phone
+            # must not show, and this answer is cheap beside it.
+            "notifications": _notifications_block(),
             "capabilities": {
                 "features": _feature_flags(),
                 "i18n": {"catalogues": 1},
@@ -8031,6 +8106,203 @@ def build_app(daemon: MobileDaemon):
             row["durable"] = _durable_user_session_dir(session_id) is not None
         return JSONResponse({"asks": rows})
 
+    async def api_notifications(request: Request) -> Response:
+        """``GET /api/notifications``: the inbox reel, the desktop route's answer.
+
+        A THIN ADAPTER over ``notifications.items.list_page`` -- the same call the
+        desktop route makes -- so the phone and the app cannot describe one store
+        two ways: the paging cursor, the conservative ``through_seq`` boundary,
+        the ``observed`` id/revision tokens a bulk write must echo, and the
+        ``waiting_count``/``waiting_unread_count`` split all come from there.
+
+        PER-ROW LIVENESS, like ``/api/asks``: the index knows an item is durable,
+        not whether the conversation behind it can answer now, so each row carries
+        ``runtime_live`` (this process's dial table) and ``durable`` (a session
+        directory that survives a restart). A row with neither is a receipt the
+        phone can read and cannot open, which is what the two flags are for.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        query = request.query_params
+        try:
+            limit = int(query.get("limit") or inbox.LIST_LIMIT_DEFAULT)
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=422)
+        through = query.get("through_seq")
+        try:
+            through_seq = int(through) if through not in (None, "") else None
+        except ValueError:
+            return JSONResponse({"error": "through_seq must be an integer"}, status_code=422)
+        state = query.get("state") or "unread"
+        if state not in ("unread", "all", "dismissed"):
+            return JSONResponse(
+                {"error": "state must be unread, all or dismissed"}, status_code=422
+            )
+        source = query.get("source") or None
+        if source not in (None, "notify", "ask"):
+            return JSONResponse({"error": "source must be notify or ask"}, status_code=422)
+        priority = query.get("priority") or None
+        if priority not in (None, "high", "normal", "low"):
+            return JSONResponse({"error": "priority must be high, normal or low"}, status_code=422)
+        session_id = request.query_params.get("session_id") or None
+        if session_id is not None and not re.fullmatch(r"[0-9a-f]{12}", session_id):
+            return JSONResponse({"error": "invalid session id"}, status_code=422)
+        try:
+            window = _lapsed_window(config_dir())
+            page = await asyncio.to_thread(
+                inbox.list_page,
+                config_dir(),
+                state=state,
+                source=source,
+                priority=priority,
+                session_id=session_id,
+                cursor=query.get("cursor") or None,
+                limit=limit,
+                lapsed_visible_ms=window,
+                through_seq=through_seq,
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid cursor"}, status_code=422)
+        for row in list(page.get("items") or []) + list(page.get("waiting") or []):
+            # The row carries its conversation as a NESTED object (the desktop
+            # answer's shape), so reading a top-level id marked every row
+            # unsendable -- the failure the asks wire already paid for once.
+            facts = row.get("session")
+            session_key = (
+                str((facts.get("id") or row.get("session_id") or "") or "")
+                if isinstance(facts, dict)
+                else str(row.get("session_id") or "")
+            )
+            row["runtime_live"] = _session_is_live(daemon, session_key)
+            row["durable"] = _durable_user_session_dir(session_key) is not None
+        return JSONResponse(page)
+
+    async def api_notification_detail(request: Request) -> Response:
+        """``GET /api/notifications/{id}``: one item, its context and the calls."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        item_id = str(request.path_params["item_id"])
+        if not re.fullmatch(r"n_[a-z2-7]{16}", item_id) and not item_id.startswith("ask:"):
+            return JSONResponse({"error": "invalid item id"}, status_code=422)
+        answer = await asyncio.to_thread(
+            inbox.detail, config_dir(), item_id, lapsed_visible_ms=_lapsed_window(config_dir())
+        )
+        if answer is None:
+            return JSONResponse({"error": "unknown notification"}, status_code=404)
+        session_key = str((answer.get("item") or {}).get("session_id") or "")
+        (answer.get("item") or {})["runtime_live"] = _session_is_live(daemon, session_key)
+        (answer.get("item") or {})["durable"] = _durable_user_session_dir(session_key) is not None
+        return JSONResponse(answer)
+
+    async def api_notifications_patch(request: Request) -> Response:
+        """``PATCH /api/notifications``: the desktop write, byte for byte.
+
+        The body is the desktop body (``op`` plus exactly one target, and the
+        bounded ``observed`` tokens a bulk target must echo). Validation lives in
+        ``inbox.apply_patch`` and the desktop model, so an unsafe request is
+        refused with the SAME 422 here rather than with a relay-shaped second
+        opinion about what is safe.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": "a JSON body is required"}, status_code=422)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "a JSON object is required"}, status_code=422)
+        op = body.get("op")
+        if op not in ("read", "unread", "dismiss", "undismiss"):
+            return JSONResponse({"error": "unknown op"}, status_code=422)
+        ids = body.get("ids")
+        session_id = body.get("session_id")
+        all_items = bool(body.get("all"))
+        through_seq = body.get("through_seq")
+        observed = body.get("observed")
+        if sum((ids is not None, body.get("session_id") is not None, bool(body.get("all")))) != 1:
+            return JSONResponse({"error": "name exactly one target"}, status_code=422)
+        if ids is not None:
+            if not isinstance(ids, list) or not ids or len(ids) > 500:
+                return JSONResponse({"error": "ids must hold 1..500 tokens"}, status_code=422)
+            for entry in ids:
+                if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                    return JSONResponse({"error": "malformed id token"}, status_code=422)
+                if not isinstance(entry.get("revision"), int) or entry["revision"] < 1:
+                    return JSONResponse({"error": "malformed revision token"}, status_code=422)
+            if observed is not None:
+                return JSONResponse({"error": "observed belongs to bulk targets"}, status_code=422)
+        else:
+            if not isinstance(through_seq, int):
+                return JSONResponse(
+                    {"error": "bulk writes require through_seq and observed"}, status_code=422
+                )
+            if not isinstance(observed, list) or len(observed) > 500:
+                return JSONResponse(
+                    {"error": "bulk writes require 0..500 observed tokens"}, status_code=422
+                )
+            for entry in observed:
+                if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                    return JSONResponse({"error": "malformed observed token"}, status_code=422)
+        try:
+            answer = await asyncio.to_thread(
+                inbox.apply_patch,
+                config_dir(),
+                op,
+                ids=ids,
+                session_id=session_id,
+                through_seq=through_seq,
+                all_items=all_items,
+                observed=observed,
+            )
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=422)
+        return JSONResponse(answer)
+
+    async def api_notifications_seen(request: Request) -> Response:
+        """``POST /api/notifications/seen``: in-view receipt, per item and bounded.
+
+        The evidence is the desktop's (surface, session, input edge, visibility
+        start) and the store re-checks every claim it can, so a phone that is
+        merely mounted cannot acknowledge anything by asking.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": "a JSON body is required"}, status_code=422)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "a JSON object is required"}, status_code=422)
+        items = body.get("items")
+        evidence = body.get("evidence")
+        if not isinstance(items, list) or not items or len(items) > 100:
+            return JSONResponse({"error": "items must hold 1..100 receipts"}, status_code=422)
+        if not isinstance(evidence, dict):
+            return JSONResponse({"error": "evidence is required"}, status_code=422)
+        try:
+            answer = await asyncio.to_thread(
+                inbox.apply_seen, config_dir(), items, evidence
+            )
+        except (TypeError, ValueError) as error:
+            return JSONResponse({"error": str(error)}, status_code=422)
+        return JSONResponse(answer)
+
     async def api_schedules(request: Request) -> Response:
         """What is ARMED on this machine: the machine-wide wake and monitor
         indexes, in one answer (the phone's Schedules surface reads both).
@@ -9490,6 +9762,13 @@ def build_app(daemon: MobileDaemon):
         Route("/api/pair", api_pair, methods=["POST"]),
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/asks", api_asks),
+        # The inbox (docs/design/notifications-inbox.md §5.4): the reel, one
+        # item, the token-bound write and the in-view receipt. The SAME module
+        # functions the desktop routes call, so the two surfaces cannot drift.
+        Route("/api/notifications", api_notifications),
+        Route("/api/notifications/{item_id:str}", api_notification_detail),
+        Route("/api/notifications", api_notifications_patch, methods=["PATCH"]),
+        Route("/api/notifications/seen", api_notifications_seen, methods=["POST"]),
         # The armed index (mobile parity, read half): one fetch feeds the
         # phone's Schedules surface — the machine-wide wakes and monitors
         # listings, straight off the derived indexes. Read-only by design:

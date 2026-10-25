@@ -611,6 +611,38 @@ unchanged tick. A read that repaints the list does not consume the change for
 other clients: the wake compares against what the daemon last published, not
 the list's own cache token.
 
+## Notifications inbox (`GET/PATCH /api/notifications`)
+
+The relay is a THIN ADAPTER over the same module the desktop routes call
+(`local_operator/notifications/items.py`), never a second description of the
+store: paging (`cursor`, the frozen `through_seq` boundary), the `observed`
+id/revision tokens a bulk write must echo, and the
+`waiting_count`/`waiting_unread_count` split are the desktop's own answers.
+
+- `GET /api/notifications` — the reel. Same query parameters and the same
+  payload as `GET /v1/desktop/notifications`, plus per-row `runtime_live` (this
+  relay can reach the conversation now) and `durable` (its transcript survives a
+  restart) — the two flags `GET /api/asks` established, so a row is never
+  presented as answerable when it is not.
+- `GET /api/notifications/{id}` — one item, its context and its asks.
+- `PATCH /api/notifications` — `read`/`unread`/`dismiss`/`undismiss` over
+  `ids[{id, revision}]`, or `session_id`+`through_seq`, or `all`+`through_seq`;
+  every bulk target also needs the `observed` tokens, at most 500 per batch. A
+  missing observation is `422`, never a legacy sweep.
+- `POST /api/notifications/seen` — the in-view receipt (1..100 items). The store
+  re-checks the evidence: the surface must be `desktop` or `tui`, visibility must
+  precede the input edge, no edge may predate the row's last change, and the
+  desktop rung waits one second of dwell. An unqualified receipt is skipped, not
+  applied.
+
+Every route carries the cookie gate and answers `401` without it. The badge rides
+the existing list stream: `notifications: {unread_count, waiting_unread_count,
+waiting_count, high_water}` is a SIBLING of `unread` on `/api/sessions` and on
+`/api/sessions/events`, and its key is ABSENT (never zeroed) when this relay has
+no inbox or the store cannot be read. One fingerprint per scan tick over
+`notifications.db` and its `-wal` wakes that stream, so a write from any process
+reaches the phone within one scan interval without a second timer.
+
 ## Failure modes and rules
 
 - **Daemon down, TUI up**: the TUI is unaffected; the record sits unpublished
@@ -695,6 +727,10 @@ never re-derived per surface.
 | Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
 | Conversation tags | — | chat sidebar tag chips + `/v1/desktop/tags` | partial — S2a ships the row labels on both lists and the assignment sheet (checkboxes, primary radio, two-step clear); create/rename remains desktop/agent-only. S2b adds **view-only grouping by primary tag** on the session list: a capability-gated, opt-in local preference (`lo-mobile-group-tags`) that regroups the daemon's own order, with ★ Pinned kept as its own top section and no tag/placement writes |
 | Checkpoint rail (turn ticks) | — | checkpoint rail (`sessions.checkpoints`) | partial — the manifest is served read-only (`GET /api/sessions/{id}/checkpoints`); the phone's rail render is next (phase 4) |
+| Notifications inbox | `/notifications` page (L2) | notifications page | partial — the relay serves the reel read and write wire
+(`GET /api/notifications`, `GET /api/notifications/{id}`, `PATCH /api/notifications`, `POST /api/notifications/seen`), the
+`notifications` badge block on `/api/sessions` and `/api/sessions/events`, and the same token-bound bulk rules as the
+desktop; the phone's screens are next |
 | Wakes / schedules | `wake_panel` | schedules | partial — the armed index is served read-only (`GET /api/schedules`); the phone view and arm/cancel are next (phase 4) |
 | Settings | `settings_view` | settings | missing (phase 5) |
 | Move session | `move_picker` | move session | partial — the relay serves the peers' rows on the session list (`?include_peers`, SSE included) and the transfer verb (`POST /api/sessions/{id}/transfer`); the phone's move picker and remote-row render are next (phase 5) |

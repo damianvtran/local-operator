@@ -181,7 +181,13 @@ handler. The sidebar id is appended at the end of the wire vocabulary (D10).
 
 ## Not in this lane
 
-- Banners for `high` items (L1b): the claim primitive (`claim_delivery`) and the
+- Banners for `high` items (L1b) are specified in `../../DESKTOP_API.md` and
+  implemented on this branch: the claim is copy-once per revision machine-wide,
+  a receipt before the claim cancels the banner it makes redundant, a claim whose
+  delivery produced nothing is released, and the desktop's `update` branch is the
+  consumer. The TUI announcer leg and the `error`-exempt completion suppression
+  are core code covered by `tests/unit/notifications/test_delivery.py`.
+- Historical note (superseded): the claim primitive (`claim_delivery`) and the
   `delivered_rev` watermark exist; nothing raises yet, so the completion-banner
   suppression for a run that raised an item banner lands with it.
 - The TUI page, its sidebar note and the `activity` control op that would let an

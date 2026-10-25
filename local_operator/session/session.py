@@ -3578,6 +3578,11 @@ class Session:
         #: ``_run_notify_requested``. It is what lets a ``notify:true`` wake turn
         #: end quietly: the operator asked to be told, and the item told them.
         self._run_notified: bool = False
+        #: Whether THIS run raised (or handed off) a `high` item banner. Read by
+        #: exactly one consumer, ``_finalize_attention_notify``: a run that
+        #: already put a banner on the operator's screen does not also raise the
+        #: completion banner for itself (contract §3.4).
+        self._run_notified_banner: bool = False
         #: The raw ``custom_type`` of every INTERNAL-class input this run
         #: consumed, beside the trigger record and reset with it. The class
         #: vocabulary deliberately collapses all of them into "internal", and
@@ -16045,6 +16050,13 @@ class Session:
             notify = False
         if notify and kind != "error" and self._proactive_banner_veto(event):
             notify = False
+        # ONE BANNER PER EVENT (contract §3.4): a run that already raised a
+        # `high` item banner — or handed it to the desktop's update channel —
+        # does not also raise the completion banner for itself. `error` is
+        # exempt: a turn that died always notifies, whatever else it said. The
+        # unseen completion mark is untouched; this gates banners only.
+        if notify and kind != "error" and self._run_notified_banner:
+            notify = False
         # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
         # of her check-in banners is judged HERE, once, beside ``notify``. The
         # stamping seam in ``_publish_attention_outcome`` spends the budget
@@ -16380,6 +16392,38 @@ class Session:
             agent_id=self._agent_id or "",
         )
         self._run_notified = True
+        # THE BANNER, decided here because this is the only place that knows
+        # the write's revision and priority. Best-effort and off-loop: a banner
+        # is chrome, and the item is already durable, so a delivery failure
+        # leaves an unread row rather than failing the tool the model called.
+        if outcome.priority == "high" and not outcome.read:
+            from local_operator.notifications.delivery import deliver_item
+
+            try:
+                delivery = await asyncio.to_thread(
+                    deliver_item,
+                    root,
+                    item_id=outcome.item_id,
+                    revision=int(outcome.revision),
+                    priority=outcome.priority,
+                    session_id=self.session_id,
+                    title=title,
+                    body=body,
+                    store=store,
+                )
+            except Exception:  # noqa: BLE001 — chrome must not fail the write
+                logger.debug("notify: banner delivery failed", exc_info=True)
+                delivery = None
+            if delivery is not None and delivery.spoken_for:
+                # One banner per event: the completion banner for this run is
+                # suppressed by ``_finalize_attention_notify`` (contract §3.4).
+                self._run_notified_banner = True
+                logger.info(
+                    "notify: item %s banner rung=%s for %s",
+                    outcome.item_id,
+                    delivery.rung,
+                    self.session_id,
+                )
         return _notify_sentence(outcome)
 
     def _notify_tui_evidence(self) -> Any:
@@ -17911,6 +17955,7 @@ class Session:
         self._run_triggers = set()
         self._run_notify_requested = False
         self._run_notified = False
+        self._run_notified_banner = False
         self._run_input_types = set()
         self._run_wake_ids = set()
         self._run_catchup_unidentified = False

@@ -2463,6 +2463,26 @@ THAT row's current `updated_at`, then `visible_since <= input_at <= now` and the
 120 s freshness/dwell rules. The batch field remains the fallback for clients
 that have not added per-item stamps; a mixed batch is judged row by row (D13).
 
+**Banners (`high` only) and the `update` feed branch.** `normal` and `low`
+never raise a native notification; they are the badge and the page. A `high`
+item is claimed at most once per revision by any banner producer
+(`claim_delivery`), and only while the row is still unread — a receipt that
+lands between the write and the tick is the one thing that cancels a banner it
+has made redundant. The claim is released when a delivery attempt produces
+nothing (`release_delivery`), so an owed banner is never lost, and a later
+content change bumps `revision`, which makes the row claimable again.
+
+The desktop leg raises it on the `notification` frame with `kind: "update"`
+(`notification_contract` stays `1`; a renderer that does not know the kind
+renders it as text):
+`{kind, notification_id, item_revision, priority, title, body, session_id,
+focus_policy, dedupe_key}`. It is published only while a live desktop lease
+advertises `update` in `can_notify_kinds`, `BURST_LIMIT` per tick, and the
+overflow becomes ONE frame `{kind, overflow: true, count, notification_ids,
+priority, dedupe_key}` — the rest drains on the following ticks, each claimed
+once. A runtime run that raised (or handed off) an item banner does not also
+raise its own completion banner; `error` ends always do.
+
 **All means the entire explicitly requested scope, not the first 50 rows.** On
 an explicit mark-all/dismiss-session gesture, clients enumerate every page of
 that state/source/priority/session scope with progress/count feedback, freeze
