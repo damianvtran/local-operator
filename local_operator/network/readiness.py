@@ -37,6 +37,7 @@ import configparser
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import sys
@@ -66,6 +67,7 @@ READINESS_OP_TIMEOUT_S = 5.0
 CAPABILITY_OPERATOR_AUTHORITY = "operator_authority"
 CAPABILITY_BUILD = "build"
 CAPABILITY_GIT = "git_identity"
+CAPABILITY_REPOSITORY = "repository"
 CAPABILITY_MCP_SERVERS = "mcp_servers"
 CAPABILITY_MODEL_CREDENTIAL = "model_credential"
 CAPABILITY_MCP_CREDENTIAL = "mcp_credential"
@@ -102,6 +104,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
     {
         CAPABILITY_MCP_CREDENTIAL,
         CAPABILITY_MCP_SERVERS,
+        # Read/answer lanes need no checkout, so a missing one is equipment the
+        # report names, not an onboarding failure; repo-editing lanes need it.
+        CAPABILITY_REPOSITORY,
         CAPABILITY_TOOLING,
         # A small node IS onboarded; it is a resilience risk, said with its
         # remedy, and the admission gate (``memory_guard.admission_check``) is
@@ -119,6 +124,7 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
 PEER_SIDE_CHECKS: tuple[str, ...] = (
     CAPABILITY_OPERATOR_AUTHORITY,
     CAPABILITY_GIT,
+    CAPABILITY_REPOSITORY,
     CAPABILITY_MCP_SERVERS,
     CAPABILITY_MODEL_CREDENTIAL,
     CAPABILITY_TOOLING,
@@ -131,6 +137,8 @@ CODE_NOT_INSTALLED = "not_installed"
 CODE_ANCHOR_UNPINNED = "anchor_unpinned"
 CODE_UNUSABLE = "unusable"
 CODE_NO_GIT_IDENTITY = "no_git_identity"
+CODE_NO_REPOSITORY = "no_repository"
+CODE_NOT_GIT_CHECKOUT = "not_git_checkout"
 CODE_NO_MCP_SERVERS = "no_mcp_servers"
 CODE_NOT_CONFIGURED = "not_configured"
 CODE_NOT_ASKED = "not_asked"
@@ -352,6 +360,126 @@ def git_identity_fact(home: Path | None = None) -> dict[str, Any]:
             return ""
 
     return {"user_name": value("name"), "user_email": value("email")}
+
+
+def _default_repository_identity(home: Path) -> dict[str, str]:
+    """The installed project's name and clone URL, without a machine-specific path.
+
+    A readiness request may name the repository the session will use. With no
+    such identity, the installed distribution is the one default every peer is
+    guaranteed to share: its package name supplies ``~/<name>`` and its declared
+    project URL supplies the clone source. In particular, the relay's cwd is NOT
+    a fallback — a supervised relay commonly starts in HOME or `/`, so checking
+    there would answer about a directory the session was never going to use.
+    """
+    from importlib.metadata import PackageNotFoundError, distribution
+
+    try:
+        metadata = distribution("local-operator").metadata
+    except (OSError, PackageNotFoundError):
+        return {"path": "", "url": ""}
+    name = str(metadata.get("Name") or "").strip()
+    urls: dict[str, str] = {}
+    for entry in metadata.get_all("Project-URL") or ():
+        label, separator, value = str(entry).partition(",")
+        if separator and value.strip():
+            urls[label.strip().lower()] = value.strip()
+    url = next(
+        (urls[key] for key in ("repository", "source", "homepage") if urls.get(key)),
+        "",
+    )
+    return {"path": str(home / name) if name else "", "url": url}
+
+
+def _checkout_git_dir(path: Path) -> Path | None:
+    """The git directory at ``path``, including a linked worktree's indirection."""
+    marker = path / ".git"
+    try:
+        if marker.is_dir():
+            return marker
+        if not marker.is_file():
+            return None
+        with open(marker, encoding="utf-8") as handle:
+            declaration = handle.read(4096).splitlines()[0]
+        prefix = "gitdir:"
+        if not declaration.startswith(prefix):
+            return None
+        git_dir = Path(declaration[len(prefix) :].strip())
+        return git_dir if git_dir.is_absolute() else path / git_dir
+    except (IndexError, OSError, UnicodeError):
+        return None
+
+
+def _is_git_checkout(path: Path) -> bool:
+    """Whether ``path`` is a worktree root, not merely a directory named like one.
+
+    Read git's own small metadata files rather than spawning a process on every
+    readiness report (the same relay-path constraint as ``git_identity_fact``).
+    A normal checkout has objects/refs below `.git`; a linked worktree reaches
+    them through `commondir`. No clone, fetch, config write or index refresh is
+    possible here.
+    """
+    git_dir = _checkout_git_dir(path)
+    if git_dir is None:
+        return False
+    try:
+        if not (git_dir / "HEAD").is_file():
+            return False
+        common_dir = git_dir
+        common_marker = git_dir / "commondir"
+        if common_marker.is_file():
+            with open(common_marker, encoding="utf-8") as handle:
+                relative = handle.read(4096).strip()
+            if not relative:
+                return False
+            common_dir = Path(relative)
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
+        return (common_dir / "objects").is_dir() and (common_dir / "refs").is_dir()
+    except (OSError, UnicodeError):
+        return False
+
+
+def repository_fact(
+    home: Path | None = None, *, repository: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """The requested working copy's path, clone URL and filesystem state.
+
+    ``repository.path`` is a path ON THE PEER (absolute, ``~/...`` or relative
+    to its home), never the viewer's checkout path. ``repository.url`` alone is
+    also a sufficient identity: its final path component names the peer-side
+    destination. With neither, ``_default_repository_identity`` supplies the
+    installed project's identity. The fact is names and state only.
+    """
+    root = home if home is not None else Path.home()
+    request = repository if isinstance(repository, Mapping) else {}
+    raw_path = str(request.get("path") or "").strip()
+    url = str(request.get("url") or "").strip()
+    default = _default_repository_identity(root)
+    if raw_path in ("", "~"):
+        path_text = default["path"] if not raw_path else str(root)
+    elif raw_path.startswith("~/"):
+        path_text = str(root / raw_path[2:])
+    else:
+        candidate = Path(raw_path).expanduser()
+        path_text = str(candidate if candidate.is_absolute() else root / candidate)
+    if not raw_path and url:
+        # A URL is a repository identity too. Derive its natural destination
+        # instead of pairing it with the package's potentially unrelated name.
+        name = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        path_text = str(root / name) if name else ""
+    if not url and (not raw_path or path_text == default["path"]):
+        url = default["url"]
+    path = Path(path_text) if path_text else None
+    if path is None:
+        state = "unidentified"
+    elif not path.exists():
+        state = "missing"
+    elif not path.is_dir() or not _is_git_checkout(path):
+        state = "not_git_checkout"
+    else:
+        state = "checkout"
+    return {"path": path_text, "url": url, "state": state}
 
 
 #: The command-line tools a lane is expected to find on a device it runs on.
@@ -1035,7 +1163,12 @@ def selected_model_row(
 
 
 def collect_peer_facts(
-    root: Path, *, home: Path | None = None, selector: str = "", session_id: str = ""
+    root: Path,
+    *,
+    home: Path | None = None,
+    selector: str = "",
+    session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Everything the viewer needs from THIS device, as facts. Names only."""
     model = default_model_fact(root)
@@ -1058,6 +1191,7 @@ def collect_peer_facts(
         "credential_placement": placement_fact(provider=provider, root=root),
         "mcp": mcp_servers_fact(root, read_only=True),
         "git": git_identity_fact(home),
+        "repository": repository_fact(home, repository=repository),
         "tooling": tooling_fact(home),
         "operator": operator_fact(),
         "memory": memory_fact(),
@@ -1655,6 +1789,79 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
             f"{suggested_name} <{suggested_email}>)"
         ],
         source=SOURCE_PEER,
+    )
+
+
+def repository_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """Does the peer have the working copy an offloaded session would edit?"""
+    fact = facts.get("repository")
+    if not isinstance(fact, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_REPOSITORY,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            source=SOURCE_UNKNOWN,
+        )
+    path = _bounded(fact.get("path") or "", 500)
+    url = _bounded(fact.get("url") or "", 500)
+    state = str(fact.get("state") or "")
+    common = {
+        "device_id": member.device_id,
+        "device_name": peer_label,
+        "capability": CAPABILITY_REPOSITORY,
+        "source": SOURCE_PEER,
+        "observed": {"path": path, "state": state},
+    }
+    if state == "checkout" and path:
+        return _capability_row(
+            **common,
+            ok=True,
+            detail=(
+                f"{peer_label} has a git checkout at {path}: offloaded work has a "
+                "working copy there"
+            ),
+        )
+    if state not in ("missing", "not_git_checkout") or not path:
+        return _capability_row(
+            **common,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "the peer could not identify a repository working copy to check at "
+                f"{path or 'the requested path'}"
+            ),
+            remedies=["re-check with the repository's peer-side path and clone URL"],
+        )
+    missing = state == "missing"
+    detail = (
+        f"{peer_label} has no working copy at {path}: offloaded work for that repository "
+        "cannot edit or test it there"
+        if missing
+        else f"{path} on {peer_label} exists but is not a git checkout: offloaded work "
+        "does not have the repository's working copy there"
+    )
+    if url:
+        command = shlex.join(["git", "clone", url, path])
+        remedy = f"on {peer_label}, run `{command}`, then re-check"
+        if not missing:
+            remedy = (
+                f"on {peer_label}, move the non-checkout directory aside if it holds anything "
+                f"to keep, then run `{command}` and re-check"
+            )
+    else:
+        remedy = (
+            f"on {peer_label}, provide the repository clone URL, then clone it into {path} "
+            "and re-check"
+        )
+    return _capability_row(
+        **common,
+        ok=False,
+        code=CODE_NO_REPOSITORY if missing else CODE_NOT_GIT_CHECKOUT,
+        detail=detail,
+        remedies=[remedy],
     )
 
 
@@ -3482,6 +3689,7 @@ def _ask_readiness(
     timeout: float = READINESS_OP_TIMEOUT_S,
     selector: str = "",
     session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Ask the peer for its facts. Returns ``(facts, "")`` or ``(None, reason)``."""
     request = {
@@ -3491,6 +3699,10 @@ def _ask_readiness(
     }
     if selector:
         request.update(selector=selector, session_id=session_id)
+    if isinstance(repository, Mapping):
+        request["repository"] = {
+            key: _bounded(repository.get(key) or "", 500) for key in ("path", "url")
+        }
     reply = link.request(request, timeout=timeout)
     if reply is None:
         return None, "the readiness request did not arrive before the bound"
@@ -3511,6 +3723,7 @@ def _peer_checks(
     deadline: float | None,
     selector: str = "",
     session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Every readiness row for ONE member: reachability, then capabilities."""
     peer_label = _label(member)
@@ -3568,13 +3781,19 @@ def _peer_checks(
         READINESS_OP_TIMEOUT_S if remaining is None else min(READINESS_OP_TIMEOUT_S, remaining)
     )
     facts, problem = _ask_readiness(
-        server, link, timeout=timeout, selector=selector, session_id=session_id
+        server,
+        link,
+        timeout=timeout,
+        selector=selector,
+        session_id=session_id,
+        repository=repository,
     )
     if facts is None:
         rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
         return rows
     rows.append(operator_row(member, facts, peer_label=peer_label))
     rows.append(git_row(member, facts, peer_label=peer_label))
+    rows.append(repository_row(member, facts, peer_label=peer_label))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
     selected = facts.get("selected_model_access")
@@ -3599,7 +3818,12 @@ def _peer_checks(
 
 
 def compose(
-    server: "RelayServer", *, peer: str = "", selector: str = "", session_id: str = ""
+    server: "RelayServer",
+    *,
+    peer: str = "",
+    selector: str = "",
+    session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``peer_readiness`` local op's body: the readiness report.
 
@@ -3666,6 +3890,7 @@ def compose(
                         deadline=deadline,
                         selector=selector,
                         session_id=session_id,
+                        repository=repository,
                     )
                 )
     finally:
@@ -3917,6 +4142,9 @@ def make_handler(server: "RelayServer") -> Any:
             server.root,
             selector=_bounded(frame.get("selector") or "", 240),
             session_id=_bounded(frame.get("session_id") or "", 80),
+            repository=(
+                frame.get("repository") if isinstance(frame.get("repository"), Mapping) else None
+            ),
         )
 
     return _handle
@@ -3931,6 +4159,9 @@ def local_handler(server: "RelayServer") -> Any:
             peer=str(frame.get("peer") or ""),
             selector=_bounded(frame.get("selector") or "", 240),
             session_id=_bounded(frame.get("session_id") or "", 80),
+            repository=(
+                frame.get("repository") if isinstance(frame.get("repository"), Mapping) else None
+            ),
         )
 
     return _handle

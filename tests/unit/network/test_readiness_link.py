@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import socket
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -857,8 +859,8 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
 ) -> None:
     """The headline: every offload blocker the 2026-09-28 run hit, one row each.
 
-    BEFORE: no operator authority, no git identity, no MCP surface, no default
-    model — four rows, four codes, and the remedy each one names. AFTER fixing
+    BEFORE: no operator authority, no git identity, no repository checkout, no MCP
+    surface, no default model — five rows, five codes, and the remedy each one names. AFTER fixing
     each ON THE PEER (the files its own processes read), the same report is
     ready: every row ok and rc 0. The operator step is stubbed at the
     authority-report seam rather than install a launchd anchor, because the
@@ -881,6 +883,9 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     home = tmp_path / "peer-home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # Resolve git BEFORE the fixture replaces PATH with its synthetic tool bin.
+    git = shutil.which("git")
+    assert git is not None
     # The peer's tooling inventory (2026-10-06): a complete lane toolchain on a
     # controlled PATH plus a stored gh login, so the new row reads ok — and the
     # block after the fixes drops a tool to watch the NON-GATING warn over the
@@ -917,6 +922,19 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     git_row = _capability(payload, readiness.CAPABILITY_GIT)
     assert (git_row["ok"], git_row["code"]) == (False, readiness.CODE_NO_GIT_IDENTITY)
     assert "set its git author name and email" in " ".join(git_row["remedies"])
+    repository_row = _capability(payload, readiness.CAPABILITY_REPOSITORY)
+    assert (repository_row["ok"], repository_row["code"]) == (
+        False,
+        readiness.CODE_NO_REPOSITORY,
+    )
+    assert repository_row["observed"] == {
+        "path": str(home / "local-operator"),
+        "state": "missing",
+    }
+    assert (
+        f"git clone https://github.com/damianvtran/local-operator {home / 'local-operator'}"
+        in " ".join(repository_row["remedies"])
+    )
     mcp_row = _capability(payload, readiness.CAPABILITY_MCP_SERVERS)
     assert (mcp_row["ok"], mcp_row["code"]) == (False, readiness.CODE_NO_MCP_SERVERS)
     assert "push the MCP server definitions" in " ".join(mcp_row["remedies"])
@@ -951,6 +969,12 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     auth = AuthStore(db_path=server_b.root / "auth.db", config_dir=server_b.root)
     auth.upsert_credential("openai", {"type": "api_key", "key": "local-test"})
     auth.close()
+    subprocess.run(
+        [git, "init", "--quiet", str(home / "local-operator")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
     rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
     ok_rows = [
