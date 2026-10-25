@@ -2206,12 +2206,11 @@ def model_credential_row(
     a missing holder is reported as the fact it is, with a model-choice remedy
     and never a re-offer of the share.
     """
-    model = facts.get("default_model")
-    framed = (
-        isinstance(model, Mapping)
-        and bool(model.get("resolved"))
-        and isinstance(model.get("credential_required"), bool)
-    )
+    raw_model = facts.get("default_model")
+    # Normalize once so the framing below retains a Mapping type. Missing or
+    # malformed facts still take the legacy path: an empty mapping is unresolved.
+    model: Mapping[str, Any] = raw_model if isinstance(raw_model, Mapping) else {}
+    framed = bool(model.get("resolved")) and isinstance(model.get("credential_required"), bool)
     if framed and model.get("credential_required") is False:
         pair = _default_pair(model)
         return _capability_row(
