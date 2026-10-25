@@ -81,6 +81,17 @@ def assert_wrapped(root, aid):
     return raw
 
 
+def test_closed_card_accepts_a_digest_bound_advertise_host(root):
+    card = fields(root)
+    card["device"]["advertise_host"] = "8.8.8.8:4097"
+
+    record = a.create_request(**card, root=root)
+
+    assert record["device"]["advertise_host"] == "8.8.8.8:4097"
+    assert e.commitment(record) == record["request_digest"]
+    e.validate(record, approval_id=record["approval_id"])
+
+
 def test_exact_domains_and_nonrenewing_lookup_first(root, monkeypatch):
     first = create(root)
     aid = first["approval_id"]

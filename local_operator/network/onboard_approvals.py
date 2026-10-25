@@ -504,6 +504,7 @@ def request_device(
     device_id: str = "",
     fingerprint: str = "",
     host_key_fp: str = "",
+    advertise_host: str = "",
     network: str = "",
     role: str = "drive",
     credential_ref: str = "",
@@ -563,19 +564,25 @@ def request_device(
         what["provisioning"] = "network_only"
         expires = store.DEFAULT_EXPIRY_S
     observed = _host_key_for_request(host, user, host_key_fp)
+    device = {
+        "device_id": device_id,
+        "name": name or host,
+        "fingerprint": fingerprint,
+        "host": host,
+        "user": user,
+        "transport": "ssh",
+        "host_key_fp": observed,
+    }
+    if advertise_host:
+        # Signed with the target: the runner may advertise only the address
+        # the operator approved, never an unsigned runner-side override. Omit
+        # the empty default so an upgrade retry of an older request stays identical.
+        device["advertise_host"] = advertise_host
     return store.create_request(
         kind=store.enrollment.KIND if network_only else store.KIND_DEVICE_ONBOARD,
         request_id=request_id or store.new_request_id(),
         requested_by={"session_id": session_id, "device_id": requester, "surface": surface},
-        device={
-            "device_id": device_id,
-            "name": name or host,
-            "fingerprint": fingerprint,
-            "host": host,
-            "user": user,
-            "transport": "ssh",
-            "host_key_fp": observed,
-        },
+        device=device,
         what=what,
         credential_ref={"kind": "ssh", "ref": credential_ref} if credential_ref else None,
         created_at=moment,

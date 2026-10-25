@@ -155,12 +155,14 @@ async def test_request_same_builder_exact_network_and_no_reference_publication(l
         "network_id": "n_selected",
         "credential_ref": "secret-ref-fixture",
         "host_key_fp": "SHA256:abc",
+        "advertise_host": "8.8.8.8:4097",
     }
     r = await client.post("/v1/desktop/approvals/request", json=body)
     assert r.status_code == 200, r.text
     result = r.json()["result"]
     assert result["what"]["network_id"] == "n_selected"
     assert result["what"]["role"] == "drive" and result["what"]["grant"] == ["approve"]
+    assert result["device"]["advertise_host"] == "8.8.8.8:4097"
     aid = result["approval_id"]
     again = await client.post("/v1/desktop/approvals/request", json=body)
     assert again.json()["result"]["approval_id"] == aid
