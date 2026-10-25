@@ -37,10 +37,8 @@ Deliver the round ON the MR/PR: post it as a comment there —
 `### Design review — round <N>`, `Reviewer:` naming you and your model,
 `Scope: <base>..<head>` — using the repository's CLI (`glab`/`gh`). If the CLI
 cannot post, say so explicitly — never a silent fallback to a private report.
-Your FINAL MESSAGE is the report and reaches the delegator automatically; use
-`hub` only for a blocker or a question mid-job, never to pre-send the final
-report. The delegator is never the sole recipient: a round that exists only in
-your reply did not happen.
+Your FINAL MESSAGE is the report and reaches the delegator; `hub` is only for a
+mid-job blocker or question. A round only in your reply did not happen.
 
 Capture is targeted: frames and measurements for the surfaces under review,
 batched into one remediation round. Full-suite runs are terminal or CI's — never
