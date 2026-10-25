@@ -4167,6 +4167,7 @@ class Session:
         # (McpStartupOutcome). See session_factory.wire_mcp_into_session.
         self._on_mcp_startup_settled: Callable[[Any], None] | None = None
         self._aside_thunks: list[Aside] = []
+        self._coalesced_notes: dict[str, CustomMessage] = {}
         self._continuation_queue: list[AgentMessage] = []
         # Latest provider-reported usage. SEEDED from the replayed transcript
         # rather than starting at None, because on a resumed session the last
@@ -21481,13 +21482,15 @@ class Session:
 
         What is NOT deferred, and why each matters:
 
-        * The thunk is appended immediately, so ordering and durability are
-          unchanged: any boundary the parent reaches for another reason in the
-          meantime still carries the note.
+        * The note is queued immediately; any earlier boundary can carry it.
+          Its commit discharges the wake obligation and cancels the timer. A
+          pending note is flushed to the parent transcript during disposal, so
+          the grace window cannot turn a durable report into abandoned memory.
         * An IDLE parent marks at once. An aside wakes no idle session today
           (the mark only cuts a parked ``wait``), so deferral would buy nothing
           there; marking keeps that path byte-for-byte what it was.
-        * The mark is issued EXACTLY ONCE on every exit of the timer — settle,
+        * Unless delivery already discharged it, the mark is issued EXACTLY
+          ONCE on every exit of the timer — settle,
           expiry, or cancellation by :meth:`dispose` — through the same
           :meth:`_PeerArrival.mark`, so the never-clear/only-increment
           invariant holds and no arrival is ever silently swallowed. On settle
@@ -21500,28 +21503,53 @@ class Session:
         ``settled`` is the owning job manager's ``settled_event`` for the
         child; ``grace_s <= 0`` is today's behaviour exactly.
         """
-        self._aside_thunks.append(thunk)
+        # Immediate paths retain the original queue contract (including lazy
+        # materialization). Only delayed notes need a delivery acknowledgment.
         if grace_s <= 0 or settled.is_set() or not self._is_streaming or self._disposed:
-            self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+            self.queue_aside(thunk)
             return
+        message = thunk()
+        assert isinstance(message, CustomMessage)
+        self._coalesced_notes[message.id] = message
+        self._aside_thunks.append(lambda: message)
+        delivered = False
+        marked = False
+        timer: asyncio.Task[Any] | None = None
+        previous_commit = message.on_commit
 
-        async def _deferred_mark() -> None:
+        def acknowledge() -> None:
+            nonlocal delivered
+            delivered = True
+            self._coalesced_notes.pop(message.id, None)
+            if timer is not None:
+                timer.cancel()
+            if previous_commit is not None:
+                previous_commit()
+
+        def finish(_task: asyncio.Task[Any] | None = None) -> None:
+            nonlocal marked
+            # Outside the coroutine: a task cancelled before first execution
+            # never enters its finally. A committed note no longer owes a wake;
+            # marking it would interrupt a NEW wait with already-read news.
+            if not delivered and not marked:
+                marked = True
+                self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+
+        message.on_commit = acknowledge
+
+        async def deferred_mark() -> None:
             try:
                 await asyncio.wait_for(settled.wait(), grace_s)
             except TimeoutError:
-                # Still running after the window: a genuine mid-job note ("I am
-                # blocked"). It arrives at most ``grace_s`` late.
                 pass
             finally:
-                # ``finally`` so a dispose-time cancel still counts the arrival:
-                # the thunk is already queued, and a mark that never happens is
-                # the lost-wakeup class ``_PeerArrival`` exists to rule out.
-                self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+                finish()
 
-        if self._spawn_background(_deferred_mark()) is None:
-            # Disposed between the check above and the spawn: nothing will run
-            # the timer, so do not let the deferral eat the mark.
-            self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+        timer = self._spawn_background(deferred_mark())
+        if timer is None:
+            finish()
+        else:
+            timer.add_done_callback(finish)
 
     async def _todo_continuation(self) -> list[AgentMessage]:
         """The loop's follow-up hook: re-assert the outstanding todos at the yield.
@@ -30157,6 +30185,13 @@ class Session:
             # rung uses: bounded by the store's own retry, idempotent by token,
             # under the publish lock, and it never raises into teardown.
             await self._flush_pending_attention_republish()
+            # Coalesced notes may not have reached any model boundary before
+            # shutdown. Persist them WITHOUT a provider call; the normal aside
+            # drain and transcript identity guard keep this write idempotent.
+            await self._transcript.append_messages(
+                [m for m in self._coalesced_notes.values() if not self._transcript.has_entry(m.id)]
+            )
+            self._coalesced_notes.clear()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
             for task in list(self._background_tasks):

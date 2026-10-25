@@ -13,16 +13,20 @@ What it counts, per top-level session in the window (read-only):
 * a NOTE is a ``hub_message`` row with ``direction == "to_parent"``;
 * it COALESCES under window G when the same job's ``job_result`` row lands
   within G seconds of the note (absent row = never settled in this transcript);
-* the calls it SAVES are the parent's ``analytics.db`` ``calls`` rows (purpose
+* its potentially avoidable calls are the parent's ``analytics.db`` ``calls`` rows (purpose
   ``turn``, opened ``?mode=ro``) that START inside ``[note, settle)`` —
-  counted ONLY when the note interrupted a parked ``wait`` (the wait's tool row
+  attributed ONLY when the note interrupted a parked ``wait`` (the wait's tool row
   reporting "a hub message arrived" sits just before the note), because then
   the note is the only reason the parent was awake. A parent that was busy
   with other tools would have made those calls anyway, so they are excluded.
   ``calls.ts_ms`` is the call's START while a transcript assistant row is
   stamped at its END, so the transcript cannot count these: the call reading
   the note is usually still streaming when the settle row lands;
-* their input cost is those calls' ``context_tokens``.
+* their input cost is those calls' ``context_tokens``. Overlapping spans are
+  deduplicated by session and call-row index. These are attribution estimates
+  (an upper bound), not proof that every counted call disappears: another
+  arrival may independently require a call, or early delivery may discharge
+  the note before the grace expires.
 
 Top-level = a session id that never appears with a ``parent_session_id`` in
 ``calls`` (children's own notes go to THEIR parent, which may itself be a
@@ -99,6 +103,9 @@ def main() -> int:
     parser.add_argument("--days", type=float, default=7.0)
     parser.add_argument("--home", default=os.path.expanduser("~/.local-operator"))
     parser.add_argument("--out", default="")
+    parser.add_argument(
+        "--max-sessions", type=int, default=310, help="Bound the recent top-level sample"
+    )
     args = parser.parse_args()
 
     home = Path(args.home)
@@ -112,11 +119,19 @@ def main() -> int:
     settle_gaps: list[float] = []
     saved_calls: Counter[float] = Counter()
     saved_ctx: Counter[float] = Counter()
+    attributed: dict[float, set[tuple[str, int]]] = defaultdict(set)
     coalesced: Counter[float] = Counter()
     coalesced_interrupting: Counter[float] = Counter()
     body_in_result = body_checked = 0
 
-    for transcript in sorted((home / "sessions").glob("*/transcript.jsonl")):
+    candidates = sorted(
+        (home / "sessions").glob("*/transcript.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for transcript in candidates:
+        if sessions >= args.max_sessions:
+            break
         sid = transcript.parent.name
         if sid in children:
             continue
@@ -184,14 +199,20 @@ def main() -> int:
             # Calls STARTED in [note, settle): the ones the note's wake bought.
             lo = bisect.bisect_left(call_ts, int(note_ts * 1000))
             hi = bisect.bisect_left(call_ts, int(float(settle.get("ts") or 0) * 1000))
-            ctx = [c for _, c in session_calls[lo:hi]]
             for window in WINDOWS:
                 if gap <= window:
                     coalesced[window] += 1
                     if was_interrupt:
                         coalesced_interrupting[window] += 1
-                        saved_calls[window] += len(ctx)
-                        saved_ctx[window] += sum(ctx)
+                        # Overlapping note spans can attribute the same parent
+                        # call twice. Its per-session row index is stable even
+                        # when two calls share a millisecond timestamp.
+                        for call_index in range(lo, hi):
+                            identity = (sid, call_index)
+                            if identity not in attributed[window]:
+                                attributed[window].add(identity)
+                                saved_calls[window] += 1
+                                saved_ctx[window] += session_calls[call_index][1]
 
     per_week = 7.0 / args.days
     lines = [
@@ -206,8 +227,11 @@ def main() -> int:
         f"note body (first 200 chars) verbatim inside the job_result: "
         f"{body_in_result}/{body_checked} of notes settling within 120 s",
         "",
-        "grace_s  coalesced  coalesced&interrupting  parent_calls_saved  "
-        "input_tokens_saved  per_week_tokens",
+        "Attribution estimates, NOT demonstrated eliminated calls; overlapping spans deduplicated.",
+        "Assumes the note alone caused these calls; concurrent arrivals and early "
+        "delivery may reduce savings.",
+        "grace_s  coalesced  coalesced&interrupting  parent_calls_estimate  "
+        "input_tokens_estimate  per_week_tokens_estimate",
     ]
     for window in WINDOWS:
         lines.append(
