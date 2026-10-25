@@ -60,8 +60,8 @@ describe("retainConfigStream", () => {
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
-			"relay.ask",
 			"relay.approvals",
+			"relay.ask",
 			"relay.asks",
 			"relay.library",
 			"relay.session",

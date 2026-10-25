@@ -39,7 +39,6 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
-import { messageRuntime } from "../store";
 import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
 import {
@@ -71,6 +70,21 @@ const READ_TIMEOUT_MS = 8000;
  *  round 1, N2 — before this the countdown was sampled only when a re-read
  *  landed, so a crossing could be stated up to 20 s late). */
 const TICK_MS = 15000;
+
+/** The sentence a dismissal receipt shows, per reason.
+
+    A LOOKUP RATHER THAN A TEMPLATE. This used to be
+    `` `relay.ask.dismiss.receipt_${reason}` `` — a key no static check can
+    verify (a renamed or missing key would surface as the key text on screen)
+    and a shape the relay copy gate counts as unextracted literals. Spelling
+    each key here keeps them greppable and type-checked against the generated
+    key union; ``lapsed`` is the door with no recorded reason, so it names the
+    generic receipt. */
+const RECEIPT_KEY = {
+	lapsed: "relay.ask.dismiss.receipt",
+	moot: "relay.ask.dismiss.receipt_moot",
+	answered_in_chat: "relay.ask.dismiss.receipt_answered_in_chat",
+} as const;
 
 function failureText(error: unknown): string {
 	if (error instanceof TypeError) return messageRuntime.t("relay.asks.error.reach_failed");
@@ -278,11 +292,7 @@ export function AsksSheet({
 				    thing twice. See `shownReceipt`. */}
 				{shownReceipt ? (
 					<p className="text-body-sm text-ink-muted" data-testid="ask-receipt">
-						{messageRuntime.t(
-							shownReceipt.reason === "lapsed"
-								? "relay.ask.dismiss.receipt"
-								: `relay.ask.dismiss.receipt_${shownReceipt.reason}`,
-						)}
+						{messageRuntime.t(RECEIPT_KEY[shownReceipt.reason])}
 					</p>
 				) : null}
 				{loaded && rows.length === 0 && !error && !shownReceipt ? (

@@ -52,6 +52,25 @@ import { clearAskDraft, messageRuntime, useAskDraft } from "../store";
 import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
 
+/** The two dismissal reasons, in the order the card offers them (design §17:
+    "No longer needed" first, then "Answered in chat"), with the catalogue keys
+    each row paints.
+
+    A LOOKUP RATHER THAN A TEMPLATE. The keys used to be built by interpolation
+    (``relay.ask.dismiss.${reason}`` / ``..._note``), which no static check can
+    verify — a renamed key would render as the key text on screen — and which
+    the relay copy gate counts as unextracted literals. Spelling each key here
+    keeps them greppable and type-checked against the generated key union. */
+const DISMISS_COPY = {
+	moot: { key: "relay.ask.dismiss.moot", note: "relay.ask.dismiss.moot_note" },
+	answered_in_chat: {
+		key: "relay.ask.dismiss.answered_in_chat",
+		note: "relay.ask.dismiss.answered_in_chat_note",
+	},
+} as const;
+
+const DISMISS_REASONS = ["moot", "answered_in_chat"] as const;
+
 /** The daemon's sentence, or the plainest honest thing when it gave none.
  *
  *  `api.request` falls back to the bare status when an error body is not JSON
@@ -286,6 +305,7 @@ export function AskCard({
 	   BOTH FACTS ARE READ OFF THE ROW, not passed as props: they are the
 	   aggregate's own fields (`PendingAsk.runtime_live` / `.durable`), and a
 	   second copy of them on the component was exactly the drift D7 was made of. */
+	const cold = row.runtime_live === false;
 	const state = askStateLine(row, nowMs, messageRuntime.t);
 	/* A DISMISSED ROW STATES ITS REASON (SA-D8, design §17). The reason is a
 	   catalogue sentence rather than a literal here, so the card says it in the
@@ -744,7 +764,7 @@ export function AskCard({
 									<span className="text-meta text-ink-dim">
 										{messageRuntime.t("relay.ask.dismiss.title")}
 									</span>
-									{(["moot", "answered_in_chat"] as const).map((reason) => (
+									{DISMISS_REASONS.map((reason) => (
 										<button
 											key={reason}
 											type="button"
@@ -765,11 +785,11 @@ export function AskCard({
 											    which reason had been sent; the pressed row keeps its
 											    words and gains the in-flight mark, the sibling dims. */}
 											<span className="text-body-sm">
-												{messageRuntime.t(`relay.ask.dismiss.${reason}`)}
+												{messageRuntime.t(DISMISS_COPY[reason].key)}
 												{busy === "dismiss" && sentReason === reason ? " …" : ""}
 											</span>
 											<span className="text-meta text-ink-dim">
-												{messageRuntime.t(`relay.ask.dismiss.${reason}_note`)}
+												{messageRuntime.t(DISMISS_COPY[reason].note)}
 											</span>
 										</button>
 									))}

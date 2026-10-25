@@ -175,8 +175,14 @@ describe("the phone's gate sheet", () => {
 		expect(said.textContent).toContain("Keeping approvals at");
 		/* BOTH authority-increasing choices are named: the global scope is the one
 		   a reader is most likely to assume is exempt because it is "only a
-		   default", and it is not. */
-		expect(said.textContent).toContain("run without asking in all sessions");
+		   default", and it is not. It is named in its own sentence —
+		   `relay.approvals.gate.unpaired_default_auto`, en-only at this commit —
+		   rather than as another fragment inside the translated first sentence,
+		   so the seven locales that carry the fragments keep their own word order
+		   instead of getting one English clause spliced into the middle. */
+		expect(said.textContent).toContain(
+			"Run without asking in all sessions also needs a paired phone.",
+		);
 		// ...and it was there BEFORE the tap: no request had been made yet.
 		expect(mocks.sendCommandWithProof).not.toHaveBeenCalled();
 	});
