@@ -234,8 +234,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 
@@ -395,6 +396,7 @@ _install_real_store_guard()
 def pytest_configure(config: pytest.Config) -> None:
     _refuse_a_split_tree(config)
     shard_stall_watchdog.install(config, on_ci=_on_ci_host())
+    _install_thread_leak_report(config)
     shard_memory_dump.install()
 
 
@@ -428,10 +430,16 @@ def _on_ci_host() -> bool:
 
 def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
     shard_stall_watchdog.note_start(nodeid)
+    _thread_leak_start(nodeid)
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     shard_stall_watchdog.note_report(report)
+    if report.when == "teardown":
+        # The teardown report is emitted after the teardown phase has finished,
+        # which is the "end of teardown" reading the guard reports on. The
+        # setup/call reports are progress for the watchdog above, not a boundary.
+        _thread_leak_finish(report.nodeid)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -1363,3 +1371,311 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
         return workers
     except Exception:  # see docstring: never break the run
         return _FALLBACK_WORKERS
+
+
+# ---------------------------------------------------------------------------
+# Thread-leak report (REPORT-ONLY)
+# ---------------------------------------------------------------------------
+# The CI unit shard `test (3.13, 3)` dies with
+# ``OSError: [Errno 12] Cannot allocate memory`` while a thread is starting, and
+# the merged instrumented dump of the dying worker says why that is plausible:
+# 481 live threads, ``VmData`` 21.9 GB against ``VmRSS`` 776 MB, soft
+# ``RLIMIT_STACK`` 16 MiB, and system ``Committed_AS`` 26.8 GiB against an 11.1
+# GiB ``CommitLimit`` with ``overcommit_memory=0``. 481 x 16 MiB is ~7.5 GiB of
+# thread-stack RESERVATION in one worker, ~30 GiB across four -- the same order
+# as the measured commit. What that explanation does not say is which tests left
+# the threads behind, and the suite had no way to answer: this file's only
+# thread-state assertions are two tests watching their own bodies.
+# ``tests/shard_memory_dump.py`` records that state AT the failure; this reports
+# the tests that were growing the count before it, continuously.
+#
+# This section is that answer, and it is REPORT-ONLY by design rather than by
+# first draft. Whether a surviving thread is a leak or a deliberate pool that a
+# session-scoped fixture tears down at session end depends on the test, so
+# failing cells before the leakers have names would turn one memory-hungry shard
+# into hundreds of red ones. Nothing here can fail, skip or alter a test: every
+# entry point swallows its own errors, and the first internal error stands the
+# guard down for the rest of the process with ONE note.
+#
+# THE DELTA (`after - before`) IS THE POINT, not the absolute count. A shard's
+# workers inherit every thread an earlier test left alive -- 400 of them in the
+# scenario this exists for -- so an absolute reading blames each later test for
+# its predecessor's threads and names none of the real leakers. The delta names
+# the test during whose setup/teardown the count grew, which is the only cheap
+# signal that attributes a thread to a test at all.
+#
+# CHEAP, because this runs on 15k-test shards: ``threading.active_count()`` is
+# ``len(threading._active)``, i.e. O(1), and it is read twice per test -- at
+# ``pytest_runtest_logstart`` (immediately before setup) and on the teardown
+# report (immediately after teardown). ``threading.enumerate()`` is called ONLY
+# when a positive delta has already been found, and its thread names are capped;
+# no stack, no frames, no locals ever leave a thread. The counts are kept per
+# leaking test, not per test: a clean run allocates nothing that survives a test.
+#
+# The logstart/logreport boundary is also why the lines reach the job log at all:
+# pytest's capture is suspended between phases (it is active only inside setup /
+# call / teardown), which is the same window the terminal reporter writes its
+# progress into. Writes go to STDERR, never stdout, because ``-q`` output is
+# parsed from stdout.
+#
+# xdist: the hooks run inside each WORKER, and the controller is deliberately
+# left with no reporter -- it sees every test's logstart/logreport too (that is
+# how the terminal reporter prints), but its own thread table is unrelated to a
+# worker's, and a relay thread appearing there would be reported as a leak by a
+# process that never ran a test. Each worker's numbers stand alone: a per-worker
+# peak is the figure that matters to the worker that died of commit exhaustion,
+# and nothing is summed across workers.
+#
+# Silence with ``LOCAL_OPERATOR_THREAD_LEAK_REPORT=0`` (any value in
+# `_FALSY_ENV_VALUES`); a clean run prints nothing at all.
+
+#: Env kill-switch. Default ON -- this is a diagnostic for CI logs, and a run
+#: that has to be told to arm it is a run that will not have it when a shard dies.
+_LEAK_ENV = "LOCAL_OPERATOR_THREAD_LEAK_REPORT"
+
+#: Per-test lines ONE process may print. A fixture that leaks on every test in a
+#: 15k-test shard would otherwise write 15k lines into a CI log; the counters keep
+#: counting and the summary still reports the total.
+_PER_TEST_LINE_CAP = 40
+
+#: Worst tests named in the summary, and thread names sampled per leak. Names are
+#: the diagnostic (an executor pool is named ``ThreadPoolExecutor-0_0``, an asyncio
+#: executor ``asyncio_0``); more than a handful per leak is noise in a log.
+_WORST_CAP = 10
+_NAME_CAP = 5
+
+
+class _Leak:
+    """One test that ended its teardown with more threads alive than it began.
+
+    A plain class rather than a dataclass on purpose: ``test_xdist_worker_budget``
+    loads this module with ``spec_from_file_location`` without registering it in
+    ``sys.modules``, and a dataclass resolves its ``from __future__ import
+    annotations`` strings through ``sys.modules[cls.__module__]`` -- so a
+    dataclass here would break every test in that file at import.
+    """
+
+    __slots__ = ("after", "before", "daemons", "names", "nodeid")
+
+    def __init__(
+        self, nodeid: str, before: int, after: int, names: tuple[str, ...], daemons: int
+    ) -> None:
+        self.nodeid = nodeid
+        self.before = before
+        self.after = after
+        self.names = names
+        self.daemons = daemons
+
+    @property
+    def delta(self) -> int:
+        return self.after - self.before
+
+
+def _thread_leak_sink(text: str) -> None:
+    """One line of report, on stderr (see the section header for why not stdout)."""
+    print(text, file=sys.stderr, flush=True)
+
+
+def _sample_threads(delta: int) -> tuple[tuple[str, ...], int]:
+    """Names of a capped sample of live threads, and how many of them are daemons.
+
+    The tail of ``threading.enumerate()`` is an APPROXIMATION of the threads this
+    test started, not a proven identity diff: an exact diff needs a full
+    enumeration at the start of EVERY test, which is the per-test cost this guard
+    exists not to pay. ``threading._active`` preserves insertion order and drops
+    a thread when it exits, so its tail is the most recently started live
+    threads -- enough to tell an executor pool from a stray ``Thread``, and never
+    a claim about which thread belongs to which test.
+
+    Taken only when the caller already has a positive delta.
+    """
+    live = threading.enumerate()
+    if delta <= 0 or not live:
+        return (), 0
+    sample = live[-min(delta, _NAME_CAP) :]
+    return tuple(thread.name for thread in sample), sum(1 for thread in sample if thread.daemon)
+
+
+class _ThreadLeakReport:
+    """Per-process accumulator: the tests that leaked, and how much.
+
+    Deliberately not thread-safe: every field is touched from the pytest thread
+    that runs tests, and a lock here would be new shared state in the very
+    process this guard exists to keep out of memory trouble.
+    """
+
+    def __init__(self, worker: str, sink: Callable[[str], None] | None = None) -> None:
+        self.worker = worker
+        self._sink = sink if sink is not None else _thread_leak_sink
+        #: nodeid -> count at logstart. Emptied per test, so it holds one entry
+        #: per in-flight item rather than one per test in the whole shard.
+        self._before: dict[str, int] = {}
+        self._worst: list[_Leak] = []
+        self.tests_reported = 0
+        self.total_leaked = 0
+        self.peak = 0
+        self.lines_emitted = 0
+        self.suppressed = 0
+
+    def start(self, nodeid: str) -> None:
+        """Record the thread count this test starts from."""
+        self._before[nodeid] = threading.active_count()
+
+    def finish(self, nodeid: str) -> None:
+        """Report the delta at the end of teardown, when it is positive."""
+        before = self._before.pop(nodeid, None)
+        if before is None:
+            # No start reading: the guard was armed mid-test, or an internal
+            # error lost it. Nothing can be attributed without both ends.
+            return
+        after = threading.active_count()
+        # The before reading is part of "peak seen": a test that inherits 481 and
+        # ends at 400 is exactly the state that provokes the OSError.
+        self.peak = max(self.peak, before, after)
+        if after <= before:
+            return
+        names, daemons = _sample_threads(after - before)
+        leak = _Leak(nodeid=nodeid, before=before, after=after, names=names, daemons=daemons)
+        self.tests_reported += 1
+        self.total_leaked += leak.delta
+        self._remember(leak)
+        self._emit_line(leak)
+
+    def _remember(self, leak: _Leak) -> None:
+        """Keep the largest ``_WORST_CAP`` deltas for the summary."""
+        self._worst.append(leak)
+        self._worst.sort(key=lambda kept: kept.delta, reverse=True)
+        del self._worst[_WORST_CAP:]
+
+    def _emit_line(self, leak: _Leak) -> None:
+        if self.lines_emitted >= _PER_TEST_LINE_CAP:
+            if self.suppressed == 0:
+                self._sink(
+                    f"[thread-leak] {self.worker}: per-test lines capped at "
+                    f"{_PER_TEST_LINE_CAP}; every further leaker is counted in the summary"
+                )
+            self.suppressed += 1
+            return
+        self.lines_emitted += 1
+        self._sink(
+            f"[thread-leak] {self.worker}: {leak.nodeid} before={leak.before} "
+            f"after={leak.after} delta=+{leak.delta} daemon={leak.daemons}/{len(leak.names)} "
+            f"names={list(leak.names)}"
+        )
+
+    def summary(self) -> str | None:
+        """One line for this process, or None when it saw no leak at all.
+
+        None is what makes a clean run silent: no header, no zero counts, no
+        "0 leaks" line to scroll past in a log that is already enormous.
+        """
+        if self.tests_reported == 0:
+            return None
+        worst = ", ".join(f"+{leak.delta} {leak.nodeid}" for leak in self._worst)
+        tail = f"; {self.suppressed} further line(s) suppressed" if self.suppressed else ""
+        return (
+            f"[thread-leak] {self.worker}: {self.tests_reported} test(s) left "
+            f"{self.total_leaked} thread(s) behind (peak {self.peak} live); "
+            f"worst {len(self._worst)}: {worst}{tail}"
+        )
+
+
+#: This process's reporter, or None where no tests run (see
+#: `_install_thread_leak_report`).
+_THREAD_LEAK: _ThreadLeakReport | None = None
+
+#: Set after the first internal error. The guard stops paying for a broken probe
+#: and the note is emitted exactly once -- "at most once", per its contract.
+_THREAD_LEAK_FAILED = False
+
+
+def _thread_leak_enabled() -> bool:
+    """ON unless explicitly switched off (the inverse of `_env_flag`'s opt-in).
+
+    Deliberately not ``_env_flag``: that helper reads an EMPTY value as off, which
+    is right for its own opt-in knobs and wrong for a kill-switch whose default
+    has to be on.
+    """
+    return os.environ.get(_LEAK_ENV, "").strip().lower() not in _FALSY_ENV_VALUES
+
+
+def _thread_leak_stand_down() -> None:
+    """Note an internal error once, then keep the guard out of the run's way."""
+    global _THREAD_LEAK_FAILED
+    if _THREAD_LEAK_FAILED:
+        return
+    _THREAD_LEAK_FAILED = True
+    try:
+        _thread_leak_sink(
+            "[thread-leak] guard stood down after an internal error "
+            "(report-only: no test was affected)"
+        )
+    except Exception:  # a broken stderr must not become a broken run
+        pass
+
+
+def _install_thread_leak_report(config: pytest.Config) -> None:
+    """Create this process's reporter -- only where tests actually run.
+
+    An xdist worker is identified by ``workerinput``, xdist's own marker. The
+    controller receives every test's logstart/logreport too, so it must not arm:
+    its thread table belongs to the controller, and a relay thread appearing
+    mid-run would be reported as a leak by a process that ran no test. Without
+    ``workerinput`` this process runs the tests itself only when it has no
+    workers at all (``-n0``, or no xdist installed).
+    """
+    global _THREAD_LEAK
+    if not _thread_leak_enabled():
+        return
+    worker_input = getattr(config, "workerinput", None)
+    if isinstance(worker_input, dict):
+        _THREAD_LEAK = _ThreadLeakReport(str(worker_input.get("workerid") or "worker"))
+        return
+    if getattr(getattr(config, "option", None), "numprocesses", 0) not in (None, 0, "0"):
+        return
+    _THREAD_LEAK = _ThreadLeakReport("main")
+
+
+def _thread_leak_start(nodeid: str) -> None:
+    """Take the before reading at the start of setup. Never raises."""
+    report = _THREAD_LEAK
+    if _THREAD_LEAK_FAILED or report is None:
+        return
+    try:
+        report.start(nodeid)
+    except Exception:
+        _thread_leak_stand_down()
+
+
+def _thread_leak_finish(nodeid: str) -> None:
+    """Take the after reading at the end of teardown and report a delta. Never raises."""
+    report = _THREAD_LEAK
+    if _THREAD_LEAK_FAILED or report is None:
+        return
+    try:
+        report.finish(nodeid)
+    except Exception:
+        _thread_leak_stand_down()
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Emit this process's summary line, and nothing when it saw no leak.
+
+    ``pytest_unconfigure`` rather than ``pytest_sessionfinish``: that hook is
+    already this file's real-store post-mortem, which can return early or raise
+    ``pytest.exit``, and the summary must not depend on either. Unconfigure also
+    runs in an xdist WORKER, which is the process holding the numbers.
+    """
+    report = _THREAD_LEAK
+    if report is None or _THREAD_LEAK_FAILED:
+        return
+    try:
+        summary = report.summary()
+    except Exception:
+        _thread_leak_stand_down()
+        return
+    if summary is not None:
+        try:
+            _thread_leak_sink(summary)
+        except Exception:
+            _thread_leak_stand_down()
