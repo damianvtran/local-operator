@@ -18,10 +18,19 @@ messages.** It lives in a temp config root; the operator's store is never read.
 Both sides of every comparison get their own APFS clone of the same seed, so the
 bytes are identical and only the code under test differs.
 
-## What a cold open costs, miss versus hit
+## What a cold facade open costs, miss versus hit — IN ONE PROCESS
 
-Fresh process per side, four opens each, replay cache cleared between samples —
-i.e. the restart case a durable record exists for. Baseline = `origin/main`.
+**Read the scope off the label: these are four facade opens inside ONE process
+per side, with only the replay cache cleared between samples.** They are not
+fresh-process numbers. The process stays warm in every way a process can —
+imports, the transcript index cache, config, the roster and wake reads — so the
+hit figure below is the cost of opening a facade with an empty replay cache, and
+it is *not* what a cold restart of the desktop costs. (An earlier revision of
+this file called these "fresh process" numbers. That was wrong, and the
+fresh-process measurement in the next section is what the restart claim rests
+on.)
+
+Baseline = `origin/main`.
 
 | side | sample | backend CPU | journal passes | journal bytes |
 |---|---|---|---|---|
@@ -41,10 +50,11 @@ Read as two claims, and only two:
   which writes the record. Nothing here makes a first-ever open cheap, and a
   journal whose record is missing, stale, corrupt, unknown-schema or from an
   older build takes exactly this path.
-* **A later process's open of an unchanged journal reads no journal bytes at
-  all** — 0 passes and 0 bytes against 8.6 MB, at ~10 ms of CPU against
-  119-218 ms. The remaining ~10 ms is the synthesised state, the config/wake
-  reads and the restore, not a hidden parse.
+* **An open with a matching record reads no journal bytes at all** — 0 passes
+  and 0 bytes against 8.6 MB, at ~10 ms of CPU against 119-218 ms *in the same
+  in-process scope*. Those ~10 ms are the synthesised state, the config/wake
+  reads and the restore, not a hidden parse. What this does NOT say is that a
+  cold restart opens in ~10 ms; see the fresh-process section for that number.
 
 ## Real process, real route
 
@@ -63,9 +73,30 @@ after — one request is below macOS's reporting resolution, twenty are not:
 **These steady-state numbers do NOT show the win, and that is the honest
 reading.** Within one process the replay cache already answers the second and
 later reads, so neither side pays a parse per request after the first: the
-round-2 figures are the same cost on both sides. The durable record's benefit is
-the *cross-process* one measured in the table above (a restart, which is what a
-desktop server does between requests), not an intra-process one.
+round-2 figures are the same cost on both sides.
+
+## Fresh process — what independent QA actually measured
+
+The restart question, answered by a measurement that starts a NEW process for the
+open rather than reusing a warm one (independent QA, evidence id 6403162115):
+
+| | backend CPU |
+|---|---|
+| fresh-process **hit** (record valid, journal unchanged) | **314.6 ms** |
+| of which **session enter** | **267.8 ms** |
+
+The byte claim survives at this scope: **0 replay passes, 0 journal bytes** — the
+replay-message parse and attachment resolution really are gone from the open.
+What does not survive is any reading of the in-process table as a restart cost.
+A cold restart with a valid record still costs ~315 ms of backend CPU, and the
+dominant remaining term is **session enter** (state synthesis, config, the
+index, the sidecars) — work this slice does not touch and does not claim to have
+improved.
+
+So: **`<300 ms` for a cold start is not demonstrated**, and nothing in
+this change should be read as promising it. What is claimed is narrower and
+measured: the journal is not replayed, and the first paint's frontend state is
+identical.
 
 ## Wire equality
 
@@ -101,6 +132,9 @@ is a separate change.
 ## Reproduce
 
 * In-process numbers and the fixture: `l3c_measure.py` (`seed`, `inproc`).
+  `inproc` opens N facades inside ONE process and clears only the replay cache
+  between them — it does not measure a fresh process, and its hit figure must
+  not be quoted as a restart cost.
 * Real process, real routes, frame capture and canonical diff: `l3c_run.sh`
   with `l3c_frames.py` and `l3c_cpu.py`. Every process is reaped by pid and every
   root is a temp directory. Both need `L3C_WORKTREE` (and `L3C_ROOT_BASE` /
