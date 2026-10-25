@@ -3159,7 +3159,7 @@
     {
       "locale": "zh-CN",
       "namespace": "relay.account_policy",
-      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
       "owner": "i18n-translator lane",
       "payoff": "2027-02-28",
       "missing": [
@@ -3181,7 +3181,7 @@
     {
       "locale": "zh-CN",
       "namespace": "wire.errors.sdk_spec",
-      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
       "owner": "i18n-translator lane",
       "payoff": "2027-02-28",
       "missing": [
@@ -3211,7 +3211,7 @@
     {
       "locale": "zh-CN",
       "namespace": "wire.errors.sdk_startup",
-      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
       "owner": "i18n-translator lane",
       "payoff": "2027-02-28",
       "missing": [
@@ -3224,7 +3224,7 @@
     {
       "locale": "zh-CN",
       "namespace": "wire.settings.account_policy",
-      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
       "owner": "i18n-translator lane",
       "payoff": "2027-02-28",
       "missing": [

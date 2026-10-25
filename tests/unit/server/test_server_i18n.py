@@ -1,9 +1,11 @@
 """The i18n catalogue route, and the capability + language that advertise it.
 
-The held Chinese candidate is absent from this partial package. Route
+Chinese ships after its 2026-10-24 security disposition, so the route serves
+its audited committed bytes rather than treating the candidate as absent. Route
 assertions cover shape and cache revalidation, not semantic approval or full
-CLI localization. Missing assets stay 404 even with their old candidate ETag;
-the public preview contract for ordinary present catalogues is unchanged.
+CLI localization. A locale the generated set does not ship stays 404 even with
+committed-shaped bytes on disk or an old candidate ETag; the public preview
+contract for ordinary present catalogues is unchanged.
 """
 
 from __future__ import annotations
