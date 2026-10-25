@@ -57,6 +57,7 @@ would need a lease.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import threading
@@ -70,6 +71,8 @@ from local_operator.network.types import MeshRefusal
 
 if TYPE_CHECKING:
     from local_operator.network.relay import RelayServer
+
+logger = logging.getLogger(__name__)
 
 #: The record's own directory, under the network root (RU §6.1).
 ROLLOUTS_DIRNAME = "rollouts"
@@ -907,13 +910,35 @@ def stop_driver(server: "RelayServer", *, timeout: float = DRIVER_STOP_JOIN_S) -
     loop's reason: a tick may be mid-dial, and a stop that waited on a peer
     would make every caller's stop cost depend on another machine. The thread is
     a daemon, so the bound is a promptness claim, not an unreachable leak.
+
+    The registry entry is what makes a survivor findable, so it is removed only
+    once the thread is known stopped: ``Thread.join(timeout)`` returns nothing
+    either way, and popping before the join left a still-running driver with no
+    handle any caller could reach. A driver still alive at the deadline is
+    reported in a warning and its entry is KEPT, so a subsequent
+    ``ensure_driver`` reuses the survivor rather than starting a second scan. A
+    thread that ignores its stop cannot be killed from here; this makes the
+    condition visible instead of impossible.
     """
     with _DRIVER_LOCK:
-        driver = _DRIVERS.pop(id(server), None)
+        driver = _DRIVERS.get(id(server))
     if driver is None:
         return
     driver.stop()
     driver.join(timeout=timeout)
+    if driver.is_alive():
+        logger.warning(
+            "mesh rollouts: driver thread did not stop within the %.1fs timeout "
+            "and is still running — it was not killed; its registry entry is "
+            "kept so ensure_driver reuses it rather than starting a second one",
+            timeout,
+        )
+        return
+    with _DRIVER_LOCK:
+        # Identity-checked: a concurrent ensure_driver may have replaced a driver
+        # that looked dead, and this must not unregister its replacement.
+        if _DRIVERS.get(id(server)) is driver:
+            del _DRIVERS[id(server)]
 
 
 def resume_record(
