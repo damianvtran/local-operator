@@ -118,6 +118,10 @@ OWNED_SPA_NAMESPACES = (
     "relay.ask",
     "relay.approvals",
     "relay.asks",
+    # The borderless redesign's chrome (drawer, chips, tray, banners; 2026-10-25,
+    # docs/design/mobile-relay-redesign.md §11.1). Its own namespace so no existing
+    # English value changes: a value edit stales every locale's passed ledger rows.
+    "relay.chrome",
 )
 
 GENERATED_HEADER = (
