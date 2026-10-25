@@ -1528,8 +1528,14 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
         # Names are unauthenticated labels, so the full device id stays in its own
         # leading column; putting the variable-length name after it keeps duplicate
         # or crafted names from hiding the only field that distinguishes members.
-        # Parentheses make the fallback visibly absent metadata, not a literal name.
-        name = str(member.get("name") or "").strip() or f"({UNNAMED_DEVICE})"
+        # JSON-quoting every present name reserves the unquoted fallback for absent
+        # metadata: no literal stored spelling can impersonate that fallback.
+        stored_name = str(member.get("name") or "")
+        name = (
+            json.dumps(stored_name, ensure_ascii=False)
+            if stored_name.strip()
+            else f"({UNNAMED_DEVICE})"
+        )
         lines.append(
             f"  {mark:7} {member['device_id']}  {name}  {member['role']:5}  "
             f"{', '.join(member['capabilities'])}{suspect}"
