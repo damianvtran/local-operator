@@ -766,6 +766,50 @@ def one_turn_secret_value_is_present(
     return False
 
 
+def one_turn_container_has_secret(
+    values: Iterable[SecretStr],
+    value: Any,
+    redact: Callable[[str], str] | None = None,
+) -> bool:
+    """Walk every STRING LEAF of ``value`` with the coverage primitive.
+
+    Never ``json.dumps`` a container first: dumping escapes the quotes of an
+    already-escaped leaf, so an encoded value inside arguments, a tool result
+    or a forwarded prompt stops matching its own spelling (review S-12/R3-1,
+    measured as JSON-escaped args and results passing a no-op sink). Pydantic
+    models are walked through ``model_dump(mode="python")`` so a result or
+    message is inspected as fields, not as its JSON spelling.
+    """
+    seen: set[int] = set()
+
+    def walk(item: Any) -> bool:
+        if isinstance(item, str):
+            return one_turn_secret_value_is_present(values, item, redact)
+        if isinstance(item, Mapping):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            return any(walk(key) or walk(entry) for key, entry in item.items())
+        if isinstance(item, (list, tuple, set, frozenset)):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            return any(walk(entry) for entry in item)
+        dump = getattr(item, "model_dump", None)
+        if callable(dump):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            try:
+                return walk(dump(mode="python"))
+            except Exception:
+                # A model that refuses to dump cannot be proven safe.
+                return True
+        return False
+
+    return walk(value)
+
+
 def one_turn_public_text(request: "ChatRequest", value: str | None) -> str | None:
     """Return safe provider metadata, or None when it cannot be proven safe."""
     if value is None or not request.has_one_turn_secrets:
