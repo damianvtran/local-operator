@@ -18,6 +18,12 @@ from scripts import native_relay_update_probe as probe
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="a generation venv uses a POSIX symlink")
 
 
+@pytest.fixture()
+def root(tmp_path: Path) -> Path:
+    """This file is outside tests/unit/network, so supply its own isolated root."""
+    return tmp_path
+
+
 def _package(root: Path, *, poison: bool = False) -> None:
     package = root / "local_operator"
     network = package / "network"
@@ -33,6 +39,7 @@ def _package(root: Path, *, poison: bool = False) -> None:
 
 def _minimal_venv(root: Path, *, with_package: bool = True) -> None:
     """Build only the venv identity pieces; no copied interpreter or pip install."""
+    root.mkdir(parents=True)
     executable = Path(getattr(sys, "base_executable", sys.executable)).resolve()
     (root / "pyvenv.cfg").write_text(
         f"home = {executable.parent}\ninclude-system-site-packages = false\n",
