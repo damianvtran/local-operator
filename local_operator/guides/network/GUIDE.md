@@ -1164,7 +1164,7 @@ inherits, what is lent per command, and what must already be on the node.
 ## Provisioning a working copy on a peer
 
 Phase 2 already says a checkout is not something it can deliver, and pairing
-pairing does not create one either. An offloaded session can only touch
+does not create one either. An offloaded session can only touch
 repository files the peer holds, so a lane that expects `~/local-operator` on a
 node without one fails at the first `git` call.
 
