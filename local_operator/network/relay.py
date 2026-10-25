@@ -400,6 +400,9 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # §8.2). Slow by registration below: the handler may run a real install
         # inside its own bounded deadline.
         "net_update",
+        # One peer's own relay recovery; the member answers before its
+        # supervisor replaces the process, and the origin verifies on reconnect.
+        "net_restart",
     }
 )
 
@@ -427,6 +430,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         # ask a peer (the ``peer_*`` boundary rule; the peer-scope half is
         # ``net_update``).
         "peer_update",
+        "peer_restart",
     }
 )
 
@@ -448,6 +452,9 @@ SLICE_MODULES: tuple[str, ...] = (
     # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
     # starts no thread of its own (the S3 rollout driver is a different slice).
     "local_operator.network.meshupdate",
+    # Peer-targeted relay recovery. No fleet fan-out and no independent role:
+    # the member's existing self-decided update grant authorises its own relay.
+    "local_operator.network.meshrestart",
     # S3a of the rolling updates: the rollout record and the serial pass. It
     # serves NO ops of its own — one start hook, the ``mesh-rollout`` driver
     # thread — and it opens no record by itself: the trigger that does is
