@@ -21460,6 +21460,69 @@ class Session:
         # re-issued — and cheaper than teaching the tool about withdrawal.
         self._peer_arrival.mark(HUB_MESSAGE_TYPE)
 
+    def queue_aside_coalesced(
+        self,
+        thunk: Callable[[], AsideResult],
+        *,
+        settled: asyncio.Event,
+        grace_s: float,
+    ) -> None:
+        """Queue a child's unprompted note NOW; hold only its WAKE for ``grace_s``.
+
+        WHY. Measured over 7 days of top-level transcripts: 60% of child->parent
+        hub notes were followed by the SAME job's settle within 120 s, 75%
+        within 20 s, and 99.6% landed while the parent was mid-turn (usually
+        parked in ``wait``). The immediate mark in :meth:`queue_aside` cut that
+        wait short, the parent paid a full-context model call (~244k input
+        tokens for a manager) to read the note and re-issue ``wait``, and was
+        woken again seconds later by the job_result carrying the same news.
+        Deferring the mark to the EARLIER of the settle and the grace window
+        collapses those two wakes into one.
+
+        What is NOT deferred, and why each matters:
+
+        * The thunk is appended immediately, so ordering and durability are
+          unchanged: any boundary the parent reaches for another reason in the
+          meantime still carries the note.
+        * An IDLE parent marks at once. An aside wakes no idle session today
+          (the mark only cuts a parked ``wait``), so deferral would buy nothing
+          there; marking keeps that path byte-for-byte what it was.
+        * The mark is issued EXACTLY ONCE on every exit of the timer — settle,
+          expiry, or cancellation by :meth:`dispose` — through the same
+          :meth:`_PeerArrival.mark`, so the never-clear/only-increment
+          invariant holds and no arrival is ever silently swallowed. On settle
+          the mark coincides with the job manager's own settle event; ``wait``
+          checks a settled job BEFORE the peer count, so a parent waiting on
+          that job wakes once with the result, and a parent waiting on a
+          DIFFERENT job is still woken to read the note (plus the result its
+          boundary now carries) rather than sleeping through both.
+
+        ``settled`` is the owning job manager's ``settled_event`` for the
+        child; ``grace_s <= 0`` is today's behaviour exactly.
+        """
+        self._aside_thunks.append(thunk)
+        if grace_s <= 0 or settled.is_set() or not self._is_streaming or self._disposed:
+            self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+            return
+
+        async def _deferred_mark() -> None:
+            try:
+                await asyncio.wait_for(settled.wait(), grace_s)
+            except TimeoutError:
+                # Still running after the window: a genuine mid-job note ("I am
+                # blocked"). It arrives at most ``grace_s`` late.
+                pass
+            finally:
+                # ``finally`` so a dispose-time cancel still counts the arrival:
+                # the thunk is already queued, and a mark that never happens is
+                # the lost-wakeup class ``_PeerArrival`` exists to rule out.
+                self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+
+        if self._spawn_background(_deferred_mark()) is None:
+            # Disposed between the check above and the spawn: nothing will run
+            # the timer, so do not let the deferral eat the mark.
+            self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+
     async def _todo_continuation(self) -> list[AgentMessage]:
         """The loop's follow-up hook: re-assert the outstanding todos at the yield.
 
