@@ -1,0 +1,141 @@
+{
+  "locale": "vi",
+  "key_count": 828,
+  "aged_key_count": 10,
+  "missing": [],
+  "extra": [],
+  "order_identical": true,
+  "non_aged_changed_since_base": [],
+  "aged_added_vs_base": [
+    "wire.settings.compaction_aged_clear_after_calls.help",
+    "wire.settings.compaction_aged_clear_after_calls.label",
+    "wire.settings.compaction_aged_clear_batch_tokens.help",
+    "wire.settings.compaction_aged_clear_batch_tokens.label",
+    "wire.settings.compaction_aged_clear_enabled.choice.false.description",
+    "wire.settings.compaction_aged_clear_enabled.choice.true.description",
+    "wire.settings.compaction_aged_clear_enabled.help",
+    "wire.settings.compaction_aged_clear_enabled.label",
+    "wire.settings.compaction_aged_clear_min_tokens.help",
+    "wire.settings.compaction_aged_clear_min_tokens.label"
+  ],
+  "changed_since_round1": [
+    "wire.settings.compaction_aged_clear_batch_tokens.help",
+    "wire.settings.compaction_aged_clear_min_tokens.label"
+  ],
+  "fixes_match_proposals": true,
+  "changes_outside_proposals": [],
+  "keys": [
+    {
+      "key": "wire.settings.compaction_aged_clear_after_calls.help",
+      "cells": 67,
+      "maxCells": null,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_after_calls.label",
+      "cells": 20,
+      "maxCells": 29,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_batch_tokens.help",
+      "cells": 88,
+      "maxCells": null,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_batch_tokens.label",
+      "cells": 14,
+      "maxCells": 29,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_enabled.choice.false.description",
+      "cells": 15,
+      "maxCells": null,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_enabled.choice.true.description",
+      "cells": 14,
+      "maxCells": null,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_enabled.help",
+      "cells": 113,
+      "maxCells": null,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_enabled.label",
+      "cells": 22,
+      "maxCells": 29,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_min_tokens.help",
+      "cells": 37,
+      "maxCells": null,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    },
+    {
+      "key": "wire.settings.compaction_aged_clear_min_tokens.label",
+      "cells": 24,
+      "maxCells": 29,
+      "within_budget": true,
+      "survives_label_truncation": true,
+      "nfc": true,
+      "control_or_format_chars": [],
+      "icu_arguments_equal_en_none": true,
+      "render_ok": true
+    }
+  ],
+  "over_budget": [],
+  "mechanical_clean": true
+}

@@ -95,8 +95,12 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # `wire.errors.desktop` -- THIRTY-FIVE (both newly carried, 30 and 84 keys).
     # The relay.asks re-audit adds the 77-key `hi/relay.asks` row -- THIRTY-SIX.
     # The approvals slice adds the independently audited 17-key
-    # `hi/relay.approvals` row -- THIRTY-SEVEN.
-    assert len(hindi) == 37
+    # `hi/relay.approvals` row -- THIRTY-SEVEN. The aged tool-result clearing
+    # slice's independently audited 10-key `wire.settings` delta (round 1: one
+    # hi MINOR, fixed verbatim; round 2 clean, 0 blocker/major) makes it
+    # THIRTY-EIGHT. zh-CN and ur instead REPLACE their single wire.settings row
+    # in place: they keep one row per carried namespace, so their counts hold.
+    assert len(hindi) == 38
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

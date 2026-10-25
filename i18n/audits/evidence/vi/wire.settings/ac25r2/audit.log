@@ -1,0 +1,59 @@
+$ git -C ~/local-operator/.worktrees/i18n-2922 rev-parse HEAD
+43da538c4d011b687982c974f307dd54d388a807
+$ .venv/bin/python audit.py.txt <out>   # run from the session scratchpad copy, byte-identical to audit.py.txt in this bundle
+revision=43da538c4d011b687982c974f307dd54d388a807 namespace=wire.settings aged_keys=10 label_budget=29
+context_rows=10 label_maxCells=[29]
+[es] keys=828 missing=0 extra=0 order_identical=True non_aged_changed_since_base=0 aged_added=10
+[es] round1_fixes=3 changed_since_round1=3 fixes_match_proposals=True outside_proposals=0
+[es]   width after_calls.label cells=22 max=29 truncation_safe=True
+[es]   width batch_tokens.label cells=24 max=29 truncation_safe=True
+[es]   width enabled.label cells=26 max=29 truncation_safe=True
+[es]   width min_tokens.label cells=27 max=29 truncation_safe=True
+[es] nfc_fail=0 control=0 icu_mismatch=0 render_fail=0 over_budget=0 mechanical_clean=True
+[fr] keys=828 missing=0 extra=0 order_identical=True non_aged_changed_since_base=0 aged_added=10
+[fr] round1_fixes=3 changed_since_round1=3 fixes_match_proposals=True outside_proposals=0
+[fr]   width after_calls.label cells=22 max=29 truncation_safe=True
+[fr]   width batch_tokens.label cells=25 max=29 truncation_safe=True
+[fr]   width enabled.label cells=29 max=29 truncation_safe=True
+[fr]   width min_tokens.label cells=26 max=29 truncation_safe=True
+[fr] nfc_fail=0 control=0 icu_mismatch=0 render_fail=0 over_budget=0 mechanical_clean=True
+[hi] keys=828 missing=0 extra=0 order_identical=True non_aged_changed_since_base=0 aged_added=10
+[hi] round1_fixes=1 changed_since_round1=1 fixes_match_proposals=True outside_proposals=0
+[hi]   width after_calls.label cells=13 max=29 truncation_safe=True
+[hi]   width batch_tokens.label cells=17 max=29 truncation_safe=True
+[hi]   width enabled.label cells=17 max=29 truncation_safe=True
+[hi]   width min_tokens.label cells=24 max=29 truncation_safe=True
+[hi] nfc_fail=0 control=0 icu_mismatch=0 render_fail=0 over_budget=0 mechanical_clean=True
+[ru] keys=828 missing=0 extra=0 order_identical=True non_aged_changed_since_base=0 aged_added=10
+[ru] round1_fixes=2 changed_since_round1=2 fixes_match_proposals=True outside_proposals=0
+[ru]   width after_calls.label cells=28 max=29 truncation_safe=True
+[ru]   width batch_tokens.label cells=22 max=29 truncation_safe=True
+[ru]   width enabled.label cells=25 max=29 truncation_safe=True
+[ru]   width min_tokens.label cells=28 max=29 truncation_safe=True
+[ru] nfc_fail=0 control=0 icu_mismatch=0 render_fail=0 over_budget=0 mechanical_clean=True
+[ur] keys=828 missing=0 extra=0 order_identical=True non_aged_changed_since_base=0 aged_added=10
+[ur] round1_fixes=2 changed_since_round1=2 fixes_match_proposals=True outside_proposals=0
+[ur]   width after_calls.label cells=20 max=29 truncation_safe=True
+[ur]   width batch_tokens.label cells=21 max=29 truncation_safe=True
+[ur]   width enabled.label cells=24 max=29 truncation_safe=True
+[ur]   width min_tokens.label cells=28 max=29 truncation_safe=True
+[ur] nfc_fail=0 control=0 icu_mismatch=0 render_fail=0 over_budget=0 mechanical_clean=True
+[vi] keys=828 missing=0 extra=0 order_identical=True non_aged_changed_since_base=0 aged_added=10
+[vi] round1_fixes=2 changed_since_round1=2 fixes_match_proposals=True outside_proposals=0
+[vi]   width after_calls.label cells=20 max=29 truncation_safe=True
+[vi]   width batch_tokens.label cells=14 max=29 truncation_safe=True
+[vi]   width enabled.label cells=22 max=29 truncation_safe=True
+[vi]   width min_tokens.label cells=24 max=29 truncation_safe=True
+[vi] nfc_fail=0 control=0 icu_mismatch=0 render_fail=0 over_budget=0 mechanical_clean=True
+[zh-CN] keys=828 missing=0 extra=0 order_identical=True non_aged_changed_since_base=0 aged_added=10
+[zh-CN] round1_fixes=1 changed_since_round1=1 fixes_match_proposals=True outside_proposals=0
+[zh-CN]   width after_calls.label cells=14 max=29 truncation_safe=True
+[zh-CN]   width batch_tokens.label cells=21 max=29 truncation_safe=True
+[zh-CN]   width enabled.label cells=14 max=29 truncation_safe=True
+[zh-CN]   width min_tokens.label cells=19 max=29 truncation_safe=True
+[zh-CN] nfc_fail=0 control=0 icu_mismatch=0 render_fail=0 over_budget=0 mechanical_clean=True
+failures=0
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0

@@ -1,0 +1,161 @@
+"""Mechanical verifier for the aged-clear wire.settings audit (ac25r2).
+
+Read-only. Run from the worktree root with its own venv:
+    .venv/bin/python <this file> <out_dir>
+Prints one block per locale and writes <out_dir>/<locale>.json.
+Checks: whole-file key parity/order vs en, no non-aged key changed since
+eaae289edf, ICU argument sets equal en (none), runtime render ok, NFC,
+no control/bidi/zero-width chars, maxCells from the en context sidecar
+(cell_len, the width model truncate_cells uses) and truncation survival at
+the settings label budget, and that the round-1 fixes equal the auditor's
+round-1 proposals byte-for-byte.
+"""
+
+import json
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
+
+from rich.cells import cell_len
+
+from local_operator.i18n import runtime
+from local_operator.tui.widgets.settings_view import _LABEL_BUDGET
+from local_operator.tui.widgets.tool_card import truncate_cells
+
+NS = "wire.settings"
+BASE = "eaae289edf"
+ROUND1 = "62813bbd7a"
+CAT = Path("local_operator/i18n/catalogues")
+P = "wire.settings.compaction_aged_clear_"
+
+# Round-1 proposals, verbatim from the round-1 report.
+PROPOSALS = {
+    "es": {
+        P + "enabled.label": "Borrar resultados antiguos",
+        P + "batch_tokens.help": "Borra solo cuando los resultados antiguos suman esta cantidad de tokens, para que la caché de prompts se reescriba pocas veces.",
+        P + "enabled.help": "Sustituye, por lotes, los resultados antiguos de herramientas por una nota breve para volver a obtenerlos, de modo que las ejecuciones largas dejen de reenviarlos.",
+    },
+    "fr": {
+        P + "enabled.label": "Effacer les anciens résultats",
+        P + "min_tokens.label": "Minimum à effacer (tokens)",
+        P + "batch_tokens.help": "N’efface qu’une fois que les anciens résultats totalisent ce nombre de tokens, afin que le cache de prompt soit rarement réécrit.",
+    },
+    "ru": {
+        P + "enabled.label": "Очищать старые результаты",
+        P + "after_calls.help": "Сколько вызовов модели должно пройти после результата инструмента, прежде чем его можно будет очистить.",
+    },
+    "vi": {
+        P + "min_tokens.label": "Tối thiểu để xóa (token)",
+        P + "batch_tokens.help": "Chỉ xóa khi các kết quả cũ đạt tổng số token này, để cache prompt hiếm khi phải ghi lại.",
+    },
+    "hi": {
+        P + "after_calls.help": "किसी टूल परिणाम को साफ़ करने से पहले कितनी मॉडल कॉल बीत जानी चाहिए।",
+    },
+    "ur": {
+        P + "batch_tokens.label": "صفائی کی کھیپ (ٹوکنز)",
+        P + "enabled.help": "پرانے ٹول نتائج کو کھیپوں میں دوبارہ فیچ کے مختصر نوٹ سے بدلیں، تاکہ طویل رنز انہیں بار بار نہ بھیجیں۔",
+    },
+    "zh-CN": {
+        P + "batch_tokens.label": "批量清除阈值（token）",
+    },
+}
+
+
+def at(rev: str, path: str) -> dict:
+    return json.loads(subprocess.check_output(["git", "show", f"{rev}:{path}"]))
+
+
+def main(out: Path) -> int:
+    out.mkdir(parents=True, exist_ok=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    en = json.loads((CAT / "en" / f"{NS}.json").read_text("utf-8"))
+    ctx = json.loads((CAT / "en" / f"{NS}.context.json").read_text("utf-8"))
+    aged = [k for k in en if k.startswith(P)]
+    print(f"revision={head} namespace={NS} aged_keys={len(aged)} label_budget={_LABEL_BUDGET}")
+    ctx_rows = [k for k in aged if k in ctx]
+    print(f"context_rows={len(ctx_rows)} label_maxCells={sorted({ctx[k].get('maxCells') for k in aged if k.endswith('.label')})}")
+    failures = 0
+    for loc in ("es", "fr", "hi", "ru", "ur", "vi", "zh-CN"):
+        path = CAT / loc / f"{NS}.json"
+        cur = json.loads(path.read_text("utf-8"))
+        base = at(BASE, str(path))
+        r1 = at(ROUND1, str(path))
+        res: dict = {"locale": loc, "key_count": len(cur), "aged_key_count": len(aged)}
+        res["missing"] = sorted(set(en) - set(cur))
+        res["extra"] = sorted(set(cur) - set(en))
+        res["order_identical"] = list(cur) == list(en)
+        res["non_aged_changed_since_base"] = sorted(
+            k for k in cur if not k.startswith(P) and cur.get(k) != base.get(k)
+        )
+        res["aged_added_vs_base"] = sorted(k for k in aged if k not in base)
+        res["changed_since_round1"] = sorted(k for k in cur if cur[k] != r1.get(k))
+        props = PROPOSALS[loc]
+        res["fixes_match_proposals"] = all(cur[k] == v for k, v in props.items())
+        res["changes_outside_proposals"] = sorted(set(res["changed_since_round1"]) - set(props))
+        rows = []
+        for k in aged:
+            v = cur[k]
+            bad = [hex(ord(c)) for c in v if unicodedata.category(c) in ("Cc", "Cf")]
+            args_ok = runtime.message_arguments(v) == runtime.message_arguments(en[k]) == ()
+            try:
+                rendered = runtime.render_message(v, {}, loc)
+                render_ok = rendered == v
+            except Exception as exc:  # report, never hide
+                render_ok = f"error: {exc}"
+            cap = ctx.get(k, {}).get("maxCells")
+            width = cell_len(v)
+            row = {
+                "key": k,
+                "cells": width,
+                "maxCells": cap,
+                "within_budget": cap is None or width <= cap,
+                "survives_label_truncation": (not k.endswith(".label")) or truncate_cells(v, _LABEL_BUDGET) == v,
+                "nfc": unicodedata.is_normalized("NFC", v),
+                "control_or_format_chars": bad,
+                "icu_arguments_equal_en_none": args_ok,
+                "render_ok": render_ok,
+            }
+            ok = (
+                row["within_budget"] and row["survives_label_truncation"] and row["nfc"]
+                and not bad and args_ok and render_ok is True
+            )
+            failures += not ok
+            rows.append(row)
+        res["keys"] = rows
+        res["over_budget"] = [r["key"] for r in rows if not r["within_budget"]]
+        clean = (
+            not res["missing"] and not res["extra"] and res["order_identical"]
+            and not res["non_aged_changed_since_base"] and len(res["aged_added_vs_base"]) == len(aged)
+            and res["fixes_match_proposals"] and not res["changes_outside_proposals"]
+            and not res["over_budget"]
+        )
+        failures += not clean
+        res["mechanical_clean"] = clean and all(
+            r["nfc"] and not r["control_or_format_chars"] and r["icu_arguments_equal_en_none"] and r["render_ok"] is True
+            and r["survives_label_truncation"] for r in rows
+        )
+        (out / f"{loc}.json").write_text(json.dumps(res, ensure_ascii=False, indent=2) + "\n", "utf-8")
+        print(
+            f"[{loc}] keys={res['key_count']} missing={len(res['missing'])} extra={len(res['extra'])} "
+            f"order_identical={res['order_identical']} non_aged_changed_since_base={len(res['non_aged_changed_since_base'])} "
+            f"aged_added={len(res['aged_added_vs_base'])}"
+        )
+        print(
+            f"[{loc}] round1_fixes={len(props)} changed_since_round1={len(res['changed_since_round1'])} "
+            f"fixes_match_proposals={res['fixes_match_proposals']} outside_proposals={len(res['changes_outside_proposals'])}"
+        )
+        for r in rows:
+            if r["maxCells"]:
+                print(f"[{loc}]   width {r['key'][len(P):]} cells={r['cells']} max={r['maxCells']} truncation_safe={r['survives_label_truncation']}")
+        print(
+            f"[{loc}] nfc_fail={sum(not r['nfc'] for r in rows)} control={sum(bool(r['control_or_format_chars']) for r in rows)} "
+            f"icu_mismatch={sum(not r['icu_arguments_equal_en_none'] for r in rows)} render_fail={sum(r['render_ok'] is not True for r in rows)} "
+            f"over_budget={len(res['over_budget'])} mechanical_clean={res['mechanical_clean']}"
+        )
+    print(f"failures={failures}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(Path(sys.argv[1])))

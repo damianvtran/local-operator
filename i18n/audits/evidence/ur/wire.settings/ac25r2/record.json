@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "audit_id": "ac25r2",
+  "audit_kind": "independent_translation_audit_delta",
+  "locale": "ur",
+  "namespace": "wire.settings",
+  "round": 2,
+  "audit_date": "2026-10-25",
+  "key_count": 10,
+  "namespace_key_count": 828,
+  "round1_revision": "62813bbd7ad212bdb0d9eedb1f6d4aed8742fe62",
+  "audited_revision": "43da538c4d011b687982c974f307dd54d388a807",
+  "fix_commit_under_review": "43da538c4d011b687982c974f307dd54d388a807",
+  "base_revision": "eaae289edfadbbd43bd61a8ac1ef1c21d1c9f531",
+  "current_bytes_match_audited_hashes": true,
+  "translator": {
+    "agent": "i18n-translator",
+    "session": null,
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25",
+    "source": "Identity and model stated by the delegating lopdev manager; translator session id was not provided and is left null rather than invented."
+  },
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "session": "d5aa5aa4c387",
+    "model": "anthropic/claude-opus-5-5",
+    "audit_date": "2026-10-25",
+    "independent_from_translator_session": true,
+    "independent_from_implementer": true,
+    "actual_model_source": "This session's model header reports anthropic/claude-opus-5-5; no fallback observed. Same model as the translator (agent-level independence, disclosed)."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "5ec56141fb88cf5383659ea641101da09ab09136beeda3fed6a9d04dab13d01a"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "sha256": "70f11806d26b4e164db366efb81d8b1558b0a11eb772f585d54750be73320c42"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/ur.md",
+        "sha256": "157b1310a090ca98bd9c4b2262a8ebcf7d5ca92cd91fb5f9c7e82d21fe768c9c"
+      }
+    ]
+  },
+  "changed_keys": [
+    "wire.settings.compaction_aged_clear_after_calls.help",
+    "wire.settings.compaction_aged_clear_after_calls.label",
+    "wire.settings.compaction_aged_clear_batch_tokens.help",
+    "wire.settings.compaction_aged_clear_batch_tokens.label",
+    "wire.settings.compaction_aged_clear_enabled.choice.false.description",
+    "wire.settings.compaction_aged_clear_enabled.choice.true.description",
+    "wire.settings.compaction_aged_clear_enabled.help",
+    "wire.settings.compaction_aged_clear_enabled.label",
+    "wire.settings.compaction_aged_clear_min_tokens.help",
+    "wire.settings.compaction_aged_clear_min_tokens.label"
+  ],
+  "round1_findings": [
+    {
+      "id": "A-ur-1",
+      "severity": "MINOR",
+      "disposition": "fixed",
+      "fix_commit": "43da538c4d011b687982c974f307dd54d388a807"
+    }
+  ],
+  "supersedes_ledger_row": {
+    "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+    "auditor": {
+      "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
+      "model": "openrouter/moonshotai/kimi-k3.1-pro",
+      "date": "2026-10-24",
+      "result": "passed",
+      "findings": 0
+    },
+    "note": "R3 current-byte dual audit clean, 0 B/M; ur24a3/ur24b3 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.settings/ur24a3/record.json; peer ur24b3.",
+    "reason": "One row per carried namespace for this locale; replaced in place. Its evidence bundles are untouched and still cover the unchanged keys."
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "blocker": 0,
+    "major": 0,
+    "unresolved_blocker_major_count": 0,
+    "round2_new_findings": 0,
+    "finding_ids": [
+      "A-ur-1"
+    ]
+  },
+  "ledger_entry": {
+    "locale": "ur",
+    "namespace": "wire.settings",
+    "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
+    "translator": {
+      "agent": "i18n-translator",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-10-25"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-10-25",
+      "result": "passed",
+      "findings": 1
+    },
+    "status": "passed",
+    "note": "aged_clear 10-key delta. R1 1 MINOR fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/ur/wire.settings/ac25r2/record.json"
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report (reasoning); audit.log is the executed command transcript; mechanical.json is machine output of audit.py.txt. Report text proves nothing about execution.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/wire.settings/ac25r2/report.md",
+      "sha256": "c37d75038845918c87221c0bfcb44a6b9f9084d0acd1ed7a9a1a236107ffa975"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.settings/ac25r2/audit.log",
+      "sha256": "4b06fdfd54de075f69cc1cfc7bfd66f7d061cee2b405918fa7168cee707aecb2"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.settings/ac25r2/audit.py.txt",
+      "sha256": "8e95a7b66bb2fbf50ab45af907f8f0e3858f0463791b5e62fb1fc928385dc088"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.settings/ac25r2/mechanical.json",
+      "sha256": "c40a22feff8e3acc8d9c48ccf11051612387386a1604a306f2ffb7964583ea29"
+    }
+  ]
+}

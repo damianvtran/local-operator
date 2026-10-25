@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "audit_id": "ac25r2",
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "record": "i18n/audits/evidence/hi/wire.settings/ac25r2/record.json",
+  "provenance": "Bundle receipt for audit ac25r2 written 2026-10-25 by i18n-auditor (lopdev team), session d5aa5aa4c387, model anthropic/claude-opus-5-5; this manifest is not another audit.",
+  "hashes": {
+    "record.json": "48aca5adc7060070283793163b7384f0fce84ed4d457a7276ef8043ac341d7fa",
+    "report.md": "cae4c16041a82a14d7d6f5367f25eb01fb80bbc2c8e6acfa652db2c378ae301b",
+    "audit.log": "4b06fdfd54de075f69cc1cfc7bfd66f7d061cee2b405918fa7168cee707aecb2",
+    "audit.py.txt": "8e95a7b66bb2fbf50ab45af907f8f0e3858f0463791b5e62fb1fc928385dc088",
+    "mechanical.json": "d8f813537e95214b71d6e5f8b2ebe93059674a6d2f30a62be9525e99d343806a"
+  }
+}
