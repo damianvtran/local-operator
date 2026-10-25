@@ -1,0 +1,51 @@
+# One operator-authorized diagnostic, never a standing privileged CI gate.
+# The operator applies native-delegated-once-<exact-reviewed-head> once after
+# wrapper/provenance/cleanup review. The wrapper verifies that head and these
+# content hashes; any earlier run consumes the authorization (including relabel).
+name: Native delegated relay update once
+on:
+  pull_request:
+    types: [labeled]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  # Relabels serialize; the wrapper's read-only history check then fails closed.
+  group: native-delegated-once-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  delegated-diagnostic-once:
+    if: >-
+      startsWith(github.event.label.name, 'native-delegated-once-') &&
+      github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Fetch the fixed base
+        run: git fetch --no-tags origin main
+      - name: Run the one authorized delegated diagnostic
+        env:
+          EXPECTED_HEAD: ${{ github.event.label.name }}
+          EXPECTED_WRAPPER_SHA256: 53b0a8cdd687f87f42b79c26db667c2326431f69eacb20395f5564a6eb4dff06
+          EXPECTED_PROBE_SHA256: 3963bdad593da823723035bac69264e8905b9e166cb09614d1e4520f119fe463
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/native-delegated-once-wrapper.sh
+      - name: Upload scope and native receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-delegated-once
+          path: |
+            ${{ runner.temp }}/native-*.json
+            ${{ runner.temp }}/native-*.rc
+            ${{ runner.temp }}/native-*.log
+          retention-days: 7
