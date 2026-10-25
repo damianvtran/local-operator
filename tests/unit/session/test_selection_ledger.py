@@ -279,3 +279,33 @@ async def test_missing_generation_falls_back_and_recovered_state_survives_prewar
     assert read_selection_payloads(directory) is None
     assert selection._read_selection(directory) == expected
     transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_archived_session_answers_selection_without_a_ledger(tmp_path):
+    """A compressed journal has no plain inode, so the ledger must stand aside.
+
+    This is the behaviour the archive-awareness guard's allow-list row claims: the
+    plain stat fails, the reader answers None, and the model-selection fallback
+    pays today's exact scan through the codec resolver.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session import compression
+    from local_operator.session.tail_anchor import read_selection_payloads
+
+    transcript = Transcript(tmp_path)
+    await transcript.append_custom(
+        "selected_model", {"version": 2, "selector": "test/second-choice"}
+    )
+    await transcript.append_message(Message.user("hello"))
+    transcript.close()
+
+    outcome = compression.compress_session(tmp_path)
+    assert outcome.status == "compressed", outcome
+    assert not (tmp_path / "transcript.jsonl").is_file()
+
+    assert read_selection_payloads(tmp_path) is None
+    assert not (tmp_path / "tail-anchor.json").exists()
+    assert not (tmp_path / "tail-anchor.v1.json").exists()
+    selected = selection.read_model_selection(tmp_path)
+    assert selected is not None and selected.model_id == "second-choice"

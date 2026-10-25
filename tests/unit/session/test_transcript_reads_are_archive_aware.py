@@ -117,6 +117,21 @@ _ALLOWED: dict[str, str] = {
     "local_operator/session/transcript.py::project_indexed_source_subset": (
         "unreachable for an archive: its read_indexed_raw_rows already answered None"
     ),
+    # The selection ledger names the PLAIN journal's own inode, boundary and
+    # generation stamps, so an archived session has no record that could
+    # validate: the stat below fails, this answers None, and the caller pays
+    # today's exact scan down the codec resolver. Resolving the archive here
+    # instead would compare a cache copy's inode against a plain-file record.
+    "local_operator/session/tail_anchor.py::_validated_selection_anchor": (
+        "an archived session has no plain inode to describe; None falls back to the resolver"
+    ),
+    # Runs immediately below _write_entries' fsync of this session's OWN plain
+    # journal, under the writer lock. Transcript's construction restores an
+    # archive before any write (compression.restore_for_write) and the
+    # compression pass takes that same lock, so an archive cannot reach here.
+    "local_operator/session/tail_anchor.py::_update_selection_after_commit": (
+        "the durable writer just fsynced this journal; construction restored any archive"
+    ),
 }
 
 
