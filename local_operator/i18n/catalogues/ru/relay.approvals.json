@@ -1,0 +1,19 @@
+{
+  "relay.approvals.card.notice_session_auto": "эта сессия теперь в режиме auto",
+  "relay.approvals.card.request_needs_answer": "Этот запрос всё ещё ждёт вашего ответа.",
+  "relay.approvals.card.set_auto_all": "Включить auto для всех сессий",
+  "relay.approvals.card.set_auto_session": "Включить auto для этой сессии",
+  "relay.approvals.card.still_needs_answer": "Этот вызов всё ещё ждёт вашего ответа.",
+  "relay.approvals.gate.body_scope": "Первые два варианта меняют только эту сессию; последний меняет значение по умолчанию для всех последующих сессий.",
+  "relay.approvals.gate.default_auto": "выполнять без запроса во всех сессиях (default auto)",
+  "relay.approvals.gate.refused_nothing_changed": "отказано — ничего не изменилось",
+  "relay.approvals.gate.unpaired_default_auto": "Выполнять без запроса во всех сессиях тоже требует сопряжённого телефона.",
+  "relay.approvals.policy.default_auto_receipt": "для последующих сессий теперь auto по умолчанию",
+  "relay.approvals.policy.global_default": "Одобрения: {mode} — глобальное значение по умолчанию.",
+  "relay.approvals.policy.mode_ask": "ask",
+  "relay.approvals.policy.mode_auto": "auto",
+  "relay.approvals.policy.mode_only": "Одобрения: {mode}.",
+  "relay.approvals.policy.session_override": "Одобрения: {mode} — переопределение для этой сессии.",
+  "relay.approvals.policy.session_override_global": "Одобрения: {mode} — переопределение для этой сессии; глобально: {global}.",
+  "relay.approvals.policy.this_run": "Одобрения: {mode} — только для этого запуска."
+}

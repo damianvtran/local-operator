@@ -42,9 +42,14 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # a passed audit at the CURRENT en bytes; a row for a namespace with no
     # file (or a file with no row) would mean the released package carries
     # unaudited or missing copy. Keep the exact-name and freshness pins, not
-    # just the cardinality: 81 is the number that satisfied the gate on the
+    # just the cardinality: 81 was the number that satisfied the gate on the
     # disposition date, and the set equality is what actually enforces it.
-    assert len(chinese) == 81
+    # The relay wave adds the two namespaces zh-CN now carries alongside the
+    # release: `relay.approvals` (17 keys, the approval-scope copy main added
+    # as literals) and the restored 77-key `relay.asks`. Both were independently
+    # audited at these bytes on 2026-10-25 (four MINOR findings on relay.asks,
+    # nits elsewhere, no blocker/major), so the cardinality is 83.
+    assert len(chinese) == 83
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -89,7 +94,9 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # fix's refusal notices add one audited row each for `tui.notices` and
     # `wire.errors.desktop` -- THIRTY-FIVE (both newly carried, 30 and 84 keys).
     # The relay.asks re-audit adds the 77-key `hi/relay.asks` row -- THIRTY-SIX.
-    assert len(hindi) == 36
+    # The approvals slice adds the independently audited 17-key
+    # `hi/relay.approvals` row -- THIRTY-SEVEN.
+    assert len(hindi) == 37
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

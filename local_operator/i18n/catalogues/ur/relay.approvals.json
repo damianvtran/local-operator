@@ -1,0 +1,19 @@
+{
+  "relay.approvals.card.notice_session_auto": "یہ سیشن اب auto ہے",
+  "relay.approvals.card.request_needs_answer": "اس درخواست کا جواب ابھی دینا باقی ہے۔",
+  "relay.approvals.card.set_auto_all": "تمام سیشنز کے لیے auto مقرر کریں",
+  "relay.approvals.card.set_auto_session": "اس سیشن کے لیے auto مقرر کریں",
+  "relay.approvals.card.still_needs_answer": "اس کال کا جواب ابھی دینا باقی ہے۔",
+  "relay.approvals.gate.body_scope": "پہلے دو اختیارات صرف اسی سیشن کو بدلتے ہیں؛ آخری والا اس کے بعد آنے والے تمام سیشنز کا ڈیفالٹ بدلتا ہے۔",
+  "relay.approvals.gate.default_auto": "تمام سیشنز میں بغیر پوچھے چلائیں (default auto)",
+  "relay.approvals.gate.refused_nothing_changed": "مسترد — کچھ تبدیل نہیں ہوا",
+  "relay.approvals.gate.unpaired_default_auto": "تمام سیشنز میں بغیر پوچھے چلانے کے لیے بھی جوڑا ہوا فون درکار ہے۔",
+  "relay.approvals.policy.default_auto_receipt": "اس کے بعد آنے والے سیشنز کا ڈیفالٹ اب auto ہے",
+  "relay.approvals.policy.global_default": "منظوریاں: {mode} — عالمی ڈیفالٹ۔",
+  "relay.approvals.policy.mode_ask": "ask",
+  "relay.approvals.policy.mode_auto": "auto",
+  "relay.approvals.policy.mode_only": "منظوریاں: {mode}۔",
+  "relay.approvals.policy.session_override": "منظوریاں: {mode} — اس سیشن کے لیے الگ ترتیب۔",
+  "relay.approvals.policy.session_override_global": "منظوریاں: {mode} — اس سیشن کے لیے الگ ترتیب؛ عالمی {global}۔",
+  "relay.approvals.policy.this_run": "منظوریاں: {mode} — صرف اس رن کے لیے۔"
+}

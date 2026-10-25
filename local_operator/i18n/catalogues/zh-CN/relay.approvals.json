@@ -1,0 +1,19 @@
+{
+  "relay.approvals.card.notice_session_auto": "本会话现为auto",
+  "relay.approvals.card.request_needs_answer": "此请求仍需你回复。",
+  "relay.approvals.card.set_auto_all": "为所有会话设置auto",
+  "relay.approvals.card.set_auto_session": "为本会话设置auto",
+  "relay.approvals.card.still_needs_answer": "此调用仍需你回复。",
+  "relay.approvals.gate.body_scope": "前两个选项只改变本会话；最后一个改变其后所有会话的默认值。",
+  "relay.approvals.gate.default_auto": "在所有会话中无需询问直接运行（default auto）",
+  "relay.approvals.gate.refused_nothing_changed": "已拒绝——没有任何更改",
+  "relay.approvals.gate.unpaired_default_auto": "在所有会话中无需询问直接运行也需要已配对的手机。",
+  "relay.approvals.policy.default_auto_receipt": "其后所有会话的默认值现为auto",
+  "relay.approvals.policy.global_default": "审批：{mode}——全局默认。",
+  "relay.approvals.policy.mode_ask": "ask",
+  "relay.approvals.policy.mode_auto": "auto",
+  "relay.approvals.policy.mode_only": "审批：{mode}。",
+  "relay.approvals.policy.session_override": "审批：{mode}——本会话覆盖。",
+  "relay.approvals.policy.session_override_global": "审批：{mode}——本会话覆盖；全局{global}。",
+  "relay.approvals.policy.this_run": "审批：{mode}——仅本次运行。"
+}

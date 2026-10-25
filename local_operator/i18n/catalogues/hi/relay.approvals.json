@@ -1,0 +1,19 @@
+{
+  "relay.approvals.card.notice_session_auto": "यह सत्र अब auto है",
+  "relay.approvals.card.request_needs_answer": "इस अनुरोध का उत्तर अभी बाकी है।",
+  "relay.approvals.card.set_auto_all": "सभी सत्रों के लिए auto सेट करें",
+  "relay.approvals.card.set_auto_session": "इस सत्र के लिए auto सेट करें",
+  "relay.approvals.card.still_needs_answer": "इस कॉल का उत्तर अभी बाकी है।",
+  "relay.approvals.gate.body_scope": "पहले दो विकल्प केवल इस सत्र को बदलते हैं; आख़िरी वाला इसके बाद आने वाले सभी सत्रों का डिफ़ॉल्ट बदलता है।",
+  "relay.approvals.gate.default_auto": "सभी सत्रों में बिना पूछे चलाएँ (default auto)",
+  "relay.approvals.gate.refused_nothing_changed": "अस्वीकार किया गया — कुछ नहीं बदला",
+  "relay.approvals.gate.unpaired_default_auto": "सभी सत्रों में बिना पूछे चलाने के लिए भी जुड़ा हुआ फ़ोन चाहिए।",
+  "relay.approvals.policy.default_auto_receipt": "इसके बाद आने वाले सत्रों का डिफ़ॉल्ट अब auto है",
+  "relay.approvals.policy.global_default": "स्वीकृतियाँ: {mode} — वैश्विक डिफ़ॉल्ट।",
+  "relay.approvals.policy.mode_ask": "ask",
+  "relay.approvals.policy.mode_auto": "auto",
+  "relay.approvals.policy.mode_only": "स्वीकृतियाँ: {mode}।",
+  "relay.approvals.policy.session_override": "स्वीकृतियाँ: {mode} — इस सत्र का ओवरराइड।",
+  "relay.approvals.policy.session_override_global": "स्वीकृतियाँ: {mode} — इस सत्र का ओवरराइड; वैश्विक {global}।",
+  "relay.approvals.policy.this_run": "स्वीकृतियाँ: {mode} — इस रन के लिए।"
+}

@@ -191,10 +191,15 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # namespace `relay.asks` on the same terms — it is a DIFFERENT namespace
     # from R5's `relay.ask` (the dismiss reasons and stale-ask line), and
     # `namespaces()` returns the files sorted, so `relay.asks` sorts before
-    # `relay.session.tags` rather than where the slice landed.
+    # `relay.session.tags` rather than where the slice landed. The approvals
+    # slice adds `relay.approvals` (17 keys, the approval-scope copy main added
+    # as literals) on the same terms: carried only now that its independent
+    # audit row exists against the current en bytes. It sorts before
+    # `relay.ask`.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
+        "relay.approvals",
         "relay.ask",
         "relay.asks",
         "relay.session.tags",

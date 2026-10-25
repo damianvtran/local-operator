@@ -6042,6 +6042,158 @@
       },
       "status": "passed",
       "note": "5 changed keys reviewed (no prior ur ledger row existed). title_* use '\u062f\u0631\u062e\u0648\u0627\u0633\u062a\u06cc\u06ba' as the section noun (distinct from \u0633\u0648\u0627\u0644\u0627\u062a; the loading line agrees feminine plural '\u067e\u0691\u06be\u06cc \u062c\u0627 \u0631\u06c1\u06cc \u06c1\u06cc\u06ba'); duration.hours is now one/other and renders 1\u2192'1 \u06af\u06be\u0646\u0679\u06c1', 2/5/47\u2192'N \u06af\u06be\u0646\u0679\u06d2', fixing the round-1 FAIL. All five plural keys render correctly, including sheet.title_waiting 1\u2192'1 \u0633\u0648\u0627\u0644' and dock.timed_out 1\u2192'1 \u0633\u0648\u0627\u0644 \u06a9\u0627 \u0648\u0642\u062a \u062e\u062a\u0645'. The plural is only admissible because arguments_match now permits en number->plural; the copy itself is correct and uses the full ur category set (one/other), so it does not depend on the loose edge of that rule. 0 new findings. ur carries only relay.asks, so this passed row makes the locale eligible to ship with English fallback elsewhere. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls \u2014 clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.approvals",
+      "source_sha256": "321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+        "date": "unrecorded"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "New namespace relay.approvals (17 keys), current-byte round. Scope audit (the reason this copy exists): the three gate labels are 'continuer \u00e0 demander (ask)' / 'ex\u00e9cuter sans demander (auto)' / 'ex\u00e9cuter sans demander dans toutes les sessions (default auto)'. The session-only vs all-sessions distinction survives on two independent signals \u2014 the explicit scope phrase 'dans toutes les sessions' and the parenthetical '(auto)' vs '(default auto)' \u2014 and gate.body_scope restates it ('ne changent que cette session' / 'la valeur par d\u00e9faut de toutes les sessions suivantes'). 'Run without asking' keeps its risk: 'sans demander', never 'automatiquement'/'silencieusement'. gate.refused_nothing_changed keeps both halves ('refus\u00e9 \u2014 rien n\u2019a chang\u00e9'). card.set_auto_session/all keep cette/toutes. Register matches fr relay.asks (vous, 'appairage', 'session'; the ask/auto mode tokens stay Latin as they do in relay.asks and wire.settings). fr typography held: U+202F before ; and :, spaced em dash, curly apostrophe. 0 findings. Mechanical: 17/17 keys against en, ICU argument tuples identical and in source order ({mode} in six keys, {mode}+{global} in session_override_global), this namespace carries no plural messages, no bidi/zero-width controls, no straight quotes, no double spaces, no English leakage (no value equals its en source). Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded because the seven catalogue files arrived as untracked working-tree bytes at ab44bbb04a. This row is what lets the locale keep carrying relay.approvals: the carried-namespace gate un-ships any locale whose carried namespace lacks a fresh passed row."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.approvals",
+      "source_sha256": "321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+        "date": "unrecorded"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "New namespace relay.approvals (17 keys), current-byte round. Scope audit: the three gate labels are 'seguir preguntando (ask)' / 'ejecutar sin preguntar (auto)' / 'ejecutar sin preguntar en todas las sesiones (default auto)'. The session-only vs all-sessions distinction survives on two independent signals \u2014 'en todas las sesiones' plus '(auto)' vs '(default auto)' \u2014 and gate.body_scope restates it ('cambian solo esta sesi\u00f3n' / 'el valor predeterminado de todas las sesiones siguientes'). 'Run without asking' keeps its risk: 'sin preguntar', never 'autom\u00e1ticamente'/'en silencio'. gate.refused_nothing_changed keeps both halves ('rechazado \u2014 nada cambi\u00f3'). card.set_auto_session/all keep esta/todas. Register matches es relay.asks (t\u00fa, 'emparejado', 'solicitud' vs 'llamada', 'aprobar/rechazar'). Neutral Spanish, no region-marked words. 0 findings. Mechanical: 17/17 keys against en, ICU argument tuples identical and in source order ({mode} in six keys, {mode}+{global} in session_override_global), this namespace carries no plural messages, no bidi/zero-width controls, no straight quotes, no double spaces, no English leakage (no value equals its en source). Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded because the seven catalogue files arrived as untracked working-tree bytes at ab44bbb04a. This row is what lets the locale keep carrying relay.approvals: the carried-namespace gate un-ships any locale whose carried namespace lacks a fresh passed row."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.approvals",
+      "source_sha256": "321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+        "date": "unrecorded"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "New namespace relay.approvals (17 keys), current-byte round. Scope audit: the three gate labels are '\u092a\u0942\u091b\u0924\u0947 \u0930\u0939\u0947\u0902 (ask)' / '\u092c\u093f\u0928\u093e \u092a\u0942\u091b\u0947 \u091a\u0932\u093e\u090f\u0901 (auto)' / '\u0938\u092d\u0940 \u0938\u0924\u094d\u0930\u094b\u0902 \u092e\u0947\u0902 \u092c\u093f\u0928\u093e \u092a\u0942\u091b\u0947 \u091a\u0932\u093e\u090f\u0901 (default auto)'. The session-only vs all-sessions distinction survives \u2014 '\u0938\u092d\u0940 \u0938\u0924\u094d\u0930\u094b\u0902 \u092e\u0947\u0902' is the leading scope phrase and only the third label carries it, with '(auto)' vs '(default auto)' as the second signal \u2014 and gate.body_scope restates it ('\u0915\u0947\u0935\u0932 \u0907\u0938 \u0938\u0924\u094d\u0930 \u0915\u094b' / '\u0907\u0938\u0915\u0947 \u092c\u093e\u0926 \u0906\u0928\u0947 \u0935\u093e\u0932\u0947 \u0938\u092d\u0940 \u0938\u0924\u094d\u0930\u094b\u0902 \u0915\u093e \u0921\u093f\u092b\u093c\u0949\u0932\u094d\u091f'). 'Run without asking' keeps its risk: '\u092c\u093f\u0928\u093e \u092a\u0942\u091b\u0947', never '\u0938\u094d\u0935\u091a\u093e\u0932\u093f\u0924'/'\u091a\u0941\u092a\u091a\u093e\u092a'. gate.refused_nothing_changed keeps both halves ('\u0905\u0938\u094d\u0935\u0940\u0915\u093e\u0930 \u0915\u093f\u092f\u093e \u0917\u092f\u093e \u2014 \u0915\u0941\u091b \u0928\u0939\u0940\u0902 \u092c\u0926\u0932\u093e'). card.set_auto_* keep \u0907\u0938/\u0938\u092d\u0940. Glossary held: \u0938\u0924\u094d\u0930 (session), \u0938\u094d\u0935\u0940\u0915\u0943\u0924\u093f\u092f\u093e\u0901 (approvals), danda \u0964 for full stops. 1 NIT, 0 minor, 0 blocker, 0 major. NIT: '\u0913\u0935\u0930\u0930\u093e\u0907\u0921' (session_override) and '\u0930\u0928' (this_run) are Devanagari loans the hi guide does not record (it records runtime\u2192\u0930\u0928\u091f\u093e\u0907\u092e and job\u2192\u091c\u0949\u092c); readable dev register \u2014 record them in the guide if kept. Confidence: I verified meaning, scope words, negation, glossary terms and mechanics; I am not a native Hindi speaker, so fine-grained idiom/naturalness is not independently native-checked. Mechanical: 17/17 keys against en, ICU argument tuples identical and in source order ({mode} in six keys, {mode}+{global} in session_override_global), this namespace carries no plural messages, no bidi/zero-width controls, no straight quotes, no double spaces, no English leakage (no value equals its en source). Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded because the seven catalogue files arrived as untracked working-tree bytes at ab44bbb04a. This row is what lets the locale keep carrying relay.approvals: the carried-namespace gate un-ships any locale whose carried namespace lacks a fresh passed row."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.approvals",
+      "source_sha256": "321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+        "date": "unrecorded"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "New namespace relay.approvals (17 keys), current-byte round. Scope audit: the three gate labels are '\u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0442\u044c \u0441\u043f\u0440\u0430\u0448\u0438\u0432\u0430\u0442\u044c (ask)' / '\u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0442\u044c \u0431\u0435\u0437 \u0437\u0430\u043f\u0440\u043e\u0441\u0430 (auto)' / '\u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0442\u044c \u0431\u0435\u0437 \u0437\u0430\u043f\u0440\u043e\u0441\u0430 \u0432\u043e \u0432\u0441\u0435\u0445 \u0441\u0435\u0441\u0441\u0438\u044f\u0445 (default auto)'. The session-only vs all-sessions distinction survives \u2014 '\u0432\u043e \u0432\u0441\u0435\u0445 \u0441\u0435\u0441\u0441\u0438\u044f\u0445' plus '(auto)' vs '(default auto)' \u2014 and gate.body_scope restates it ('\u0442\u043e\u043b\u044c\u043a\u043e \u044d\u0442\u0443 \u0441\u0435\u0441\u0441\u0438\u044e' / '\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e \u0434\u043b\u044f \u0432\u0441\u0435\u0445 \u043f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0445 \u0441\u0435\u0441\u0441\u0438\u0439'). 'Run without asking' keeps its risk and is NOT softened to '\u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438'/'\u043c\u043e\u043b\u0447\u0430'. gate.refused_nothing_changed keeps both halves ('\u043e\u0442\u043a\u0430\u0437\u0430\u043d\u043e \u2014 \u043d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u043e\u0441\u044c'). card.set_auto_* keep \u044d\u0442\u043e\u0439/\u0432\u0441\u0435\u0445. ru labels are infinitives per the ru guide; glossary \u043e\u0434\u043e\u0431\u0440\u0435\u043d\u0438\u044f (not \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f) held. 1 MINOR: gate.default_auto/run_without say '\u0431\u0435\u0437 \u0437\u0430\u043f\u0440\u043e\u0441\u0430' where the same catalogue renders the identical concept as '\u043d\u0435 \u0441\u043f\u0440\u0430\u0448\u0438\u0432\u0430\u044f' (wire.settings.tool_approval_mode.choice.auto.description, '\u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0442\u044c \u0438\u0445, \u043d\u0435 \u0441\u043f\u0440\u0430\u0448\u0438\u0432\u0430\u044f'); '\u0431\u0435\u0437 \u0437\u0430\u043f\u0440\u043e\u0441\u0430' names the prompt as a request rather than the act of asking, so the button is marginally less explicit than the setting it changes. Not a blocker: it does not read as automatic/silent, and the sibling body_scope/unpaired sentences make the consequence plain. Recommend '\u043d\u0435 \u0441\u043f\u0440\u0430\u0448\u0438\u0432\u0430\u044f' for symmetry in a later copy pass. Mechanical: 17/17 keys against en, ICU argument tuples identical and in source order ({mode} in six keys, {mode}+{global} in session_override_global), this namespace carries no plural messages, no bidi/zero-width controls, no straight quotes, no double spaces, no English leakage (no value equals its en source). Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded because the seven catalogue files arrived as untracked working-tree bytes at ab44bbb04a. This row is what lets the locale keep carrying relay.approvals: the carried-namespace gate un-ships any locale whose carried namespace lacks a fresh passed row."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.approvals",
+      "source_sha256": "321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+        "date": "unrecorded"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "New namespace relay.approvals (17 keys), current-byte round. Scope audit: the three gate labels are 'ti\u1ebfp t\u1ee5c h\u1ecfi (ask)' / 'ch\u1ea1y kh\u00f4ng h\u1ecfi (auto)' / 'ch\u1ea1y kh\u00f4ng h\u1ecfi trong m\u1ecdi phi\u00ean (default auto)'. The session-only vs all-sessions distinction survives \u2014 'trong m\u1ecdi phi\u00ean' plus '(auto)' vs '(default auto)' \u2014 and gate.body_scope restates it ('ch\u1ec9 \u0111\u1ed5i phi\u00ean n\u00e0y' / 'm\u1eb7c \u0111\u1ecbnh cho m\u1ecdi phi\u00ean sau \u0111\u00f3'). 'Run without asking' keeps its risk: 'kh\u00f4ng h\u1ecfi', never 't\u1ef1 \u0111\u1ed9ng'/'\u00e2m th\u1ea7m'. gate.refused_nothing_changed keeps both halves ('\u0111\u00e3 t\u1eeb ch\u1ed1i \u2014 kh\u00f4ng c\u00f3 g\u00ec thay \u0111\u1ed5i'). card.set_auto_* keep phi\u00ean n\u00e0y/m\u1ecdi phi\u00ean. Register matches vi relay.asks ('phi\u00ean', 'ph\u00ea duy\u1ec7t', 'gh\u00e9p n\u1ed1i'). 0 findings. Mechanical: 17/17 keys against en, ICU argument tuples identical and in source order ({mode} in six keys, {mode}+{global} in session_override_global), this namespace carries no plural messages, no bidi/zero-width controls, no straight quotes, no double spaces, no English leakage (no value equals its en source). Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded because the seven catalogue files arrived as untracked working-tree bytes at ab44bbb04a. This row is what lets the locale keep carrying relay.approvals: the carried-namespace gate un-ships any locale whose carried namespace lacks a fresh passed row."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.approvals",
+      "source_sha256": "321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+        "date": "unrecorded"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "New namespace relay.approvals (17 keys), current-byte round. Scope audit: the three gate labels are '\u067e\u0648\u0686\u06be\u062a\u06d2 \u0631\u06c1\u06cc\u06ba (ask)' / '\u0628\u063a\u06cc\u0631 \u067e\u0648\u0686\u06be\u06d2 \u0686\u0644\u0627\u0626\u06cc\u06ba (auto)' / '\u062a\u0645\u0627\u0645 \u0633\u06cc\u0634\u0646\u0632 \u0645\u06cc\u06ba \u0628\u063a\u06cc\u0631 \u067e\u0648\u0686\u06be\u06d2 \u0686\u0644\u0627\u0626\u06cc\u06ba (default auto)'. The session-only vs all-sessions distinction survives \u2014 '\u062a\u0645\u0627\u0645 \u0633\u06cc\u0634\u0646\u0632 \u0645\u06cc\u06ba' plus '(auto)' vs '(default auto)' \u2014 and gate.body_scope restates it ('\u0635\u0631\u0641 \u0627\u0633\u06cc \u0633\u06cc\u0634\u0646 \u06a9\u0648' / '\u0627\u0633 \u06a9\u06d2 \u0628\u0639\u062f \u0622\u0646\u06d2 \u0648\u0627\u0644\u06d2 \u062a\u0645\u0627\u0645 \u0633\u06cc\u0634\u0646\u0632 \u06a9\u0627 \u0688\u06cc\u0641\u0627\u0644\u0679'). 'Run without asking' keeps its risk: '\u0628\u063a\u06cc\u0631 \u067e\u0648\u0686\u06be\u06d2', never '\u062e\u0648\u062f\u06a9\u0627\u0631'/'\u062e\u0627\u0645\u0648\u0634\u06cc \u0633\u06d2'. gate.refused_nothing_changed keeps both halves ('\u0645\u0633\u062a\u0631\u062f \u2014 \u06a9\u0686\u06be \u062a\u0628\u062f\u06cc\u0644 \u0646\u06c1\u06cc\u06ba \u06c1\u0648\u0627'). card.set_auto_* keep \u0627\u0633/\u062a\u0645\u0627\u0645. RTL: no manual bidi controls in any value; Urdu punctuation \u06d4 \u061b held; the Latin ask/auto tokens stay LTR islands. Glossary \u0645\u0646\u0638\u0648\u0631\u06cc\u0627\u06ba (approvals), \u0633\u06cc\u0634\u0646 (session) held. 1 NIT, 0 minor, 0 blocker, 0 major. NIT: session_override renders '\u0627\u0644\u06af \u062a\u0631\u062a\u06cc\u0628' ('a separate arrangement') rather than a word for 'override'; legible because session_override_global supplies the global contrast, but a reader of session_override alone gets 'session-specific setting' without the supersede sense. Confidence: I verified meaning, scope words, negation, glossary terms, punctuation and mechanics; I am not a native Urdu reader, so fine-grained idiom/naturalness is not independently native-checked and Nastaliq shaping is the terminal's job. Mechanical: 17/17 keys against en, ICU argument tuples identical and in source order ({mode} in six keys, {mode}+{global} in session_override_global), this namespace carries no plural messages, no bidi/zero-width controls, no straight quotes, no double spaces, no English leakage (no value equals its en source). Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded because the seven catalogue files arrived as untracked working-tree bytes at ab44bbb04a. This row is what lets the locale keep carrying relay.approvals: the carried-namespace gate un-ships any locale whose carried namespace lacks a fresh passed row."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.approvals",
+      "source_sha256": "321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+        "date": "unrecorded"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "New namespace relay.approvals (17 keys), current-byte round. Scope audit: the three gate labels are '\u7ee7\u7eed\u8be2\u95ee\uff08ask\uff09' / '\u65e0\u9700\u8be2\u95ee\u76f4\u63a5\u8fd0\u884c\uff08auto\uff09' / '\u5728\u6240\u6709\u4f1a\u8bdd\u4e2d\u65e0\u9700\u8be2\u95ee\u76f4\u63a5\u8fd0\u884c\uff08default auto\uff09'. The session-only vs all-sessions distinction survives \u2014 only the third label carries the scope phrase '\u5728\u6240\u6709\u4f1a\u8bdd\u4e2d', with '\uff08auto\uff09' vs '\uff08default auto\uff09' as the second signal \u2014 and gate.body_scope restates it ('\u53ea\u6539\u53d8\u672c\u4f1a\u8bdd' / '\u6539\u53d8\u5176\u540e\u6240\u6709\u4f1a\u8bdd\u7684\u9ed8\u8ba4\u503c'). 'Run without asking' keeps its risk: '\u65e0\u9700\u8be2\u95ee', never '\u81ea\u52a8'/'\u9759\u9ed8'; '\u76f4\u63a5\u8fd0\u884c' adds that the gate is bypassed, it does not hide it. gate.refused_nothing_changed keeps both halves ('\u5df2\u62d2\u7edd\u2014\u2014\u6ca1\u6709\u4efb\u4f55\u66f4\u6539'). card.set_auto_* keep \u672c\u4f1a\u8bdd/\u6240\u6709\u4f1a\u8bdd. zh typography held: full-width punctuation, '\u2014\u2014' for the em dash, \uff08\uff09 around the runtime token. 1 NIT, 0 minor, 0 blocker, 0 major. NIT: session_override_global renders '\u5168\u5c40{global}' with no separator \u2014 '\u5168\u5c40\uff1a{global}' or '\u5168\u5c40\u4e3a{global}' reads cleaner; '\u672c\u4f1a\u8bdd\u73b0\u4e3aauto' (card.notice_session_auto) is slightly bookish but matches relay.asks.gate.notice_auto's '\u73b0\u4e3aauto', so it is consistent and not a defect. Mechanical: 17/17 keys against en, ICU argument tuples identical and in source order ({mode} in six keys, {mode}+{global} in session_override_global), this namespace carries no plural messages, no bidi/zero-width controls, no straight quotes, no double spaces, no English leakage (no value equals its en source). Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded because the seven catalogue files arrived as untracked working-tree bytes at ab44bbb04a. This row is what lets the locale keep carrying relay.approvals: the carried-namespace gate un-ships any locale whose carried namespace lacks a fresh passed row."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 3bd709c0f4)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Restored byte-identically from 3bd709c0f4 after the hold that deleted it was lifted; 77/77 keys, 0 placeholder mismatches, 4 plural keys all other-only with a rendering '#', no bidi controls, no English leakage except the intentional mode token 'ask'. Scope audit of the gate labels it carries: '\u7ee7\u7eed\u8be2\u95ee\uff08ask\uff09' / '\u65e0\u9700\u8be2\u95ee\u76f4\u63a5\u8fd0\u884c\uff08auto\uff09' / '\u5728\u6240\u6709\u4f1a\u8bdd\u4e2d\u65e0\u9700\u8be2\u95ee\u76f4\u63a5\u8fd0\u884c\uff08default auto\uff09' \u2014 the session-only vs all-sessions distinction survives and 'run without asking' keeps its risk. Dispositions of the five findings left to this round: (1) sheet.title_plain '\u63d0\u95ee' \u2014 MINOR and the same defect class the other six locales were fixed for on 2026-10-20 (their rows record 'demandes'/'consultas'/'\u092a\u0942\u091b\u0924\u093e\u091b'/'\u0437\u0430\u043f\u0440\u043e\u0441\u044b'/'y\u00eau c\u1ea7u'/'\u062f\u0631\u062e\u0648\u0627\u0633\u062a\u06cc\u06ba' as section nouns 'distinct from' the question word); \u63d0\u95ee is the question-asking verb, so the sheet that also holds approvals and secrets is named with the question word. Not major: rows inside carry their own kind labels and the dock badge is unchanged, so no approval is granted or missed because of it; recommend '\u8bf7\u6c42' (already used in card.request_needs_answer) in the next copy pass. (2) pending.kind_approval '\u9700\u8981\u5ba1\u6279' / kind_secret '\u9700\u8981\u673a\u5bc6\u4fe1\u606f' \u2014 MINOR. \u9700\u8981\u5ba1\u6279 is accurate and is the vocabulary gate.body/notice_auto already use, and the verbal form is not a zh-only deviation (ru '\u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f \u043e\u0434\u043e\u0431\u0440\u0435\u043d\u0438\u0435', vi 'c\u1ea7n ph\u00ea duy\u1ec7t' are verbal too); the weak point is '\u673a\u5bc6\u4fe1\u606f' for a secret value, since zh has no recorded credentials/secret rendering (glossary \u00a72 note 6 leaves the zh cell '\u2014') \u2014 the card's masked field and card.secret_notice carry the meaning. (3) card.decline and pending.deny both '\u62d2\u7edd' \u2014 MINOR. They never co-occur (decline sits beside 'send answer' on the ask card, deny beside 'approve' on the approval card) and five of seven locales collapse them identically (fr 'refuser', hi '\u0905\u0938\u094d\u0935\u0940\u0915\u093e\u0930 \u0915\u0930\u0947\u0902', vi 't\u1eeb ch\u1ed1i', ur '\u0627\u0646\u06a9\u0627\u0631 \u06a9\u0631\u06cc\u06ba'); the English pair is a register distinction, not a functional one, and both refuse. (4) gate.unpaired_after '\u6a21\u5f0f\u4ece\u4e0d\u9700\u8981\u914d\u5bf9\u3002' \u2014 MINOR. It extends the bold 'ask' label with \u6a21\u5f0f (necessary in Chinese) but joins without a connective; rendered it reads '\u5c06\u5ba1\u6279\u4fdd\u6301\u5728 ask \u6a21\u5f0f\u4ece\u4e0d\u9700\u8981\u914d\u5bf9\u3002' \u2014 understandable, slightly run-on, no meaning loss. (5) sheet.loading '\u2026\u2026' \u2014 REJECTED, not a defect: the zh style guide mandates '\u2026\u2026 (two marks)' and 62 other zh catalogue strings already use it (tui.library.loading, relay.session.past.loading, mobile.setup.checking), while the six single-'\u2026' strings are all inside comma-separated Latin lists; the sidecar's 'The ellipsis is U+2026' pins the character class, not a count. Additional NIT found here: dock.waiting/dock.timed_out/title_waiting write '# \u4e2a\u2026' with a space while title_lapsed writes '{count}\u4e2a\u2026' without one \u2014 pick one convention. 4 MINOR + 1 NIT, 0 blocker, 0 major, so this row attests; minors do not force another round but should ride the next zh copy pass. Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded in 3bd709c0f4, the wave commit these bytes were restored from. Round-1 audit of restored bytes, not a carried re-audit."
     }
   ]
 }

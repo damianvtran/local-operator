@@ -1,0 +1,19 @@
+{
+  "relay.approvals.card.notice_session_auto": "phiên này giờ là auto",
+  "relay.approvals.card.request_needs_answer": "Yêu cầu này vẫn đang chờ bạn trả lời.",
+  "relay.approvals.card.set_auto_all": "Đặt auto cho mọi phiên",
+  "relay.approvals.card.set_auto_session": "Đặt auto cho phiên này",
+  "relay.approvals.card.still_needs_answer": "Lệnh gọi này vẫn đang chờ bạn trả lời.",
+  "relay.approvals.gate.body_scope": "Hai lựa chọn đầu chỉ đổi phiên này; lựa chọn cuối đổi mặc định cho mọi phiên sau đó.",
+  "relay.approvals.gate.default_auto": "chạy không hỏi trong mọi phiên (default auto)",
+  "relay.approvals.gate.refused_nothing_changed": "đã từ chối — không có gì thay đổi",
+  "relay.approvals.gate.unpaired_default_auto": "Chạy không hỏi trong mọi phiên cũng cần điện thoại đã ghép nối.",
+  "relay.approvals.policy.default_auto_receipt": "mặc định cho các phiên sau đó giờ là auto",
+  "relay.approvals.policy.global_default": "Phê duyệt: {mode} — mặc định toàn cục.",
+  "relay.approvals.policy.mode_ask": "ask",
+  "relay.approvals.policy.mode_auto": "auto",
+  "relay.approvals.policy.mode_only": "Phê duyệt: {mode}.",
+  "relay.approvals.policy.session_override": "Phê duyệt: {mode} — ghi đè cho phiên này.",
+  "relay.approvals.policy.session_override_global": "Phê duyệt: {mode} — ghi đè cho phiên này; toàn cục: {global}.",
+  "relay.approvals.policy.this_run": "Phê duyệt: {mode} — chỉ lần chạy này."
+}

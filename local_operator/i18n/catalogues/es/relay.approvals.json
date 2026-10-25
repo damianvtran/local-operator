@@ -1,0 +1,19 @@
+{
+  "relay.approvals.card.notice_session_auto": "esta sesión ahora es auto",
+  "relay.approvals.card.request_needs_answer": "Esta solicitud aún necesita tu respuesta.",
+  "relay.approvals.card.set_auto_all": "Activar auto para todas las sesiones",
+  "relay.approvals.card.set_auto_session": "Activar auto para esta sesión",
+  "relay.approvals.card.still_needs_answer": "Esta llamada aún necesita tu respuesta.",
+  "relay.approvals.gate.body_scope": "Las dos primeras opciones cambian solo esta sesión; la última cambia el valor predeterminado de todas las sesiones siguientes.",
+  "relay.approvals.gate.default_auto": "ejecutar sin preguntar en todas las sesiones (default auto)",
+  "relay.approvals.gate.refused_nothing_changed": "rechazado — nada cambió",
+  "relay.approvals.gate.unpaired_default_auto": "Ejecutar sin preguntar en todas las sesiones también requiere un teléfono emparejado.",
+  "relay.approvals.policy.default_auto_receipt": "las sesiones siguientes ahora están en auto por defecto",
+  "relay.approvals.policy.global_default": "Aprobaciones: {mode} — valor predeterminado global.",
+  "relay.approvals.policy.mode_ask": "ask",
+  "relay.approvals.policy.mode_auto": "auto",
+  "relay.approvals.policy.mode_only": "Aprobaciones: {mode}.",
+  "relay.approvals.policy.session_override": "Aprobaciones: {mode} — ajuste propio de esta sesión.",
+  "relay.approvals.policy.session_override_global": "Aprobaciones: {mode} — ajuste propio de esta sesión; ajuste global: {global}.",
+  "relay.approvals.policy.this_run": "Aprobaciones: {mode} — esta ejecución."
+}

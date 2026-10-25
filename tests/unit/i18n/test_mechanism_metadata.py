@@ -94,16 +94,19 @@ async def test_mounted_capabilities_metadata_and_catalogue_gate(
             )
             assert control.status_code == 304
         # The relay.asks slice's own namespace is served from the locale that
-        # carries it: a shipped locale's committed catalogue revalidates, and
-        # the namespace it never carried stays a plain inventory 404.
+        # carries it: a shipped locale's committed catalogue revalidates. The
+        # approvals slice added `relay.approvals` to every locale, so the 404
+        # case it used to probe here is now covered by the two genuinely
+        # absent namespaces in the loop above; this asserts the new fact
+        # instead of the retired one.
         served = await client.get(
             "/v1/i18n/catalogues/ur/relay.asks", headers={"If-None-Match": "*"}
         )
         assert served.status_code == 304
-        absent = await client.get(
+        served_approvals = await client.get(
             "/v1/i18n/catalogues/ur/relay.approvals", headers={"If-None-Match": "*"}
         )
-        assert absent.status_code == 404
+        assert served_approvals.status_code == 304
 
 
 @pytest.mark.asyncio
