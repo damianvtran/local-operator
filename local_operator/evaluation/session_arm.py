@@ -142,6 +142,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeConfig,
     EpisodeSpec,
     UndeclaredDisclosedInfra,
+    _not_applied_failure,
     _observation_phase_failure,
     _rebindable_failure,
     _terminal_kind,
@@ -266,6 +267,34 @@ RECOVERY_AFTER_AMBIGUOUS_DELIVERY = (
 #: flapping guest spend an entire run; the third ambiguous delivery in one
 #: episode poisons and ends exactly as it did before the probe existed.
 AMBIGUOUS_REBIND_BUDGET = 2
+
+#: The sentence a DECLARED not-applied failure delivers after its re-bind
+#: (``ActionNotAppliedError`` -> ``phase == "not_applied"``). The adapter
+#: proved no input of the batch reached the environment, so -- unlike both
+#: siblings above -- this one may say the batch did NOT apply and that
+#: re-issuing it is safe. It still points at the current screen: the batch
+#: was decided against a screen that may since have moved on its own.
+RECOVERY_AFTER_NOT_APPLIED = (
+    "Not applied: the environment could not accept your last batch, and none of "
+    "its actions were applied -- the environment is as it was before that call. "
+    "The episode continues. You may re-issue the batch; check the current screen "
+    "first, since it may have changed on its own."
+)
+
+#: How many CONSECUTIVE declared not-applied failures one episode re-binds
+#: before ending, with no successful batch in between (a success resets the
+#: count). A harness RESILIENCE bound, like ``AMBIGUOUS_REBIND_BUDGET``: each
+#: re-bind happens instead of the episode's death on a batch the model already
+#: sent, adds no task and changes no step accounting (the batch's epoch was
+#: charged at admission either way). Three because the measured cause is a
+#: guest control server too slow to answer a pre-action health probe for
+#: ~15 s at a time (OSWorld main16: per-action wall 18-22 s once a terminal
+#: opened), which recovers between batches; a guest that refuses three
+#: batches running is not recovering, and without a bound it would spend the
+#: rest of the step budget on refusals plus one ``observe`` each. The fourth
+#: consecutive not-applied failure ends the episode with a sentence that names
+#: the bound.
+NOT_APPLIED_REBIND_LIMIT = 3
 
 #: The completion challenge's channel sentence -- the ONE part of the shared
 #: challenge text (``provider_client.build_completion_challenge``) that states
@@ -674,6 +703,8 @@ def _bridge_wedge_sentence(
     committed: bool,
     recovery_attempted: bool,
     recover_error: BaseException | None,
+    not_applied: bool = False,
+    not_applied_limit: int | None = None,
 ) -> str:
     """The one sentence a wedge ends with -- model-facing, record and outcome.
 
@@ -685,13 +716,27 @@ def _bridge_wedge_sentence(
     outcome cannot drift into three different stories.
     """
 
-    if recover_error is not None:
+    if not_applied_limit is not None:
+        # Checked FIRST: the cap ends the episode without a re-read, and the
+        # sentence must say the environment kept refusing rather than imply
+        # the batch's state was ambiguous (it was declared not applied).
+        attempted = (
+            f"the environment refused {not_applied_limit + 1} consecutive batches "
+            "without applying any of them, so it is not recovering and the "
+            f"re-bind bound ({not_applied_limit} consecutive) is spent"
+        )
+    elif recover_error is not None:
         attempted = (
             "a re-read of the environment's current observation failed too "
             f"({_bounded_cause(recover_error)})"
         )
     elif recovery_attempted:
         attempted = "the re-read returned no observation"
+    elif not_applied:
+        attempted = (
+            "the batch was declared not applied, but no re-read path is wired "
+            "into this build, so the binding cannot be re-established"
+        )
     elif committed:
         attempted = (
             "no re-read path is wired into this build, so the binding cannot " "be re-established"
@@ -907,6 +952,11 @@ class ActionBridge:
         #: replaces it, so it is the observation ``_last_shown`` was rendered
         #: from and the one a corrective reply binds to.
         self._last_observation: Observation | None = None
+        #: Declared not-applied failures re-bound since the last successful
+        #: batch; bounded by :data:`NOT_APPLIED_REBIND_LIMIT`. Reset by a
+        #: successful ``execute`` only -- a re-bind of any other class is not
+        #: evidence the environment accepts input again.
+        self._consecutive_not_applied = 0
 
     def arm(self, observation: Observation) -> None:
         """Arm the token with the episode's first observation.
@@ -1625,6 +1675,7 @@ class ActionBridge:
             # NOTE: the epoch was consumed at ADMISSION (above); the old
             # post-success increment that lived here is what made the
             # non-execute output forms uncharged. Do not reintroduce it.
+            self._consecutive_not_applied = 0
             token.record_in_flight(result.observation)
             if self.record is not None:
                 self.record("batch", {"batch": batch, "result": result})
@@ -1676,7 +1727,7 @@ class ActionBridge:
         ONE re-bind through the driver's ``recover`` seam (a read-only fetch of
         the environment's current observation).
 
-        WHICH FAILURES QUALIFY. Three, and the third arrives as the SESSION's
+        WHICH FAILURES QUALIFY. Four, and the last arrives as the SESSION's
         verdict rather than as an error class:
 
         * the adapter declared the batch committed and only the read-back was
@@ -1684,6 +1735,11 @@ class ActionBridge:
         * the worker refused before any adapter code ran
           (``_refused_before_dispatch`` -- ``invalid_state``, the task_077
           wedge): a refusal applied NOTHING, so a read-only re-read is safe;
+        * the adapter declared that NO part of the batch was applied
+          (``_not_applied_failure`` -- ``ActionNotAppliedError``, the OSWorld
+          main16 wedges): the model is told the batch did not run and may be
+          re-issued, bounded by ``NOT_APPLIED_REBIND_LIMIT`` consecutive
+          re-binds with no successful batch between them;
         * ``AmbiguousRebindCleared``: a ``delivery=ambiguous`` execute failure
           that the session's bounded probe of the environment's control server
           CLEARED -- the batch dropped mid-delivery, its effect is UNKNOWN, and
@@ -1733,6 +1789,23 @@ class ActionBridge:
         # ambiguous-delivery clearance. See ``_refused_before_dispatch`` for
         # the accuracy loss the refusal closes.
         committed = _observation_phase_failure(original)
+        not_applied = cleared_error is None and _not_applied_failure(original)
+        if not_applied:
+            # The consecutive bound (``NOT_APPLIED_REBIND_LIMIT``): a guest that
+            # keeps refusing input must not spend the step budget on refusals.
+            # Counted BEFORE the re-read so the cap costs no ``observe``; the
+            # session itself is still usable (the supervisor did not poison),
+            # so scoring the state reached still works after this ending.
+            self._consecutive_not_applied += 1
+            if self._consecutive_not_applied > NOT_APPLIED_REBIND_LIMIT:
+                return self._end_wedged(
+                    error=original,
+                    committed=False,
+                    recovery_attempted=False,
+                    recover_error=None,
+                    not_applied=True,
+                    not_applied_limit=NOT_APPLIED_REBIND_LIMIT,
+                )
         recovery_attempted = recover is not None and (
             cleared_error is not None or _rebindable_failure(original)
         )
@@ -1751,13 +1824,77 @@ class ActionBridge:
                     attempt=cleared_error.attempt,
                     attempts=cleared_error.attempts,
                 )
+            if not_applied:
+                return self._deliver_not_applied_recovery(error=original, recovered=recovered)
             return self._deliver_recovery(error=original, recovered=recovered)
         return self._end_wedged(
             error=original,
             committed=committed,
             recovery_attempted=recovery_attempted,
             recover_error=recover_error,
+            not_applied=not_applied,
         )
+
+    def _deliver_not_applied_recovery(
+        self, *, error: Exception, recovered: Observation
+    ) -> dict[str, Any]:
+        """Re-arm the token after a DECLARED not-applied batch, and answer.
+
+        The re-arm discipline is ``_deliver_recovery``'s (held in flight,
+        armed by ``fold`` at the turn end, so one-batch-per-turn holds). Only
+        the claim differs, and it is the STRONGEST of the three recovery
+        sentences: the adapter proved nothing was applied, so the model is told
+        the batch did not run and may be re-issued (``RECOVERY_AFTER_NOT_APPLIED``).
+
+        The recovered screen is re-rendered only when it differs from the one
+        the model last saw, for the sibling's reason: the renderer's dedup note
+        ("your last action changed nothing visible") would read as a claim
+        about a batch that never ran.
+
+        Its own record kind, ``not_applied_rebind``, keeps these apart from the
+        committed-class ``recovered`` rows in a bundle, with the running
+        consecutive count and its bound.
+        """
+
+        token = self._token
+        if token is not None:
+            token.record_in_flight(recovered)
+        shown_before = self._last_observation
+        content: list[Any] = [
+            *self._pending_ask_delivery,
+            TextContent(text=RECOVERY_AFTER_NOT_APPLIED),
+        ]
+        if shown_before is None or shown_before.observation_id != recovered.observation_id:
+            rendered = self.render(recovered)
+            self._last_shown = (recovered.observation_id, rendered)
+            self._last_observation = recovered
+            content = [*content, *rendered]
+        if self.record is not None:
+            self.record(
+                "not_applied_rebind",
+                {
+                    "steps": self._steps,
+                    # Charged at admission like every attempted batch; the
+                    # environment refused it, the model still produced it.
+                    "attempted_epoch": True,
+                    "consecutive": self._consecutive_not_applied,
+                    "limit": NOT_APPLIED_REBIND_LIMIT,
+                    "transport_error": _bounded_cause(error, limit=500),
+                    "observation_id": recovered.observation_id,
+                },
+            )
+        details: dict[str, Any] = {
+            "recovered": True,
+            "not_applied": True,
+            "observation_id": recovered.observation_id,
+        }
+        if self._pending_ask_receipt is not None:
+            details["ask"] = self._pending_ask_receipt
+        return {
+            "content": content,
+            "is_error": True,
+            "details": details,
+        }
 
     def _deliver_recovery(self, *, error: Exception, recovered: Observation) -> dict[str, Any]:
         """Re-arm the token with the re-bound observation and answer the call.
@@ -1889,6 +2026,8 @@ class ActionBridge:
         committed: bool,
         recovery_attempted: bool,
         recover_error: Exception | None,
+        not_applied: bool = False,
+        not_applied_limit: int | None = None,
     ) -> dict[str, Any]:
         """End the episode: the observation binding cannot be re-established.
 
@@ -1909,6 +2048,8 @@ class ActionBridge:
             committed=committed,
             recovery_attempted=recovery_attempted,
             recover_error=recover_error,
+            not_applied=not_applied,
+            not_applied_limit=not_applied_limit,
         )
         self.end_requested = BRIDGE_WEDGED_TERMINAL
         self.end_diagnostic = sentence

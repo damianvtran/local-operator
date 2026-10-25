@@ -118,10 +118,23 @@ from local_operator.evaluation.receipts import (
 # after a failed ``execute`` whose batch may not be replayed; it mutates
 # nothing, carries no operation key, and its answer decides nothing except
 # whether the session may stay usable for the bridge's read-only re-bind.
-ADAPTER_SCHEMA_VERSION = "1.6"
+#
+# 1.7 adds the NOT-APPLIED phase: ``"not_applied"`` joins ``ErrorPhase``
+# (rpc.py), written by a worker only when the adapter raised
+# ``ActionNotAppliedError`` from ``execute`` (see below). No field is added and
+# no existing line's bytes move, but the bump is still required: ``phase`` is a
+# CLOSED ``Literal`` on a ``ProtocolModel``, so a 1.6 parent receiving
+# ``"phase":"not_applied"`` would fail to validate the error line itself --
+# an opaque protocol failure on the error path, mid-episode, rather than the
+# graceful "treat as unknown" a reader might assume. The exact-version pin in
+# ``AdapterSelector`` turns the mismatch into a refusal at selection time,
+# before a worker is spawned. (A 1.7 parent reading a 1.6 worker is fine on
+# the wire -- the old worker can only ever write the two old values -- but the
+# pin is exact in both directions by design, as for every earlier bump.)
+ADAPTER_SCHEMA_VERSION = "1.7"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
-SchemaVersion: TypeAlias = Literal["1.6"]
+SchemaVersion: TypeAlias = Literal["1.7"]
 ADAPTER_ENTRY_POINT_GROUP = "local_operator.evaluation_adapters.v1"
 MAX_RESCUE_REFS = 256
 MAX_REQUIREMENTS = 256
@@ -757,6 +770,41 @@ class ObservationPhaseError(Exception):
 
     An adapter that never raises it is completely unaffected: the phase
     defaults to ``unknown`` and every failure poisons exactly as before.
+    """
+
+
+class ActionNotAppliedError(Exception):
+    """NO part of this ``execute`` batch was applied; the environment is untouched.
+
+    The mirror image of ``ObservationPhaseError``. That type says "the mutation
+    committed, only the read-back failed"; this one says the opposite and
+    stronger thing: the adapter stopped BEFORE any input of the batch reached
+    the environment, so the environment is exactly as it was before the call
+    and the batch's effect is not unknown but provably nil.
+
+    WHY IT EXISTS. Without it such a failure crosses the worker as
+    ``phase == "unknown"``, which the parent must treat as an ambiguous
+    mutation: it poisons the session and the action bridge ends the episode.
+    Measured on the OSWorld 2.1 offline subset (arm main16): 10 of 20 episodes
+    ended that way, several after hundreds of applied steps, on failures whose
+    own message read "guest action 1 was not attempted; no input was sent".
+    Declaring the fact lets the parent keep the session, re-read the current
+    observation once (read-only), and hand the model a tool error saying the
+    batch did not apply and may be retried.
+
+    WHAT IT DOES NOT LICENSE. It is NOT a committed claim, so it never licenses
+    ``resume_observation`` (whose contract is "the batch committed, skip the
+    re-apply" -- resuming a never-applied batch would accept an observation
+    for actions that never ran). The parent never resends the batch either;
+    only the model may choose to issue it again, against a fresh observation.
+
+    Raising this when ANY input of the batch may have reached the environment
+    -- an ambiguous delivery, or a failure after an earlier statement of the
+    same batch succeeded -- is a contract violation that hides a partial
+    application from the model. Raise it only from a branch that has PROVED
+    nothing was sent. Like ``ObservationPhaseError`` it is honoured only from
+    ``execute``; from any other method the claim is dropped and the failure
+    stays ``unknown``.
     """
 
 

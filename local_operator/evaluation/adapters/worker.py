@@ -16,6 +16,7 @@ from local_operator.evaluation.adapters.api import (
     METHOD_STATES,
     PARAM_MODELS,
     RESULT_MODELS,
+    ActionNotAppliedError,
     AdapterMethod,
     AdapterSelector,
     AdapterState,
@@ -185,6 +186,12 @@ def _error_phase(error: BaseException, method: AdapterMethod) -> ErrorPhase:
 
     if method == "execute" and isinstance(error, ObservationPhaseError):
         return "observation"
+    # The opposite declaration, under the same discipline: a declared type,
+    # honoured from ``execute`` only (the bridge's read-only re-bind is its one
+    # consumer, and a not-applied claim from ``reset_start`` or ``cleanup``
+    # would have no safe parent-side meaning).
+    if method == "execute" and isinstance(error, ActionNotAppliedError):
+        return "not_applied"
     return "unknown"
 
 

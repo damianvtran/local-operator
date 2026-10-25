@@ -71,6 +71,8 @@ from local_operator.evaluation.session_arm import (
     AMBIGUOUS_REBIND_BUDGET,
     BRIDGE_WEDGED_TERMINAL,
     EPISODE_TOOL_SURFACE,
+    NOT_APPLIED_REBIND_LIMIT,
+    RECOVERY_AFTER_NOT_APPLIED,
     RECOVERY_AFTER_READBACK_LOSS,
     ActionBridge,
     ObservationRenderer,
@@ -2055,6 +2057,244 @@ class TestFailedExecuteRecovery:
         assert [kind for kind, _ in recorded] == ["output_epoch", "recovered"]
         assert recorded[1][1]["observation_id"] == obs0.observation_id
         assert recorded[1][1]["transport_error"].startswith("RpcRemoteError")
+
+
+def _not_applied_error() -> RpcRemoteError:
+    """The wire shape of an adapter-declared ``ActionNotAppliedError`` -- the
+    OSWorld main16 wedge ("guest action 1 was not attempted; no input was
+    sent"), now declared instead of crossing as ``phase == "unknown"``."""
+
+    return RpcRemoteError(
+        "adapter_error",
+        "adapter operation failed",
+        RpcErrorDetail(
+            exception_type="ActionNotAppliedError",
+            message=(
+                "guest action 1 was not attempted; no input was sent; supervisor "
+                "recovery budget exhausted"
+            ),
+            method="execute",
+            operation_id="exec-na",
+            phase="not_applied",
+        ),
+    )
+
+
+class TestNotAppliedRebind:
+    """A DECLARED not-applied batch re-binds once, tells the model the batch did
+    not run, and is bounded by ``NOT_APPLIED_REBIND_LIMIT`` consecutive
+    failures so a dead guest cannot spin the step budget."""
+
+    _WAIT = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+
+    @pytest.mark.asyncio
+    async def test_re_binds_once_and_the_next_batch_runs(self, tmp_path: Path) -> None:
+        obs0 = _observation()
+        obs1 = _observation(sequence=1, text="screen B")
+        executed: list[Any] = []
+        re_reads: list[int] = []
+        recorded: list[tuple[str, dict[str, Any]]] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            executed.append(batch)
+            if len(executed) == 1:
+                raise _not_applied_error()
+            return _result(input_observation=obs0, output_observation=obs1)
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            return obs0
+
+        bridge = _bridge(
+            tmp_path,
+            observation=obs0,
+            execute=execute,
+            recover=recover,
+            record=lambda kind, payload: recorded.append((kind, payload)),
+        )
+        first = await bridge.call(self._WAIT)
+        assert first["is_error"] is True
+        assert first["details"]["recovered"] is True
+        assert first["details"]["not_applied"] is True
+        # The SAME screen the model saw: not re-rendered (no false dedup note).
+        assert [block.text for block in first["content"]] == [RECOVERY_AFTER_NOT_APPLIED]
+        assert bridge.end_requested is None
+        assert re_reads == [1]
+        assert [kind for kind, _ in recorded] == ["output_epoch", "not_applied_rebind"]
+        assert recorded[1][1]["consecutive"] == 1
+        assert recorded[1][1]["limit"] == NOT_APPLIED_REBIND_LIMIT
+
+        bridge.fold(TurnEndEvent())
+        after = await bridge.call(self._WAIT)
+        assert after["is_error"] is False
+        assert len(executed) == 2 and re_reads == [1]
+        # The failed batch's epoch was charged at admission, the success's too.
+        assert bridge.steps == 2
+
+    @pytest.mark.asyncio
+    async def test_the_consecutive_cap_ends_the_episode_legibly(self, tmp_path: Path) -> None:
+        re_reads: list[int] = []
+        recorded: list[tuple[str, dict[str, Any]]] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _not_applied_error()
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            return _observation()
+
+        bridge = _bridge(
+            tmp_path,
+            execute=execute,
+            recover=recover,
+            max_steps=50,
+            record=lambda kind, payload: recorded.append((kind, payload)),
+        )
+        for _ in range(NOT_APPLIED_REBIND_LIMIT):
+            reply = await bridge.call(self._WAIT)
+            assert reply["details"].get("not_applied") is True
+            assert bridge.end_requested is None
+            bridge.fold(TurnEndEvent())
+
+        final = await bridge.call(self._WAIT)
+        assert final["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert bridge.end_requested == BRIDGE_WEDGED_TERMINAL
+        # The cap costs no re-read: exactly one per re-bound failure.
+        assert len(re_reads) == NOT_APPLIED_REBIND_LIMIT
+        sentence = final["content"][-1].text
+        assert sentence == bridge.end_diagnostic
+        assert f"refused {NOT_APPLIED_REBIND_LIMIT + 1} consecutive batches" in sentence
+        assert "ambiguous" not in sentence
+        assert recorded[-1][0] == "bridge_wedged"
+        assert recorded[-1][1]["recovery_attempted"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_successful_batch_resets_the_consecutive_count(self, tmp_path: Path) -> None:
+        obs0 = _observation()
+        obs1 = _observation(sequence=1, text="screen B")
+        # LIMIT failures, a success, then LIMIT failures again: never capped.
+        script = ["fail"] * NOT_APPLIED_REBIND_LIMIT + ["ok"] + ["fail"] * NOT_APPLIED_REBIND_LIMIT
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            if script.pop(0) == "fail":
+                raise _not_applied_error()
+            return _result(input_observation=obs0, output_observation=obs1)
+
+        async def recover() -> Observation:
+            return obs0
+
+        bridge = _bridge(tmp_path, observation=obs0, execute=execute, recover=recover, max_steps=50)
+        while script:
+            await bridge.call(self._WAIT)
+            assert bridge.end_requested is None
+            bridge.fold(TurnEndEvent())
+
+    @pytest.mark.asyncio
+    async def test_a_failed_re_read_still_wedges_accurately(self, tmp_path: Path) -> None:
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _not_applied_error()
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            raise _observation_phase_error()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call(self._WAIT)
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert re_reads == [1]
+        assert "a re-read of the environment's current observation failed too" in (
+            bridge.end_diagnostic or ""
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_recover_seam_wedges_naming_the_declaration(self, tmp_path: Path) -> None:
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _not_applied_error()
+
+        bridge = _bridge(tmp_path, execute=execute)
+        reply = await bridge.call(self._WAIT)
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        diagnostic = bridge.end_diagnostic or ""
+        assert "declared not applied" in diagnostic
+        assert "ambiguous" not in diagnostic
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_phase_with_the_same_words_still_ends_the_episode(
+        self, tmp_path: Path
+    ) -> None:
+        """Negative control: only the DECLARED phase re-binds. The pre-1.7 wire
+        shape -- the same sentence at ``phase == "unknown"`` -- ends as before."""
+
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise RpcRemoteError(
+                "adapter_error",
+                "adapter operation failed",
+                RpcErrorDetail(
+                    exception_type="GuestExecutionError",
+                    message="guest action 1 was not attempted; no input was sent",
+                    method="execute",
+                    operation_id="exec-na",
+                ),
+            )
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            return _observation()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call(self._WAIT)
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert re_reads == []
+
+    @pytest.mark.asyncio
+    async def test_the_read_back_loop_never_resumes_a_not_applied_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """``resume_observation`` means "committed, skip the re-apply"; a
+        not-applied batch must propagate after ONE execute, never be resumed."""
+
+        from local_operator.evaluation.protocol import ActionBatch, WaitAction
+        from local_operator.evaluation.runner.episode import EpisodeConfig
+        from local_operator.evaluation.session_arm import _make_execute
+
+        calls: list[str] = []
+
+        class Session:
+            async def execute(self, params: Any, *, timeout: float) -> Any:
+                calls.append("execute")
+                raise _not_applied_error()
+
+            async def resume_observation(self, params: Any, *, timeout: float) -> Any:
+                calls.append("resume_observation")
+                raise AssertionError("a not-applied batch must never be resumed")
+
+        config = EpisodeConfig(
+            evidence_root=tmp_path / "evidence",
+            artifact_root=tmp_path / "artifacts",
+            rescue_root=tmp_path / "rescue",
+            observation_retry_attempts=3,
+            observation_retry_delay=0.0,
+        )
+        execute = _make_execute(cast("Any", Session()), config, cast("Any", SimpleNamespace()))
+        batch = ActionBatch(
+            protocol_version="1.0",
+            task_id="task",
+            episode_id="episode",
+            observation_id="obs-0",
+            actions=(WaitAction(observation_id="obs-0", duration_ms=1),),
+        )
+        with pytest.raises(RpcRemoteError):
+            await execute(batch)
+        assert calls == ["execute"]
 
 
 class TestAmbiguousDeliveryRebind:

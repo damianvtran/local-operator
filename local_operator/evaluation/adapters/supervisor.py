@@ -206,6 +206,32 @@ def _refused_before_dispatch(error: BaseException) -> bool:
     return isinstance(error, RpcRemoteError) and error.code == "invalid_state"
 
 
+def _declared_not_applied(error: BaseException) -> bool:
+    """Did the ADAPTER declare that no part of its batch reached the environment?
+
+    True only for an answered ``adapter_error`` whose worker-built detail
+    carries ``phase == "not_applied"`` -- the worker writes that value only for
+    an ``ActionNotAppliedError`` raised from ``execute`` (``worker._error_phase``).
+    Mirrors ``episode._not_applied_failure`` and must stay in lockstep with it,
+    for the reason ``_mutation_committed`` states: if the bridge re-bound a case
+    this module poisoned, the re-bind's ``observe`` would hit the poison gate.
+
+    SAME RESTRICTION AS ``_refused_before_dispatch``: a not-applied batch did
+    not commit, so this keeps the session usable for the bridge's read-only
+    ``observe`` re-bind and licenses NOTHING else -- never
+    ``resume_observation``, whose contract ("the batch committed, skip the
+    re-apply") would bind a never-applied batch to an observation. It is
+    consulted only in ``_mutating_call``, scoped to ``execute``.
+    """
+
+    return (
+        isinstance(error, RpcRemoteError)
+        and error.code == "adapter_error"
+        and error.detail is not None
+        and error.detail.phase == "not_applied"
+    )
+
+
 #: The token an adapter embeds in the execute failure's message when the
 #: DELIVERY of the batch is ambiguous -- "the request may have been written,
 #: and the guest may have acted on it" (the OSWorld adapter's ``guest_loss``).
@@ -955,8 +981,13 @@ class VerifiedAdapterSession:
             # bridge's re-bind is the only consumer, and widening every mutating
             # method would be scope drift (``_mutation_committed`` stays the
             # committed-class predicate). The refusal never licenses a resume.
+            # A DECLARED not-applied ``execute`` (``ActionNotAppliedError``)
+            # joins the refusal for the same reason: nothing reached the
+            # environment, so the bridge's read-only re-bind is safe. It is a
+            # structured phase, not a message match, so it needs no probe.
             stays_usable = _mutation_committed(error) or (
-                method == "execute" and _refused_before_dispatch(error)
+                method == "execute"
+                and (_refused_before_dispatch(error) or _declared_not_applied(error))
             )
             if stays_usable:
                 raise

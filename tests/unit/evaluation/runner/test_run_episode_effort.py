@@ -166,7 +166,7 @@ def test_the_chosen_effort_lands_in_the_episode_metadata(tmp_path) -> None:
         episode_id="ep-effort",
         selector=run_episode.AdapterSelector.model_validate(
             {
-                "schema_version": "1.6",
+                "schema_version": "1.7",
                 "adapter_id": "tiny",
                 "distribution": "tiny-adapter",
                 "version": "1.0",
