@@ -446,6 +446,46 @@ def compaction_title() -> Msg:
     return Msg("wire.settings.compaction.title", {})
 
 
+def compaction_aged_clear_after_calls_help() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_after_calls.help", {})
+
+
+def compaction_aged_clear_after_calls_label() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_after_calls.label", {})
+
+
+def compaction_aged_clear_batch_tokens_help() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_batch_tokens.help", {})
+
+
+def compaction_aged_clear_batch_tokens_label() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_batch_tokens.label", {})
+
+
+def compaction_aged_clear_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_enabled.choice.false.description", {})
+
+
+def compaction_aged_clear_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_enabled.choice.true.description", {})
+
+
+def compaction_aged_clear_enabled_help() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_enabled.help", {})
+
+
+def compaction_aged_clear_enabled_label() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_enabled.label", {})
+
+
+def compaction_aged_clear_min_tokens_help() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_min_tokens.help", {})
+
+
+def compaction_aged_clear_min_tokens_label() -> Msg:
+    return Msg("wire.settings.compaction_aged_clear_min_tokens.label", {})
+
+
 def compaction_auto_continue_choice_false_description() -> Msg:
     return Msg("wire.settings.compaction_auto_continue.choice.false.description", {})
 

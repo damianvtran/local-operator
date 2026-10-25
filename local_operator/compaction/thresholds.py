@@ -27,6 +27,9 @@ from pydantic import BaseModel, Field, model_validator
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_AGED_CLEAR_AFTER_CALLS",
+    "DEFAULT_AGED_CLEAR_BATCH_TOKENS",
+    "DEFAULT_AGED_CLEAR_MIN_TOKENS",
     "DEFAULT_RESERVE_TOKENS",
     "DEFAULT_THRESHOLD_PERCENT",
     "DEFAULT_THRESHOLD_TOKENS",
@@ -92,6 +95,21 @@ DEFAULT_WIRE_BYTES_BUDGET = 24_000_000
 #: surviving by shedding frames at the wall.
 DEFAULT_WIRE_BYTES_TRIGGER = 16_000_000
 
+# Aged tool-result clearing (``pruning.clear_aged_tool_results``; the cache
+# arithmetic that picks these numbers is documented there).
+#: Default age, in assistant messages after the result, before a result is
+#: eligible. The replay found K=20 slightly more aggressive (-16..-19%) and
+#: K=40 less; 30 keeps the stub away from anything still in active use.
+DEFAULT_AGED_CLEAR_AFTER_CALLS = 30
+
+#: Default per-result floor. Below ~500 tokens the ~40-token stub recovers too
+#: little to repay the re-fetch risk.
+DEFAULT_AGED_CLEAR_MIN_TOKENS = 500
+
+#: Default batch threshold: the pass fires only once the eligible results sum
+#: to at least this many tokens (see the cache arithmetic above).
+DEFAULT_AGED_CLEAR_BATCH_TOKENS = 30_000
+
 
 class CompactionSettings(BaseModel):
     """Compaction knobs, mirrored from ``config.yml`` ``values.compaction.*``.
@@ -145,6 +163,33 @@ class CompactionSettings(BaseModel):
     )
     mid_turn_enabled: bool = Field(
         default=True, description="Allow threshold compaction at safe tool-loop boundaries."
+    )
+    # Aged tool-result clearing: independent of the threshold above and of
+    # ``mid_turn_enabled`` — it is the relief a run gets BELOW the trigger,
+    # which is where a delegated subagent spends its whole life. It still
+    # honours ``enabled``: a host that switched compaction off asked for the
+    # context to be sent as-is.
+    aged_clear_enabled: bool = Field(
+        default=True,
+        description=(
+            "Replace old tool results with a short re-fetch stub, in batches,"
+            " at every tool-loop boundary and after each turn."
+        ),
+    )
+    aged_clear_after_calls: int = Field(
+        default=DEFAULT_AGED_CLEAR_AFTER_CALLS,
+        description="Age, in model calls after the result, before it may be cleared.",
+    )
+    aged_clear_min_tokens: int = Field(
+        default=DEFAULT_AGED_CLEAR_MIN_TOKENS,
+        description="Smallest result (estimated tokens) worth clearing.",
+    )
+    aged_clear_batch_tokens: int = Field(
+        default=DEFAULT_AGED_CLEAR_BATCH_TOKENS,
+        description=(
+            "Clear only once the eligible results total this many tokens, so the"
+            " prompt cache is rewritten rarely."
+        ),
     )
     # ``None`` — not 0 — is the ordinary-session default, and the distinction
     # is the whole feature. A chat session's images are attachments the user

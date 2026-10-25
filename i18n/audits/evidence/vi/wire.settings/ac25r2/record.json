@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "audit_id": "ac25r2",
+  "audit_kind": "independent_translation_audit_delta",
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "round": 2,
+  "audit_date": "2026-10-25",
+  "key_count": 10,
+  "namespace_key_count": 828,
+  "round1_revision": "62813bbd7ad212bdb0d9eedb1f6d4aed8742fe62",
+  "audited_revision": "43da538c4d011b687982c974f307dd54d388a807",
+  "fix_commit_under_review": "43da538c4d011b687982c974f307dd54d388a807",
+  "base_revision": "eaae289edfadbbd43bd61a8ac1ef1c21d1c9f531",
+  "current_bytes_match_audited_hashes": true,
+  "translator": {
+    "agent": "i18n-translator",
+    "session": null,
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25",
+    "source": "Identity and model stated by the delegating lopdev manager; translator session id was not provided and is left null rather than invented."
+  },
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "session": "d5aa5aa4c387",
+    "model": "anthropic/claude-opus-5-5",
+    "audit_date": "2026-10-25",
+    "independent_from_translator_session": true,
+    "independent_from_implementer": true,
+    "actual_model_source": "This session's model header reports anthropic/claude-opus-5-5; no fallback observed. Same model as the translator (agent-level independence, disclosed)."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "5ec56141fb88cf5383659ea641101da09ab09136beeda3fed6a9d04dab13d01a"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "sha256": "d3c864a5a69da20a37fab65de58589411ab47be70add2f0702ffda307f5034cc"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/vi.md",
+        "sha256": "0a99f5643a262a1c1994f08746fab2473ade5946573eedf20c95107b40b9fa97"
+      }
+    ]
+  },
+  "changed_keys": [
+    "wire.settings.compaction_aged_clear_after_calls.help",
+    "wire.settings.compaction_aged_clear_after_calls.label",
+    "wire.settings.compaction_aged_clear_batch_tokens.help",
+    "wire.settings.compaction_aged_clear_batch_tokens.label",
+    "wire.settings.compaction_aged_clear_enabled.choice.false.description",
+    "wire.settings.compaction_aged_clear_enabled.choice.true.description",
+    "wire.settings.compaction_aged_clear_enabled.help",
+    "wire.settings.compaction_aged_clear_enabled.label",
+    "wire.settings.compaction_aged_clear_min_tokens.help",
+    "wire.settings.compaction_aged_clear_min_tokens.label"
+  ],
+  "round1_findings": [
+    {
+      "id": "A-vi-1",
+      "severity": "MAJOR",
+      "disposition": "fixed",
+      "fix_commit": "43da538c4d011b687982c974f307dd54d388a807"
+    },
+    {
+      "id": "A-vi-2",
+      "severity": "NIT",
+      "disposition": "fixed",
+      "fix_commit": "43da538c4d011b687982c974f307dd54d388a807"
+    }
+  ],
+  "supersedes_ledger_row": null,
+  "current_report_verdict": {
+    "status": "passed",
+    "blocker": 0,
+    "major": 0,
+    "unresolved_blocker_major_count": 0,
+    "round2_new_findings": 0,
+    "finding_ids": [
+      "A-vi-1",
+      "A-vi-2"
+    ]
+  },
+  "ledger_entry": {
+    "locale": "vi",
+    "namespace": "wire.settings",
+    "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
+    "translator": {
+      "agent": "i18n-translator",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-10-25"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-10-25",
+      "result": "passed",
+      "findings": 2
+    },
+    "status": "passed",
+    "note": "aged_clear 10-key delta. R1 1 MAJOR+1 NIT fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/vi/wire.settings/ac25r2/record.json"
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report (reasoning); audit.log is the executed command transcript; mechanical.json is machine output of audit.py.txt. Report text proves nothing about execution.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/wire.settings/ac25r2/report.md",
+      "sha256": "767107d7d7ee08a7e66e6a6caf128da54f2c65bac0ce16976073b63b460a109a"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.settings/ac25r2/audit.log",
+      "sha256": "4b06fdfd54de075f69cc1cfc7bfd66f7d061cee2b405918fa7168cee707aecb2"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.settings/ac25r2/audit.py.txt",
+      "sha256": "8e95a7b66bb2fbf50ab45af907f8f0e3858f0463791b5e62fb1fc928385dc088"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.settings/ac25r2/mechanical.json",
+      "sha256": "b30e73ae65cbe138fe95a882cae39481f7f3472776ac8427028f7e459fddc70b"
+    }
+  ]
+}

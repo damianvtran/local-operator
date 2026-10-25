@@ -4355,21 +4355,21 @@
     {
       "locale": "ur",
       "namespace": "wire.settings",
-      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
       "translator": {
-        "agent": "i18n-translator (translator specialist (ur-wire-settings); session ffc94c8cb17d)",
-        "model": "openrouter/moonshotai/kimi-k3.1-pro",
-        "date": "2026-10-23"
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
       },
       "auditor": {
-        "agent": "i18n-auditor (session 5ebbaba9537e; peer 3e0f499dc2ee)",
-        "model": "openrouter/moonshotai/kimi-k3.1-pro",
-        "date": "2026-10-24",
+        "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25",
         "result": "passed",
-        "findings": 0
+        "findings": 1
       },
       "status": "passed",
-      "note": "R3 current-byte dual audit clean, 0 B/M; ur24a3/ur24b3 (5ebbaba9537e/3e0f499dc2ee, same actual model). Earlier failures retained. Record: i18n/audits/evidence/ur/wire.settings/ur24a3/record.json; peer ur24b3."
+      "note": "aged_clear 10-key delta. R1 1 MINOR fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/ur/wire.settings/ac25r2/record.json"
     },
     {
       "locale": "ur",
@@ -5837,21 +5837,21 @@
     {
       "locale": "zh-CN",
       "namespace": "wire.settings",
-      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
       "translator": {
-        "agent": null,
-        "model": null,
-        "date": null
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
       },
       "auditor": {
-        "agent": "translation-auditor (lopdev team)",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-24",
+        "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25",
         "result": "passed",
-        "findings": 0
+        "findings": 1
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.settings/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+      "note": "aged_clear 10-key delta. R1 1 MINOR fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/zh-CN/wire.settings/ac25r2/record.json"
     },
     {
       "locale": "zh-CN",
@@ -6194,6 +6194,101 @@
       },
       "status": "passed",
       "note": "Restored byte-identically from 3bd709c0f4 after the hold that deleted it was lifted; 77/77 keys, 0 placeholder mismatches, 4 plural keys all other-only with a rendering '#', no bidi controls, no English leakage except the intentional mode token 'ask'. Scope audit of the gate labels it carries: '\u7ee7\u7eed\u8be2\u95ee\uff08ask\uff09' / '\u65e0\u9700\u8be2\u95ee\u76f4\u63a5\u8fd0\u884c\uff08auto\uff09' / '\u5728\u6240\u6709\u4f1a\u8bdd\u4e2d\u65e0\u9700\u8be2\u95ee\u76f4\u63a5\u8fd0\u884c\uff08default auto\uff09' \u2014 the session-only vs all-sessions distinction survives and 'run without asking' keeps its risk. Dispositions of the five findings left to this round: (1) sheet.title_plain '\u63d0\u95ee' \u2014 MINOR and the same defect class the other six locales were fixed for on 2026-10-20 (their rows record 'demandes'/'consultas'/'\u092a\u0942\u091b\u0924\u093e\u091b'/'\u0437\u0430\u043f\u0440\u043e\u0441\u044b'/'y\u00eau c\u1ea7u'/'\u062f\u0631\u062e\u0648\u0627\u0633\u062a\u06cc\u06ba' as section nouns 'distinct from' the question word); \u63d0\u95ee is the question-asking verb, so the sheet that also holds approvals and secrets is named with the question word. Not major: rows inside carry their own kind labels and the dock badge is unchanged, so no approval is granted or missed because of it; recommend '\u8bf7\u6c42' (already used in card.request_needs_answer) in the next copy pass. (2) pending.kind_approval '\u9700\u8981\u5ba1\u6279' / kind_secret '\u9700\u8981\u673a\u5bc6\u4fe1\u606f' \u2014 MINOR. \u9700\u8981\u5ba1\u6279 is accurate and is the vocabulary gate.body/notice_auto already use, and the verbal form is not a zh-only deviation (ru '\u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f \u043e\u0434\u043e\u0431\u0440\u0435\u043d\u0438\u0435', vi 'c\u1ea7n ph\u00ea duy\u1ec7t' are verbal too); the weak point is '\u673a\u5bc6\u4fe1\u606f' for a secret value, since zh has no recorded credentials/secret rendering (glossary \u00a72 note 6 leaves the zh cell '\u2014') \u2014 the card's masked field and card.secret_notice carry the meaning. (3) card.decline and pending.deny both '\u62d2\u7edd' \u2014 MINOR. They never co-occur (decline sits beside 'send answer' on the ask card, deny beside 'approve' on the approval card) and five of seven locales collapse them identically (fr 'refuser', hi '\u0905\u0938\u094d\u0935\u0940\u0915\u093e\u0930 \u0915\u0930\u0947\u0902', vi 't\u1eeb ch\u1ed1i', ur '\u0627\u0646\u06a9\u0627\u0631 \u06a9\u0631\u06cc\u06ba'); the English pair is a register distinction, not a functional one, and both refuse. (4) gate.unpaired_after '\u6a21\u5f0f\u4ece\u4e0d\u9700\u8981\u914d\u5bf9\u3002' \u2014 MINOR. It extends the bold 'ask' label with \u6a21\u5f0f (necessary in Chinese) but joins without a connective; rendered it reads '\u5c06\u5ba1\u6279\u4fdd\u6301\u5728 ask \u6a21\u5f0f\u4ece\u4e0d\u9700\u8981\u914d\u5bf9\u3002' \u2014 understandable, slightly run-on, no meaning loss. (5) sheet.loading '\u2026\u2026' \u2014 REJECTED, not a defect: the zh style guide mandates '\u2026\u2026 (two marks)' and 62 other zh catalogue strings already use it (tui.library.loading, relay.session.past.loading, mobile.setup.checking), while the six single-'\u2026' strings are all inside comma-separated Latin lists; the sidecar's 'The ellipsis is U+2026' pins the character class, not a count. Additional NIT found here: dock.waiting/dock.timed_out/title_waiting write '# \u4e2a\u2026' with a space while title_lapsed writes '{count}\u4e2a\u2026' without one \u2014 pick one convention. 4 MINOR + 1 NIT, 0 blocker, 0 major, so this row attests; minors do not force another round but should ride the next zh copy pass. Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded in 3bd709c0f4, the wave commit these bytes were restored from. Round-1 audit of restored bytes, not a carried re-audit. Evidence: i18n/audits/evidence/zh-CN/relay.asks/zha25a1/record.json \u2014 bundle written after the audit (the session captured no command log; the record states that absence and carries a labelled mechanical replay at the audited revision)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "aged_clear 10-key delta. R1 1 MAJOR+1 NIT fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/es/wire.settings/ac25r2/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "aged_clear 10-key delta. R1 2 MAJOR+1 NIT fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/fr/wire.settings/ac25r2/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "aged_clear 10-key delta. R1 1 MINOR fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/hi/wire.settings/ac25r2/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "aged_clear 10-key delta. R1 1 MAJOR+1 NIT fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/ru/wire.settings/ac25r2/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "412a3bdd01b0724bed32e293d7cd36af5a689de3a869e880161af94ab8c90f73",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev; session d5aa5aa4c387)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "aged_clear 10-key delta. R1 1 MAJOR+1 NIT fixed verbatim (43da538c4d); R2 clean, 0 B/M. i18n-translator / i18n-auditor d5aa5aa4c387, both anthropic/claude-opus-5-5 (agent-level independence). Record: i18n/audits/evidence/vi/wire.settings/ac25r2/record.json"
     }
   ]
 }

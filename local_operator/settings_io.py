@@ -4093,6 +4093,53 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
         ),
     ),
+    # Aged tool-result clearing. Literals, not the ``DEFAULT_AGED_CLEAR_*``
+    # constants, for the same reason as ``threshold_tokens`` above (importing
+    # the compaction package here would pull the pass engine into every
+    # settings read); ``_consumer_defaults`` pins each to its constant.
+    Setting(
+        key="compaction.aged_clear_enabled",
+        path=("compaction", "aged_clear_enabled"),
+        section="compaction",
+        label=_t(_ws.compaction_aged_clear_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.compaction_aged_clear_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_aged_clear_enabled_choice_true_description()),
+            _t(_ws.compaction_aged_clear_enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="compaction.aged_clear_after_calls",
+        path=("compaction", "aged_clear_after_calls"),
+        section="compaction",
+        label=_t(_ws.compaction_aged_clear_after_calls_label()),
+        kind=Kind.INT,
+        default=30,
+        help=_t(_ws.compaction_aged_clear_after_calls_help()),
+        minimum=1,
+    ),
+    Setting(
+        key="compaction.aged_clear_min_tokens",
+        path=("compaction", "aged_clear_min_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_aged_clear_min_tokens_label()),
+        kind=Kind.INT,
+        default=500,
+        help=_t(_ws.compaction_aged_clear_min_tokens_help()),
+        minimum=0,
+    ),
+    Setting(
+        key="compaction.aged_clear_batch_tokens",
+        path=("compaction", "aged_clear_batch_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_aged_clear_batch_tokens_label()),
+        kind=Kind.INT,
+        default=30_000,
+        help=_t(_ws.compaction_aged_clear_batch_tokens_help()),
+        minimum=0,
+    ),
     # The two BYTE knobs. They live in this section because they are compaction
     # triggers, but they measure a different thing from every other key here:
     # request SIZE, not context occupancy. A screenshot-heavy conversation can
