@@ -293,6 +293,51 @@ def test_recovery_digest_mismatch_preserves_shared_blob_and_cleans_stage(
     assert not list(shared.parent.glob("*.copy"))
 
 
+def test_replace_append_with_unchanged_link_recovers_immediately(tmp_path: Path) -> None:
+    root = tmp_path / "holder"
+    owner = root / "owner"
+    session = owner / "sessions" / "abc123"
+    (session / "scratchpad" / "nested").mkdir(parents=True)
+    transcript = session / "transcript.jsonl"
+    original = b'{"line":1}\n'
+    transcript.write_bytes(original)
+    (session / "scratchpad" / "nested" / "notes.md").write_text("notes", encoding="utf-8")
+    (session / "scratchpad" / "link").symlink_to("nested/notes.md")
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame["phase"] == "plan":
+            return sync.build_manifest(owner, "abc123", have=frame.get("have") or {})
+        if frame["phase"] == "fetch":
+            return sync.serve_fetch(
+                owner,
+                "abc123",
+                plan=frame["plan_id"],
+                name=frame["name"],
+                offset=frame.get("offset", 0),
+                limit=frame.get("limit", sync.SYNC_CHUNK_BYTES),
+            )
+        return sync.serve_verify(
+            owner,
+            "abc123",
+            plan=frame["plan_id"],
+            name=frame["name"],
+            prefix_bytes=frame["prefix_bytes"],
+            prefix_digest=frame["prefix_digest"],
+        )
+
+    first = sync.sync_from(root, "abc123", ask=ask, into=sync.replica_dir(root, "abc123"))
+    assert first["mode"] == "replace"
+    transcript.write_bytes(original + b'{"line":2}\n')
+    second = sync.sync_from(root, "abc123", ask=ask, into=sync.replica_dir(root, "abc123"))
+    assert second["mode"] == "append"
+    assert second["items"] == 0
+    promoted = sync.promote_replica(root, "abc123", new_id="recovered")
+    target = root / "sessions" / "recovered"
+    assert promoted["session_id"] == "recovered"
+    assert (target / "transcript.jsonl").read_bytes() == original + b'{"line":2}\n'
+    assert (target / "scratchpad" / "link").read_text(encoding="utf-8") == "notes"
+
+
 def test_recovery_preserves_an_honest_in_tree_link(tmp_path: Path) -> None:
     root = tmp_path / "holder"
     _recovered_replica(root)
@@ -467,7 +512,8 @@ def test_stale_compressed_append_preserves_archive(tmp_path: Path) -> None:
     assert compression.compress_session(dest, codec="gzip").status == "compressed"
     archive = compression.archive_path(dest)
     assert archive is not None
-    before = archive.read_bytes()
+    assert (dest / compression.PREVIEW_SIDECAR_NAME).is_file()
+    before = {path.name: path.read_bytes() for path in dest.iterdir() if path.is_file()}
     plan = _plan([])
 
     def ask(frame: dict[str, Any]) -> dict[str, Any]:
@@ -485,8 +531,39 @@ def test_stale_compressed_append_preserves_archive(tmp_path: Path) -> None:
     with pytest.raises(sync.SyncRefused) as refusal:
         _pull(tmp_path, ask)
     assert refusal.value.code == "stale_plan"
-    assert archive.read_bytes() == before
+    after = {path.name: path.read_bytes() for path in dest.iterdir() if path.is_file()}
+    assert after == before
     assert not (dest / "transcript.jsonl").exists()
+
+
+def test_failed_compressed_append_preserves_full_replica_state(tmp_path: Path) -> None:
+    from local_operator.session import compression
+
+    dest = tmp_path / "replica"
+    dest.mkdir()
+    original = b"{}\n"
+    (dest / "transcript.jsonl").write_bytes(original)
+    assert compression.compress_session(dest, codec="gzip").status == "compressed"
+    before = {path.name: path.read_bytes() for path in dest.iterdir() if path.is_file()}
+    plan = _plan([])
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        answer = plan(frame)
+        if frame["phase"] == "plan":
+            answer["transcript"] = {
+                "mode": "append",
+                "prefix_bytes": len(original),
+                "region_bytes": len(original),
+                "total_bytes": len(original * 2),
+                "digest": sync.sha256_bytes(b"not the appended transcript"),
+            }
+        return answer
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        _pull(tmp_path, ask)
+    assert refusal.value.code == "digest_mismatch"
+    after = {path.name: path.read_bytes() for path in dest.iterdir() if path.is_file()}
+    assert after == before
 
 
 def test_valid_compressed_append_restores_and_appends(tmp_path: Path) -> None:

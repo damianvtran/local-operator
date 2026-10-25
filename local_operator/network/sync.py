@@ -2081,37 +2081,27 @@ class PullResult:
     links: tuple[str, ...] = ()
 
 
-def _capture_transcript_state(directory: Path) -> tuple[bytes | None, dict[str, bytes]]:
-    from local_operator.session import compression
+def _capture_transcript_state(directory: Path) -> dict[str, bytes]:
+    """Capture the replica's root files before a temporary archive restore.
 
-    plain = directory / TRANSCRIPT_NAME
-    original_plain = plain.read_bytes() if plain.is_file() else None
-    archives = {
+    ``restore_for_write`` also removes compression sidecars such as preview.json.
+    A journal containing only transcript/archive payloads would therefore lose
+    state on a refused append or a failed apply, despite preserving the transcript.
+    """
+    return {
         path.name: path.read_bytes()
         for path in directory.iterdir()
-        if path.name in compression.ARCHIVE_FILENAMES
+        if path.is_file() and not path.is_symlink()
     }
-    return original_plain, archives
 
 
-def _restore_transcript_state(
-    directory: Path, state: tuple[bytes | None, dict[str, bytes]]
-) -> None:
-    """Undo a restore needed only to measure a compressed append candidate."""
-    from local_operator.session import compression
-
-    original_plain, archives = state
-    plain = directory / TRANSCRIPT_NAME
-    if original_plain is None:
-        plain.unlink(missing_ok=True)
-    else:
-        plain.write_bytes(original_plain)
-    for name in compression.ARCHIVE_FILENAMES:
-        path = directory / name
-        if name in archives:
-            path.write_bytes(archives[name])
-        else:
-            path.unlink(missing_ok=True)
+def _restore_transcript_state(directory: Path, state: dict[str, bytes]) -> None:
+    """Restore every pre-pull root file and remove files this attempt introduced."""
+    for path in directory.iterdir():
+        if path.is_file() and not path.is_symlink() and path.name not in state:
+            path.unlink()
+    for name, payload in state.items():
+        (directory / name).write_bytes(payload)
 
 
 def pull(
@@ -2142,7 +2132,7 @@ def pull(
     attachment_scope = _write_scope(anchor, attachments_root / ATTACHMENTS_DIRNAME)
     # Capture before ANY plan request or mutation: a refused plan must leave both
     # the archive and the previous plain transcript byte-for-byte unchanged.
-    transcript_state = _capture_transcript_state(dest_dir) if dest_dir.is_dir() else (None, {})
+    transcript_state = _capture_transcript_state(dest_dir) if dest_dir.is_dir() else {}
     dest_dir.mkdir(parents=True, exist_ok=True)
     restored = False
     # THE PLAN IS ASKED FOR AGAIN WHEN IT CANNOT DESCRIBE THIS DESTINATION. An
@@ -2360,6 +2350,12 @@ def _apply_validated_plan(
         # cursor.
         file_name = name if name.endswith(ATTACHMENT_SIDECAR_SUFFIX) else f"{name}.bin"
         attested.setdefault(f"{ATTACHMENT_PREFIX}{file_name}", str(value))
+    # Unchanged links are present in have["files"] but are not re-sent as plan
+    # items. Carry their on-disk classification into the attestation just as the
+    # recovery digest does, otherwise an append cursor forgets every held link.
+    for name, _target in tree_link_entries(dest_dir):
+        if name in attested:
+            link_names.append(name)
     attested[TRANSCRIPT_NAME] = digest
     return PullResult(
         session_id=session_id,
