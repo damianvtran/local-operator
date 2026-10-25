@@ -1629,6 +1629,11 @@ def build_manifest(
         },
         "items": items,
         "attachments": blobs,
+        # COMPLETE source membership, not merely the transfer delta. The holder may
+        # prune only when this set recomputes plan_id; an old or partial plan without
+        # it remains a conservative no-deletion sync.
+        "members": {name: stamp.digest for name, stamp in sorted(stamps.items())},
+        "member_links": sorted(name for name, stamp in stamps.items() if stamp.link),
         "copy_set": copy_set(root, session_id),
         # The trees this plan carries, as flat names, and the entries it deliberately
         # does not: a symlink out of the session (refused by a deleting move) and a fifo
@@ -2164,7 +2169,12 @@ def pull(
         # temporary restore used to measure a compressed append.
         try:
             _validate_plan_destinations(
-                dest_dir, attachments_root, plan, session_scope, attachment_scope
+                dest_dir,
+                attachments_root,
+                plan,
+                session_scope,
+                attachment_scope,
+                session_id=session_id,
             )
         except SyncRefused:
             if restored:
@@ -2232,6 +2242,7 @@ def pull(
             session_scope=session_scope,
             attachment_scope=attachment_scope,
             have=have,
+            complete_members=_complete_plan_members(plan, session_id),
             stop=stop,
         )
     except (OSError, SyncRefused):
@@ -2256,6 +2267,7 @@ def _apply_validated_plan(
     session_scope: _WriteScope,
     attachment_scope: _WriteScope,
     have: dict[str, dict[str, Any]],
+    complete_members: tuple[dict[str, str], tuple[str, ...]] | None,
     stop: Callable[[], bool] | None,
 ) -> dict[str, Any]:
     digest = str(transcript.get("digest") or "")
@@ -2286,6 +2298,21 @@ def _apply_validated_plan(
     blobs = 0
     links = 0
     attested: dict[str, str] = {}
+    prune: list[tuple[Path, _WriteScope]] = []
+    if complete_members is not None:
+        source_members, source_links = complete_members
+        # The cursor's attachment field is a count; all held member digests,
+        # including attachments, are already represented in files.
+        previous = dict(have.get("files") or {})
+        for name in sorted(previous):
+            if name == TRANSCRIPT_NAME or name in source_members:
+                continue
+            target = _destination_for(dest_dir, attachments_root, name)
+            if target is None:
+                raise SyncRefused("unknown_item", f"Held sync member {name!r} is unsafe to prune.")
+            scope = attachment_scope if name.startswith(ATTACHMENT_PREFIX) else session_scope
+            _assert_contained(scope, target, leaf_link=True)
+            prune.append((target, scope))
     link_names: list[str] = []
     for item in list(plan.get("items") or []) + list(plan.get("attachments") or []):
         name = str(item.get("name") or "")
@@ -2332,6 +2359,11 @@ def _apply_validated_plan(
         else:
             items += 1
 
+    # Publish deletions only after every planned transfer succeeded. A failed fetch
+    # must not turn an otherwise recoverable held member into an early deletion.
+    for target, scope in prune:
+        _unlink_at(target.parent, target.name, scope)
+
     # EVERY MEMBER THE HOLDER NOW HOLDS, whether this pull fetched it or it was already
     # there (``have["files"]`` is the holder's own digest report, re-verified by the plan
     # on the owner's side). This is the set a replica's cursor records.
@@ -2354,8 +2386,13 @@ def _apply_validated_plan(
     # items. Carry their on-disk classification into the attestation just as the
     # recovery digest does, otherwise an append cursor forgets every held link.
     for name, _target in tree_link_entries(dest_dir):
-        if name in attested:
+        if name in attested and name not in link_names:
             link_names.append(name)
+    if complete_members is not None:
+        # The complete source set is authoritative for both membership and digest.
+        # No prior held entry may survive merely because this was an append.
+        attested = dict(source_members)
+        link_names = list(source_links)
     attested[TRANSCRIPT_NAME] = digest
     return PullResult(
         session_id=session_id,
@@ -2388,16 +2425,75 @@ def transcript_exists(directory: Path) -> bool:
     return compression.has_transcript(directory)
 
 
+def _complete_plan_members(
+    plan: dict[str, Any], session_id: str
+) -> tuple[dict[str, str], tuple[str, ...]] | None:
+    """Return deletion authority only for a digest-bound complete source member set."""
+    raw = plan.get("members")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(digest, str)
+        or not digest.startswith("sha256:")
+        for name, digest in raw.items()
+    ):
+        raise SyncRefused("unknown_item", "The complete sync member set is malformed.")
+    links_raw = plan.get("member_links")
+    if not isinstance(links_raw, list) or any(not isinstance(name, str) for name in links_raw):
+        raise SyncRefused("unknown_item", "The complete sync link member set is malformed.")
+    links = tuple(sorted(set(links_raw)))
+    if len(links) != len(links_raw) or any(name not in raw for name in links):
+        raise SyncRefused("unknown_item", "The complete sync link member set is inconsistent.")
+    members = dict(raw)
+    transcript = plan.get("transcript") or {}
+    if (
+        TRANSCRIPT_NAME not in members
+        or members[TRANSCRIPT_NAME] != str(transcript.get("digest") or "")
+        or str(plan.get("plan_id") or "") != _attested_digest(members, links, session_id)
+    ):
+        raise SyncRefused(
+            "unknown_item", "The complete sync member set does not match its plan identity."
+        )
+    for item in [
+        *list(plan.get("items") or []),
+        *list(plan.get("attachments") or []),
+    ]:
+        if not isinstance(item, dict):
+            raise SyncRefused("unknown_item", "A sync transfer item is malformed.")
+        name = str(item.get("name") or "")
+        if name not in members or str(item.get("digest") or "") != members[name]:
+            raise SyncRefused(
+                "unknown_item", f"Sync item {name!r} is outside the complete source member set."
+            )
+    return members, links
+
+
 def _validate_plan_destinations(
     session_root: Path,
     attachments_root: Path,
     plan: dict[str, Any],
     session_scope: _WriteScope,
     attachment_scope: _WriteScope,
+    session_id: str | None = None,
 ) -> None:
     """Validate all peer paths before any member, including the transcript, lands."""
+    complete = _complete_plan_members(plan, session_id) if session_id is not None else None
     items = [dict(item) for item in plan.get("items") or [] if isinstance(item, dict)]
     attachments = [dict(item) for item in plan.get("attachments") or [] if isinstance(item, dict)]
+    if complete is not None:
+        members, member_links = complete
+        for name in members:
+            if _destination_for(session_root, attachments_root, name) is None:
+                raise SyncRefused(
+                    "unknown_item", f"Complete sync member {name!r} has an unsafe destination."
+                )
+        for name in member_links:
+            if _destination_for(session_root, attachments_root, name) is None or name.startswith(
+                ATTACHMENT_PREFIX
+            ):
+                raise SyncRefused("unknown_item", f"Complete sync link {name!r} is unsafe.")
     links: dict[Path, tuple[str, str]] = {}
     for item in [*items, *attachments]:
         name = str(item.get("name") or "")

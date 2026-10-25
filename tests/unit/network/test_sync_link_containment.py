@@ -302,6 +302,9 @@ def test_replace_append_with_unchanged_link_recovers_immediately(tmp_path: Path)
     original = b'{"line":1}\n'
     transcript.write_bytes(original)
     (session / "scratchpad" / "nested" / "notes.md").write_text("notes", encoding="utf-8")
+    (session / "scratchpad" / "nested" / "alternate.md").write_text(
+        "alternate target with different bytes", encoding="utf-8"
+    )
     (session / "scratchpad" / "link").symlink_to("nested/notes.md")
 
     def ask(frame: dict[str, Any]) -> dict[str, Any]:
@@ -327,15 +330,145 @@ def test_replace_append_with_unchanged_link_recovers_immediately(tmp_path: Path)
 
     first = sync.sync_from(root, "abc123", ask=ask, into=sync.replica_dir(root, "abc123"))
     assert first["mode"] == "replace"
+    (session / "scratchpad" / "link").unlink()
+    (session / "scratchpad" / "link").symlink_to("nested/alternate.md")
     transcript.write_bytes(original + b'{"line":2}\n')
     second = sync.sync_from(root, "abc123", ask=ask, into=sync.replica_dir(root, "abc123"))
     assert second["mode"] == "append"
     assert second["items"] == 0
+    cursor = sync.read_replica_cursor(root, "abc123")
+    assert cursor["links"].count("scratchpad/link") == 1
     promoted = sync.promote_replica(root, "abc123", new_id="recovered")
     target = root / "sessions" / "recovered"
     assert promoted["session_id"] == "recovered"
     assert (target / "transcript.jsonl").read_bytes() == original + b'{"line":2}\n'
-    assert (target / "scratchpad" / "link").read_text(encoding="utf-8") == "notes"
+    assert (target / "scratchpad" / "link").read_text(encoding="utf-8") == (
+        "alternate target with different bytes"
+    )
+
+
+@pytest.mark.parametrize("kind", ["link", "file"])
+def test_source_deleted_member_does_not_survive_append_recovery(tmp_path: Path, kind: str) -> None:
+    root = tmp_path / "holder"
+    owner = root / "owner"
+    session = owner / "sessions" / "abc123"
+    (session / "scratchpad").mkdir(parents=True)
+    transcript = session / "transcript.jsonl"
+    original = b'{"line":1}\n'
+    transcript.write_bytes(original)
+    (session / "title.json").write_text('{"title":"remove me"}', encoding="utf-8")
+    (session / "scratchpad" / "notes.md").write_text("notes", encoding="utf-8")
+    link = session / "scratchpad" / "link"
+    link.symlink_to("notes.md")
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame["phase"] == "plan":
+            return sync.build_manifest(owner, "abc123", have=frame.get("have") or {})
+        if frame["phase"] == "fetch":
+            return sync.serve_fetch(
+                owner,
+                "abc123",
+                plan=frame["plan_id"],
+                name=frame["name"],
+                offset=frame.get("offset", 0),
+                limit=frame.get("limit", sync.SYNC_CHUNK_BYTES),
+            )
+        return sync.serve_verify(
+            owner,
+            "abc123",
+            plan=frame["plan_id"],
+            name=frame["name"],
+            prefix_bytes=frame["prefix_bytes"],
+            prefix_digest=frame["prefix_digest"],
+        )
+
+    sync.sync_from(root, "abc123", ask=ask, into=sync.replica_dir(root, "abc123"))
+    name = "scratchpad/link" if kind == "link" else "title.json"
+    (link if kind == "link" else session / "title.json").unlink()
+    transcript.write_bytes(original + b'{"line":2}\n')
+    second = sync.sync_from(root, "abc123", ask=ask, into=sync.replica_dir(root, "abc123"))
+    assert second["mode"] == "append"
+    replica = sync.replica_dir(root, "abc123")
+    assert not (replica / name).exists()
+    assert not (replica / name).is_symlink()
+    cursor = sync.read_replica_cursor(root, "abc123")
+    assert name not in cursor["files"]
+    assert name not in cursor["links"]
+    sync.promote_replica(root, "abc123", new_id="recovered")
+    target = root / "sessions" / "recovered"
+    assert not (target / name).exists()
+    assert not (target / name).is_symlink()
+
+
+def test_incomplete_plan_cannot_prune_held_member(tmp_path: Path) -> None:
+    root = tmp_path / "holder"
+    owner = root / "owner"
+    session = owner / "sessions" / "abc123"
+    (session / "scratchpad").mkdir(parents=True)
+    (session / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    (session / "scratchpad" / "notes.md").write_text("keep", encoding="utf-8")
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame["phase"] == "plan":
+            return sync.build_manifest(owner, "abc123", have=frame.get("have") or {})
+        return sync.serve_fetch(
+            owner,
+            "abc123",
+            plan=frame["plan_id"],
+            name=frame["name"],
+            offset=frame.get("offset", 0),
+            limit=frame.get("limit", sync.SYNC_CHUNK_BYTES),
+        )
+
+    sync.sync_from(root, "abc123", ask=ask, into=sync.replica_dir(root, "abc123"))
+    replica = sync.replica_dir(root, "abc123")
+    original = (replica / "scratchpad" / "notes.md").read_bytes()
+
+    def partial(frame: dict[str, Any]) -> dict[str, Any]:
+        answer = ask(frame)
+        if frame["phase"] == "plan":
+            answer.pop("members", None)
+            answer["items"] = []
+        return answer
+
+    sync.sync_from(root, "abc123", ask=partial, into=replica)
+    assert (replica / "scratchpad" / "notes.md").read_bytes() == original
+
+
+def test_failed_transfer_does_not_prune_source_deleted_member(tmp_path: Path) -> None:
+    root = tmp_path / "holder"
+    owner = root / "owner"
+    session = owner / "sessions" / "abc123"
+    (session / "scratchpad").mkdir(parents=True)
+    (session / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    (session / "title.json").write_text('{"title":"keep on failure"}', encoding="utf-8")
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame["phase"] == "plan":
+            return sync.build_manifest(owner, "abc123", have=frame.get("have") or {})
+        return sync.serve_fetch(
+            owner,
+            "abc123",
+            plan=frame["plan_id"],
+            name=frame["name"],
+            offset=frame.get("offset", 0),
+            limit=frame.get("limit", sync.SYNC_CHUNK_BYTES),
+        )
+
+    sync.sync_from(root, "abc123", ask=ask, into=sync.replica_dir(root, "abc123"))
+    (session / "title.json").unlink()
+    (session / "transcript.jsonl").write_text('{}\n{"new":true}\n', encoding="utf-8")
+    replica = sync.replica_dir(root, "abc123")
+    old = (replica / "title.json").read_bytes()
+
+    def failing(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame["phase"] == "fetch" and frame["name"] == sync.TRANSCRIPT_NAME:
+            raise ConnectionError("transfer interrupted")
+        return ask(frame)
+
+    with pytest.raises(ConnectionError):
+        sync.sync_from(root, "abc123", ask=failing, into=replica)
+    assert (replica / "title.json").read_bytes() == old
 
 
 def test_recovery_preserves_an_honest_in_tree_link(tmp_path: Path) -> None:
@@ -417,7 +550,14 @@ def test_honest_in_tree_and_dangling_links_round_trip(tmp_path: Path) -> None:
             prefix_digest=frame["prefix_digest"],
         )
 
-    dest = _pull(tmp_path, ask)
+    dest = tmp_path / "replica"
+    sync.pull(
+        tmp_path / "config",
+        session_id,
+        ask=ask,
+        dest_dir=dest,
+        attachments_root=dest,
+    )
     assert os.readlink(dest / "scratchpad" / "link") == "nested/notes.md"
     assert (dest / "scratchpad" / "link").read_text(encoding="utf-8") == "notes"
     assert (dest / "scratchpad" / "upward").read_text(encoding="utf-8") == "notes"
