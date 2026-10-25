@@ -195,8 +195,25 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     executable = _systemd_binary()
     if executable is None:
         raise ProbeBlocked("systemd user-manager executable is unavailable")
+    trace = shutil.which("strace")
+    trace_path = scratch / "manager.strace"
+    argv = [executable, "--user", "--log-level=debug"]
+    if trace is not None:
+        # Existing runner tool only: capture why systemd exits without a log.
+        # This is a bounded CI diagnostic, never an install or a privilege bypass.
+        argv = [
+            trace,
+            "-f",
+            "-s",
+            "200",
+            "-e",
+            "trace=%process,%file,prctl,unshare,setns,bind,listen",
+            "-o",
+            str(trace_path),
+            *argv,
+        ]
     proc = subprocess.Popen(  # noqa: S603 — fixed executable, disposable manager
-        [executable, "--user", "--log-level=debug"],
+        argv,
         env=env,
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -209,11 +226,16 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
             detail = _log_tail(log) or "no manager log"
             version = _run([executable, "--version"], timeout=3.0)
             status = _run(["systemctl", "--user", "is-system-running"], env=env, timeout=3.0)
+            trace_detail = (
+                trace_path.read_text(encoding="utf-8", errors="replace")[-4000:].strip()
+                if trace_path.exists()
+                else "strace unavailable or produced no output"
+            )
             diagnostics = (
                 f"uid={os.getuid()} exe={executable} xdg={xdg} "
                 f"version={(version.stdout or version.stderr).strip()[:300]} "
                 f"systemctl_status={(status.stdout + status.stderr).strip()[:500]} "
-                f"manager_log={detail}"
+                f"manager_log={detail} syscall_trace={trace_detail}"
             )
             raise ProbeBlocked(
                 f"private systemd --user exited with {proc.returncode}: {diagnostics}"
@@ -472,6 +494,7 @@ def main() -> int:
             "relay_listen": "127.0.0.1 only",
             "external_dialing": "none by the relay; dependency installation only",
             "port": port,
+            "strace_available": shutil.which("strace") is not None,
         }
         _require(
             ["systemctl", "--user", "set-environment", f"LOCAL_OPERATOR_CONFIG_DIR={config}"]
