@@ -448,6 +448,16 @@
         "effort": "default",
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "version": "1.3.1",
+        "instructions_sha256": "a18fde05910d5138744a42aeb19e8bb4fc71dabecc8f2e17ae41d416aba9b3a8",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": "default",
+        "delegate": false,
+        "class": null
       }
     ],
     "copy-reviewer": [
@@ -485,6 +495,16 @@
         "sha": "4e505b2ecc2df2225eddbdcae7e4d26e33eef4a0",
         "version": "1.3.0",
         "instructions_sha256": "f5ea12bb34e95159c4c8ba8b62622518720437f765242d40d175019051ce6b9d",
+        "description": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "version": "1.3.1",
+        "instructions_sha256": "88e0db5b825634a68c4443fc2782d8436b1150107ad3d021c56bf5c9ca7e6e1a",
         "description": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
         "tools": null,
         "effort": null,
@@ -607,6 +627,16 @@
         "sha": "8078806dbf617674133fa6167a3b12eee636811a",
         "version": "1.5.3",
         "instructions_sha256": "843adb80cc1e7752834744471fc7131c35faaeb87758361dca6277ee7f096a5d",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "version": "1.5.4",
+        "instructions_sha256": "df1c873e75af3568893b56195cd918e9c2ccae7f1bb0ffa6405d70b844934537",
         "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
         "tools": null,
         "effort": null,
@@ -998,6 +1028,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "version": "1.0.1",
+        "instructions_sha256": "424ec4205698228bf0b6796e217c48e25981a39cab12c9c48e747df062514ac1",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "reviewer": [
@@ -1222,6 +1273,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "version": "1.3.6",
+        "instructions_sha256": "d8a52dabce6a04ac46eecbb5c064ff1b14a1811eea7167b59214bfcb6e44e0a1",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "scout": [
@@ -1382,6 +1454,16 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "version": "1.3.1",
+        "instructions_sha256": "20ad2928fdb6028e9d8880a0cc24840e66a89cb32969596734e620c4b27b49b0",
+        "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "ux-reviewer": [
@@ -1469,6 +1551,16 @@
         "sha": "8078806dbf617674133fa6167a3b12eee636811a",
         "version": "1.4.3",
         "instructions_sha256": "9560c52e1a7356cb2ffed3ad26b4a20cd0f0ab56f7c98b786249593cd0ba135a",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "version": "1.4.4",
+        "instructions_sha256": "75518af4f438caead761bb0aad8db4f03122891fae9e20bc8dd41a666f8884f7",
         "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
         "tools": null,
         "effort": null,
