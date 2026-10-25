@@ -514,11 +514,18 @@ class StallRecorder:
         A failure has to answer that WITHOUT a rerun, because the reading is
         gone as soon as the process exits. So the message carries each leg's
         per-generation GC record, the ``gc.get_count()`` boundaries that show
-        what was queued, and a verdict line that divides the asserted quantity
-        between GC and everything else. ``delta_ms`` is the compared quantity
+        what was queued, and a verdict line.
+
+        The verdict's arithmetic is deliberately one-sided. The GC figure is a
+        LEG TOTAL (every collection the leg recorded) while the measured
+        quantity is a PEAK INTERVAL, and a total is at least what any one
+        interval held — so the message states "at most N ms of the leg's GC,
+        at least M ms not GC". Writing the GC half as exact would be the
+        over-read this instrument exists to prevent, because a reader acts on
+        that line when the flake recurs. ``delta_ms`` is the compared quantity
         when the failed assertion was a delta (the control leg's own GC cancels
-        there, exactly as layout does); without it the leg's absolute reading
-        is divided instead.
+        there, exactly as layout does); without it the leg's absolute peak is
+        used.
         """
         lines = [
             "",
@@ -540,14 +547,16 @@ class StallRecorder:
             gc_delta = subject_gc - baseline_gc
             share = 100.0 * gc_delta / delta_ms if delta_ms > 0 else 0.0
             lines.append(
-                f"  verdict: of the {delta_ms:.1f} ms delta, {gc_delta:.1f} ms ({share:.1f}%) was "
-                f"loop-thread GC; {delta_ms - gc_delta:.1f} ms was not GC."
+                f"  verdict: the {delta_ms:.1f} ms delta can attribute at most {gc_delta:.1f} ms "
+                f"({share:.1f}%) to loop-thread GC — leg TOTALS against peak intervals, so that "
+                f"is an upper bound; at least {delta_ms - gc_delta:.1f} ms was not GC."
             )
         else:
             share = 100.0 * subject_gc / subject.cpu_ms if subject.cpu_ms > 0 else 0.0
             lines.append(
-                f"  verdict: of this leg's {subject.cpu_ms:.1f} ms CPU reading, "
-                f"{subject_gc:.1f} ms ({share:.1f}%) was loop-thread GC; "
+                f"  verdict: this leg's {subject.cpu_ms:.1f} ms CPU peak can attribute at most "
+                f"{subject_gc:.1f} ms ({share:.1f}%) to loop-thread GC — a leg total against a "
+                f"single peak interval, so an upper bound; at least "
                 f"{subject.cpu_ms - subject_gc:.1f} ms was not GC."
             )
         return "\n".join(lines)
@@ -817,7 +826,7 @@ class StallRecorder:
         because cyclic GC runs on whichever thread triggers it, so a gen-2
         pass over this worker's accumulated heap is real loop-thread CPU that
         no callback attribution can charge to a callback.
-        """ ""
+        """
         bound_cpu = cpu_ceiling_ms
         _, bound_wall, _ = self.loaded_bounds(
             cpu_ceiling_ms=cpu_ceiling_ms,
@@ -2233,10 +2242,15 @@ async def test_s2_gc_attribution_step_scales_with_the_surviving_heap() -> None:
     assert big_ms > small_ms * 2, (baseline_ms, small_ms, big_ms, drained_ms)
     # The reverse arm: same leg body, graph already reclaimed, step gone.
     assert drained_ms < big_ms * 0.5, (baseline_ms, small_ms, big_ms, drained_ms)
-    # The probe sees the same scaling: the CPU reading this instrument sits
-    # beside contains the pass it charges, so the two cannot disagree silently.
+    # The only relation this instrument asserts between the two readings is
+    # CONTAINMENT, one-directional: a collection is synchronous, so it lies
+    # inside one probe interval and that leg's peak cannot be smaller than the
+    # time the record charges. That is a consistency check — a mismatch would
+    # mean the record and the peak describe different intervals — and NOT
+    # corroboration of scaling: the drained leg below shows a large probe peak
+    # over 0.03 ms of GC, because the peak carries everything else the loop did
+    # in that window too.
     assert big_peak.cpu_ms >= big_ms, (big_peak.cpu_ms, big_ms)
-    assert big_peak.cpu_ms > baseline.cpu_ms
 
 
 def test_s2_gc_attribution_shows_no_step_with_gc_held_off_and_restores_it() -> None:
@@ -2341,9 +2355,14 @@ def test_s2_gc_attribution_is_reported_on_failure_and_in_the_pass_summary() -> N
             control=control, turn=LegPeak(cpu_ms=650.0, wall_ms=5.0, gc=turn.gc)
         )
     message = str(failure.value)
-    assert "was loop-thread GC" in message
+    assert "loop-thread GC" in message
     assert "gen2" in message
     assert "never subtracted from a bound" in message
+    # The verdict must state its own arithmetic: a leg total against a peak
+    # interval can only bound the GC share from above, and the rest from below.
+    assert "at most" in message
+    assert "at least" in message
+    assert "upper bound" in message
     assert "648" not in message  # the message reports THIS run, not history
 
 
