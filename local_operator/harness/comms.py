@@ -102,6 +102,23 @@ logger = logging.getLogger(__name__)
 #: only to correlate the parent's action with a later child reply.
 HUB_COMMUNICATION_CUSTOM_TYPE = "hub_communication"
 
+#: How long a child's UNPROMPTED note may hold back its parent's wake while
+#: the parent is mid-turn; 0 restores the immediate wake.
+#:
+#: WHY 20 s, from 7 days of top-level transcripts (9,271 child->parent notes):
+#: 5,535 were followed by the same job's settle within 120 s, 3,048 of them
+#: within 10 s and 1,097 more within 10-20 s, so a 20 s window coalesces ~75%
+#: of the double-wakes a 120 s window would, while a genuine "I am blocked"
+#: note — the one case where the parent must act before the child finishes —
+#: reaches it at most 20 s late. Past 20 s the curve flattens: each extra
+#: second buys few coalesced wakes and delays every real mid-job note.
+#:
+#: Deliberately NOT a config key yet: a ``/settings`` row re-hashes the
+#: ``wire.settings`` catalogue (every locale needs a fresh audited ledger pass
+#: before it ships again), and nothing yet says an operator needs to tune this.
+#: Read at call time (a module global), so a test patches it here.
+HUB_NOTE_WAKE_GRACE_S = 20.0
+
 #: Opening and closing tags of the model-facing envelope
 #: :meth:`SubagentComms._format_to_child` wraps parent→child text in. A hub
 #: steer persists as a plain role=user Message carrying this envelope, so
@@ -3447,7 +3464,22 @@ class SubagentComms:
                 ),
             },
         )
-        self._parent_session_of(record).queue_aside(lambda: message)
+        parent_session = self._parent_session_of(record)
+        coalesce = getattr(parent_session, "queue_aside_coalesced", None)
+        jobs = self._owning_jobs(job_id)
+        settled_event = getattr(jobs, "settled_event", None) if jobs is not None else None
+        if callable(coalesce) and callable(settled_event):
+            # Only the WAKE waits; the note is queued now (see
+            # ``Session.queue_aside_coalesced`` for the measured double-wake this
+            # removes). Keyed on the job manager that owns the row, so a
+            # grandchild's note coalesces with ITS settle in the lead's ledger.
+            coalesce(
+                lambda: message,
+                settled=settled_event(record.job_id if record is not None else job_id),
+                grace_s=HUB_NOTE_WAKE_GRACE_S,
+            )
+        else:
+            parent_session.queue_aside(lambda: message)
         return "delivered to the parent (it will read this at its next step)"
 
     def _parent_session_of(self, record: _ChildRecord | None) -> Any:
