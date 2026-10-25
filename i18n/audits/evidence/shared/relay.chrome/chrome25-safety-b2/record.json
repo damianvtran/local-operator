@@ -1,0 +1,766 @@
+{
+  "schema": 1,
+  "audit_id": "chrome25-safety-b2",
+  "kind": "translation-audit",
+  "round": "R2-delta",
+  "namespace": "relay.chrome",
+  "locales": [
+    "es",
+    "fr",
+    "hi",
+    "ru",
+    "ur",
+    "vi",
+    "zh-CN"
+  ],
+  "auditor": {
+    "agent": "translation-auditor",
+    "session_id": "acd16c49df72",
+    "model": "radient/auto",
+    "model_source": "session header (harness-reported selection; underlying provider model not exposed); no fallback model selected or used",
+    "independence": "same independent auditor as b1; structured remediation JSON used; translator/first-auditor narrative reports not relied on"
+  },
+  "date": "2026-10-25",
+  "source": {
+    "repo": "damianvtran/local-operator",
+    "worktree": "~/local-operator/.worktrees/relay-chrome-i18n",
+    "commit": "535cea359825411741069cbffcee42e2927df9d3",
+    "tree_state": "no tracked modifications; seven target catalogues untracked",
+    "audited_inputs_untracked": [
+      "local_operator/i18n/catalogues/es/relay.chrome.json",
+      "local_operator/i18n/catalogues/fr/relay.chrome.json",
+      "local_operator/i18n/catalogues/hi/relay.chrome.json",
+      "local_operator/i18n/catalogues/ru/relay.chrome.json",
+      "local_operator/i18n/catalogues/ur/relay.chrome.json",
+      "local_operator/i18n/catalogues/vi/relay.chrome.json",
+      "local_operator/i18n/catalogues/zh-CN/relay.chrome.json"
+    ]
+  },
+  "inputs": {
+    "en_source": {
+      "path": "local_operator/i18n/catalogues/en/relay.chrome.json",
+      "sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac"
+    },
+    "en_context": {
+      "path": "local_operator/i18n/catalogues/en/relay.chrome.context.json",
+      "sha256": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a"
+    },
+    "targets": {
+      "es": {
+        "path": "local_operator/i18n/catalogues/es/relay.chrome.json",
+        "current_sha256": "416f3d6c884403ea962f158b1718f3743352674b9e7ffc5a47aed4c7520df333",
+        "before_snapshot": "~/.local-operator/sessions/d69e1fa9cd3c/scratchpad/chrome25-es-remediation/relay.chrome.es.before.json",
+        "before_sha256": "9e1b68d5e546317ff912e1aa9d463d9ae6d44d7b109e0e584ef5e82a1a667192",
+        "before_matches_b1": true,
+        "scope_sha256": "da2084775ae7587988b6ccc79066fd511e357fdfc606534419d4e29855e64007",
+        "unchanged_scope_sha256": "fe5093e62e3c74be626b2d92cfb20afbfcbc1c39682c2fbad3d8f6b338e408ab"
+      },
+      "fr": {
+        "path": "local_operator/i18n/catalogues/fr/relay.chrome.json",
+        "current_sha256": "5d3a3387e7324a1ed5b1b51104fd06da1470285674f3ce62e24e0eaf33bbb6d2",
+        "before_snapshot": "~/.local-operator/sessions/132edc7afe5f/scratchpad/chrome25-fr-remediation/candidate-pristine.json",
+        "before_sha256": "b3a97316412b6b35c0d883a0e79a7cf8b9ed88c99bf298920cd235a2d7a6916f",
+        "before_matches_b1": true,
+        "scope_sha256": "a4f8531ca939c04068d3bfcee516bb4dc9a2faad4cafc913a44dc8463c122ea9",
+        "unchanged_scope_sha256": "3fe9bca4a93fb79fd03dca0cb5d78cf3e8f7d60cc054dd79432d2540fd89e65e"
+      },
+      "hi": {
+        "path": "local_operator/i18n/catalogues/hi/relay.chrome.json",
+        "current_sha256": "eb9f326ca6689ed0d35311cd75ae8cb5683b515e8b638c938790759eeec96784",
+        "before_snapshot": "~/.local-operator/sessions/6f3832cb71c0/scratchpad/hi-relay-chrome.candidate-pre-remediation.json",
+        "before_sha256": "a29563f5dd0a9f425b717639c28e6a8f4c97382d45b0928bacdf5e12d31285b3",
+        "before_matches_b1": true,
+        "scope_sha256": "ee73e1f3e48400b7c692deb6b88a76618674807f6991486bfae6fdc46797814f",
+        "unchanged_scope_sha256": "df24329c526bc29c2ce50898271b6a3cc0ffde779a7c77ca3fc01b86b845270a"
+      },
+      "ru": {
+        "path": "local_operator/i18n/catalogues/ru/relay.chrome.json",
+        "current_sha256": "fb17616cb7875507eb4b16853cb7b229a1176f46349d9c942d9cc8a427e6c97c",
+        "before_snapshot": "~/.local-operator/sessions/635b55fcabb6/scratchpad/chrome25-ru-remediation/candidate-before.json",
+        "before_sha256": "27709627e9deb166ae6954a142400f482876b940681819ab6b49234f88d738fd",
+        "before_matches_b1": true,
+        "scope_sha256": "c31c9b41f7f4d867528e74c361d6eb190a87ef5ec70df55be96b5abc362e28c0",
+        "unchanged_scope_sha256": "1e7754716d3f0904fa824761cc20d94ba3c626acce5e41181dc52932083dd766"
+      },
+      "ur": {
+        "path": "local_operator/i18n/catalogues/ur/relay.chrome.json",
+        "current_sha256": "a90b9bea54c17e3b74527bb7c503363df348d1d625b105431ff8bbed56f39fff",
+        "before_snapshot": "~/.local-operator/sessions/d409548ee35d/scratchpad/chrome25-ur-remediation/candidate-before.json",
+        "before_sha256": "6059005113786f1d74fc848a9f254fadd5fba259be11aecfcbf59ebe2cd24d28",
+        "before_matches_b1": true,
+        "scope_sha256": "febde170836ece2821250598b8c5320803ea28e1f21b211bd58a9a8103656f7a",
+        "unchanged_scope_sha256": "56db4e83321e65cdb0f060d4750a0252996a2674d4d66acdce9e16b812a9e3ca"
+      },
+      "vi": {
+        "path": "local_operator/i18n/catalogues/vi/relay.chrome.json",
+        "current_sha256": "a875b7f4177f4e3d9118a5d779734db751e350c384e01ae6059916bec5c8c1d9",
+        "before_snapshot": "~/.local-operator/sessions/70a22e9a7716/scratchpad/chrome25-vi-remediation/relay.chrome.pre-remediation.json",
+        "before_sha256": "97a991ac3245c8b4edd59877eb1d1259affb1c8c77bedd460a0721c08a1d27b8",
+        "before_matches_b1": true,
+        "scope_sha256": "3b0d0927b57c29ccf8df3715be2f5806a3e3f1250f073c77edb937af8757b479",
+        "unchanged_scope_sha256": "7520786fe5126f98379e6dbb28b2dac702fbca0bbe57e427a0b3dc45730bc169"
+      },
+      "zh-CN": {
+        "path": "local_operator/i18n/catalogues/zh-CN/relay.chrome.json",
+        "current_sha256": "ba4215e753320387d61bc9d9661eb2a63420473436e492f6da657ac8595c1855",
+        "before_snapshot": "~/.local-operator/sessions/5217c4e5f8e3/scratchpad/zh-CN-relay.chrome.candidate-before-remediation.json",
+        "before_sha256": "ca2c2df9bf514ef301af0feb86062a96e17f5a2e40d2f8a1febed26f5746646e",
+        "before_matches_b1": true,
+        "scope_sha256": "54ae7cd281348a9a44ba38a52e821969df26ad023d3b712f06ec6438f4993822",
+        "unchanged_scope_sha256": "d1722a5aaaf11089cdf0733efb6eb79280e4ba8180db99fc144b13c2f66bb333"
+      }
+    }
+  },
+  "coverage": {
+    "original_keys": [
+      "relay.chrome.drawer.status",
+      "relay.chrome.link.reconnecting",
+      "relay.chrome.link.since_seconds",
+      "relay.chrome.link.since_minutes",
+      "relay.chrome.list.filter.needs_you",
+      "relay.chrome.list.mark_all",
+      "relay.chrome.row.mark_read",
+      "relay.chrome.session.subtitle.waiting",
+      "relay.chrome.session.subtitle.not_answering",
+      "relay.chrome.session.tray.approve",
+      "relay.chrome.session.tray.approve_label",
+      "relay.chrome.session.ended",
+      "relay.chrome.session.ended_hint",
+      "relay.chrome.session.resume",
+      "relay.chrome.session.resuming",
+      "relay.chrome.session.degraded",
+      "relay.chrome.snackbar.dismiss"
+    ],
+    "keys_read_per_locale": 17,
+    "target_values_read": 119,
+    "changed_scope_values_reviewed": 25,
+    "unchanged_scope_values_byte_identical": 94,
+    "per_locale": {
+      "es": {
+        "changed_scope_keys": [
+          "relay.chrome.session.ended_hint",
+          "relay.chrome.session.degraded"
+        ],
+        "changed_count": 2,
+        "unchanged_count": 15,
+        "catalogue_keys": 83,
+        "order_identical_to_en": true,
+        "missing": [],
+        "extra": []
+      },
+      "fr": {
+        "changed_scope_keys": [
+          "relay.chrome.session.subtitle.waiting",
+          "relay.chrome.session.ended",
+          "relay.chrome.session.ended_hint",
+          "relay.chrome.session.degraded"
+        ],
+        "changed_count": 4,
+        "unchanged_count": 13,
+        "catalogue_keys": 83,
+        "order_identical_to_en": true,
+        "missing": [],
+        "extra": []
+      },
+      "hi": {
+        "changed_scope_keys": [
+          "relay.chrome.drawer.status",
+          "relay.chrome.list.filter.needs_you",
+          "relay.chrome.list.mark_all",
+          "relay.chrome.session.subtitle.waiting",
+          "relay.chrome.session.ended_hint"
+        ],
+        "changed_count": 5,
+        "unchanged_count": 12,
+        "catalogue_keys": 83,
+        "order_identical_to_en": true,
+        "missing": [],
+        "extra": []
+      },
+      "ru": {
+        "changed_scope_keys": [
+          "relay.chrome.session.ended_hint",
+          "relay.chrome.session.resume",
+          "relay.chrome.session.resuming"
+        ],
+        "changed_count": 3,
+        "unchanged_count": 14,
+        "catalogue_keys": 83,
+        "order_identical_to_en": true,
+        "missing": [],
+        "extra": []
+      },
+      "ur": {
+        "changed_scope_keys": [
+          "relay.chrome.drawer.status",
+          "relay.chrome.link.since_seconds",
+          "relay.chrome.link.since_minutes",
+          "relay.chrome.session.resuming",
+          "relay.chrome.session.degraded"
+        ],
+        "changed_count": 5,
+        "unchanged_count": 12,
+        "catalogue_keys": 83,
+        "order_identical_to_en": true,
+        "missing": [],
+        "extra": []
+      },
+      "vi": {
+        "changed_scope_keys": [
+          "relay.chrome.session.ended",
+          "relay.chrome.session.ended_hint",
+          "relay.chrome.session.degraded"
+        ],
+        "changed_count": 3,
+        "unchanged_count": 14,
+        "catalogue_keys": 83,
+        "order_identical_to_en": true,
+        "missing": [],
+        "extra": []
+      },
+      "zh-CN": {
+        "changed_scope_keys": [
+          "relay.chrome.link.reconnecting",
+          "relay.chrome.link.since_seconds",
+          "relay.chrome.link.since_minutes"
+        ],
+        "changed_count": 3,
+        "unchanged_count": 14,
+        "catalogue_keys": 83,
+        "order_identical_to_en": true,
+        "missing": [],
+        "extra": []
+      }
+    }
+  },
+  "remediation_records": [
+    {
+      "locale": "es",
+      "path": "~/.local-operator/sessions/d69e1fa9cd3c/scratchpad/chrome25-es-remediation/remediation.json",
+      "sha256": "d41bb5744c86683f327b68d2f6c397051cea66ad5c12f98e0cbca3a9a7826f4c"
+    },
+    {
+      "locale": "fr",
+      "path": "~/.local-operator/sessions/132edc7afe5f/scratchpad/chrome25-fr-remediation/remediation.json",
+      "sha256": "3f367ad882d0f6b4fd46860e6c593ae57c9a49c0d3729e3e63b45b4f40816697"
+    },
+    {
+      "locale": "hi",
+      "path": "~/.local-operator/sessions/6f3832cb71c0/scratchpad/remediation.json",
+      "sha256": "486f30552b360a9bab52c7744a619fb87acfe240004fe10aa5a53514bc057a39"
+    },
+    {
+      "locale": "ru",
+      "path": "~/.local-operator/sessions/635b55fcabb6/scratchpad/chrome25-ru-remediation/remediation.json",
+      "sha256": "71c95ce270e42b6dbdcb563d61b2e1c8e7ee124a5a6843fdffd2a6669ba2dba3"
+    },
+    {
+      "locale": "ur",
+      "path": "~/.local-operator/sessions/d409548ee35d/scratchpad/chrome25-ur-remediation/remediation.json",
+      "sha256": "9d79d860544f840b4bd8b15803c7640d446ac22e0443509db334acdf3b773246"
+    },
+    {
+      "locale": "vi",
+      "path": "~/.local-operator/sessions/70a22e9a7716/scratchpad/chrome25-vi-remediation/remediation.json",
+      "sha256": "55972740375fa95b0cf5d1f8f34cd075b0d0577678bf72897c5aec17b2b1e655"
+    },
+    {
+      "locale": "zh-CN",
+      "path": "~/.local-operator/sessions/5217c4e5f8e3/scratchpad/remediation.json",
+      "sha256": "5e8dc04e9686ef67b1db2af7cab3b8d0cef8b82532f89f040fa630abe8b3c1f5"
+    }
+  ],
+  "original_findings": [
+    {
+      "id": "MAJ-01",
+      "locale": "ur",
+      "key": "relay.chrome.link.since_seconds",
+      "b1_severity": "major",
+      "b1_proposed": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · سنک # سیکنڈ پہلے} other {دوبارہ منسلک ہو رہا ہے · سنک # سیکنڈ پہلے}}",
+      "current_value": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · سنک # سیکنڈ پہلے} other {دوبارہ منسلک ہو رہا ہے · سنک # سیکنڈ پہلے}}",
+      "disposition": "fixed",
+      "current_evidence": "`… · سنک # سیکنڈ پہلے`; one/other + `#`; 41/44 at one-digit, 42/44 at two-digit"
+    },
+    {
+      "id": "MAJ-02",
+      "locale": "ur",
+      "key": "relay.chrome.link.since_minutes",
+      "b1_severity": "major",
+      "b1_proposed": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · سنک # منٹ پہلے} other {دوبارہ منسلک ہو رہا ہے · سنک # منٹ پہلے}}",
+      "current_value": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · سنک # منٹ پہلے} other {دوبارہ منسلک ہو رہا ہے · سنک # منٹ پہلے}}",
+      "disposition": "fixed",
+      "current_evidence": "`… · سنک # منٹ پہلے`; one/other + `#`; 39/44 at one-digit, 40/44 at two-digit"
+    },
+    {
+      "id": "MAJ-03",
+      "locale": "vi",
+      "key": "relay.chrome.session.ended",
+      "b1_severity": "major",
+      "b1_proposed": "Phiên kết thúc · đã lưu lịch sử",
+      "current_value": "Phiên kết thúc · lịch sử đã lưu",
+      "disposition": "fixed",
+      "current_evidence": "`Phiên kết thúc · lịch sử đã lưu`; 31/32; state, not imperative"
+    },
+    {
+      "id": "MAJ-04",
+      "locale": "fr",
+      "key": "relay.chrome.session.ended",
+      "b1_severity": "major",
+      "b1_proposed": "Terminée · historique conservé",
+      "current_value": "Terminée · historique conservé",
+      "disposition": "fixed",
+      "current_evidence": "`Terminée · historique conservé`; 30/32; subject dropped, history kept"
+    },
+    {
+      "id": "MIN-01",
+      "locale": "es",
+      "key": "relay.chrome.session.ended_hint",
+      "b1_severity": "minor",
+      "b1_proposed": "Enviar un mensaje o Reanudar la reabre en tu carpeta personal",
+      "current_value": "Enviar un mensaje o Reanudar la reabre en tu carpeta personal",
+      "disposition": "fixed",
+      "current_evidence": "`Enviar un mensaje o Reanudar la reabre…`; 61 cells, no maxCells"
+    },
+    {
+      "id": "MIN-02",
+      "locale": "es",
+      "key": "relay.chrome.session.degraded",
+      "b1_severity": "minor",
+      "b1_proposed": "No responde — los mensajes esperarán",
+      "current_value": "No responde — los mensajes esperarán",
+      "disposition": "fixed",
+      "current_evidence": "`No responde — los mensajes esperarán`; 36/36"
+    },
+    {
+      "id": "MIN-03",
+      "locale": "fr",
+      "key": "relay.chrome.session.subtitle.waiting",
+      "b1_severity": "minor",
+      "b1_proposed": "Vous attend",
+      "current_value": "Vous attend",
+      "disposition": "fixed",
+      "current_evidence": "`Vous attend`; 11/24"
+    },
+    {
+      "id": "MIN-04",
+      "locale": "fr",
+      "key": "relay.chrome.session.ended_hint",
+      "b1_severity": "minor",
+      "b1_proposed": "Envoyer un message ou Reprendre la rouvre dans votre dossier personnel",
+      "current_value": "Envoyer un message ou « Reprendre » la rouvre dans votre dossier personnel",
+      "disposition": "fixed",
+      "current_evidence": "`Envoyer un message ou « Reprendre »…`; 74, no maxCells; button word preserved"
+    },
+    {
+      "id": "MIN-05",
+      "locale": "fr",
+      "key": "relay.chrome.list.mark_all",
+      "b1_severity": "minor",
+      "b1_proposed": "Tout marquer lu",
+      "current_value": "Tout marquer comme lu",
+      "disposition": "rejected — accepted width residual",
+      "current_evidence": "`Tout marquer comme lu`; 21/20; no clipping measured; b1 fallback ungrammatical"
+    },
+    {
+      "id": "MIN-06",
+      "locale": "fr",
+      "key": "relay.chrome.session.degraded",
+      "b1_severity": "minor",
+      "b1_proposed": "Ne répond pas — envois en attente",
+      "current_value": "Ne répond pas — les envois attendent",
+      "disposition": "fixed (width); lexical component withdrawn",
+      "current_evidence": "`Ne répond pas — les envois attendent`; 36/36; `envois` corpus-backed"
+    },
+    {
+      "id": "MIN-07",
+      "locale": "hi",
+      "key": "relay.chrome.list.filter.needs_you",
+      "b1_severity": "minor",
+      "b1_proposed": "आपका ध्यान चाहिए · {count, number}",
+      "current_value": "आपका ध्यान चाहिए · {count, number}",
+      "disposition": "fixed",
+      "current_evidence": "`आपका ध्यान चाहिए · {count, number}`; 15/16, 16/16 at two digits, 17/16 at three"
+    },
+    {
+      "id": "MIN-08",
+      "locale": "hi",
+      "key": "relay.chrome.list.mark_all",
+      "b1_severity": "minor",
+      "b1_proposed": "सभी को पढ़ा हुआ चिह्नित करें",
+      "current_value": "सभी को पढ़ा हुआ चिह्नित करें",
+      "disposition": "fixed",
+      "current_evidence": "`सभी को पढ़ा हुआ चिह्नित करें`; 18/20"
+    },
+    {
+      "id": "MIN-09",
+      "locale": "ur",
+      "key": "relay.chrome.session.degraded",
+      "b1_severity": "minor",
+      "b1_proposed": "جواب نہیں دے رہا — پیغامات رکے ہیں",
+      "current_value": "جواب نہیں دے رہا — پیغامات رکے ہیں",
+      "disposition": "fixed",
+      "current_evidence": "`جواب نہیں دے رہا — پیغامات رکے ہیں`; 34/36; plural intransitive"
+    },
+    {
+      "id": "MIN-10",
+      "locale": "vi",
+      "key": "relay.chrome.list.mark_all",
+      "b1_severity": "minor",
+      "b1_proposed": "Đánh dấu hết đã đọc",
+      "current_value": "Đánh dấu tất cả đã đọc",
+      "disposition": "rejected — accepted width residual",
+      "current_evidence": "`Đánh dấu tất cả đã đọc`; 22/20; no clipping measured; alternatives lose idiom/scope"
+    },
+    {
+      "id": "NIT-01",
+      "locale": "ur",
+      "key": "relay.chrome.list.mark_all",
+      "b1_severity": "nit",
+      "b1_proposed": "سب کو پڑھا نشان زد کریں",
+      "current_value": "سب پڑھا نشان زد کریں",
+      "disposition": "rejected — accepted nit",
+      "current_evidence": "`سب پڑھا نشان زد کریں`; 20/20; grammatical 23/20"
+    },
+    {
+      "id": "NIT-02",
+      "locale": "vi",
+      "key": "relay.chrome.session.ended_hint",
+      "b1_severity": "nit",
+      "b1_proposed": "Gửi tin nhắn hoặc Mở lại sẽ mở lại phiên trong thư mục home của bạn",
+      "current_value": "Gửi tin nhắn hoặc Mở lại sẽ khôi phục phiên trong thư mục home của bạn",
+      "disposition": "fixed",
+      "current_evidence": "`… sẽ khôi phục phiên …`; 70, no maxCells; result now says restore"
+    }
+  ],
+  "changed_keys": {
+    "es": [
+      {
+        "key": "relay.chrome.session.ended_hint",
+        "before": "Un envío o Reanudar la reabre en tu carpeta personal",
+        "after": "Enviar un mensaje o Reanudar la reabre en tu carpeta personal",
+        "max_cells": null,
+        "cell_width": "61",
+        "findings": [
+          "MIN-01"
+        ]
+      },
+      {
+        "key": "relay.chrome.session.degraded",
+        "before": "No responde — los envíos esperarán",
+        "after": "No responde — los mensajes esperarán",
+        "max_cells": 36,
+        "cell_width": "36",
+        "findings": [
+          "MIN-02"
+        ]
+      }
+    ],
+    "fr": [
+      {
+        "key": "relay.chrome.session.subtitle.waiting",
+        "before": "En attente de vous",
+        "after": "Vous attend",
+        "max_cells": 24,
+        "cell_width": "11",
+        "findings": [
+          "MIN-03"
+        ]
+      },
+      {
+        "key": "relay.chrome.session.ended",
+        "before": "Session terminée · historique conservé",
+        "after": "Terminée · historique conservé",
+        "max_cells": 32,
+        "cell_width": "30",
+        "findings": [
+          "MAJ-04"
+        ]
+      },
+      {
+        "key": "relay.chrome.session.ended_hint",
+        "before": "Un envoi ou Reprendre la rouvre dans votre dossier personnel",
+        "after": "Envoyer un message ou « Reprendre » la rouvre dans votre dossier personnel",
+        "max_cells": null,
+        "cell_width": "74",
+        "findings": [
+          "MIN-04"
+        ]
+      },
+      {
+        "key": "relay.chrome.session.degraded",
+        "before": "Ne répond pas — les envois attendront",
+        "after": "Ne répond pas — les envois attendent",
+        "max_cells": 36,
+        "cell_width": "36",
+        "findings": [
+          "MIN-06"
+        ]
+      }
+    ],
+    "hi": [
+      {
+        "key": "relay.chrome.drawer.status",
+        "before": "{state, select, online {कनेक्टेड · यह फ़ोन} retrying {ऑफ़लाइन · फिर कोशिश} other {कनेक्ट हो रहा है…}}",
+        "after": "{state, select, online {कनेक्टेड · यह फ़ोन} retrying {ऑफ़लाइन · फिर से कोशिश} other {कनेक्ट हो रहा है…}}",
+        "max_cells": 32,
+        "cell_width": "online=13, retrying=16, other=12",
+        "findings": []
+      },
+      {
+        "key": "relay.chrome.list.filter.needs_you",
+        "before": "आपके लिए · {count, number}",
+        "after": "आपका ध्यान चाहिए · {count, number}",
+        "max_cells": 16,
+        "cell_width": "16",
+        "findings": [
+          "MIN-07"
+        ]
+      },
+      {
+        "key": "relay.chrome.list.mark_all",
+        "before": "सभी पढ़ा हुआ चिह्नित करें",
+        "after": "सभी को पढ़ा हुआ चिह्नित करें",
+        "max_cells": 20,
+        "cell_width": "18",
+        "findings": [
+          "MIN-08"
+        ]
+      },
+      {
+        "key": "relay.chrome.session.subtitle.waiting",
+        "before": "आपका इंतज़ार",
+        "after": "आपका इंतज़ार है",
+        "max_cells": 24,
+        "cell_width": "10",
+        "findings": []
+      },
+      {
+        "key": "relay.chrome.session.ended_hint",
+        "before": "संदेश भेजने या “जारी रखें” से यह आपके होम फ़ोल्डर में फिर खुलेगा",
+        "after": "संदेश भेजने पर या “जारी रखें” दबाने पर यह आपके होम फ़ोल्डर में फिर खुलेगा",
+        "max_cells": null,
+        "cell_width": "51",
+        "findings": []
+      }
+    ],
+    "ru": [
+      {
+        "key": "relay.chrome.session.ended_hint",
+        "before": "Отправка сообщения или «Продолжить» снова откроет её в вашей домашней папке",
+        "after": "Отправка сообщения или «Возобновить» снова откроет её в вашей домашней папке",
+        "max_cells": null,
+        "cell_width": "76",
+        "findings": []
+      },
+      {
+        "key": "relay.chrome.session.resume",
+        "before": "Продолжить",
+        "after": "Возобновить",
+        "max_cells": 12,
+        "cell_width": "11",
+        "findings": []
+      },
+      {
+        "key": "relay.chrome.session.resuming",
+        "before": "Продолжаем…",
+        "after": "Возобновляем…",
+        "max_cells": 12,
+        "cell_width": "13",
+        "findings": []
+      }
+    ],
+    "ur": [
+      {
+        "key": "relay.chrome.drawer.status",
+        "before": "{state, select, online {منسلک · یہی فون} retrying {آف لائن · دوبارہ کوشش} other {منسلک ہو رہا ہے…}}",
+        "after": "{state, select, online {منسلک · یہی فون} retrying {آف لائن · دوبارہ کوشش ہو رہی ہے} other {منسلک ہو رہا ہے…}}",
+        "max_cells": 32,
+        "cell_width": "online=15, retrying=31, other=16",
+        "findings": []
+      },
+      {
+        "key": "relay.chrome.link.since_seconds",
+        "before": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · # سیکنڈ پہلے} other {دوبارہ منسلک ہو رہا ہے · # سیکنڈ پہلے}}",
+        "after": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · سنک # سیکنڈ پہلے} other {دوبارہ منسلک ہو رہا ہے · سنک # سیکنڈ پہلے}}",
+        "max_cells": 44,
+        "cell_width": "one=41, other=41",
+        "findings": [
+          "MAJ-01"
+        ]
+      },
+      {
+        "key": "relay.chrome.link.since_minutes",
+        "before": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · # منٹ پہلے} other {دوبارہ منسلک ہو رہا ہے · # منٹ پہلے}}",
+        "after": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · سنک # منٹ پہلے} other {دوبارہ منسلک ہو رہا ہے · سنک # منٹ پہلے}}",
+        "max_cells": 44,
+        "cell_width": "one=39, other=39",
+        "findings": [
+          "MAJ-02"
+        ]
+      },
+      {
+        "key": "relay.chrome.session.resuming",
+        "before": "کھل رہا ہے…",
+        "after": "جاری ہو رہا…",
+        "max_cells": 12,
+        "cell_width": "12",
+        "findings": []
+      },
+      {
+        "key": "relay.chrome.session.degraded",
+        "before": "جواب نہیں دے رہا — پیغام روکے ہیں",
+        "after": "جواب نہیں دے رہا — پیغامات رکے ہیں",
+        "max_cells": 36,
+        "cell_width": "34",
+        "findings": [
+          "MIN-09"
+        ]
+      }
+    ],
+    "vi": [
+      {
+        "key": "relay.chrome.session.ended",
+        "before": "Phiên đã kết thúc · giữ lịch sử",
+        "after": "Phiên kết thúc · lịch sử đã lưu",
+        "max_cells": 32,
+        "cell_width": "31",
+        "findings": [
+          "MAJ-03"
+        ]
+      },
+      {
+        "key": "relay.chrome.session.ended_hint",
+        "before": "Gửi tin nhắn hoặc Mở lại sẽ mở phiên trong thư mục home của bạn",
+        "after": "Gửi tin nhắn hoặc Mở lại sẽ khôi phục phiên trong thư mục home của bạn",
+        "max_cells": null,
+        "cell_width": "70",
+        "findings": [
+          "NIT-02"
+        ]
+      },
+      {
+        "key": "relay.chrome.session.degraded",
+        "before": "Không phản hồi — tin gửi sẽ chờ",
+        "after": "Không phản hồi — tin nhắn sẽ chờ",
+        "max_cells": 36,
+        "cell_width": "32",
+        "findings": []
+      }
+    ],
+    "zh-CN": [
+      {
+        "key": "relay.chrome.link.reconnecting",
+        "before": "正在重连……",
+        "after": "重连中……",
+        "max_cells": 32,
+        "cell_width": "8",
+        "findings": []
+      },
+      {
+        "key": "relay.chrome.link.since_seconds",
+        "before": "{count, plural, other {重连中 · 上次同步于 # 秒前}}",
+        "after": "{count, plural, other {重连中 · 上次同步：# 秒前}}",
+        "max_cells": 44,
+        "cell_width": "other=25",
+        "findings": []
+      },
+      {
+        "key": "relay.chrome.link.since_minutes",
+        "before": "{count, plural, other {重连中 · 上次同步于 # 分钟前}}",
+        "after": "{count, plural, other {重连中 · 上次同步：# 分钟前}}",
+        "max_cells": 44,
+        "cell_width": "other=27",
+        "findings": []
+      }
+    ]
+  },
+  "width_risks": [
+    {
+      "key": "fr list.mark_all",
+      "cells": "21/20",
+      "note": "b1 MIN-05 rejected; correct French kept; no clipping measured"
+    },
+    {
+      "key": "vi list.mark_all",
+      "cells": "22/20",
+      "note": "b1 MIN-10 rejected; alternatives lose idiom/scope; no clipping measured"
+    },
+    {
+      "key": "ru session.resuming",
+      "cells": "13/12",
+      "note": "new +1 (was 11); semantic pass; rendered check"
+    },
+    {
+      "key": "hi list.filter.needs_you",
+      "cells": "15/16, 16/16, 17/16 at 1/2/3 digits",
+      "note": "semantic fix; 3-digit count over cap"
+    },
+    {
+      "key": "ur list.filter.needs_you",
+      "cells": "16/16, 17/16, 18/16 at 1/2/3 digits",
+      "note": "unchanged; chip row scrolls per sidecar"
+    },
+    {
+      "key": "es list.filter.needs_you",
+      "cells": "15/16, 16/16, 17/16 at 1/2/3 digits",
+      "note": "unchanged; 3-digit count over cap"
+    },
+    {
+      "key": "ur list.mark_all",
+      "cells": "20/20",
+      "note": "b1 NIT-01 rejected; at cap; grammatical form 23/20"
+    }
+  ],
+  "at_cap": [
+    "`es` `session.degraded` 36/36",
+    "`fr` `session.degraded` 36/36",
+    "`ur` `session.resuming` 12/12",
+    "`vi` `session.resuming` 12/12"
+  ],
+  "no_maxcells_growth": [
+    "`es` `session.ended_hint` 61",
+    "`fr` `session.ended_hint` 74",
+    "`hi` `session.ended_hint` 51",
+    "`ru` `session.ended_hint` 76",
+    "`vi` `session.ended_hint` 70",
+    "`ur` `session.ended_hint` 85",
+    "`zh-CN` `session.ended_hint` 40"
+  ],
+  "unreachable": "`es` `link.since_*` remain 46/45 cells only in the `many` branch (exact 10^6 counts); the seconds line is <60 s and the minutes counter would need ~2 years. Unreachable; not a risk.",
+  "record_notes": [
+    "ru remediation.json safety-ru says safety labels untouched, but actual diff changes session.ended_hint, session.resume, session.resuming; reviewed, semantics pass, metadata inconsistency only",
+    "zh remediation JSON reports generate_check exit 1 (ledger has 0 relay.chrome rows; shipped.json stale); out of scope for this safety-copy delta",
+    "b1 MIN-06 lexical objection withdrawn: fr corpus uses envois for message sends; width component fixed 37->36"
+  ],
+  "counts": {
+    "b1_findings": 16,
+    "fixed": 13,
+    "rejected_or_withdrawn": 3,
+    "blocker": 0,
+    "major": 0,
+    "new_semantic_minor": 0,
+    "new_semantic_nit": 0,
+    "width_risks": 7
+  },
+  "verdicts": {
+    "es": "PASS",
+    "fr": "PASS",
+    "hi": "PASS",
+    "ru": "PASS",
+    "ur": "PASS",
+    "vi": "PASS",
+    "zh-CN": "PASS",
+    "overall": "PASS — terminal PASS"
+  },
+  "limitations": [
+    "source-semantic delta only; no rendered frame, browser, or runtime",
+    "cell_len against maxCells is a text-budget check, not clipping proof",
+    "target catalogues are untracked; hashes pin the audited bytes",
+    "unchanged values carried by byte proof; only the 25 changed safety-scope values were re-read semantically",
+    "no code, catalogue, ledger, or commit change"
+  ],
+  "artifacts": {
+    "report": "~/.local-operator/sessions/acd16c49df72/scratchpad/chrome25-safety-b2/report.md",
+    "report_sha256": "6a6933f6e10a64275461d2e7fe9cf088057eebe1be2929fce2b4006c2e0c96a2"
+  }
+}

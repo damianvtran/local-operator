@@ -1,0 +1,254 @@
+{
+  "locale": "ur",
+  "namespace": "relay.chrome",
+  "wave": "chrome25",
+  "round": "unified remediation round 1 (first locale audit chrome25-ur-a1 + second safety audit chrome25-safety-b1)",
+  "worktree": "~/local-operator/.worktrees/relay-chrome-i18n",
+  "commit": "535cea359825411741069cbffcee42e2927df9d3",
+  "agent": {
+    "role": "translator",
+    "team": "lopdev",
+    "session": "d409548ee35d",
+    "model_as_reported": "radient/auto",
+    "note": "session header model string; the provider/model behind the auto route is not exposed in-session",
+    "fallback": "none used"
+  },
+  "english": {
+    "path": "local_operator/i18n/catalogues/en/relay.chrome.json",
+    "sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac"
+  },
+  "context": {
+    "path": "local_operator/i18n/catalogues/en/relay.chrome.context.json",
+    "sha256": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a"
+  },
+  "target": {
+    "path": "local_operator/i18n/catalogues/ur/relay.chrome.json",
+    "sha256_before": "6059005113786f1d74fc848a9f254fadd5fba259be11aecfcbf59ebe2cd24d28",
+    "sha256_after": "a90b9bea54c17e3b74527bb7c503363df348d1d625b105431ff8bbed56f39fff",
+    "keys": 83
+  },
+  "changed_keys": [
+    {
+      "key": "relay.chrome.drawer.status",
+      "before": "{state, select, online {منسلک · یہی فون} retrying {آف لائن · دوبارہ کوشش} other {منسلک ہو رہا ہے…}}",
+      "after": "{state, select, online {منسلک · یہی فون} retrying {آف لائن · دوبارہ کوشش ہو رہی ہے} other {منسلک ہو رہا ہے…}}",
+      "before_cells": 99,
+      "after_cells": 109
+    },
+    {
+      "key": "relay.chrome.link.since_seconds",
+      "before": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · # سیکنڈ پہلے} other {دوبارہ منسلک ہو رہا ہے · # سیکنڈ پہلے}}",
+      "after": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · سنک # سیکنڈ پہلے} other {دوبارہ منسلک ہو رہا ہے · سنک # سیکنڈ پہلے}}",
+      "before_cells": 106,
+      "after_cells": 114
+    },
+    {
+      "key": "relay.chrome.link.since_minutes",
+      "before": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · # منٹ پہلے} other {دوبارہ منسلک ہو رہا ہے · # منٹ پہلے}}",
+      "after": "{count, plural, one {دوبارہ منسلک ہو رہا ہے · سنک # منٹ پہلے} other {دوبارہ منسلک ہو رہا ہے · سنک # منٹ پہلے}}",
+      "before_cells": 102,
+      "after_cells": 110
+    },
+    {
+      "key": "relay.chrome.list.starting",
+      "before": "شروع…",
+      "after": "شروع ہو رہا…",
+      "before_cells": 5,
+      "after_cells": 12
+    },
+    {
+      "key": "relay.chrome.row.saving",
+      "before": "محفوظ…",
+      "after": "محفوظ ہو رہا…",
+      "before_cells": 6,
+      "after_cells": 13
+    },
+    {
+      "key": "relay.chrome.appearance.group_by_tag",
+      "before": "گفتگوئیں ٹیگ سے گروپ کریں",
+      "after": "گفتگوئیں ٹیگ کے حساب سے گروپ کریں",
+      "before_cells": 25,
+      "after_cells": 33
+    },
+    {
+      "key": "relay.chrome.session.resuming",
+      "before": "کھل رہا ہے…",
+      "after": "جاری ہو رہا…",
+      "before_cells": 11,
+      "after_cells": 12
+    },
+    {
+      "key": "relay.chrome.session.degraded",
+      "before": "جواب نہیں دے رہا — پیغام روکے ہیں",
+      "after": "جواب نہیں دے رہا — پیغامات رکے ہیں",
+      "before_cells": 33,
+      "after_cells": 34
+    }
+  ],
+  "findings": [
+    {
+      "id": "F1",
+      "source": "chrome25-ur-a1",
+      "severity": "minor",
+      "keys": [
+        "relay.chrome.row.saving"
+      ],
+      "issue": "Bare محفوظ is the completed participle ('saved'); the label replaces the pin action while the computer has not confirmed.",
+      "disposition": "fixed",
+      "evidence": "new value uses the locale's own busy form محفوظ ہو رہا… ; 13 cells vs maxCells 12 (1 over) — accurate tense retained over a misleading abbreviation, flagged for rendered fit"
+    },
+    {
+      "id": "F2",
+      "source": "chrome25-ur-a1",
+      "keys": [
+        "relay.chrome.list.starting"
+      ],
+      "severity": "minor",
+      "issue": "شروع… read as 'start/started', the only non-progressive busy label in the file.",
+      "disposition": "fixed",
+      "evidence": "شروع ہو رہا… ; 12 cells = maxCells 12"
+    },
+    {
+      "id": "F3",
+      "source": "chrome25-ur-a1",
+      "keys": [
+        "relay.chrome.drawer.status"
+      ],
+      "severity": "minor",
+      "issue": "retrying branch was the bare noun دوبارہ کوشش, which reads like a Retry control; the footer states what the app is doing.",
+      "disposition": "fixed",
+      "evidence": "آف لائن · دوبارہ کوشش ہو رہی ہے ; 31 cells vs maxCells 32; select branches online/retrying/other unchanged"
+    },
+    {
+      "id": "F4",
+      "source": "chrome25-ur-a1",
+      "keys": [
+        "relay.chrome.session.degraded"
+      ],
+      "severity": "minor",
+      "issue": "Singular پیغام with plural transitive روکے ہیں reads 'stopped the message', and 'روکے' reads as blocked rather than waiting.",
+      "disposition": "fixed",
+      "evidence": "fixed with the MIN-09 wording پیغامات رکے ہیں (plural subject, intransitive verb); 34 cells vs maxCells 36; F4's primary proposal پیغام قطار میں ہے was NOT used: 'قطار میں' asserts a queue state the English does not state, which the wave brief forbids (no new queued/delivered guarantee), and it keeps the singular پیغام, a weaker agreement fix"
+    },
+    {
+      "id": "F5",
+      "source": "chrome25-ur-a1",
+      "keys": [
+        "relay.chrome.appearance.group_by_tag"
+      ],
+      "severity": "minor",
+      "issue": "ٹیگ سے گروپ کریں is a Hindi-ised calque; Urdu instrumental is کے حساب سے.",
+      "disposition": "fixed",
+      "evidence": "گفتگوئیں ٹیگ کے حساب سے گروپ کریں ; 33 cells vs maxCells 36; کے حساب سے is attested in wire.settings"
+    },
+    {
+      "id": "F6",
+      "source": "chrome25-ur-a1",
+      "keys": [
+        "relay.chrome.drawer.library"
+      ],
+      "severity": "minor",
+      "issue": "Cross-namespace term drift: لائبریری here vs untranslated 'Library' in wire.settings prose.",
+      "disposition": "rejected",
+      "evidence": "out of scope for this wave and not a defect in this file: the drift lives in a shipped, already-audited namespace (wire.settings) that this wave must not edit; glossary §1 does not list Library as keep-English, and the style guide permits settled loanwords in Urdu script (سیشن، ٹوکن، فائل، ریموٹ، ورک اسپیس). لائبریری retained; recorded as a corpus/glossary decision for the owner, not a change here"
+    },
+    {
+      "id": "F7",
+      "source": "chrome25-ur-a1",
+      "keys": [
+        "relay.chrome.session.resuming"
+      ],
+      "severity": "nit",
+      "issue": "Busy state switched verb to 'opening' while the button says جاری رکھیں.",
+      "disposition": "fixed",
+      "evidence": "جاری ہو رہا… ; 12 cells = maxCells 12; same verb as the button"
+    },
+    {
+      "id": "F8",
+      "source": "chrome25-ur-a1",
+      "keys": [
+        "relay.chrome.link.since_seconds",
+        "relay.chrome.link.since_minutes"
+      ],
+      "severity": "nit",
+      "issue": "No lexical referent for 'last synced'; the count can be read as outage duration.",
+      "disposition": "fixed",
+      "evidence": "resolved with the safety round's MAJ-01/02 form: سنک # سیکنڈ پہلے / سنک # منٹ پہلے (42/40 cells vs maxCells 44 at two-digit counts). F8's own proposal (دوبارہ منسلک… · آخری اپ ڈیٹ) was not adopted: it puts a mid-string ellipsis in a string the English does not punctuate that way, and سنک is already attested in wire.settings"
+    },
+    {
+      "id": "F9",
+      "source": "chrome25-ur-a1",
+      "keys": [
+        "relay.chrome.list.filter.needs_you"
+      ],
+      "severity": "nit",
+      "issue": "Width only: 16 cells at one digit (= maxCells 16), 17 at two digits.",
+      "disposition": "deferred",
+      "evidence": "wording retained: آپ کا انتظار · {count, number} is the natural phrasing and matches session.subtitle.waiting; measured 16 cells at a one-digit count (= maxCells 16) and 17 at two digits. No copy change; deferred to the rendered fit pass (the chip row scrolls sideways per the context sidecar)"
+    },
+    {
+      "id": "MAJ-01",
+      "source": "chrome25-safety-b1",
+      "keys": [
+        "relay.chrome.link.since_seconds"
+      ],
+      "severity": "major",
+      "issue": "Dropped 'last synced': the number reads as reconnect duration, not screen freshness.",
+      "disposition": "fixed",
+      "evidence": "سنک # سیکنڈ پہلے ; one/other branches both keep # and the same width; 42 cells at two-digit count vs maxCells 44"
+    },
+    {
+      "id": "MAJ-02",
+      "source": "chrome25-safety-b1",
+      "keys": [
+        "relay.chrome.link.since_minutes"
+      ],
+      "severity": "major",
+      "issue": "Same omission in the minutes variant.",
+      "disposition": "fixed",
+      "evidence": "سنک # منٹ پہلے ; 40 cells at two-digit count vs maxCells 44"
+    },
+    {
+      "id": "MIN-09",
+      "source": "chrome25-safety-b1",
+      "keys": [
+        "relay.chrome.session.degraded"
+      ],
+      "severity": "minor",
+      "issue": "Singular/transitive پیغام روکے ہیں reads 'stopped the message'.",
+      "disposition": "fixed",
+      "evidence": "پیغامات رکے ہیں ; 34 cells vs maxCells 36; states held/waiting, claims no delivery"
+    },
+    {
+      "id": "NIT-01",
+      "source": "chrome25-safety-b1",
+      "keys": [
+        "relay.chrome.list.mark_all"
+      ],
+      "severity": "nit",
+      "issue": "Missing object marker کو in سب پڑھا نشان زد کریں.",
+      "disposition": "rejected",
+      "evidence": "the grammatical full form سب کو پڑھا نشان زد کریں measures 23 cells against the 20-cell header-action budget (rich.cells.cell_len), i.e. 3 cells of clipping risk on a header action; the retained سب پڑھا نشان زد کریں is 20/20 and the object marker is optional with سب in Urdu imperatives. Both audits classify this as a nit/'not a semantic error'; no wording change"
+    }
+  ],
+  "validation": {
+    "key_parity": "83/83, key order identical to en",
+    "structural_icu": "no mismatches in argument name/kind/skeleton or in plural+select branch selectors (repository parser AST walk)",
+    "plural_categories": "ur one/other on all 4 plural messages; every branch renders #",
+    "renders": "messages.render(locale='ur') exercised for all ICU messages incl. select branches and counts 1/2/12",
+    "check_py": "exit 0 — 'check.py: ok — 182 file(s) scanned, 2253 literal(s) at or below the baseline, catalogues consistent; 34 advisory finding(s)'; --catalogues-only '0 problem(s)'",
+    "widths_over_budget": [
+      "relay.chrome.row.saving 13/12 (accepted, tense honesty)",
+      "relay.chrome.list.filter.needs_you 17/16 at two-digit counts (unchanged, layout)"
+    ],
+    "bidi_controls": "none inserted",
+    "english_context_unchanged": true,
+    "other_files": "not modified (git status: only the seven untracked locale catalogues, six of them other translators')"
+  },
+  "residual": [
+    "row.saving is 1 cell over its 12-cell budget: rendered fit check needed (pin action sheet + 72 px swipe tile).",
+    "filter.needs_you reaches 17 cells at two-digit counts against 16: chip row scrolls; rendered fit check.",
+    "list.mark_all stays telegraphese at 20/20; the fully grammatical 23-cell form needs a budget raise.",
+    "drawer.library vs untranslated 'Library' in wire.settings prose is a corpus/glossary decision outside this wave (F6 rejected here)."
+  ]
+}

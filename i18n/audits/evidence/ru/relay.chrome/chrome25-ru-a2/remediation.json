@@ -1,0 +1,273 @@
+{
+  "namespace": "relay.chrome",
+  "locale": "ru",
+  "round": "chrome25-ru-remediation-1",
+  "worktree": "~/local-operator/.worktrees/relay-chrome-i18n",
+  "branch": "i18n/relay-chrome-wave",
+  "base_commit": "535cea359825411741069cbffcee42e2927df9d3",
+  "committed": false,
+  "translator": {
+    "agent": "translator",
+    "team": "lopdev",
+    "session": "635b55fcabb6",
+    "session_model": "radient/auto",
+    "fallback": "none selected or used in this session",
+    "model_note": "harness-reported selection; the resolved provider model id is not exposed in-session and is not claimed"
+  },
+  "audits_answered": [
+    {
+      "id": "chrome25-ru-a1",
+      "kind": "locale audit",
+      "verdict": "PASS — 0 blocker, 0 major, 2 minor (F3, F4), 3 nit (F1, F2, F5)"
+    },
+    {
+      "id": "chrome25-safety-b1",
+      "kind": "independent second safety audit",
+      "verdict": "ru PASS — 0 findings"
+    }
+  ],
+  "inputs": {
+    "english": {
+      "path": "local_operator/i18n/catalogues/en/relay.chrome.json",
+      "sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/relay.chrome.context.json",
+      "sha256": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a"
+    }
+  },
+  "target": {
+    "path": "local_operator/i18n/catalogues/ru/relay.chrome.json",
+    "before_sha256": "27709627e9deb166ae6954a142400f482876b940681819ab6b49234f88d738fd",
+    "after_sha256": "fb17616cb7875507eb4b16853cb7b229a1176f46349d9c942d9cc8a427e6c97c",
+    "bytes_before": 6668,
+    "bytes_after": 6670,
+    "keys": 83,
+    "key_order_matches_en": true,
+    "snapshot_before": "~/.local-operator/sessions/635b55fcabb6/scratchpad/chrome25-ru-remediation/candidate-before.json",
+    "snapshot_after": "~/.local-operator/sessions/635b55fcabb6/scratchpad/chrome25-ru-remediation/candidate-after.json"
+  },
+  "changed_keys": [
+    {
+      "key": "relay.chrome.row.actions",
+      "finding": "F4",
+      "before": "Действия для {name}",
+      "after": "Действия: {name}"
+    },
+    {
+      "key": "relay.chrome.session.ended_hint",
+      "finding": "F3",
+      "before": "Отправка сообщения или «Продолжить» снова откроет её в вашей домашней папке",
+      "after": "Отправка сообщения или «Возобновить» снова откроет её в вашей домашней папке"
+    },
+    {
+      "key": "relay.chrome.session.resume",
+      "finding": "F3",
+      "before": "Продолжить",
+      "after": "Возобновить"
+    },
+    {
+      "key": "relay.chrome.session.resuming",
+      "finding": "F3",
+      "before": "Продолжаем…",
+      "after": "Возобновляем…"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F3",
+      "source": "chrome25-ru-a1",
+      "severity": "minor",
+      "keys": [
+        "relay.chrome.session.resume",
+        "relay.chrome.session.resuming",
+        "relay.chrome.session.ended_hint"
+      ],
+      "disposition": "fixed",
+      "reason": "English resume is already «возобновить» in this locale (wire.slash.resume, wire.slash.archive); «продолж-» is the locale's verb for English continue (tui.notices.budget_exhausted_continue, relay.asks.gate.keep_asking). Aligning removes the drift and keeps the two verbs distinct.",
+      "evidence": [
+        "ru/wire.slash.resume: «Выбрать прошлую беседу или возобновить её (id)» for en 'Pick a past conversation to resume, or resume one (id)'",
+        "ru/wire.slash.archive: «…по id всё ещё можно возобновить» for en '…still resumable by id'",
+        "ru/tui.notices.budget_exhausted_continue: «просим продолжить работу» (continue)",
+        "hint updated in the same pass; session.resume appears verbatim in session.ended_hint (checked programmatically)"
+      ],
+      "width_note": "session.resuming «Возобновляем…» = 13 cells vs maxCells 12; U+2026 is required product typography and no clipping was measured (source-side). Flagged for the rendered-fit pass rather than degraded to a shortened/inflected form."
+    },
+    {
+      "id": "F4",
+      "source": "chrome25-ru-a1",
+      "severity": "minor",
+      "keys": [
+        "relay.chrome.row.actions"
+      ],
+      "disposition": "fixed",
+      "reason": "«для» governs the genitive while {name} is inserted verbatim in the nominative, so «Действия для Сборка релиза» is ungrammatical. The colon construction is case-free and already this surface's pattern for interpolated accessibility labels.",
+      "evidence": [
+        "rendered «Действия: Сборка релиза» (23 cells, budget 40)",
+        "sibling accessible names use the same pattern: composer.folder_label «Рабочая папка: {name}», model_label «Модель: {label}», spend_label «Расходы и контекст: {label}»"
+      ]
+    },
+    {
+      "id": "F1",
+      "source": "chrome25-ru-a1",
+      "severity": "nit",
+      "keys": [
+        "relay.chrome.appearance.on",
+        "relay.chrome.appearance.off"
+      ],
+      "disposition": "rejected",
+      "reason": "«вкл»/«выкл» match the locale's shipped short state pair and its value casing; the 6-cell budget forces the abbreviation anyway. Both audits say no change is required. Recording the pair in the style guide is programme-owned and deferred.",
+      "evidence": [
+        "ru/tui.tags.on = «вкл», .off = «выкл»; ru/tui.schedule.value_on = «вкл», value_off = «выкл»; ru/wire.settings.bool.on = «включено» (lowercase value vocabulary)",
+        "«включено» (8) and «выключено» (10) both exceed maxCells 6"
+      ],
+      "outcome": "kept — proposed alternative rejected; observation answered with evidence"
+    },
+    {
+      "id": "F2",
+      "source": "chrome25-ru-a1",
+      "severity": "nit",
+      "keys": [
+        "relay.chrome.row.mark_read",
+        "relay.chrome.list.mark_all"
+      ],
+      "disposition": "rejected",
+      "reason": "Both independent audits classify «Прочитать»/«Прочитать все» as established Russian messenger idiom for mark-as-read, not a defect; the explicit marking form needs more than the 20-cell header budget and would split the pair.",
+      "evidence": [
+        "«Отметить прочитанными» = 21 cells vs mark_all maxCells 20; «Отметить все прочитанными» = 25",
+        "Telegram ru uses «Прочитать всё» for the same control (cited by both audits)"
+      ],
+      "outcome": "kept — proposed alternative rejected; observation answered with evidence"
+    },
+    {
+      "id": "F5",
+      "source": "chrome25-ru-a1",
+      "severity": "nit (width signal)",
+      "keys": [
+        "relay.chrome.list.filter.unread"
+      ],
+      "disposition": "rejected",
+      "reason": "The short state form is kept: the adjective «Непрочитанные» overruns the 16-cell chip budget at every count, and the short form fits the common cases. A 3-digit count still renders 1 cell over — a rendered-fit signal for QA/design, not a semantic defect.",
+      "evidence": [
+        "«Непрочитано · 3» = 15, «Непрочитано · 12» = 16/16, «Непрочитано · 123» = 17",
+        "«Непрочитанные» is 13 cells → 17 cells at one digit, 19 at three"
+      ],
+      "outcome": "kept — proposed alternative rejected; observation answered with evidence"
+    },
+    {
+      "id": "safety-ru",
+      "source": "chrome25-safety-b1",
+      "severity": "none",
+      "keys": [
+        "session.degraded",
+        "session.tray.approve",
+        "session.tray.approve_label",
+        "session.ended",
+        "session.ended_hint",
+        "list.filter.needs_you",
+        "list.filter.mark_all",
+        "row.mark_read",
+        "drawer.status",
+        "link.*",
+        "snackbar.dismiss"
+      ],
+      "disposition": "no_action",
+      "reason": "The second independent safety audit passed ru with 0 findings. The remediation does not touch the safety labels; re-verified after the pass: 'sends will wait' honesty, approval-pill voice-control prefix, ended/history-kept state and the home-folder promise all intact."
+    }
+  ],
+  "deferred": [
+    {
+      "item": "Record «вкл»/«выкл» as the ru short state pair and «возобновить» (Resume) vs «продолжить» (Continue) in i18n/style-guides/ru.md",
+      "reason": "binding programme reference, outside this catalogue wave's write scope; proposed by audit F1/F3 and left for the programme owner"
+    }
+  ],
+  "validation": {
+    "keys": 83,
+    "key_order_matches_en": true,
+    "icu_argument_parity": true,
+    "select_branches": [
+      "online",
+      "retrying",
+      "other"
+    ],
+    "plural": {
+      "relay.chrome.link.since_seconds": [
+        "one",
+        "few",
+        "many",
+        "other"
+      ],
+      "relay.chrome.link.since_minutes": [
+        "one",
+        "few",
+        "many",
+        "other"
+      ],
+      "relay.chrome.session.tray.questions": [
+        "one",
+        "few",
+        "many",
+        "other"
+      ],
+      "relay.chrome.session.tray.agents_failed": [
+        "one",
+        "few",
+        "many",
+        "other"
+      ]
+    },
+    "cross_key_references": {
+      "approve_label_startswith_approve": true,
+      "list_new_in_empty_hint": true,
+      "resume_in_ended_hint": true
+    },
+    "typography": {
+      "ascii_ellipsis": false,
+      "u2026": 9,
+      "u00b7": 18,
+      "trailing_periods": false,
+      "capitalised_vy": false
+    },
+    "width": {
+      "over_budget_rendered": [
+        {
+          "key": "relay.chrome.session.resuming",
+          "cells": 13,
+          "maxCells": 12,
+          "note": "+1 cell, flagged for rendered fit"
+        }
+      ],
+      "at_budget_rendered": [
+        {
+          "key": "relay.chrome.list.filter.unread",
+          "cells": 16,
+          "maxCells": 16,
+          "count": 12
+        }
+      ]
+    },
+    "check_py": {
+      "command": "cd ~/local-operator/.worktrees/relay-chrome-i18n && PYTHONPATH=. ~/local-operator/.venv/bin/python scripts/i18n/check.py",
+      "exit": 0,
+      "summary": "check.py: ok — 182 file(s) scanned, 2253 literal(s) at or below the baseline, catalogues consistent; 34 advisory finding(s) (report-only until activated)",
+      "ru_problems": 0,
+      "capture": "~/.local-operator/sessions/635b55fcabb6/scratchpad/chrome25-ru-remediation/check.py.out"
+    }
+  },
+  "residual_findings": [
+    "Rendered fit: session.resuming «Возобновляем…» is 13 cells vs maxCells 12 in the ended banner button — confirm no clip at 360–390 px; if it clips, that is a layout/budget decision.",
+    "Rendered fit: list.filter.unread renders 17 cells at a 3-digit count; the sidecar says the chip row scrolls sideways — confirm in the rendered pass.",
+    "Programme-owned style-guide records (see deferred)."
+  ],
+  "not_touched": [
+    "en source",
+    "en context",
+    "other locales",
+    "ledger",
+    "allowance",
+    "generators",
+    "gates",
+    "application code"
+  ],
+  "report_md": "~/.local-operator/sessions/635b55fcabb6/scratchpad/chrome25-ru-remediation/remediation.md"
+}

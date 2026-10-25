@@ -1,0 +1,211 @@
+{
+  "wave": "chrome25",
+  "locale": "es",
+  "namespace": "relay.chrome",
+  "round": "remediation-1",
+  "session": "d69e1fa9cd3c",
+  "role": "translator (team lopdev)",
+  "model": "radient/auto",
+  "model_note": "harness session header reports radient/auto; no fallback model selected or used",
+  "worktree": "~/local-operator/.worktrees/relay-chrome-i18n",
+  "base_commit": "535cea359825411741069cbffcee42e2927df9d3",
+  "english_sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac",
+  "context_sha256": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a",
+  "old_target_sha256": "9e1b68d5e546317ff912e1aa9d463d9ae6d44d7b109e0e584ef5e82a1a667192",
+  "new_target_sha256": "416f3d6c884403ea962f158b1718f3743352674b9e7ffc5a47aed4c7520df333",
+  "keys_total": 83,
+  "key_order_identical_to_english": true,
+  "keys_added": [],
+  "keys_removed": [],
+  "changed_keys": [
+    {
+      "key": "relay.chrome.drawer.open",
+      "before": "Abrir navegación",
+      "after": "Abrir el menú de navegación",
+      "findings": ["chrome25-es-a1-04"]
+    },
+    {
+      "key": "relay.chrome.drawer.close",
+      "before": "Cerrar navegación",
+      "after": "Cerrar el menú de navegación",
+      "findings": ["chrome25-es-a1-04"]
+    },
+    {
+      "key": "relay.chrome.list.filter_empty",
+      "before": "No hay conversaciones con este filtro",
+      "after": "No hay conversaciones que coincidan",
+      "findings": ["chrome25-es-a1-07"]
+    },
+    {
+      "key": "relay.chrome.list.empty_hint",
+      "before": "Empieza una con Nuevo, o desde Local Operator en tu máquina",
+      "after": "Empieza una con el botón Nuevo, o desde Local Operator en tu máquina",
+      "findings": ["chrome25-es-a1-01"]
+    },
+    {
+      "key": "relay.chrome.session.back",
+      "before": "Volver a conversaciones",
+      "after": "Volver a las conversaciones",
+      "findings": ["chrome25-es-a1-05"]
+    },
+    {
+      "key": "relay.chrome.session.loading",
+      "before": "Cargando conversación…",
+      "after": "Cargando la conversación…",
+      "findings": ["chrome25-es-a1-06"]
+    },
+    {
+      "key": "relay.chrome.session.ended_hint",
+      "before": "Un envío o Reanudar la reabre en tu carpeta personal",
+      "after": "Enviar un mensaje o Reanudar la reabre en tu carpeta personal",
+      "findings": ["chrome25-es-a1-02", "chrome25-safety-b1-MIN-01"]
+    },
+    {
+      "key": "relay.chrome.session.degraded",
+      "before": "No responde — los envíos esperarán",
+      "after": "No responde — los mensajes esperarán",
+      "findings": ["chrome25-es-a1-03", "chrome25-safety-b1-MIN-02"]
+    }
+  ],
+  "findings": [
+    {
+      "id": "chrome25-es-a1-01",
+      "source": "first locale audit (es)",
+      "severity": "minor",
+      "key": "relay.chrome.list.empty_hint",
+      "disposition": "fixed",
+      "reason": "Accepted. 'una' (conversación) beside the articleless button name 'Nuevo' reads as a calque of 'start one with New'; naming the control removes the clash while keeping the required button word byte-identical. Key has no maxCells and is documented as wrapping to two lines; length grows 60 -> 68 cells, so rendered fit is flagged below rather than called clipped.",
+      "verified_against": ["en source", "en context (no maxCells; 'wraps to two lines')", "existing es corpus 'Nuevo' FAB convention"]
+    },
+    {
+      "id": "chrome25-es-a1-02",
+      "source": "first locale audit (es)",
+      "severity": "minor",
+      "key": "relay.chrome.session.ended_hint",
+      "disposition": "fixed",
+      "reason": "Accepted, and independently reproduced by the safety audit as MIN-01. 'Un envío' nominalises 'a send' and in this corpus (wire.slash/relay.asks 'un envío anterior', 'Registrar envíos') reads as a dispatch/submission. 'Enviar un mensaje' is the verb form, matches composer.label 'Mensaje', keeps the button word 'Reanudar' verbatim and keeps 'carpeta personal'. No maxCells; no new guarantee added (no queued/delivered claim).",
+      "verified_against": ["en source", "en context ('use that button's translated word', 'home folder')", "es corpus", "safety report MIN-01"]
+    },
+    {
+      "id": "chrome25-es-a1-03",
+      "source": "first locale audit (es)",
+      "severity": "nit",
+      "key": "relay.chrome.session.degraded",
+      "disposition": "fixed",
+      "reason": "Accepted, independently reproduced by the safety audit as MIN-02. Same nominalisation; 'los mensajes' is what the operator types and what waits. 'esperarán' keeps the source's wait sense and adds no delivery guarantee. 36 cells against maxCells 36 (was 34) - at budget, flagged for rendered fit.",
+      "verified_against": ["en source ('sends will wait')", "en context (maxCells 36)", "es corpus composer 'Mensaje'", "safety report MIN-02"]
+    },
+    {
+      "id": "chrome25-es-a1-04",
+      "source": "first locale audit (es)",
+      "severity": "nit",
+      "key": "relay.chrome.drawer.open + relay.chrome.drawer.close",
+      "disposition": "fixed",
+      "reason": "Accepted. Accessible names only (no maxCells, never painted): the bare 'Abrir navegación' is a calque that names no object in Spanish; 'el menú de navegación' names the control and stays consistent with the landmark name 'Navegación' left unchanged in drawer.label.",
+      "verified_against": ["en context (accessible name, drawer, landmark single noun)", "es guide (infinitive action labels)"]
+    },
+    {
+      "id": "chrome25-es-a1-05",
+      "source": "first locale audit (es)",
+      "severity": "nit",
+      "key": "relay.chrome.session.back",
+      "disposition": "fixed",
+      "reason": "Accepted. The definite article is expected in a Spanish back label and this string is also the visible action on the load-failure screen. 27 cells against maxCells 28.",
+      "verified_against": ["en context (accessible name + visible error action, maxCells 28)", "es corpus"]
+    },
+    {
+      "id": "chrome25-es-a1-06",
+      "source": "first locale audit (es)",
+      "severity": "nit",
+      "key": "relay.chrome.session.loading",
+      "disposition": "fixed",
+      "reason": "Accepted. The line names one specific conversation; the article completes the reference. 25 cells against maxCells 28.",
+      "verified_against": ["en context (maxCells 28)", "es corpus"]
+    },
+    {
+      "id": "chrome25-es-a1-07",
+      "source": "first locale audit (es)",
+      "severity": "nit",
+      "key": "relay.chrome.list.filter_empty",
+      "disposition": "fixed",
+      "reason": "Accepted. 'con este filtro' states a property the conversations have, not the matching condition; 'que coincidan' (negated-existence subjunctive) states the match and aligns with the sibling search empty state. 35 cells against maxCells 40; the fuller 'Ninguna conversación coincide con este filtro' is 42 and over budget.",
+      "verified_against": ["en source ('No conversations match this filter')", "en context (maxCells 40)", "es grammar"]
+    },
+    {
+      "id": "chrome25-safety-b1-MIN-01",
+      "source": "second safety audit (all locales)",
+      "severity": "minor",
+      "key": "relay.chrome.session.ended_hint",
+      "disposition": "fixed",
+      "reason": "Same concrete issue as chrome25-es-a1-02; both reviewers agree on the same proposal, applied once.",
+      "verified_against": ["safety report MIN-01", "es target"]
+    },
+    {
+      "id": "chrome25-safety-b1-MIN-02",
+      "source": "second safety audit (all locales)",
+      "severity": "minor",
+      "key": "relay.chrome.session.degraded",
+      "disposition": "fixed",
+      "reason": "Same concrete issue as chrome25-es-a1-03; both reviewers agree on the same proposal, applied once.",
+      "verified_against": ["safety report MIN-02", "es target"]
+    }
+  ],
+  "rejected": [],
+  "deferred": [],
+  "considered_and_left_unchanged": [
+    {
+      "key": "relay.chrome.session.tray.questions",
+      "state": "kept 'one / many / other', branch text unchanged",
+      "reason": "Both audits cleared it; plural categories verified against the locale's CLDR set."
+    },
+    {
+      "key": "relay.chrome.list.filter.needs_you",
+      "state": "kept 'Te necesita · {count, number}'",
+      "reason": "Safety audit flagged only the Hindi equivalent ('for you' loses the action-required sense). Spanish 'te necesita' preserves 'needs you'; the fixed singular is correct at count 1. 16/16 cells at two-digit counts - rendered fit noted."
+    },
+    {
+      "key": "relay.chrome.list.mark_all",
+      "state": "kept 'Marcar todo leído'",
+      "reason": "Safety report explicitly excluded it as a finding (budget-driven compression; full form 'Marcar todo como leído' is 23 cells vs 20). Rendered check still advisable."
+    },
+    {
+      "key": "relay.chrome.link.since_seconds / since_minutes",
+      "state": "kept full words ('sincronizado hace # segundos/minutos')",
+      "reason": "Keeps the 'last synced' element the Urdu major was missing. one/other branches 42-44 cells against maxCells 44; the 'many' branches (46/45 in raw form, 54/53 with a literal 1.000.000 render) are unreachable - seconds switch at 60 and minutes would need ~2 years - and the safety report recorded the same conclusion (not a finding). Accurate idiom retained over abbreviation."
+    },
+    {
+      "key": "relay.chrome.session.ended",
+      "state": "kept 'Finalizada · historial guardado'",
+      "reason": "States history kept as a state (not an imperative), 31/32 cells; both audits cleared the subject drop. Safety's French width major does not apply."
+    },
+    {
+      "key": "relay.chrome.appearance.on / off",
+      "state": "kept 'Sí' / 'No'",
+      "reason": "'Activado'/'Desactivado' cannot fit maxCells 6; both audits cleared."
+    }
+  ],
+  "checks": {
+    "check_py": "ok — 182 file(s) scanned, 2253 literal(s) at or below the baseline, catalogues consistent; 34 advisory finding(s) (report-only until activated); exit 0; zero findings naming es/relay.chrome",
+    "check_catalogues_in_process": "total catalogue problems: 0; problems under es/relay.chrome: []",
+    "argument_tuples": "0 mismatches across all 83 keys (name, kind and order)",
+    "plural_selectors": {
+      "relay.chrome.link.since_seconds": ["many", "one", "other"],
+      "relay.chrome.link.since_minutes": ["many", "one", "other"],
+      "relay.chrome.session.tray.questions": ["many", "one", "other"],
+      "relay.chrome.session.tray.agents_failed": ["many", "one", "other"]
+    },
+    "separators": "U+00B7 middle dot and U+2026 ellipsis preserved in every branch; spaced em dash kept in session.degraded",
+    "typography": "no double spaces, no ASCII '...', no straight quotes, no trailing periods, no usted/vosotros, UTF-8 NFC, trailing newline",
+    "key_parity": "83/83 keys, order identical to English, no additions or removals"
+  },
+  "residual_for_rendered_pass": [
+    "relay.chrome.session.degraded is now exactly 36/36 cells ('No responde — los mensajes esperarán'); confirm it neither wraps nor clips in the banner at 360 px.",
+    "relay.chrome.list.empty_hint grew 60 -> 68 cells (no sidecar budget); confirm it still wraps to two lines in the empty list at 360 px.",
+    "relay.chrome.link.since_seconds sits at 44/44 from a two-digit count; confirm the one-line subtitle does not clip.",
+    "relay.chrome.list.filter.needs_you is 16/16 with a two-digit count; relay.chrome.model.effort is 24/24; relay.chrome.session.ended 31/32; relay.chrome.appearance.group_by_tag 35/36.",
+    "relay.chrome.list.mark_all ('Marcar todo leído') is a budget-driven compression; confirm the header action reads cleanly if the header is tight."
+  ],
+  "not_addressed_out_of_scope": [
+    "Wave-level: tests/unit/i18n/test_catalogues.py::test_wave3_hindi_carries_its_namespace_snapshot_with_parity pins the Hindi namespace tuple and now fails because hi carries relay.chrome (addition by the Hindi translator). Ledger rows and that pinned fixture are the wave owner's change, not this locale's delta."
+  ]
+}

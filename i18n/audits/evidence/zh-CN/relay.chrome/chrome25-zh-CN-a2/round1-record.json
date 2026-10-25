@@ -1,0 +1,227 @@
+{
+  "audit_id": "chrome25-zh-CN-a1",
+  "kind": "translation audit (independent, post-hoc)",
+  "locale": "zh-CN",
+  "namespace": "relay.chrome",
+  "keys_read": 83,
+  "keys_in_source": 83,
+  "date": "2026-10-25",
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "6d6acecadd03",
+    "model": "radient/auto",
+    "model_source": "harness-reported model for this session; no fallback invoked and no role/tool default changed",
+    "independence": "different session from the translator; did not read translator report, wave provenance sidecar or ledger row for relay.chrome; edited nothing"
+  },
+  "repository": {
+    "path": "~/local-operator/.worktrees/relay-chrome-i18n",
+    "branch": "i18n/relay-chrome-wave",
+    "base": "535cea359825411741069cbffcee42e2927df9d3",
+    "head": "535cea359825411741069cbffcee42e2927df9d3",
+    "head_equals_base": true
+  },
+  "hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/relay.chrome.json",
+      "sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/relay.chrome.context.json",
+      "sha256": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/relay.chrome.json",
+      "sha256": "ca2c2df9bf514ef301af0feb86062a96e17f5a2e40d2f8a1febed26f5746646e"
+    }
+  },
+  "target_bytes": {
+    "bytes": 4798,
+    "utf8_bom": false,
+    "crlf": false,
+    "trailing_newline": true,
+    "duplicate_keys": 0,
+    "indent": 2,
+    "key_order_matches_en": true
+  },
+  "verdict": "PASS",
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 4
+  },
+  "area_verdicts": {
+    "drawer.* (12)": "clean",
+    "link.* (3)": "F01 minor, F04 nit",
+    "list.* (21)": "F02 minor; other 20 clean",
+    "snackbar.* (1)": "F05 nit",
+    "row.* (10)": "clean",
+    "appearance.* (5)": "clean",
+    "session.* (25)": "F03 nit, F06 nit; safety copy clean",
+    "composer.* (4)": "clean",
+    "spend.* (1)": "clean",
+    "model.* (1)": "clean"
+  },
+  "safety_wording": {
+    "approve pill": {
+      "key": "relay.chrome.session.tray.approve",
+      "text": "批准",
+      "verdict": "PASS",
+      "note": "matches relay.asks.pending.approve (approve -> 批准); reads as granting the held run"
+    },
+    "approve accessible name": {
+      "key": "relay.chrome.session.tray.approve_label",
+      "text": "批准——有请求等待你处理",
+      "verdict": "PASS",
+      "note": "sidecar requires it to START with the visible pill word for voice control; 批准 matches the pill exactly, and 'a request is waiting for you' is preserved"
+    },
+    "ended banner": {
+      "key": "relay.chrome.session.ended",
+      "text": "会话已结束 · 历史记录保留",
+      "verdict": "PASS",
+      "note": "'history kept' is stated, not implied; no claim of deletion"
+    },
+    "ended hint": {
+      "key": "relay.chrome.session.ended_hint",
+      "text": "发送消息或点击“恢复”会在主目录中重新打开",
+      "verdict": "PASS",
+      "note": "uses the Resume button's own word 恢复 and 主目录 for the operator's home folder as the sidecar defines it; object elision is natural Chinese and the session is the only referent"
+    },
+    "resume button": {
+      "key": "relay.chrome.session.resume",
+      "text": "恢复",
+      "verdict": "PASS",
+      "note": "matches repo 'resume' rendering; reopens the ended session"
+    },
+    "degraded banner": {
+      "key": "relay.chrome.session.degraded",
+      "text": "未响应——消息将等待发送",
+      "verdict": "PASS",
+      "note": "says messages will wait to be sent, matching the sidecar's 'kept and delivered when it answers again'; no data-loss claim"
+    }
+  },
+  "findings": [
+    {
+      "id": "chrome25-zh-CN-a1-F01",
+      "severity": "minor",
+      "category": "idiom (calque)",
+      "keys": [
+        "relay.chrome.link.since_seconds",
+        "relay.chrome.link.since_minutes"
+      ],
+      "current": "{count, plural, other {重连中 · 上次同步于 # 秒前}} / {count, plural, other {重连中 · 上次同步于 # 分钟前}}",
+      "proposed": "{count, plural, other {重连中 · 上次同步：# 秒前}} / {count, plural, other {重连中 · 上次同步：# 分钟前}}",
+      "reason": "「同步于 # 秒前」is a word-for-word rendering of 'synced # seconds ago'; 于 marks a point in time (「同步于 14:30」), not an offset, so 「同步于 1 秒前」is not idiomatic Chinese UI copy. The colon form keeps the English subject order and the full-width colon this locale uses."
+    },
+    {
+      "id": "chrome25-zh-CN-a1-F02",
+      "severity": "minor",
+      "category": "typography (house style)",
+      "keys": [
+        "relay.chrome.list.empty_hint"
+      ],
+      "current": "点击“新建”开始对话，或在电脑上用 Local Operator 开始",
+      "proposed": "点击“新建”开始对话，或在电脑上用Local Operator开始",
+      "reason": "i18n/style-guides/zh-CN.md forbids a space between Chinese text and a Latin/digit run, and the locale's own product-name precedent follows it (cli.browser.json: 「加载Local Operator扩展」). Only string in the namespace that spaces a Latin run; cosmetic, no meaning error."
+    },
+    {
+      "id": "chrome25-zh-CN-a1-F03",
+      "severity": "nit",
+      "category": "glossary consistency",
+      "keys": [
+        "relay.chrome.session.loading"
+      ],
+      "current": "正在读取对话……",
+      "proposed": "正在加载对话……",
+      "reason": "This locale's established rendering of 'Loading …' is 正在加载… (relay.session ×3, relay.shell, tui.hub_links, tui.review); 读取 is used for 'reading …' (relay.asks 'reading asks…', tui.library 'Reading the library…'). 读取对话 is understandable, but one English term should map to one Chinese term."
+    },
+    {
+      "id": "chrome25-zh-CN-a1-F04",
+      "severity": "nit",
+      "category": "consistency",
+      "keys": [
+        "relay.chrome.link.reconnecting"
+      ],
+      "current": "正在重连……",
+      "proposed": "重连中……",
+      "reason": "The same English token 'Reconnecting' renders as 正在重连 in the standalone subtitle and as 重连中 in link.since_seconds/since_minutes, which appear on the same line as the state escalates. Both forms are idiomatic; unify."
+    },
+    {
+      "id": "chrome25-zh-CN-a1-F05",
+      "severity": "nit",
+      "category": "glossary drift (context-scoped)",
+      "keys": [
+        "relay.chrome.snackbar.dismiss"
+      ],
+      "current": "关闭",
+      "proposed": "关闭 (keep; record the exception)",
+      "reason": "'Dismiss' is rendered 忽略 throughout relay.ask, relay.asks and tui.asks (dismiss a question without replying). Here the object is a transient snackbar, where 关闭 is the correct word and 忽略 would import the asks meaning. Drift is real; recommend keeping the text and recording the context-scoped exception in the glossary rather than changing it."
+    },
+    {
+      "id": "chrome25-zh-CN-a1-F06",
+      "severity": "nit",
+      "category": "glossary drift (repo-wide)",
+      "keys": [
+        "relay.chrome.session.subtitle.not_answering",
+        "relay.chrome.session.degraded"
+      ],
+      "current": "未响应 (both)",
+      "proposed": "未响应 (keep; align the others or record the choice)",
+      "reason": "The same English 'not answering' is 无响应 in tui.small.info_panel.not_answering and in relay.asks.error.read_timeout. 未响应 is the more common product string and is internally consistent in this namespace, so this is a repo-wide alignment nit, not a defect of this file."
+    }
+  ],
+  "checks": [
+    {
+      "name": "repo catalogue gate",
+      "command": "PYTHONPATH=<wt> ~/local-operator/.venv/bin/python scripts/i18n/check.py",
+      "exit": 0,
+      "actual": "check.py: ok — 182 file(s) scanned, 2253 literal(s) at or below the baseline, catalogues consistent; 34 advisory finding(s) (report-only until activated)",
+      "log": "repo-check.log"
+    },
+    {
+      "name": "generation drift gate",
+      "command": "PYTHONPATH=<wt> ~/local-operator/.venv/bin/python scripts/i18n/generate.py --check",
+      "exit": 1,
+      "actual": "generate.py --check: committed artifacts are stale — regenerate with .venv/bin/python scripts/i18n/generate.py; changed: local_operator/i18n/data/shipped.json",
+      "diagnosis": "_shipped_locales() needs a passed, fresh ledger row for every namespace a locale carries; zh-CN carries 84 catalogues and the ledger has 83 rows, the only missing one being relay.chrome under audit (same for es/fr/hi/ru/ur/vi). Freshly computed set is ['en'] vs committed 8 locales. Wave-state prerequisite, not a translation defect; regenerate once the audit row is recorded.",
+      "log": "repo-generate-check.log"
+    },
+    {
+      "name": "independent mechanical audit",
+      "command": "PYTHONPATH=<wt> ~/local-operator/.venv/bin/python check_zh.py",
+      "exit": 1,
+      "exit_note": "exit 1 == exactly one style violation (F02); every other assertion passed",
+      "actual": "PASS key sets/order, PASS 83/83 parse, PASS argument name+kind parity, PASS zh-CN CLDR category set with lossless branches, PASS no rendered branch over maxCells, PASS typography sweep, FAIL only 'no space between Chinese text and Latin/digit runs'",
+      "log": "executed-checks.log",
+      "script": "check_zh.py"
+    },
+    {
+      "name": "ICU branch rendering",
+      "command": "runtime.render_message(..., locale='zh-CN') for every plural/select branch",
+      "exit": 0,
+      "actual": "drawer.status 3 branches; plurals at 0/1/2/21/1234; numbers grouped ('1,234 个问题'); agents_failed nested {running}/{total} preserved",
+      "log": "executed-checks.log"
+    },
+    {
+      "name": "negative controls (in-memory, repo untouched)",
+      "command": "synthetic strings only",
+      "exit": 0,
+      "actual": "A unbalanced-brace syntax accepted only as plain text -> '1 个问题'; B missing closing brace rejected MessageSyntaxError; C renamed arg rejected MessageFormatError; D no-arg message renders '已连接'; E argument parity discriminates identical vs renamed pairs (True/True); F one/other plural in zh-CN exposes ['one','other'] != ['other']",
+      "log": "executed-checks.log"
+    }
+  ],
+  "limits": [
+    "No rendered app evidence: width statements are computed display cells, not screenshots; rendered evidence is expected separately and is not claimed here.",
+    "Not a native-speaker sign-off; F01/F03/F04 are judgement calls the implementer may answer rather than apply.",
+    "generate.py --check is red for a wave-state reason explained in checks; it is not a translation finding.",
+    "A second independent pass will also cover the safety copy; this pass covered it explicitly and passed it."
+  ],
+  "evidence_files": {
+    "report": "report.md",
+    "mechanical_log": "executed-checks.log",
+    "script": "check_zh.py",
+    "repo_gate_log": "repo-check.log",
+    "generate_gate_log": "repo-generate-check.log",
+    "record": "record.json"
+  }
+}

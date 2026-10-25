@@ -1,0 +1,312 @@
+{
+ "schema": 1,
+ "audit_id": "chrome25-hi-a2",
+ "round": 2,
+ "round_kind": "terminal delta verification (same locale/scope ownership; no full namespace re-audit)",
+ "locale": "hi",
+ "namespace": "relay.chrome",
+ "base_commit": "535cea359825411741069cbffcee42e2927df9d3",
+ "worktree": "~/local-operator/.worktrees/relay-chrome-i18n",
+ "target": {
+  "path": "local_operator/i18n/catalogues/hi/relay.chrome.json",
+  "state": "untracked working-tree file",
+  "sha256_before": "a29563f5dd0a9f425b717639c28e6a8f4c97382d45b0928bacdf5e12d31285b3",
+  "sha256_after": "eb9f326ca6689ed0d35311cd75ae8cb5683b515e8b638c938790759eeec96784",
+  "before_source": "~/.local-operator/sessions/6f3832cb71c0/scratchpad/hi-relay-chrome.candidate-pre-remediation.json",
+  "before_binding": "the pre-remediation snapshot hash equals my own R1 record.json subject.sha256.target — the exact bytes R1 audited",
+  "hash_method": "hashlib.sha256 over the bytes on disk, recomputed in this run; no hash copied from prose"
+ },
+ "frozen_source": {
+  "en_sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac",
+  "context_sha256": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a",
+  "unchanged": true,
+  "verified_against": [
+   "R1 record",
+   "the audit brief",
+   "the hi remediation record"
+  ]
+ },
+ "scope": {
+  "keys_total": 83,
+  "keys_reviewed_this_round": 7,
+  "keys_carried_forward": 76,
+  "changed_keys": {
+   "relay.chrome.drawer.status": {
+    "before": "{state, select, online {कनेक्टेड · यह फ़ोन} retrying {ऑफ़लाइन · फिर कोशिश} other {कनेक्ट हो रहा है…}}",
+    "after": "{state, select, online {कनेक्टेड · यह फ़ोन} retrying {ऑफ़लाइन · फिर से कोशिश} other {कनेक्ट हो रहा है…}}",
+    "delta": "retrying branch text only; online/other branches and select structure byte-identical"
+   },
+   "relay.chrome.list.filter.needs_you": {
+    "before": "आपके लिए · {count, number}",
+    "after": "आपका ध्यान चाहिए · {count, number}"
+   },
+   "relay.chrome.list.mark_all": {
+    "before": "सभी पढ़ा हुआ चिह्नित करें",
+    "after": "सभी को पढ़ा हुआ चिह्नित करें"
+   },
+   "relay.chrome.row.actions": {
+    "before": "{name} के लिए क्रियाएँ",
+    "after": "{name} के लिए कार्रवाइयाँ"
+   },
+   "relay.chrome.row.saving": {
+    "before": "सहेज रहे हैं…",
+    "after": "सहेजा जा रहा है…"
+   },
+   "relay.chrome.session.subtitle.waiting": {
+    "before": "आपका इंतज़ार",
+    "after": "आपका इंतज़ार है"
+   },
+   "relay.chrome.session.ended_hint": {
+    "before": "संदेश भेजने या “जारी रखें” से यह आपके होम फ़ोल्डर में फिर खुलेगा",
+    "after": "संदेश भेजने पर या “जारी रखें” दबाने पर यह आपके होम फ़ोल्डर में फिर खुलेगा"
+   }
+  },
+  "diff_shape": "value-only, one JSON line per key, 23 unified-diff lines, no reformatting, no key added/removed/reordered; key order identical",
+  "matches_remediation_record": true,
+  "match_method": "independent per-key byte comparison against the pre-remediation snapshot, not a read of the record's table"
+ },
+ "carry_forward_proof": {
+  "method": "per-key byte equality between the pre-remediation snapshot (a29563f5…, the R1 target) and the current file",
+  "identical_keys": 76,
+  "changed_keys": 7,
+  "safety_keys_byte_identical": [
+   "relay.chrome.session.tray.approve",
+   "relay.chrome.session.tray.approve_label",
+   "relay.chrome.session.subtitle.ended",
+   "relay.chrome.session.ended",
+   "relay.chrome.session.resume",
+   "relay.chrome.session.resuming",
+   "relay.chrome.session.degraded",
+   "relay.chrome.session.subtitle.not_answering",
+   "relay.chrome.session.tray.label",
+   "relay.chrome.session.empty_title",
+   "relay.chrome.session.empty_hint",
+   "relay.chrome.composer.label"
+  ],
+  "r1_coverage_retained": "R1 (chrome25-hi-a1) read all 83 keys at exactly a29563f5…; the 76 unchanged keys are those same bytes, so their R1 verdicts stand without re-reading"
+ },
+ "dispositions": [
+  {
+   "id": "chrome25-hi-a1-01",
+   "severity": "major",
+   "key": "relay.chrome.list.filter.needs_you",
+   "remediation_status": "fixed",
+   "applied": "आपका ध्यान चाहिए · {count, number}",
+   "auditor_verdict": "FIXED — accepted",
+   "reason": "The chip now states that the operator's attention is required, which is the substance of the R1 finding; the wording differs from my proposal but is better here (it does not reuse the liveness line's इंतज़ार, and it states the need rather than a wait). 15/16 cells at a 1-digit count."
+  },
+  {
+   "id": "chrome25-hi-a1-02",
+   "severity": "minor",
+   "key": "relay.chrome.session.subtitle.waiting",
+   "remediation_status": "fixed (different wording)",
+   "applied": "आपका इंतज़ार है",
+   "auditor_verdict": "FIXED — accepted",
+   "reason": "The predicate is complete; the four sibling statuses are predicates too (कार्यरत / आइडल / समाप्त / उत्तर नहीं दे रहा). The remediation's critique of my locative proposal is correct — a bare में-phrase would need है as well — so no further churn is warranted. 10/24 cells."
+  },
+  {
+   "id": "chrome25-hi-a1-03",
+   "severity": "minor",
+   "key": "relay.chrome.model.effort",
+   "remediation_status": "rejected",
+   "retained": "तर्क-प्रयास",
+   "auditor_verdict": "REJECTED CORRECTLY — finding withdrawn",
+   "reason": "Verified on disk: तर्क-प्रयास is shipped by wire.settings.model_effort.label ('डिफ़ॉल्ट तर्क-प्रयास'), wire.settings.model.description and wire.slash.effort — the settings row and command for this same knob. My R1 premise ('not the corpus form / unique to this file') was wrong because my corpus grep was capped and its matches truncated. Keeping the control-side term is the consistent choice.",
+   "corpus_split_noted": "the locale does carry रीज़निंग प्रयास in tui.notices.*; that pre-existing split is cross-namespace and out of scope for relay.chrome — recorded, not raised"
+  },
+  {
+   "id": "chrome25-hi-a1-04",
+   "severity": "minor",
+   "key": "relay.chrome.row.actions",
+   "remediation_status": "fixed",
+   "applied": "{name} के लिए कार्रवाइयाँ",
+   "auditor_verdict": "FIXED — accepted",
+   "reason": "कार्रवाई/कार्रवाइयाँ is the corpus term for an actions menu (tui.transcript.group.actions, wire.errors.desktop.credential_operation_failed). Correction accepted: क्रिया is attested elsewhere (wire.settings.aida.description, 'अगली क्रिया'), so my 'only occurrence' supporting claim was wrong; the disposition rests on the concept's term, which is what R1 argued. 21/40 cells."
+  },
+  {
+   "id": "chrome25-hi-a1-05",
+   "severity": "minor",
+   "key": "relay.chrome.session.ended_hint",
+   "remediation_status": "fixed",
+   "applied": "संदेश भेजने पर या “जारी रखें” दबाने पर यह आपके होम फ़ोल्डर में फिर खुलेगा",
+   "auditor_verdict": "FIXED — accepted",
+   "reason": "Both coordinates now carry a verb; the resume label is quoted verbatim (verified True against session.resume), the home-folder destination is kept, and 'दबाने' matches the file's own press verb in list.empty_hint. 51 cells, no maxCells (wraps)."
+  },
+  {
+   "id": "chrome25-hi-a1-06",
+   "severity": "nit",
+   "key": "relay.chrome.list.mark_all",
+   "remediation_status": "fixed",
+   "applied": "सभी को पढ़ा हुआ चिह्नित करें",
+   "auditor_verdict": "FIXED — accepted",
+   "reason": "Dative object marker restored; 18/20 cells by cell_len, so the earlier elision bought nothing."
+  },
+  {
+   "id": "chrome25-hi-a1-07",
+   "severity": "nit",
+   "keys": [
+    "relay.chrome.list.marking",
+    "relay.chrome.row.saving"
+   ],
+   "remediation_status": "fixed (opposite direction to my proposal)",
+   "applied": "passive voice in both: 'चिह्नित हो रहा है…' (unchanged) and 'सहेजा जा रहा है…'",
+   "auditor_verdict": "FIXED — my premise was wrong, their direction is right",
+   "reason": "My R1 report asserted the passive 'सहेजा जा रहा है…' was 16 cells against maxCells 12. Re-measured here with rich.cells.cell_len on the exact string: 11 cells, so the assertion was not executed in R1 — that was my error and the remediation's correction is right. The new value is also byte-identical to the already-shipped relay.session.tags.saving (verified True), so the passive unifies this file and the tags sheet on one voice."
+  },
+  {
+   "id": "chrome25-hi-a1-08",
+   "severity": "nit",
+   "key": "relay.chrome.drawer.status",
+   "remediation_status": "fixed",
+   "applied": "retrying branch: ऑफ़लाइन · फिर से कोशिश",
+   "auditor_verdict": "FIXED — accepted",
+   "reason": "Corpus majority form; 16/32 cells; select selectors and the online/other branches unchanged."
+  },
+  {
+   "id": "chrome25-safety-b1 MIN-07 / MIN-08",
+   "note": "the second safety-stream audit's hi findings land on the same two keys and are visibly applied (needs_you, mark_all). Compatibility confirmed; the safety stream's own delta signoff is that auditor's, not claimed here."
+  }
+ ],
+ "refuted_r1_claims": [
+  {
+   "claim": "a1-03: तर्क-प्रयास is not the corpus form for 'reasoning effort'",
+   "verification": "grep over all 29 hi catalogues: तर्क-प्रयास in wire.settings.model_effort.label, wire.settings.model.description, wire.slash.effort (3 corpus strings) + this key",
+   "outcome": "R1 claim wrong; rejection correct"
+  },
+  {
+   "claim": "a1-07: सहेजा जा रहा है… measures 16 cells (maxCells 12, so passive cannot fit)",
+   "verification": "rich.cells.cell_len('सहेजा जा रहा है…') == 11",
+   "outcome": "R1 measurement wrong (asserted, not executed); remediation's 11/12 is correct"
+  },
+  {
+   "claim": "a1-04: क्रियाएँ is the only occurrence of क्रिया in the corpus",
+   "verification": "wire.settings.aida.description contains 'अगली क्रिया'; the concept term for an actions menu is still कार्रवाई",
+   "outcome": "supporting premise wrong; disposition direction stands and was applied"
+  }
+ ],
+ "checks": [
+  {
+   "name": "repo catalogue validation",
+   "command": "env -i HOME=$ISO LOCAL_OPERATOR_CONFIG_DIR=$ISO/.local-operator PATH=$PATH TERM=xterm-256color ../../.venv/bin/python scripts/i18n/check.py",
+   "output": "check.py: ok — 182 file(s) scanned, 2253 literal(s) at or below the baseline, catalogues consistent; 34 advisory finding(s) (report-only until activated)",
+   "exit_code": 0,
+   "note": "no advisory line mentions hi/ or relay.chrome"
+  },
+  {
+   "name": "key parity and order",
+   "output": "en 83, context 83, hi 83; sets equal True; order identical True",
+   "passed": true
+  },
+  {
+   "name": "ICU arguments, name and kind, all 83 keys",
+   "output": "0 mismatches; plural selector differences [] (four plural keys one+other; drawer.status online/retrying/other)",
+   "passed": true
+  },
+  {
+   "name": "hi CLDR categories vs used",
+   "output": "shipped table ['one','other']; exactly those used; no value-less branch",
+   "passed": true
+  },
+  {
+   "name": "render matrix (shipped runtime)",
+   "output": "30 cases, 0 failures; changed-key samples: 'आपका ध्यान चाहिए · 3', 'आपका ध्यान चाहिए · 12', 'आपका इंतज़ार है', 'सभी को पढ़ा हुआ चिह्नित करें', 'सहेजा जा रहा है…', 'ऑफ़लाइन · फिर से कोशिश', 'minervaai के लिए कार्रवाइयाँ'",
+   "passed": true
+  },
+  {
+   "name": "negative controls",
+   "output": "rename -> \"argument 1 is 'counts', en's is 'count' (renamed or reordered)\"; kind -> \"changed kind 'number' -> 'simple'\"; few -> \"plural category 'few' not in ['one', 'other']\"; valueless branch -> other:False; lossy upgrade -> \"missing locale categories ['one']\"; dropped -> \"en has 2 argument(s), translation has 1\"",
+   "passed": true
+  },
+  {
+   "name": "cross-key integrity",
+   "output": "approve_label starts with visible pill True; ended_hint quotes session.resume verbatim True; empty_hint quotes list.new verbatim True",
+   "passed": true
+  },
+  {
+   "name": "typography on the change set",
+   "output": "no ASCII quotes, no '...', no ZWJ/ZWNJ; U+2026 kept; middle-dot separator mismatches []",
+   "passed": true
+  },
+  {
+   "name": "rendered widths, sample counts",
+   "output": "85 rendered rows, 0 over maxCells",
+   "passed": true
+  },
+  {
+   "name": "rendered widths, 3-digit and 4-digit counts on every count-bearing key",
+   "output": "only relay.chrome.list.filter.needs_you exceeds: 17/16 at 3 digits, 19/16 at 4; all others inside (since_seconds 36/44 and 38/44; agents_failed 20/28 and 22/28; tray.questions 7/16 and 9/16; filter.unread 10/16 and 12/16; tray.tasks 11/16 and 15/16; tray.agents 11/20 and 15/20)",
+   "passed": true,
+   "note": "documented residual, not a semantic defect"
+  },
+  {
+   "name": "row_saving_matches_tags_saving",
+   "output": "relay.chrome.row.saving == relay.session.tags.saving == 'सहेजा जा रहा है…' -> True",
+   "passed": true
+  }
+ ],
+ "residual": [
+  {
+   "key": "relay.chrome.list.filter.needs_you",
+   "issue": "17 cells at a 3-digit count and 19 at 4 digits against maxCells 16",
+   "scope": "only this key; only counts >= 100 or >= 1000 conversations blocked on one operator",
+   "evidence": "rendered through the shipped runtime and measured with rich.cells.cell_len; sidecar says the chip row scrolls sideways and asks only to keep it short; no measured clipping",
+   "owner": "rendered/design fit pass",
+   "gating": false
+  }
+ ],
+ "new_issues": [],
+ "verdict": {
+  "result": "TERMINAL PASS",
+  "open_blockers": 0,
+  "open_majors": 0,
+  "open_minors": 0,
+  "notes": "All seven R1 findings are closed: six fixed (two of them also the safety stream's), one rejected correctly and withdrawn after verification. One documented width residual for the rendered pass."
+ },
+ "limitations": [
+  "R1-stream delta only; the safety stream's delta signoff is another auditor's and is not claimed",
+  "source-only: no rendered app/browser evidence and no runtime lifecycle coverage in this round; widths are cell_len measurements on rendered strings, not laid-out frames",
+  "the target is untracked working-tree state; this receipt is bound to the after hash and lapses if that file changes"
+ ],
+ "independence": {
+  "read": [
+   "current hi/relay.chrome.json",
+   "pre-remediation snapshot at the record's path",
+   "en + context catalogues",
+   "i18n/glossary.md",
+   "i18n/style-guides/hi.md",
+   "the hi remediation.md/remediation.json",
+   "the pre-existing hi corpus for term attestation"
+  ],
+  "not_read": [
+   "other locales' remediation records",
+   "translator final chat summaries"
+  ],
+  "note": "term attestation checked against the corpus files on disk, not against any summary"
+ },
+ "writes": {
+  "repo": "none",
+  "target": "none (hash after the audit equals the hash at review: eb9f326c…)",
+  "ledger": "none",
+  "other_locales": "none",
+  "evidence_location": "this session's scratchpad only"
+ },
+ "provenance": {
+  "role": "translation-auditor",
+  "team": "lopdev",
+  "session_id": "e86bee585698",
+  "job_id": "936f6bb3f7ce",
+  "parent_session_id": "44f93fd45b09",
+  "model": "radient/auto",
+  "model_note": "taken from this run's runtime header (Model: radient/auto); no underlying provider or model id inferred",
+  "harness": "lop v0.90.2",
+  "harness_generation": "20261025T122248Z-0.90.2",
+  "date_utc": "2026-10-25T18:13:27Z"
+ },
+ "evidence_files": [
+  "chrome25-hi-a2/report.md",
+  "chrome25-hi-a2/record.json",
+  "a2-audit_raw.json",
+  "a2-width.json",
+  "a2-check.txt"
+ ]
+}

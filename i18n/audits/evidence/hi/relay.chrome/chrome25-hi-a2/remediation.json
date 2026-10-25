@@ -1,0 +1,244 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "relay.chrome",
+  "round": "remediation-1",
+  "translator": {
+    "role": "translator",
+    "team": "lopdev",
+    "session": "6f3832cb71c0",
+    "provider": "radient",
+    "model": "auto",
+    "model_note": "provider alias; resolved upstream id not recorded in the session store; no fallback invoked or observed"
+  },
+  "harness": "lop v0.90.2",
+  "worktree": "~/local-operator/.worktrees/relay-chrome-i18n",
+  "base_commit": "535cea359825411741069cbffcee42e2927df9d3",
+  "files": {
+    "target": "local_operator/i18n/catalogues/hi/relay.chrome.json",
+    "pre_remediation_snapshot": "~/.local-operator/sessions/6f3832cb71c0/scratchpad/hi-relay-chrome.candidate-pre-remediation.json",
+    "old_sha256": "a29563f5dd0a9f425b717639c28e6a8f4c97382d45b0928bacdf5e12d31285b3",
+    "new_sha256": "eb9f326ca6689ed0d35311cd75ae8cb5683b515e8b638c938790759eeec96784",
+    "key_count": 83,
+    "key_order_matches_en": true,
+    "changed_key_count": 7,
+    "unchanged_key_count": 76
+  },
+  "frozen_source": {
+    "en_sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac",
+    "context_sha256": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a",
+    "en_expected": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac",
+    "context_expected": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a"
+  },
+  "changed_keys": {
+    "relay.chrome.drawer.status": {
+      "old": "{state, select, online {कनेक्टेड · यह फ़ोन} retrying {ऑफ़लाइन · फिर कोशिश} other {कनेक्ट हो रहा है…}}",
+      "new": "{state, select, online {कनेक्टेड · यह फ़ोन} retrying {ऑफ़लाइन · फिर से कोशिश} other {कनेक्ट हो रहा है…}}"
+    },
+    "relay.chrome.list.filter.needs_you": {
+      "old": "आपके लिए · {count, number}",
+      "new": "आपका ध्यान चाहिए · {count, number}"
+    },
+    "relay.chrome.list.mark_all": {
+      "old": "सभी पढ़ा हुआ चिह्नित करें",
+      "new": "सभी को पढ़ा हुआ चिह्नित करें"
+    },
+    "relay.chrome.row.actions": {
+      "old": "{name} के लिए क्रियाएँ",
+      "new": "{name} के लिए कार्रवाइयाँ"
+    },
+    "relay.chrome.row.saving": {
+      "old": "सहेज रहे हैं…",
+      "new": "सहेजा जा रहा है…"
+    },
+    "relay.chrome.session.subtitle.waiting": {
+      "old": "आपका इंतज़ार",
+      "new": "आपका इंतज़ार है"
+    },
+    "relay.chrome.session.ended_hint": {
+      "old": "संदेश भेजने या “जारी रखें” से यह आपके होम फ़ोल्डर में फिर खुलेगा",
+      "new": "संदेश भेजने पर या “जारी रखें” दबाने पर यह आपके होम फ़ोल्डर में फिर खुलेगा"
+    }
+  },
+  "findings": [
+    {
+      "id": "chrome25-hi-a1-01",
+      "severity_reported": "major",
+      "status": "fixed",
+      "proposed_by_audit": "आपका इंतज़ार · {count, number}",
+      "applied": "आपका ध्यान चाहिए · {count, number}",
+      "reason": "Both audits name the same defect: the chip must mean the operator has to act. Adopted the safety audit's action-explicit form; 'आपका इंतज़ार' states a wait (and collides with session.subtitle.waiting, a different claim).",
+      "keys": [
+        "relay.chrome.list.filter.needs_you"
+      ]
+    },
+    {
+      "id": "chrome25-safety-b1 MIN-07",
+      "severity_reported": "minor",
+      "status": "fixed",
+      "applied": "आपका ध्यान चाहिए · {count, number}",
+      "reason": "Same key and same concrete issue as hi-a1-01; adopted verbatim.",
+      "keys": [
+        "relay.chrome.list.filter.needs_you"
+      ]
+    },
+    {
+      "id": "chrome25-hi-a1-02",
+      "severity_reported": "minor",
+      "status": "fixed",
+      "proposed_by_audit": "आपके इंतज़ार में",
+      "applied": "आपका इंतज़ार है",
+      "reason": "Accepted the predicate defect, rejected the locative wording: a bare 'में' phrase is itself a fragment needing 'है'. 'आपका इंतज़ार है' completes the predicate with the same established vocabulary (10/24 cells). The duplicate concern is moot after the needs_you fix.",
+      "keys": [
+        "relay.chrome.session.subtitle.waiting"
+      ]
+    },
+    {
+      "id": "chrome25-hi-a1-03",
+      "severity_reported": "minor",
+      "status": "rejected",
+      "proposed_by_audit": "रीज़निंग प्रयास",
+      "retained": "तर्क-प्रयास",
+      "reason": "तर्क-प्रयास is shipped three times in the Hindi corpus, including wire.settings.model_effort.label ('डिफ़ॉल्ट तर्क-प्रयास') — the row that configures this same knob — plus wire.settings.model.description and wire.slash.effort. Adopting रीज़निंग here would split the term between the model sheet and the settings/command surfaces that set it. The corpus also ships रीज़निंग प्रयास in notices; that pre-existing split is recorded as out of scope.",
+      "keys": [
+        "relay.chrome.model.effort"
+      ]
+    },
+    {
+      "id": "chrome25-hi-a1-04",
+      "severity_reported": "minor",
+      "status": "fixed",
+      "applied": "{name} के लिए कार्रवाइयाँ",
+      "reason": "Corpus term for the concept 'actions' is कार्रवाई (tui.transcript.group.actions '{label} कार्रवाई'); क्रिया also means 'verb'. 21/40 cells.",
+      "keys": [
+        "relay.chrome.row.actions"
+      ]
+    },
+    {
+      "id": "chrome25-hi-a1-05",
+      "severity_reported": "minor",
+      "status": "fixed",
+      "applied": "संदेश भेजने पर या “जारी रखें” दबाने पर यह आपके होम फ़ोल्डर में फिर खुलेगा",
+      "reason": "Second coordinate had no verb; both coordinates now conditional (…पर … दबाने पर), and 'दबाने' matches the press verb used in list.empty_hint. Keeps the Resume label verbatim and the home-folder destination.",
+      "keys": [
+        "relay.chrome.session.ended_hint"
+      ]
+    },
+    {
+      "id": "chrome25-hi-a1-06",
+      "severity_reported": "nit",
+      "status": "fixed",
+      "applied": "सभी को पढ़ा हुआ चिह्नित करें",
+      "reason": "Restores the dative object marker; 18/20 cells by rich.cells.cell_len, fits.",
+      "keys": [
+        "relay.chrome.list.mark_all"
+      ]
+    },
+    {
+      "id": "chrome25-safety-b1 MIN-08",
+      "severity_reported": "minor",
+      "status": "fixed",
+      "applied": "सभी को पढ़ा हुआ चिह्नित करें",
+      "reason": "Same key and issue as hi-a1-06.",
+      "keys": [
+        "relay.chrome.list.mark_all"
+      ]
+    },
+    {
+      "id": "chrome25-hi-a1-07",
+      "severity_reported": "nit",
+      "keys": [
+        "relay.chrome.list.marking",
+        "relay.chrome.row.saving"
+      ],
+      "status": "fixed",
+      "proposed_by_audit": "unify on active: चिह्नित कर रहे हैं… / keep सहेज रहे हैं…",
+      "applied": "unify on passive: चिह्नित हो रहा है… (unchanged) / सहेजा जा रहा है… (restored)",
+      "reason": "The finding's premise is a width claim that does not reproduce: rich.cells.cell_len (the measure the hi guide names) gives सहेजा जा रहा है… = 11 cells against maxCells 12, not 16. The passive therefore fits, and it is the shipped rendering of the same English string in relay.session.tags.saving, so unifying on the passive removes the two-voice defect and the cross-file drift at once. Both busy labels now impersonal passive; row.saving 11/12, marking 12/20."
+    },
+    {
+      "id": "chrome25-hi-a1-08",
+      "severity_reported": "nit",
+      "status": "fixed",
+      "applied": "retrying branch: ऑफ़लाइन · फिर से कोशिश",
+      "reason": "Corpus majority is फिर से कोशिश (14 occurrences vs 8, mostly the imperative फिर कोशिश करें). select selectors online/retrying/other unchanged; branch 16/32 cells.",
+      "keys": [
+        "relay.chrome.drawer.status"
+      ]
+    }
+  ],
+  "checked_no_change": [
+    {
+      "key": "relay.chrome.session.degraded",
+      "note": "Safety audit PASS: भेजे संदेश रुके रहेंगे states the messages are held, not delivered; adds no delivery/queue guarantee the English lacks. Intransitive रुके is correct Hindi. No change."
+    },
+    {
+      "key": "relay.chrome.session.ended",
+      "note": "इतिहास सुरक्षित is a state, not an imperative to keep history; matches the sidecar promise."
+    },
+    {
+      "key": "relay.chrome.session.resume",
+      "note": "जारी रखें is the corpus's /resume wording; resuming खुल रहा है… describes the reopen honestly at 8/12."
+    },
+    {
+      "key": "relay.chrome.session.tray.approve_label",
+      "note": "Still starts with the visible pill string (verified True)."
+    }
+  ],
+  "validation": {
+    "key_parity": "83 == 83; key order identical to en; key sets equal",
+    "icu_arguments": "0 mismatches across all 83 keys (name and kind)",
+    "plural": "categories used: one/other (hi CLDR); every branch keeps other; no value-less branch; identical one/other branches retained (attested Hindi, noun invariant after numerals)",
+    "markers": "· and … counts match en on every key",
+    "cross_key": {
+      "approve_label_prefix": true,
+      "ended_hint_quotes_resume": true,
+      "empty_hint_quotes_new": true,
+      "ended_hint_keeps_home_folder": true
+    },
+    "width": {
+      "measure": "rich.cells.cell_len on rendered values",
+      "over_budget": [
+        {
+          "key": "relay.chrome.list.filter.needs_you",
+          "cells": 17,
+          "maxCells": 16,
+          "case": "3-digit count only; 15 cells at 1 digit, 16 at 2"
+        }
+      ],
+      "tightest": [
+        {
+          "key": "relay.chrome.row.saving",
+          "cells": 11,
+          "maxCells": 12
+        },
+        {
+          "key": "relay.chrome.list.mark_all",
+          "cells": 18,
+          "maxCells": 20
+        }
+      ]
+    },
+    "check_py": {
+      "command": "cd ~/local-operator/.worktrees/relay-chrome-i18n && PYTHONPATH=. ~/local-operator/.venv/bin/python scripts/i18n/check.py",
+      "exit": 0,
+      "output": "check.py: ok — 182 file(s) scanned, 2253 literal(s) at or below the baseline, catalogues consistent; 34 advisory finding(s) (report-only until activated)",
+      "lines_mentioning_hi_or_relay_chrome": 0,
+      "advisory_lines": 34,
+      "advisory_note": "repo-wide literal ratchet on unrelated Python files; report-only"
+    }
+  },
+  "residual_actionable": [
+    {
+      "key": "relay.chrome.list.filter.needs_you",
+      "issue": "17 cells at a 3-digit count against maxCells 16 (1 over). Not abbreviated: shorter options lose the action-required semantics. Sidecar says the chip row scrolls; no measured clipping.",
+      "owner": "rendered/design fit pass"
+    }
+  ],
+  "out_of_scope_noted": [
+    {
+      "issue": "Hindi corpus splits 'reasoning effort' between तर्क-प्रयास (settings label, model description, /effort help) and रीज़निंग प्रयास (tui.notices).",
+      "why_not_here": "cross-namespace harmonisation; this namespace keeps the control-side term."
+    }
+  ]
+}

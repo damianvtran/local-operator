@@ -1,0 +1,308 @@
+{
+  "audit_id": "chrome25-vi-a2",
+  "kind": "translation-audit-delta (round 2)",
+  "locale": "vi",
+  "locale_dir": "ltr",
+  "namespace": "relay.chrome",
+  "base_commit": "535cea359825411741069cbffcee42e2927df9d3",
+  "worktree": "~/local-operator/.worktrees/relay-chrome-i18n",
+  "target_path": "local_operator/i18n/catalogues/vi/relay.chrome.json",
+  "target_tracking": "untracked; no commit made",
+  "timestamp_utc": "2026-10-25T18:15:13Z",
+  "provenance": {
+    "agent": "translation-auditor",
+    "team": "lopdev",
+    "session_id": "757de37d01bd",
+    "model": "radient/auto",
+    "model_disclosure": "id declared by this session's runtime header; the underlying provider model is not exposed to the session and is not inferred",
+    "date": "2026-10-25",
+    "independence": "different session from the translator (70a22e9a7716) and from the safety auditor (chrome25-safety-b1); translator claims were re-derived from the catalogue bytes, the snapshot and the existing locale catalogues",
+    "inputs": [
+      "own R1 report/record (chrome25-vi-a1, session 757de37d01bd)",
+      "chrome25-vi-remediation/remediation.md, remediation.json, relay.chrome.pre-remediation.json (disk record only; no agent final summary used)",
+      "en catalogue + en context sidecar, i18n/glossary.md, i18n/style-guides/vi.md, local_operator/i18n/data/plural_rules.json, existing vi catalogues"
+    ],
+    "read_only": true
+  },
+  "hashes": {
+    "en": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac",
+    "context": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a",
+    "target_old_r1_audited": "97a991ac3245c8b4edd59877eb1d1259affb1c8c77bedd460a0721c08a1d27b8",
+    "target_new_current": "a875b7f4177f4e3d9118a5d779734db751e350c384e01ae6059916bec5c8c1d9",
+    "expected_en": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac",
+    "expected_context": "1c727d1c6c8ddff7c33cbd3abb1ed716e89ab84c864cdb9c319b5df2595fb69a",
+    "r1_target_hash": "97a991ac3245c8b4edd59877eb1d1259affb1c8c77bedd460a0721c08a1d27b8"
+  },
+  "keys": {
+    "total": 83,
+    "changed": 5,
+    "unchanged": 78,
+    "keys_read_semantically_this_round": 19,
+    "covered_by_carry_forward_digest": 64,
+    "order_matches_en": true,
+    "missing": [],
+    "extra": [],
+    "unchanged_digest_before": "586824e7db6c05c3a5a757a7abc08d6eca4e9d28a76abbc88cf8248fde6af9ea",
+    "unchanged_digest_after": "586824e7db6c05c3a5a757a7abc08d6eca4e9d28a76abbc88cf8248fde6af9ea",
+    "changed_digest_before": "ad9f6adc4d7f86808f669d3b59e25134eea662f860ff733fefdaa7dbe027621a",
+    "changed_digest_after": "664c4014c89e893b81d0cdbafbc87f37821b8d57d8e54b916343e65f2a45cd4e"
+  },
+  "delta": [
+    {
+      "key": "relay.chrome.appearance.wide_view",
+      "old": "Xem rộng",
+      "new": "Chế độ rộng",
+      "en": "Wide view",
+      "cells": 11,
+      "maxCells": 28,
+      "within_budget": true,
+      "nfc": true,
+      "satisfies": "F2"
+    },
+    {
+      "key": "relay.chrome.session.ended",
+      "old": "Phiên đã kết thúc · giữ lịch sử",
+      "new": "Phiên kết thúc · lịch sử đã lưu",
+      "en": "Session ended · history kept",
+      "cells": 31,
+      "maxCells": 32,
+      "within_budget": true,
+      "nfc": true,
+      "satisfies": "MAJ-03 (chrome25-safety-b1)"
+    },
+    {
+      "key": "relay.chrome.session.ended_hint",
+      "old": "Gửi tin nhắn hoặc Mở lại sẽ mở phiên trong thư mục home của bạn",
+      "new": "Gửi tin nhắn hoặc Mở lại sẽ khôi phục phiên trong thư mục home của bạn",
+      "en": "A send or Resume reopens it in your home folder",
+      "cells": 70,
+      "maxCells": null,
+      "within_budget": true,
+      "nfc": true,
+      "satisfies": "NIT-02 (chrome25-safety-b1) + F5"
+    },
+    {
+      "key": "relay.chrome.session.degraded",
+      "old": "Không phản hồi — tin gửi sẽ chờ",
+      "new": "Không phản hồi — tin nhắn sẽ chờ",
+      "en": "Not answering — sends will wait",
+      "cells": 32,
+      "maxCells": 36,
+      "within_budget": true,
+      "nfc": true,
+      "satisfies": "F3"
+    },
+    {
+      "key": "relay.chrome.model.effort",
+      "old": "Nỗ lực suy luận",
+      "new": "Mức suy luận",
+      "en": "Reasoning effort",
+      "cells": 12,
+      "maxCells": 24,
+      "within_budget": true,
+      "nfc": true,
+      "satisfies": "F1"
+    }
+  ],
+  "dispositions": [
+    {
+      "item": "F1",
+      "severity_in_r1": "minor",
+      "key": "relay.chrome.model.effort",
+      "status": "fixed",
+      "note": "Mức suy luận, 12 <= 24; matches the settings label surface cited in R1 (wire.settings.model_effort.label -> Mức suy luận mặc định), re-read unchanged."
+    },
+    {
+      "item": "F2",
+      "severity_in_r1": "minor",
+      "key": "relay.chrome.appearance.wide_view",
+      "status": "fixed (auditor's second option used)",
+      "note": "Chế độ rộng, 11 <= 28. Verified: 'bố cục' 0 vi hits; 'chế độ' 13 case-sensitive / 15 case-insensitive hits, the corpus word for modes. Accepted rather than requesting my primary 'Bố cục rộng' — the point (name a mode, not an act) is met."
+    },
+    {
+      "item": "F3",
+      "severity_in_r1": "minor",
+      "key": "relay.chrome.session.degraded",
+      "status": "fixed",
+      "note": "Không phản hồi — tin nhắn sẽ chờ, 32 <= 36. Verified: 'tin gửi' was exactly 1 hit corpus-wide at R1, only here; 0 now. 'tin nhắn' is the corpus word for a message."
+    },
+    {
+      "item": "F4",
+      "severity_in_r1": "minor (width signal)",
+      "key": "relay.chrome.list.mark_all",
+      "status": "accepted as rejected — residual rendered-fit check",
+      "note": "Retained 'Đánh dấu tất cả đã đọc', 22 cells vs 20. Rejection verified sound: the short form would equal row.mark_read byte-for-byte ('Đánh dấu đã đọc'), 'Đã đọc tất cả' is a state, 'đánh dấu hết' has 0 corpus hits. No measured clipping; a pure budget overrun is not a major, so no cosmetic churn is requested."
+    },
+    {
+      "item": "F5",
+      "severity_in_r1": "nit",
+      "key": "relay.chrome.session.ended_hint",
+      "status": "fixed",
+      "note": "'Mở lại' now occurs once; 'sẽ khôi phục phiên' removes the mở/mở repetition."
+    },
+    {
+      "item": "F6",
+      "severity_in_r1": "nit",
+      "key": "relay.chrome.session.ended_hint",
+      "status": "accepted as rejected — deferred to the guide owner",
+      "note": "Replacement would break a real one-term invariant: wire.settings.static.description renders 'The agent home' as 'Thư mục home của tác nhân' (verified verbatim in the corpus). Recording 'home' in i18n/style-guides/vi.md is a repo-artifact change outside the translator's writable files; not a defect in these bytes."
+    },
+    {
+      "item": "n1",
+      "severity_in_r1": "consistency note",
+      "key": "relay.chrome.snackbar.dismiss",
+      "status": "no change — agreed",
+      "note": "Đóng remains the right close-control affordance; the corpus split is a different action."
+    },
+    {
+      "item": "n2",
+      "severity_in_r1": "consistency note",
+      "key": "(capitalisation register)",
+      "status": "withdrawn by the auditor",
+      "note": "Translator's source-driven explanation verified: initial-case agreement with EN is relay.chrome 83/83, relay.asks 77/77, relay.ask 11/11, tui.notices 30/30, relay.session.tags 18/19. My R1 inference that the older relay files drift from the guide was wrong; no pass over them is warranted."
+    }
+  ],
+  "safety": {
+    "approve_label_starts_with_pill": true,
+    "pill": "Phê duyệt",
+    "approve_label": "Phê duyệt — có yêu cầu đang chờ bạn",
+    "hint_names_button_word": true,
+    "hint_button_word_occurrences": 1,
+    "ended_states_kept_history": true,
+    "ended_middle_dot_kept": true,
+    "degraded_message_noun": true,
+    "neighbours_read": [
+      "relay.chrome.session.resume",
+      "relay.chrome.session.resuming",
+      "relay.chrome.session.subtitle.ended",
+      "relay.chrome.session.subtitle.not_answering",
+      "relay.chrome.session.tray.approve",
+      "relay.chrome.session.tray.approve_label",
+      "relay.chrome.session.back",
+      "relay.chrome.composer.label",
+      "relay.chrome.appearance.theme",
+      "relay.chrome.appearance.on",
+      "relay.chrome.appearance.off",
+      "relay.chrome.drawer.appearance",
+      "relay.chrome.spend.title",
+      "relay.chrome.composer.spend_label"
+    ]
+  },
+  "corpus_checks": [
+    {
+      "term": "bố cục",
+      "vi_hits": 0,
+      "supports": "F2 rejection of the primary proposal"
+    },
+    {
+      "term": "chế độ",
+      "vi_hits_case_sensitive": 13,
+      "vi_hits_case_insensitive": 15,
+      "supports": "F2 chosen form is corpus register for modes"
+    },
+    {
+      "term": "tin gửi",
+      "vi_hits_current": 0,
+      "vi_hits_r1_snapshot": 1,
+      "supports": "F3 claim that it was a one-off coinage in this file"
+    },
+    {
+      "term": "tin nhắn",
+      "vi_hits_case_sensitive": 25,
+      "vi_hits_case_insensitive": 27,
+      "supports": "F3 product word for a message"
+    },
+    {
+      "term": "khôi phục",
+      "vi_hits": 2,
+      "supports": "F5/NIT-02 new verb is corpus-attested (tui.projects_edit.refusal_estimate_clear)"
+    },
+    {
+      "term": "đánh dấu hết",
+      "vi_hits": 0,
+      "supports": "F4 alternative rejected as unattested"
+    },
+    {
+      "term": "Thư mục home",
+      "vi_hits": 1,
+      "location": "wire.settings.static.description (EN: 'The agent home')",
+      "supports": "F6 one-term invariant"
+    }
+  ],
+  "checks": [
+    {
+      "name": "repo catalogue validation",
+      "command": "~/local-operator/.venv/bin/python scripts/i18n/check.py",
+      "output": "check.py: ok — 182 file(s) scanned, 2253 literal(s) at or below the baseline, catalogues consistent; 34 advisory finding(s) (report-only until activated); exit 0"
+    },
+    {
+      "name": "ICU argument (name AND kind) parity over all 83 keys",
+      "command": "local_operator.i18n.runtime.message_arguments on every en/vi pair",
+      "output": "clean — 0 mismatches"
+    },
+    {
+      "name": "plural categories and #",
+      "command": "local_operator.i18n.runtime.plural_selectors",
+      "output": "4 plural keys, vi = (('other',),), every branch keeps '#'"
+    },
+    {
+      "name": "changed-key width, NFC, budget",
+      "command": "cell-count + unicodedata NFC over the 5 changed values",
+      "output": "5 keys, all NFC, all within maxCells (or no maxCells): 12/24, 11/28, 32/36, 31/32, 70/-"
+    },
+    {
+      "name": "R1 carry-forward",
+      "command": "sha256 over the sorted key:value map of the 78 unchanged keys, both files",
+      "output": "equal — 586824e7db6c05c3a5a757a7abc08d6eca4e9d28a76abbc88cf8248fde6af9ea"
+    },
+    {
+      "name": "structure",
+      "command": "json load + byte checks",
+      "output": "5377 bytes, 83/83 keys, order == en, trailing newline, no BOM, 0 combining marks, 0 values identical to en, 0 ascii '...', 0 ws/trailing-period anomalies"
+    },
+    {
+      "name": "safety/neighbour render",
+      "command": "local_operator.i18n.runtime.render_message on the 5 changed keys + 8 safety neighbours",
+      "output": "see render_safety.out; approve prefix True, hint names 'Mở lại' once, degraded keeps 'tin nhắn', ended keeps '·'"
+    }
+  ],
+  "verdict": {
+    "overall": "TERMINAL PASS",
+    "blockers": 0,
+    "majors": 0,
+    "r1_minors_fixed": 3,
+    "r1_nit_fixed": 1,
+    "r1_width_signal_retained_pending_rendered_fit": 1,
+    "r1_nit_rejected_and_deferred_to_guide_owner": 1,
+    "auditor_note_withdrawn": 1,
+    "statement": "No real blocker or major remains in the delta; no new out-of-scope issue found. R1 coverage is retained for 78 byte-identical keys by digest."
+  },
+  "residual_open": [
+    {
+      "id": "F4",
+      "kind": "rendered fit",
+      "owner": "wave",
+      "note": "list.mark_all 22 cells vs 20; confirm on a rendered ghost button. Not a defect without measured clipping."
+    },
+    {
+      "id": "F6",
+      "kind": "guide record",
+      "owner": "locale guide owner",
+      "note": "record 'home' in i18n/style-guides/vi.md kept-English list; no catalogue change wanted."
+    }
+  ],
+  "limits": [
+    "No rendered app evidence in this round (no screenshot/painted frame).",
+    "Separate safety delta signoff belongs to chrome25-safety-b1; this receipt only re-verifies the safety keys it shares with my R1 surface.",
+    "Two prose counts in the remediation record differ from mine by 1 (chế độ, tin nhắn); the direction of each claim is what the dispositions rest on and it holds."
+  ],
+  "evidence_files": [
+    "report.md",
+    "record.json",
+    "verify.py",
+    "verify.out",
+    "render_safety.py",
+    "render_safety.out",
+    "chrome25-vi-a2-check.log"
+  ]
+}
