@@ -235,6 +235,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import warnings
 from collections.abc import Callable, Iterator
 
@@ -1409,13 +1410,28 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
 # the test during whose setup/teardown the count grew, which is the only cheap
 # signal that attributes a thread to a test at all.
 #
+# TWO WINDOWS, because a thread alive at the boundary is not a thread the test
+# leaked. ``RelayServer.stop()`` sets its stop flag and closes links but does not
+# join its four daemon loops -- they exit on their next tick, which is AFTER the
+# teardown report this guard reads. Every such test looks like a leaker at the
+# boundary, so a boundary total answers "how many threads existed at that
+# instant", not "what did this test leave behind". A positive boundary delta
+# therefore buys a short grace (default 250 ms, ``LOCAL_OPERATOR_THREAD_LEAK_GRACE_MS``)
+# and a second reading: only a still-positive POST-GRACE delta counts as a leak,
+# and threads that went away during the grace are reported as wind-down instead.
+# The published 481-vs-2,106 comparison from this guard's first run was an
+# at-boundary (upper-bound) figure for exactly this reason.
+#
 # CHEAP, because this runs on 15k-test shards: ``threading.active_count()`` is
-# ``len(threading._active)``, i.e. O(1), and it is read twice per test -- at
+# ``len(threading._active)``, i.e. O(1). Two reads are unconditional -- at
 # ``pytest_runtest_logstart`` (immediately before setup) and on the teardown
-# report (immediately after teardown). ``threading.enumerate()`` is called ONLY
-# when a positive delta has already been found, and its thread names are capped;
-# no stack, no frames, no locals ever leave a thread. The counts are kept per
-# leaking test, not per test: a clean run allocates nothing that survives a test.
+# report (immediately after teardown) -- and the third reading plus the grace are
+# paid ONLY by tests whose end count exceeds their start, because a test that
+# added nothing has nothing to wait for. ``threading.enumerate()`` is called only
+# after that grace, only when the post-grace delta is positive, and its names are
+# capped; no stack, no frames, no locals ever leave a thread. The counters are
+# kept per flagged test, not per test: a clean run allocates nothing that
+# survives a test.
 #
 # The logstart/logreport boundary is also why the lines reach the job log at all:
 # pytest's capture is suspended between phases (it is active only inside setup /
@@ -1449,9 +1465,17 @@ _PER_TEST_LINE_CAP = 40
 _WORST_CAP = 10
 _NAME_CAP = 5
 
+#: How long a test's boundary delta buys before the second reading, and the
+#: knob that moves it. See the two-windows note in the section header: the
+#: wait is what separates a relay loop's next tick from a thread the test kept.
+_GRACE_ENV = "LOCAL_OPERATOR_THREAD_LEAK_GRACE_MS"
+_DEFAULT_GRACE_MS = 250
+#: Clamp: a typo must not turn a 15k-test shard into an hour of sleeps.
+_MAX_GRACE_MS = 10_000
+
 
 class _Leak:
-    """One test that ended its teardown with more threads alive than it began.
+    """One test whose threads were still there AFTER the wind-down grace.
 
     A plain class rather than a dataclass on purpose: ``test_xdist_worker_budget``
     loads this module with ``spec_from_file_location`` without registering it in
@@ -1460,25 +1484,56 @@ class _Leak:
     dataclass here would break every test in that file at import.
     """
 
-    __slots__ = ("after", "before", "daemons", "names", "nodeid")
+    __slots__ = ("daemons", "end", "names", "nodeid", "settled", "start")
 
     def __init__(
-        self, nodeid: str, before: int, after: int, names: tuple[str, ...], daemons: int
+        self,
+        nodeid: str,
+        start: int,
+        end: int,
+        settled: int,
+        names: tuple[str, ...],
+        daemons: int,
     ) -> None:
         self.nodeid = nodeid
-        self.before = before
-        self.after = after
+        self.start = start
+        self.end = end
+        self.settled = settled
         self.names = names
         self.daemons = daemons
 
     @property
-    def delta(self) -> int:
-        return self.after - self.before
+    def at_boundary(self) -> int:
+        """Threads the test appeared to have added when its teardown report fired."""
+        return self.end - self.start
+
+    @property
+    def after_grace(self) -> int:
+        """Threads still there once wind-down had its grace: the leak, by definition."""
+        return self.settled - self.start
 
 
 def _thread_leak_sink(text: str) -> None:
     """One line of report, on stderr (see the section header for why not stdout)."""
     print(text, file=sys.stderr, flush=True)
+
+
+def _thread_leak_grace_seconds() -> float:
+    """How long to wait before the second reading. Never raises, never negative.
+
+    A test that is tearing down four relay loops needs one scheduler tick, not a
+    configurable wait, so the default is short and the knob exists for a slow or
+    loaded machine. Unparseable values fall back to the default silently: this is
+    a diagnostic, and a warning from every worker would be noise in the log it is
+    trying to explain. Clamped so a typo cannot turn a 15k-test shard into an
+    hour of sleeps.
+    """
+    raw = os.environ.get(_GRACE_ENV, "").strip()
+    try:
+        milliseconds = int(raw) if raw else _DEFAULT_GRACE_MS
+    except ValueError:
+        milliseconds = _DEFAULT_GRACE_MS
+    return max(0, min(milliseconds, _MAX_GRACE_MS)) / 1000.0
 
 
 def _sample_threads(delta: int) -> tuple[tuple[str, ...], int]:
@@ -1492,7 +1547,7 @@ def _sample_threads(delta: int) -> tuple[tuple[str, ...], int]:
     threads -- enough to tell an executor pool from a stray ``Thread``, and never
     a claim about which thread belongs to which test.
 
-    Taken only when the caller already has a positive delta.
+    Taken only after the grace, and only when the post-grace delta is positive.
     """
     live = threading.enumerate()
     if delta <= 0 or not live:
@@ -1502,54 +1557,97 @@ def _sample_threads(delta: int) -> tuple[tuple[str, ...], int]:
 
 
 class _ThreadLeakReport:
-    """Per-process accumulator: the tests that leaked, and how much.
+    """Per-process accumulator: the tests that held threads, and how much.
 
     Deliberately not thread-safe: every field is touched from the pytest thread
     that runs tests, and a lock here would be new shared state in the very
     process this guard exists to keep out of memory trouble.
     """
 
-    def __init__(self, worker: str, sink: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        worker: str,
+        sink: Callable[[str], None] | None = None,
+        grace_seconds: float | None = None,
+        wait: Callable[[float], None] | None = None,
+    ) -> None:
         self.worker = worker
         self._sink = sink if sink is not None else _thread_leak_sink
+        self.grace_seconds = (
+            _thread_leak_grace_seconds() if grace_seconds is None else max(0.0, grace_seconds)
+        )
+        #: Injectable so the tests pay no real wall time; production waits.
+        self._wait = wait if wait is not None else time.sleep
         #: nodeid -> count at logstart. Emptied per test, so it holds one entry
         #: per in-flight item rather than one per test in the whole shard.
-        self._before: dict[str, int] = {}
+        self._start: dict[str, int] = {}
         self._worst: list[_Leak] = []
+        #: Tests whose threads were still there after the grace: the leak count.
         self.tests_reported = 0
+        #: Sum of ``after_grace``, i.e. the number the summary may be quoted on.
         self.total_leaked = 0
+        #: Tests with ANY positive boundary delta, and the sum of those deltas --
+        #: the upper bound that includes traffic which wound down.
+        self.boundary_tests = 0
+        self.boundary_threads = 0
+        #: Of those, the ones whose threads were gone by the grace.
+        self.wind_down_tests = 0
+        self.wind_down_threads = 0
         self.peak = 0
         self.lines_emitted = 0
         self.suppressed = 0
 
     def start(self, nodeid: str) -> None:
         """Record the thread count this test starts from."""
-        self._before[nodeid] = threading.active_count()
+        self._start[nodeid] = threading.active_count()
 
     def finish(self, nodeid: str) -> None:
-        """Report the delta at the end of teardown, when it is positive."""
-        before = self._before.pop(nodeid, None)
-        if before is None:
+        """Take the after reading, give wind-down its grace, and report what stayed."""
+        start = self._start.pop(nodeid, None)
+        if start is None:
             # No start reading: the guard was armed mid-test, or an internal
             # error lost it. Nothing can be attributed without both ends.
             return
-        after = threading.active_count()
-        # The before reading is part of "peak seen": a test that inherits 481 and
+        end = threading.active_count()
+        # The start reading is part of "peak seen": a test that inherits 481 and
         # ends at 400 is exactly the state that provokes the OSError.
-        self.peak = max(self.peak, before, after)
-        if after <= before:
+        self.peak = max(self.peak, start, end)
+        if end <= start:
+            # Nothing was added, so there is nothing to wait for. This is what
+            # keeps the grace off the cost of every clean test in the shard.
             return
-        names, daemons = _sample_threads(after - before)
-        leak = _Leak(nodeid=nodeid, before=before, after=after, names=names, daemons=daemons)
+        self._wait(self.grace_seconds)
+        settled = threading.active_count()
+        self.peak = max(self.peak, settled)
+        at_boundary = end - start
+        after_grace = settled - start
+        self.boundary_tests += 1
+        self.boundary_threads += at_boundary
+        if after_grace <= 0:
+            # Added threads at the boundary, none of them by the time the grace
+            # expired: teardown traffic, not a leak. Counted so it is not lost,
+            # and reported as one aggregate line rather than per test.
+            self.wind_down_tests += 1
+            self.wind_down_threads += at_boundary - max(after_grace, 0)
+            return
+        names, daemons = _sample_threads(after_grace)
+        leak = _Leak(
+            nodeid=nodeid,
+            start=start,
+            end=end,
+            settled=settled,
+            names=names,
+            daemons=daemons,
+        )
         self.tests_reported += 1
-        self.total_leaked += leak.delta
+        self.total_leaked += after_grace
         self._remember(leak)
         self._emit_line(leak)
 
     def _remember(self, leak: _Leak) -> None:
-        """Keep the largest ``_WORST_CAP`` deltas for the summary."""
+        """Keep the largest ``_WORST_CAP`` post-grace deltas for the summary."""
         self._worst.append(leak)
-        self._worst.sort(key=lambda kept: kept.delta, reverse=True)
+        self._worst.sort(key=lambda kept: kept.after_grace, reverse=True)
         del self._worst[_WORST_CAP:]
 
     def _emit_line(self, leak: _Leak) -> None:
@@ -1563,27 +1661,43 @@ class _ThreadLeakReport:
             return
         self.lines_emitted += 1
         self._sink(
-            f"[thread-leak] {self.worker}: {leak.nodeid} before={leak.before} "
-            f"after={leak.after} delta=+{leak.delta} daemon={leak.daemons}/{len(leak.names)} "
+            f"[thread-leak] {self.worker}: {leak.nodeid} threads_at_start={leak.start} "
+            f"threads_at_end={leak.end} at_boundary=+{leak.at_boundary} "
+            f"after_grace=+{leak.after_grace} daemon={leak.daemons}/{len(leak.names)} "
             f"names={list(leak.names)}"
         )
 
-    def summary(self) -> str | None:
-        """One line for this process, or None when it saw no leak at all.
+    def summary(self) -> list[str]:
+        """The lines this process owes the log; empty when nothing moved.
 
-        None is what makes a clean run silent: no header, no zero counts, no
-        "0 leaks" line to scroll past in a log that is already enormous.
+        Empty is what makes a clean run silent: no header, no zero counts, no
+        "0 leaks" line to scroll past in a log that is already enormous. A run
+        whose only traffic wound down inside the grace still says so once --
+        otherwise the difference between "the guard saw nothing" and "the guard
+        saw transients that resolved" would be invisible.
         """
-        if self.tests_reported == 0:
-            return None
-        worst = ", ".join(f"+{leak.delta} {leak.nodeid}" for leak in self._worst)
-        tail = f"; {self.suppressed} further line(s) suppressed" if self.suppressed else ""
-        return (
-            f"[thread-leak] {self.worker}: {self.tests_reported} test(s) left "
-            f"{self.total_leaked} thread(s) behind (sum of positive deltas); "
-            f"peak {self.peak} live at a test boundary; "
-            f"worst {len(self._worst)}: {worst}{tail}"
-        )
+        lines: list[str] = []
+        if self.tests_reported:
+            worst = ", ".join(f"+{leak.after_grace} {leak.nodeid}" for leak in self._worst)
+            tail = f"; {self.suppressed} further line(s) suppressed" if self.suppressed else ""
+            lines.append(
+                f"[thread-leak] {self.worker}: {self.tests_reported} test(s) still held "
+                f"{self.total_leaked} thread(s) after a {self._grace_ms}ms grace "
+                f"(sum of after_grace); peak {self.peak} live; "
+                f"worst {len(self._worst)}: {worst}{tail}"
+            )
+        if self.wind_down_tests:
+            lines.append(
+                f"[thread-leak] {self.worker}: wind-down: {self.wind_down_tests} test(s) had "
+                f"{self.wind_down_threads} thread(s) gone by the grace; at_boundary total "
+                f"{self.boundary_threads} thread(s) over {self.boundary_tests} test(s) "
+                f"(an upper bound that includes this wind-down, not a leak count)"
+            )
+        return lines
+
+    @property
+    def _grace_ms(self) -> int:
+        return int(round(self.grace_seconds * 1000))
 
 
 #: This process's reporter, or None where no tests run (see
@@ -1665,7 +1779,7 @@ def _thread_leak_finish(nodeid: str) -> None:
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
-    """Emit this process's summary line, and nothing when it saw no leak.
+    """Emit this process's summary lines, and nothing when it saw no traffic.
 
     ``pytest_unconfigure`` rather than ``pytest_sessionfinish``: that hook is
     already this file's real-store post-mortem, which can return early or raise
@@ -1680,8 +1794,9 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     except Exception:
         _thread_leak_stand_down()
         return
-    if summary is not None:
+    for line in summary:
         try:
-            _thread_leak_sink(summary)
+            _thread_leak_sink(line)
         except Exception:
             _thread_leak_stand_down()
+            return

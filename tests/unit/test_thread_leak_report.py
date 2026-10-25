@@ -5,20 +5,26 @@ that dies of ``OSError: [Errno 12]`` (see the section header in ``conftest.py``
 for the measured evidence). It is reporting only, so the properties worth
 pinning are not "does it fail the run" but:
 
-* a test that grows the live thread count is named with its DELTA;
+* a test whose threads are still there after a short grace is named with BOTH
+  deltas -- ``at_boundary`` and ``after_grace`` -- because a thread alive at the
+  teardown report is not a thread the test kept: ``RelayServer.stop()`` closes
+  its links and lets its daemon loops exit on their next tick;
+* a test whose threads vanish during that grace is wind-down, not a leak, and
+  gets an aggregate count instead of a per-test line;
 * a test that inherits a large count and grows nothing is NOT reported, because
   an absolute reading would blame every later test in a shard for its
   predecessor's threads and name none of the real leakers;
-* a clean test does not even enumerate threads (the per-test cost is two
+* a clean test neither enumerates threads nor waits (the per-test cost is two
   ``active_count()`` reads and nothing else);
 * the per-test lines are capped while the counters keep counting, and the
-  summary still reports the true total;
+  summary still reports the true after-grace total;
 * an internal error is swallowed and noted once, never raised into a test.
 
 Every count below is synthetic: the reporter's own reads go through
 ``threading.active_count``/``threading.enumerate``, and those are monkeypatched,
 so these tests neither create threads nor depend on what the suite happens to be
-running beside them.
+running beside them. The grace is injected as a recording no-op wait for the
+same reason: no test here pays real wall time.
 """
 
 from __future__ import annotations
@@ -92,53 +98,111 @@ def _pin_threads(monkeypatch: pytest.MonkeyPatch, *threads: _FakeThread) -> None
     monkeypatch.setattr(threading, "enumerate", lambda: list(threads))
 
 
-def _report(hook_module: types.ModuleType, lines: list[str]) -> Any:
-    return hook_module._ThreadLeakReport("gw7", sink=lines.append)
-
-
-def test_a_leaking_test_is_named_with_its_delta(hook_module, monkeypatch) -> None:
-    """The one line an operator has to be able to grep out of a CI log."""
-    lines: list[str] = []
-    _pin_counts(monkeypatch, 5, 8)
-    _pin_threads(
-        monkeypatch,
-        *[_FakeThread(f"t{index}", daemon=index >= 5) for index in range(8)],
+def _report(
+    hook_module: types.ModuleType, lines: list[str], *, waits: list[float] | None = None
+) -> Any:
+    """A reporter whose grace records the wait instead of sleeping it."""
+    return hook_module._ThreadLeakReport(
+        "gw7",
+        sink=lines.append,
+        grace_seconds=0.25,
+        wait=(waits if waits is not None else []).append,
     )
-    report = _report(hook_module, lines)
+
+
+def test_a_thread_still_alive_after_the_grace_is_the_leak(hook_module, monkeypatch) -> None:
+    """The line an operator greps: both readings, both deltas, the surviving name."""
+    lines: list[str] = []
+    waits: list[float] = []
+    _pin_counts(monkeypatch, 5, 8, 7)
+    # Two different populations: names sampled BEFORE the grace would say "pre",
+    # so the assertion below is what pins "sampled after".
+    pre_grace = [_FakeThread(f"pre{index}") for index in range(8)]
+    post_grace = [_FakeThread(f"post{index}", daemon=True) for index in range(7)]
+    monkeypatch.setattr(threading, "enumerate", lambda: list(post_grace if waits else pre_grace))
+    report = _report(hook_module, lines, waits=waits)
 
     report.start("tests/unit/test_x.py::test_leaks")
     report.finish("tests/unit/test_x.py::test_leaks")
 
+    assert waits == [0.25], "the grace is paid exactly once, by the flagged test"
     assert len(lines) == 1
     line = lines[0]
     assert line.startswith("[thread-leak] gw7:")
     assert "tests/unit/test_x.py::test_leaks" in line
-    assert "before=5" in line
-    assert "after=8" in line
-    assert "delta=+3" in line
-    # The tail of the live table: three threads by delta, five names at most.
-    assert "names=['t5', 't6', 't7']" in line
-    assert "daemon=3/3" in line
+    assert "threads_at_start=5" in line
+    assert "threads_at_end=8" in line
+    assert "at_boundary=+3" in line
+    assert "after_grace=+2" in line
+    # Two threads still there after the grace: the last two names, both daemons.
+    assert "names=['post5', 'post6']" in line
+    assert "daemon=2/2" in line
     assert report.tests_reported == 1
-    assert report.total_leaked == 3
+    assert report.total_leaked == 2
+    assert report.boundary_tests == 1
+    assert report.boundary_threads == 3
+    assert report.wind_down_tests == 0
 
 
-def test_a_clean_test_is_silent_and_never_enumerates(hook_module, monkeypatch) -> None:
-    """Quiet by default, and cheap: no enumeration unless a delta was found."""
+def test_a_thread_gone_by_the_grace_is_wind_down_not_a_leak(hook_module, monkeypatch) -> None:
+    """RelayServer.stop() does not join its loops; they exit on their next tick.
+
+    A boundary reading calls that a leak. The grace is what separates it from a
+    thread the test kept, and the wind-down aggregate is where it is recorded.
+    """
     lines: list[str] = []
-    _pin_counts(monkeypatch, 5, 5)
+    waits: list[float] = []
+    _pin_counts(monkeypatch, 5, 6, 5)
+    monkeypatch.setattr(
+        threading,
+        "enumerate",
+        lambda: pytest.fail("a wind-down must not sample names"),
+    )
+    report = _report(hook_module, lines, waits=waits)
+
+    report.start("tests/unit/test_x.py::test_relay_stop")
+    report.finish("tests/unit/test_x.py::test_relay_stop")
+
+    assert waits == [0.25]
+    assert lines == [], "a wind-down must not get a per-test leak line"
+    assert report.tests_reported == 0
+    assert report.total_leaked == 0
+    assert report.boundary_tests == 1
+    assert report.boundary_threads == 1
+    assert report.wind_down_tests == 1
+    assert report.wind_down_threads == 1
+
+    summary = report.summary()
+    assert len(summary) == 1
+    assert "wind-down: 1 test(s) had 1 thread(s) gone by the grace" in summary[0]
+    assert "at_boundary total 1 thread(s) over 1 test(s)" in summary[0]
+
+
+def test_a_clean_test_is_silent_never_enumerates_and_never_waits(hook_module, monkeypatch) -> None:
+    """Quiet by default, and cheap: no enumeration and no grace without a delta."""
+    lines: list[str] = []
+    waits: list[float] = []
+    reads: list[int] = []
+
+    def fake_active_count() -> int:
+        reads.append(1)
+        return 5
+
+    monkeypatch.setattr(threading, "active_count", fake_active_count)
     monkeypatch.setattr(
         threading,
         "enumerate",
         lambda: pytest.fail("enumerate() must not be called on a clean test"),
     )
-    report = _report(hook_module, lines)
+    report = _report(hook_module, lines, waits=waits)
 
     report.start("tests/unit/test_x.py::test_clean")
     report.finish("tests/unit/test_x.py::test_clean")
 
+    assert len(reads) == 2, "a clean test reads the count twice and no more"
+    assert waits == [], "a clean test must not pay the wind-down grace"
     assert lines == []
-    assert report.summary() is None
+    assert report.summary() == []
     assert report.tests_reported == 0
     assert report.peak == 5
 
@@ -151,24 +215,28 @@ def test_inherited_threads_are_not_blamed_on_the_next_test(hook_module, monkeypa
     that starts from 400 and ends at 401 is a +1 leaker, not a 401-thread one.
     """
     lines: list[str] = []
-    report = _report(hook_module, lines)
+    waits: list[float] = []
+    report = _report(hook_module, lines, waits=waits)
     _pin_threads(monkeypatch, _FakeThread("inherited", daemon=True))
 
     _pin_counts(monkeypatch, 400, 400)
     report.start("tests/unit/test_x.py::test_inherits_quietly")
     report.finish("tests/unit/test_x.py::test_inherits_quietly")
     assert lines == []
-    assert report.summary() is None
+    assert report.summary() == []
     assert report.peak == 400
+    assert waits == []
 
-    _pin_counts(monkeypatch, 400, 401)
+    _pin_counts(monkeypatch, 400, 401, 401)
     report.start("tests/unit/test_x.py::test_inherits_and_leaks_one")
     report.finish("tests/unit/test_x.py::test_inherits_and_leaks_one")
 
+    assert waits == [0.25]
     assert len(lines) == 1
-    assert "delta=+1" in lines[0], "the absolute count leaked into the delta"
-    assert "before=400" in lines[0]
-    assert "after=401" in lines[0]
+    assert "at_boundary=+1" in lines[0], "the absolute count leaked into the delta"
+    assert "after_grace=+1" in lines[0]
+    assert "threads_at_start=400" in lines[0]
+    assert "threads_at_end=401" in lines[0]
     assert report.total_leaked == 1
     assert report.peak == 401
 
@@ -176,10 +244,11 @@ def test_inherited_threads_are_not_blamed_on_the_next_test(hook_module, monkeypa
 def test_per_test_lines_are_capped_and_the_summary_still_counts(hook_module, monkeypatch) -> None:
     """A shard-wide leak must not write one line per test, and must not under-count."""
     lines: list[str] = []
+    waits: list[float] = []
     counter = itertools.count()
     monkeypatch.setattr(threading, "active_count", lambda: next(counter))
     _pin_threads(monkeypatch, _FakeThread("pool", daemon=True))
-    report = _report(hook_module, lines)
+    report = _report(hook_module, lines, waits=waits)
     leaking = 45
 
     for index in range(leaking):
@@ -187,37 +256,55 @@ def test_per_test_lines_are_capped_and_the_summary_still_counts(hook_module, mon
         report.start(nodeid)
         report.finish(nodeid)
 
+    # Three reads per test out of one counter: start=n, end=n+1, settled=n+2.
     cap = hook_module._PER_TEST_LINE_CAP
     assert len(lines) == cap + 1, "one line per leak plus a single cap notice"
     assert f"capped at {cap}" in lines[-1]
     assert report.lines_emitted == cap
     assert report.suppressed == leaking - cap
     assert report.tests_reported == leaking
-    assert report.total_leaked == leaking
+    assert report.total_leaked == leaking * 2
+    assert report.boundary_threads == leaking
+    assert len(waits) == leaking, "only flagged tests pay the grace"
 
     summary = report.summary()
-    assert summary is not None
-    assert f"{leaking} test(s) left {leaking} thread(s) behind" in summary
-    assert f"peak {leaking * 2 - 1} live" in summary
-    assert summary.count("::") == hook_module._WORST_CAP, "the worst list must be capped too"
-    assert f"{leaking - cap} further line(s) suppressed" in summary
+    assert len(summary) == 1
+    assert f"{leaking} test(s) still held {leaking * 2} thread(s)" in summary[0]
+    assert "after a 250ms grace" in summary[0]
+    assert f"peak {leaking * 3 - 1} live" in summary[0]
+    assert summary[0].count("::") == hook_module._WORST_CAP, "the worst list must be capped too"
+    assert f"{leaking - cap} further line(s) suppressed" in summary[0]
 
 
-def test_the_summary_names_the_worst_deltas_first(hook_module, monkeypatch) -> None:
-    """Worst N by delta, so the first line of triage is the loudest leaker."""
+def test_the_summary_names_the_worst_post_grace_deltas_first(hook_module, monkeypatch) -> None:
+    """Worst N by after_grace, so the first line of triage is the loudest leaker."""
     lines: list[str] = []
     report = _report(hook_module, lines)
     _pin_threads(monkeypatch, *[_FakeThread(f"t{index}") for index in range(8)])
 
     for delta in (1, 7, 3):
-        _pin_counts(monkeypatch, 10, 10 + delta)
+        _pin_counts(monkeypatch, 10, 10 + delta, 10 + delta)
         report.start(f"tests/unit/test_x.py::test_{delta}")
         report.finish(f"tests/unit/test_x.py::test_{delta}")
 
     summary = report.summary()
-    assert summary is not None
-    assert summary.index("+7") < summary.index("+3") < summary.index("+1")
-    assert "3 test(s) left 11 thread(s) behind" in summary
+    assert len(summary) == 1
+    assert summary[0].index("+7") < summary[0].index("+3") < summary[0].index("+1")
+    assert "3 test(s) still held 11 thread(s)" in summary[0]
+
+
+def test_the_grace_is_configurable_and_clamped(hook_module, monkeypatch) -> None:
+    """Default 250 ms, overridable, and a typo cannot turn the shard into sleeps."""
+    monkeypatch.delenv(hook_module._GRACE_ENV, raising=False)
+    assert hook_module._thread_leak_grace_seconds() == 0.25
+    monkeypatch.setenv(hook_module._GRACE_ENV, "500")
+    assert hook_module._thread_leak_grace_seconds() == 0.5
+    monkeypatch.setenv(hook_module._GRACE_ENV, "not-a-number")
+    assert hook_module._thread_leak_grace_seconds() == 0.25
+    monkeypatch.setenv(hook_module._GRACE_ENV, "-50")
+    assert hook_module._thread_leak_grace_seconds() == 0.0
+    monkeypatch.setenv(hook_module._GRACE_ENV, "999999")
+    assert hook_module._thread_leak_grace_seconds() == hook_module._MAX_GRACE_MS / 1000
 
 
 def test_an_internal_error_is_swallowed_and_noted_once(hook_module, monkeypatch, capsys) -> None:
@@ -381,16 +468,17 @@ def test_the_real_hooks_report_a_leak_and_not_its_inheritor(tmp_path: pathlib.Pa
 
     leak = re.search(
         r"\[thread-leak\] (gw\d+): test_probe\.py::test_a_leaks "
-        r"before=(\d+) after=(\d+) delta=\+(\d+) daemon=\d+/\d+ names=\[.*probe-leak.*\]",
+        r"threads_at_start=(\d+) threads_at_end=(\d+) at_boundary=\+(\d+) "
+        r"after_grace=\+(\d+) daemon=\d+/\d+ names=\[.*probe-leak.*\]",
         output,
     )
     assert leak is not None, output
     assert leak.group(1) == "gw0"
-    assert int(leak.group(4)) == 1, "the leak delta is not the one the fixture created"
+    assert int(leak.group(4)) == 1, "the boundary delta is not the one the fixture created"
+    assert int(leak.group(5)) == 1, "a 30 s thread outlives the grace, so it is the leak"
     assert int(leak.group(3)) - int(leak.group(2)) == 1
 
     assert re.search(
-        r"\[thread-leak\] gw0: 1 test\(s\) left 1 thread\(s\) behind "
-        r"\(sum of positive deltas\); peak \d+ live at a test boundary",
+        r"\[thread-leak\] gw0: 1 test\(s\) still held 1 thread\(s\) " r"after a 250ms grace",
         output,
     ), output
