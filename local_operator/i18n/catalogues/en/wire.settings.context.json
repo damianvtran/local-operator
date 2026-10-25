@@ -155,5 +155,59 @@
     "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET). Boolean master switch: ON compresses transcripts older than the age row below.",
     "role": "settings row label",
     "tone": "plain"
+  },
+  "wire.settings.compaction_aged_clear_after_calls.help": {
+    "note": "Age is measured in model calls made after the tool result was produced; only results at least this old are eligible. Minimum 1.",
+    "role": "settings help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.compaction_aged_clear_after_calls.label": {
+    "maxCells": 29,
+    "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET); a longer label is clipped with '…'. Names the age threshold, counted in model calls (requests to the model), not turns or minutes.",
+    "role": "numeric setting label",
+    "tone": "plain"
+  },
+  "wire.settings.compaction_aged_clear_batch_tokens.help": {
+    "note": "Clearing waits until eligible old results add up to this many tokens, so the prompt cache (the provider's cached request prefix) is rewritten rarely rather than on every call.",
+    "role": "settings help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.compaction_aged_clear_batch_tokens.label": {
+    "maxCells": 29,
+    "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET); a longer label is clipped with '…'. Names a THRESHOLD: the token total eligible results must reach before one clearing batch runs. Not 'clear in bulk'.",
+    "role": "numeric setting label",
+    "tone": "plain"
+  },
+  "wire.settings.compaction_aged_clear_enabled.choice.false.description": {
+    "note": "What OFF means, lowercase: every tool result is sent to the model as-is.",
+    "role": "boolean choice description",
+    "tone": "plain"
+  },
+  "wire.settings.compaction_aged_clear_enabled.choice.true.description": {
+    "note": "What ON means, lowercase: old tool results are cleared.",
+    "role": "boolean choice description",
+    "tone": "plain"
+  },
+  "wire.settings.compaction_aged_clear_enabled.help": {
+    "note": "Says what is replaced (old tool results), with what (a short note telling the model how to re-fetch the result), that it happens in batches, and why (long runs stop re-sending them to the model). Nothing is deleted from the transcript. Stays inside the settings page's ~100-cell help budget.",
+    "role": "settings help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.compaction_aged_clear_enabled.label": {
+    "maxCells": 29,
+    "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET); a longer label is clipped with '…'. Boolean master switch for aged tool-result clearing: ON replaces old tool results with a short re-fetch note.",
+    "role": "settings row label",
+    "tone": "plain"
+  },
+  "wire.settings.compaction_aged_clear_min_tokens.help": {
+    "note": "Results smaller than this (estimated tokens) are never cleared: the re-fetch note would save almost nothing.",
+    "role": "settings help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.compaction_aged_clear_min_tokens.label": {
+    "maxCells": 29,
+    "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET); a longer label is clipped with '…'. Names the smallest result size, in tokens, worth clearing.",
+    "role": "numeric setting label",
+    "tone": "plain"
   }
 }

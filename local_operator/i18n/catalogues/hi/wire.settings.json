@@ -108,7 +108,7 @@
   "wire.settings.classification_waitms.label": "↳ इंतज़ार बजट (ms)",
   "wire.settings.compaction.description": "जब संदर्भ की जगह वापस पाने के लिए बातचीत का सारांश बनाया जाता है।",
   "wire.settings.compaction.title": "संपीडन",
-  "wire.settings.compaction_aged_clear_after_calls.help": "कितनी मॉडल कॉल पुराना होने पर कोई टूल परिणाम साफ़ किया जा सकता है।",
+  "wire.settings.compaction_aged_clear_after_calls.help": "किसी टूल परिणाम को साफ़ करने से पहले कितनी मॉडल कॉल बीत जानी चाहिए।",
   "wire.settings.compaction_aged_clear_after_calls.label": "कॉल के बाद साफ़ करें",
   "wire.settings.compaction_aged_clear_batch_tokens.help": "पुराने परिणाम कुल इतने टोकन हो जाने पर ही साफ़ करें, ताकि प्रॉम्प्ट कैश कम ही दोबारा लिखा जाए।",
   "wire.settings.compaction_aged_clear_batch_tokens.label": "साफ़ करने का बैच (टोकन)",

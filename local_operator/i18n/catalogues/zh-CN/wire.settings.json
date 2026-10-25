@@ -111,7 +111,7 @@
   "wire.settings.compaction_aged_clear_after_calls.help": "工具结果须经过多少次模型调用后才可清除。",
   "wire.settings.compaction_aged_clear_after_calls.label": "清除前调用次数",
   "wire.settings.compaction_aged_clear_batch_tokens.help": "旧结果累计达到此token数才清除，以减少提示词缓存的重写次数。",
-  "wire.settings.compaction_aged_clear_batch_tokens.label": "清除批量（token）",
+  "wire.settings.compaction_aged_clear_batch_tokens.label": "批量清除阈值（token）",
   "wire.settings.compaction_aged_clear_enabled.choice.false.description": "保留所有结果",
   "wire.settings.compaction_aged_clear_enabled.choice.true.description": "清除旧结果",
   "wire.settings.compaction_aged_clear_enabled.help": "分批将旧的工具结果替换为简短的重新获取说明，避免长时间运行时反复发送它们。",
