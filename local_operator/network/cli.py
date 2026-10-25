@@ -702,9 +702,29 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     serve.add_argument("--no-launchd", action="store_true", help="Never touch a plist")
     serve.add_argument("--json", action="store_true")
 
-    for action in ("start", "stop", "restart"):
+    for action in ("start", "stop"):
         child = actions.add_parser(action, help=f"{action.capitalize()} the relay")
         child.add_argument("--json", action="store_true")
+
+    restart_parser = actions.add_parser(
+        "restart",
+        help="Restart this relay, or ask a peer to recover its wedged relay",
+        description=(
+            "Without --peer, restart THIS device's relay exactly as before. With --peer, "
+            "ask one paired device to restart only its own relay: the recovery path for "
+            "a wedged remote node, which otherwise cannot be recovered from the origin. "
+            "The other device decides under your device's `update` grant (`lop network "
+            "member grant <network> <device-id> update` on THAT device), a turn in flight "
+            "answers `busy` and names the running work, and there is no --force. The "
+            "receipt reports a restart only after reconnecting to a new relay instance "
+            "with new pid or uptime evidence; accepted, busy, refused, unsupported and "
+            "unconfirmed outcomes are never printed as success."
+        ),
+    )
+    restart_parser.add_argument(
+        "--peer", default="", help="ask this device (a name or id) to restart its own relay"
+    )
+    restart_parser.add_argument("--json", action="store_true")
 
     status = actions.add_parser("status", help="Install state, links, log paths")
     status.add_argument("--json", action="store_true")
@@ -8289,6 +8309,35 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _cmd_restart(args: argparse.Namespace) -> int:
+    """Keep bare restart local; make ``--peer`` an evidenced member-side request."""
+    peer = str(getattr(args, "peer", "") or "")
+    if not peer:
+        return _cmd_service("restart")(args)
+
+    from local_operator.network import meshrestart
+
+    payload = _relay_answer(
+        "peer_restart", peer=peer, timeout=meshrestart.RESTART_CONTROL_TIMEOUT_S
+    )
+    label = str(payload.get("name") or peer)
+    state = str(payload.get("state") or "")
+    message = str(payload.get("message") or "")
+    if state == "restarted":
+        lines = [message]
+    elif state == "busy":
+        lines = [
+            f"{label}: {message or 'restart refused while work is running'}",
+            f"re-run `lop network restart --peer {peer}` when the work finishes",
+        ]
+    else:
+        text = message or str(payload.get("code") or "no answer")
+        # Origin-produced outcomes already name the peer; member-produced busy
+        # and refusal sentences do not. Add the label exactly once.
+        lines = [text if text.startswith((f"{label} ", f"{label}:")) else f"{label}: {text}"]
+    return _emit(args, payload, lines)
+
+
 def _cmd_update(args: argparse.Namespace) -> int:
     """``lop network update <peer>``: ask ONE peer to move to this device's build.
 
@@ -10157,7 +10206,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "serve": _cmd_serve,
     "start": _cmd_service("start"),
     "stop": _cmd_service("stop"),
-    "restart": _cmd_service("restart"),
+    "restart": _cmd_restart,
     "status": _cmd_status,
     "disconnect": _cmd_disconnect,
     "panic": _cmd_panic,

@@ -136,6 +136,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "memory-sync-v1",
     "pair-offer-v1",
     "mesh-update-v1",
+    "mesh-restart-v1",
     "zlib-records-v1",
     # THE COMPLETE PEER-SOURCE CONTRACT'S STORED-READ HALF. Advertised by every
     # build that can serve typed source purposes (metadata/payload/availability)
@@ -174,6 +175,10 @@ MEMORY_SYNC_V1 = "memory-sync-v1"
 #: path applies. Named here so the tuple above, the slice's ask condition and
 #: the tests read ONE spelling of the string.
 MESH_UPDATE_V1 = "mesh-update-v1"
+#: Peer-initiated relay recovery (meshrestart.py). Distinct from the update
+#: feature: a peer that can install builds but predates this op must get a clear
+#: local-remedy refusal, never an unknown-op hang or a restart it cannot report.
+MESH_RESTART_V1 = "mesh-restart-v1"
 #: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
 #: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
 #: the joiner's hello before sending, and the joiner's bounded drain checks it
