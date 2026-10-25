@@ -245,3 +245,82 @@ async def test_a_checkpoint_appended_after_the_proof_is_still_found(
     calls = _count_walks(monkeypatch)
     assert await _bridge_cwd(root) == checkpoint_cwd
     assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
+
+
+@pytest.mark.asyncio
+async def test_a_same_size_middle_rewrite_falls_back_to_the_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1 (MINOR 2), the reviewer's exact repro.
+
+    A checkpoint row written IN PLACE (``r+b``) over a middle row keeps the inode,
+    the size and the final row, so ``validate_anchor`` alone still says absent —
+    asserted below so this test notices if that gate ever learns to catch it. The
+    ``locate`` guard must refuse on the journal's ctime and answer what the walk
+    answers: the planted row's cwd, not the fallback.
+    """
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    await _journal(directory)
+    anchor = tail_anchor.build_anchor(directory)
+    assert anchor is not None
+    assert tail_anchor.write_anchor(directory, anchor)
+    journal = directory / "transcript.jsonl"
+    before = journal.stat()
+    lines = journal.read_bytes().splitlines(keepends=True)
+    target_index = len(lines) // 2
+    original = lines[target_index]
+    planted_cwd = "/tmp/relaunched-elsewhere"
+    row = json.dumps(
+        {
+            "id": "planted",
+            "ts": 1,
+            "type": "custom",
+            "payload": {
+                "custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                "details": {"state": {"cwd": planted_cwd}},
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    assert len(row) + 1 <= len(original), "fixture row too short to host the plant"
+    # Pad inside the JSON string so the line stays exactly the original length.
+    pad = len(original) - 1 - len(row)
+    row = row.replace(b'"id":"planted"', b'"id":"planted' + b"x" * pad + b'"')
+    assert len(row) + 1 == len(original)
+    offset = sum(len(line) for line in lines[:target_index])
+    with journal.open("r+b") as handle:
+        handle.seek(offset)
+        handle.write(row + b"\n")
+    after = journal.stat()
+    assert (after.st_ino, after.st_size) == (before.st_ino, before.st_size)
+    assert lines[-1] == journal.read_bytes().splitlines(keepends=True)[-1]
+    assert tail_anchor.proves_absent(directory), "validate_anchor now catches this itself"
+
+    calls = _count_walks(monkeypatch)
+    assert await _bridge_cwd(root) == planted_cwd
+    assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_append_after_the_proof_keeps_the_fast_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewrite guard must not cost the append path its skip: a journal that grew
+    with ordinary rows (ctime moved) is still proven by the suffix scan."""
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    await _journal(directory)
+    anchor = tail_anchor.build_anchor(directory)
+    assert anchor is not None
+    assert tail_anchor.write_anchor(directory, anchor)
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("appended after the proof"))
+    journal = directory / "transcript.jsonl"
+    assert journal.stat().st_size > anchor.size
+    assert journal.stat().st_ctime_ns > (directory / tail_anchor.ANCHOR_FILENAME).stat().st_mtime_ns
+    calls = _count_walks(monkeypatch)
+    assert await _bridge_cwd(root) == str(root.parent)
+    assert calls == []

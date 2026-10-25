@@ -13,9 +13,12 @@ term of a cache-hit desktop session enter — a read-only open paid for a tool
 registry it never constructs.
 
 CONSTRAINTS.
-- Stdlib only. ``tests/unit/test_import_graph.py`` pins that importing this
-  module, and a cold desktop facade restore, never loads ``session.session`` or
-  ``local_operator.tools``. Adding a heavy import here re-opens the regression.
+- Stdlib only. ``tests/unit/server/test_desktop_cold_enter_fastpath.py`` pins it:
+  ``test_the_roster_leaf_imports_nothing_from_the_package`` (this module loads no
+  other ``local_operator`` module) and
+  ``test_cold_desktop_enter_never_imports_the_live_session_or_tool_stack`` (a real
+  cold desktop enter, roster restore included, never loads ``session.session`` or
+  ``local_operator.tools``). Adding a heavy import here re-opens the regression.
 - ``session.session`` re-exports every name below under its historical spelling
   (``SUBAGENT_ROSTER_SIDECAR``, ``SUBAGENT_ROSTER_CUSTOM_TYPE``,
   ``_SUBAGENT_ROSTER_VERSION``, ``_read_roster_sidecar``), so the writer and

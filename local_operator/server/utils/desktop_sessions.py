@@ -452,6 +452,60 @@ DRAFT_MODEL_KEY = "model"
 DRAFT_MODEL_FIELDS = ("provider", "model_id", "reasoning_effort", "fast_mode")
 
 
+def _checkpoint_proven_absent(path: Path) -> bool:
+    """Whether ``path``'s journal provably carries NO frontend checkpoint row.
+
+    Lets ``_locate`` skip the backward walk that, for a journal with no such row,
+    parses the whole file. The evidence is ``tail_anchor``'s absence record (written
+    by core-start prewarm, never here), re-validated by ``validate_anchor``: same
+    inode, not shrunk, the boundary row's digest, and a needle scan of every byte
+    appended since the record.
+
+    THE SAME-SIZE REWRITE GUARD (review round 1 on #2941). ``validate_anchor``
+    trusts the bytes BELOW the recorded size. An in-place rewrite that keeps the
+    length, the inode and the final row (reproduced with ``r+b``) could plant a
+    checkpoint row there, and ``_locate`` would answer the fallback cwd where the
+    walk answers the row's. So when the journal has NOT grown past the record, its
+    ``st_ctime_ns`` (not settable by ``utime``) must not be newer than the record's
+    own ``st_mtime_ns``: a journal untouched since the proof was published passes,
+    a rewritten one falls back to the walk. A journal that HAS grown is the append
+    path; its ctime moves by construction, so it keeps the suffix scan as its proof
+    — the fast path for a live, appended-to journal is preserved.
+
+    RESIDUAL, stated rather than hidden: a middle rewrite FOLLOWED by an append, or
+    one landing between the prewarm scan and the record's publication, is not
+    caught. Nothing in this repo writes a journal that way (it is append-only;
+    rollback truncates, which the shrink guard refuses), the replay reader already
+    trusts this record identically, and closing it fully means hashing the file —
+    the cost this record exists to avoid.
+    """
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.tail_anchor import (
+        ANCHOR_CUSTOM_TYPE,
+        anchor_path,
+        read_anchor,
+        validate_anchor,
+    )
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    if ANCHOR_CUSTOM_TYPE != FRONTEND_CHECKPOINT_CUSTOM_TYPE:
+        return False
+    anchor = validate_anchor(path, read_anchor(path))
+    # ``validate_anchor`` already refuses a record that is not an absence proof
+    # (a selection-only record from the ledger carries ``checkpoint_absent=False``);
+    # re-stated here so this reader's condition does not depend on that.
+    if anchor is None or not anchor.checkpoint_absent:
+        return False
+    try:
+        journal = os.stat(path / TRANSCRIPT_FILENAME)
+        record = os.stat(anchor_path(path))
+    except OSError:
+        return False
+    if journal.st_size == anchor.size and journal.st_ctime_ns > record.st_mtime_ns:
+        return False
+    return True
+
+
 def _door_may_open(path: Path) -> bool:
     """Whether the desktop door may open the session directory ``path``.
 
@@ -6687,12 +6741,10 @@ def _persisted_children(
     from local_operator.session.roster_sidecar import (
         SUBAGENT_ROSTER_CUSTOM_TYPE,
         SUBAGENT_ROSTER_SIDECAR,
-    )
-    from local_operator.session.roster_sidecar import (
-        read_roster_sidecar as _read_roster_sidecar,
+        read_roster_sidecar,
     )
 
-    payload = _read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
+    payload = read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
     if payload is None and indexed:
         # Files already scanned the journal under its request budget, including a durable
         # negative result. Never fall back to a second unbounded journal read here.
@@ -9269,24 +9321,17 @@ class DesktopSessions:
             # ABSENCE FIRST. For a journal with NO checkpoint row that
             # backward walk has no row to stop on and parses the whole file
             # (measured 290 ms cProfile-cum on a 32k-row journal, on every
-            # fresh process's first open, cache hit or not). ``tail_anchor``
-            # records exactly that fact for exactly this type (its
-            # ``ANCHOR_CUSTOM_TYPE`` is the frontend checkpoint type), written
-            # by core-start prewarm, never by this reader. ``proves_absent``
-            # re-validates the record against the journal on disk (inode,
-            # boundary-row digest, needle scan of every byte appended since),
-            # so when it says absent the walk would have answered ``None``
-            # too; anything unproven — no sidecar, a stale one, a compressed
-            # journal — falls through to the walk unchanged.
-            from local_operator.session.tail_anchor import (
-                ANCHOR_CUSTOM_TYPE,
-                proves_absent,
-            )
-
+            # fresh process's first open, cache hit or not).
+            # ``_checkpoint_proven_absent`` answers from ``tail_anchor``'s
+            # absence record — written by core-start prewarm, never here — and
+            # re-validates it against the journal on disk (inode, boundary-row
+            # digest, needle scan of every byte appended since, and the
+            # same-size rewrite guard). When it says absent the walk would have
+            # answered ``None`` too; anything unproven — no sidecar, a stale
+            # one, a compressed journal — falls through to the walk unchanged.
             checkpoint = (
                 None
-                if ANCHOR_CUSTOM_TYPE == FRONTEND_CHECKPOINT_CUSTOM_TYPE
-                and proves_absent(path)
+                if _checkpoint_proven_absent(path)
                 else read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
             )
             return _LocatedSession(

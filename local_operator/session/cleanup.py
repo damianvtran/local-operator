@@ -1851,7 +1851,7 @@ def _subagent_child_count(directory: Path) -> int:
     """How many subagent runs ``directory`` launched, best-effort, or 0.
 
     Read from the runtime's own roster sidecar through the same reader the
-    desktop's child routes use (``session.session._read_roster_sidecar``) rather
+    desktop's child routes use (``session.roster_sidecar.read_roster_sidecar``) rather
     than re-parsing the file, so "how many children does this conversation
     have" has one answer per conversation.
 
@@ -1862,12 +1862,12 @@ def _subagent_child_count(directory: Path) -> int:
     less informative.
     """
     try:
-        from local_operator.session.roster_sidecar import SUBAGENT_ROSTER_SIDECAR
         from local_operator.session.roster_sidecar import (
-            read_roster_sidecar as _read_roster_sidecar,
+            SUBAGENT_ROSTER_SIDECAR,
+            read_roster_sidecar,
         )
 
-        payload = _read_roster_sidecar(directory / SUBAGENT_ROSTER_SIDECAR)
+        payload = read_roster_sidecar(directory / SUBAGENT_ROSTER_SIDECAR)
     except Exception:  # noqa: BLE001 — bookkeeping for a receipt, never a decision
         return 0
     if not payload:
