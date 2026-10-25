@@ -1602,6 +1602,107 @@ async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_scratchpad_write_appends_the_soft_crossing_advisory(tmp_path, monkeypatch) -> None:
+    """The real write receipt carries exactly one advisory line on the crossing."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+    content = "x" * 3072
+
+    result = await tools["write"].execute(
+        "c", {"path": "scratchpad://notes.md", "content": content}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert result.text == (
+        f"Created scratchpad://notes.md -> {pad / 'notes.md'} ({len(content)} chars)"
+        " — kept for this session (survives restarts).\n"
+        "[scratch] The pad is 75% full (1,024 bytes left) — remove the biggest file "
+        "first; build/dependency trees belong in a git worktree, not the pad."
+    )
+    assert result.text.count("[scratch] ") == 1
+    assert (pad / "notes.md").read_text(encoding="utf-8") == content
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_overwrites_above_the_soft_threshold_do_not_nag_again(
+    tmp_path, monkeypatch
+) -> None:
+    """An existing large file is already IN the pad-before total.
+
+    The first write really crosses (0% to 80%) and advises once. A same-size
+    edit and an identical-content rewrite then stay silent: excluding the old
+    file for the hard cap must not make either look like a fresh 0% to 80% cross.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 10240)
+    content = "x" * 8191 + "z"
+
+    crossed = await tools["write"].execute(
+        "c", {"path": "scratchpad://large.md", "content": content}, None, None, context
+    )
+
+    target = pad / "large.md"
+    assert crossed.is_error is False
+    assert crossed.text.count("[scratch] ") == 1
+    assert "The pad is 80% full (2,048 bytes left)" in crossed.text
+    assert target.stat().st_blocks * 512 >= 8192
+
+    updated = "x" * 8191 + "y"
+    edited = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://large.md", "old_text": "z", "new_text": "y"},
+        None,
+        None,
+        context,
+    )
+
+    assert edited.is_error is False
+    assert "[scratch] " not in edited.text
+    assert target.read_text(encoding="utf-8") == updated
+
+    rewritten = await tools["write"].execute(
+        "c", {"path": "scratchpad://large.md", "content": updated}, None, None, context
+    )
+
+    assert rewritten.is_error is False
+    assert "[scratch] " not in rewritten.text
+    assert target.read_text(encoding="utf-8") == updated
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_edit_appends_the_measured_soft_crossing_advisory(
+    tmp_path, monkeypatch
+) -> None:
+    """The edit receipt uses the FINAL payload's crossing, not its size-less preflight."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    target = pad / "notes.md"
+    target.write_text("seed\n", encoding="utf-8")
+    # The existing file's allocated block is part of pad-before: 4,096 / 8,192
+    # starts at 50%, so the final 6,144-byte payload still tests the 75% crossing.
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 8192)
+    replacement = "x" * 6144
+
+    result = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://notes.md", "old_text": "seed\n", "new_text": replacement},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    assert result.text == (
+        f"Edited scratchpad://notes.md -> {target}: 1 hunk(s), 1 replacement(s) applied.\n"
+        "[scratch] The pad is 75% full (2,048 bytes left) — remove the biggest file "
+        "first; build/dependency trees belong in a git worktree, not the pad."
+    )
+    assert result.text.count("[scratch] ") == 1
+    assert result.details is not None and "_scratchpad_advisory" not in result.details
+    assert target.read_text(encoding="utf-8") == replacement
+
+
+@pytest.mark.asyncio
 async def test_scratchpad_refuses_a_payload_over_the_write_ceiling(tmp_path) -> None:
     """The SIZE arm, end to end, because it is the one arm that depends on a
     value computed at the call site rather than on the name. A ceiling that is
