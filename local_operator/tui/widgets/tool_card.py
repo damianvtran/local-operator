@@ -491,7 +491,8 @@ REASON_MAX_ROWS = 8
 #: ``[scratch] step NN `` + 200 cells made 160 card rows at 80 columns against
 #: 43 for the same count of plain 200-cell lines (review round 2, R2-2 /
 #: design round 2, D2-r2). Each lead below is a shipped builder's opening —
-#: ``builtin._pad_budget_line``'s two arms (``The pad …``),
+#: ``builtin._pad_budget_line``'s two arms and
+#: ``scratchpad.check_scratchpad_write``'s soft crossing (all ``The pad …``),
 #: ``scratchpad.scratchpad_refusal``'s two quoted-name arms, and
 #: ``builtin._temp_scratch_line``'s nudge, the one sentence every channel's
 #: version of it shares — so a rewrite that moves an opening fails the suite's

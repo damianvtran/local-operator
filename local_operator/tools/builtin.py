@@ -186,6 +186,7 @@ from local_operator.scratchpad import (
     scratchpad_env_injection,
     scratchpad_footprint,
     scratchpad_refusal,
+    scratchpad_size_text,
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
@@ -8030,28 +8031,6 @@ def _eval_pad_write_check(code: str, context: ToolContext | None) -> str:
     return _pad_budget_line(pad)
 
 
-#: One MiB in bytes, for the budget line's DISPLAY only. The policy thresholds
-#: stay exact bytes at the walk's own comparisons; only the rendered sentence is
-#: scaled, because ``268,435,456`` costs 13 cells of a card row where ``256 MiB``
-#: costs 7 — cells the remedy needs inside the crop (design review round 1, D1/D2).
-_PAD_MIB = 1024 * 1024
-
-
-def _pad_size_text(value: int, *, attributive: bool = False) -> str:
-    """``value`` in the unit its reader parses without dividing.
-
-    MiB once the value is at least one — FLOORED, so a ``≥`` claim never
-    overstates the walk's lower bound — and bytes below that, which is where a
-    test-scale pad lives and where ``0 MiB`` would be a worse sentence than the
-    number itself. ``attributive`` spells the bytes arm as the noun modifier
-    (``8,191-byte``) that "over its ___ budget" needs; the MiB arm needs no
-    separator (``256 MiB budget``).
-    """
-    if value >= _PAD_MIB:
-        return f"{value // _PAD_MIB:,} MiB"
-    return f"{value:,}-byte" if attributive else f"{value:,} bytes"
-
-
 def _pad_watch_armed(command: str, cwd: str, pad: Path) -> bool:
     """Whether the live pad watchdog is armed for this command.
 
@@ -8122,8 +8101,8 @@ def _pad_budget_line(pad: Path) -> str:
     held, over_budget, too_wide = scratchpad_footprint(pad, budget)
     if over_budget:
         return (
-            f"[scratch] The pad now holds ≥{_pad_size_text(held)}, over its "
-            f"{_pad_size_text(budget, attributive=True)} budget — "
+            f"[scratch] The pad now holds ≥{scratchpad_size_text(held)}, over its "
+            f"{scratchpad_size_text(budget, attributive=True)} budget — "
             f"{SCRATCHPAD_ELSEWHERE_SHORT}; writes that add are refused."
         )
     if too_wide:
@@ -8977,8 +8956,8 @@ def _scratchpad_target(
     url: str,
     context: ToolContext | None,
     size: int | None = None,
-) -> Path | ToolResult:
-    """Resolve a ``scratchpad://`` URL for a MUTATING tool, or return the error.
+) -> tuple[Path, str | None] | ToolResult:
+    """Resolve a pad URL and its crossing advisory, or return the error.
 
     Returns a ``ToolResult`` on every failure, so each caller has ONE branch it
     cannot forget part of: no scratchpad root, a malformed URL, a URL that
@@ -8987,9 +8966,11 @@ def _scratchpad_target(
     file needs a file name — ``write(path="scratchpad://")`` is a refusal, not a
     silent write to the directory's own path.
 
-    ``size`` is the payload's length in bytes when it is already known.
-    ``edit`` does its address/name preflight here, then checks the computed
-    payload under its file transaction before any mutation.
+    ``size`` is the payload's length in bytes when it is already known. The
+    successful pair carries the soft warning with the path so the receipt can
+    report the SAME pre-write crossing the guard measured. ``edit`` does its
+    address/name preflight here, then checks the computed payload under its file
+    transaction before any mutation; only that measured check can cross.
     """
     root = _scratchpad_root(context)
     if root is None:
@@ -9022,12 +9003,12 @@ def _scratchpad_target(
     # refusal is the model's own argument at fault, exactly like a malformed
     # URL, so it carries the same ``invalid arguments`` marker.
     try:
-        check_scratchpad_write(target.path, root, url, size)
+        advisory = check_scratchpad_write(target.path, root, url, size)
     except ScratchpadContentError as exc:
         return _invalid_arguments(tool_call_id, tool_name, str(exc))
     # The root is created lazily by the write itself (``path.parent``), so a
     # scratchpad directory that does not exist yet is a normal first write.
-    return target.path
+    return target.path, advisory
 
 
 async def _read_scratchpad(
@@ -10412,7 +10393,9 @@ async def execute_edit(
         scratchpad_target = _scratchpad_target(tool_call_id, "edit", url, context)
         if isinstance(scratchpad_target, ToolResult):
             return scratchpad_target
-        path = scratchpad_target
+        # The size-less preflight cannot cross the byte threshold; the measured
+        # check inside the file transaction returns the advisory that matters.
+        path, _ = scratchpad_target
     else:
         path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
         denial = _confinement_denial(path, context, resolvable=_resolvable)
@@ -10467,6 +10450,9 @@ async def execute_edit(
     introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
     if introduced:
         text = f"{text}\n{_marker_introduced_note(introduced)}"
+    pad_advisory = details.pop(_SCRATCHPAD_ADVISORY_KEY, None)
+    if pad_advisory:
+        text = f"{text}\n{pad_advisory}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
@@ -10667,6 +10653,7 @@ def _edit_file_result_locked(
             current != original,
         )
 
+    pad_advisory: str | None = None
     if current != original:
         if scratch_root is not None:
             # Hunks do not reveal the final payload size: the early URL/name
@@ -10674,10 +10661,16 @@ def _edit_file_result_locked(
             # this file snapshot is still locked, before truncating anything.
             # The shared guard already excludes the replaced file, preserving
             # overwrite-to-fit recovery without counting its old bytes twice.
-            check_scratchpad_write(path, scratch_root, caller_path, len(current.encode("utf-8")))
+            pad_advisory = check_scratchpad_write(
+                path, scratch_root, caller_path, len(current.encode("utf-8"))
+            )
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
     details = _diff_details(str(path), original, current)
+    if pad_advisory:
+        # The worker thread already returns ``details``; this private, popped key
+        # carries the receipt line without changing that transaction's shape.
+        details[_SCRATCHPAD_ADVISORY_KEY] = pad_advisory
     introduced = _marker_introduced(original, current)
     if introduced:
         # Carried in ``details`` (the file tools' existing structured channel) so the
@@ -10770,6 +10763,10 @@ _DIFF_CONTEXT_LINES = 2
 #: from the worker thread to the coroutine that words the receipt. Popped before the
 #: result is built, so it never reaches the persisted details or a renderer.
 _MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
+
+#: The same one-way worker-to-receipt channel for a pad's soft crossing line.
+#: It is popped before rendering, so the structured diff remains unchanged.
+_SCRATCHPAD_ADVISORY_KEY = "_scratchpad_advisory"
 
 
 #: One unified-diff hunk header. Counts default to 1 when omitted, which the
@@ -11190,6 +11187,7 @@ async def execute_write(
     if refusal is not None:
         return refusal
     url = raw.strip()
+    pad_advisory: str | None = None
     if _has_scratchpad_scheme(url):
         # The payload is measured in BYTES, not characters: the ceiling is about
         # what this write puts on a disk shared with every other session, and a
@@ -11203,7 +11201,7 @@ async def execute_write(
         )
         if isinstance(scratchpad_target, ToolResult):
             return scratchpad_target
-        path = scratchpad_target
+        path, pad_advisory = scratchpad_target
     else:
         path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
         denial = _confinement_denial(path, context, resolvable=_resolvable)
@@ -11240,6 +11238,8 @@ async def execute_write(
     introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
     if introduced:
         text = f"{text}\n{_marker_introduced_note(introduced)}"
+    if pad_advisory:
+        text = f"{text}\n{pad_advisory}"
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import stat
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
@@ -610,6 +611,26 @@ SCRATCHPAD_MAX_BYTES_FLOOR = 16 * 1024 * 1024
 SCRATCHPAD_MAX_BYTES_CEILING = 8 * 1024 * 1024 * 1024
 
 
+def scratchpad_size_text(value: int, *, attributive: bool = False) -> str:
+    """``value`` in the unit its reader parses without dividing.
+
+    MiB once the value is at least one — FLOORED, so a ``≥`` claim never
+    overstates the walk's lower bound — and bytes below that, which is where a
+    test-scale pad lives and where ``0 MiB`` would be a worse sentence than the
+    number itself. ``attributive`` spells the bytes arm as the noun modifier
+    (``8,191-byte``) that "over its ___ budget" needs; the MiB arm needs no
+    separator (``256 MiB budget``).
+
+    This display helper lives beside the budget policy because both the shell
+    audit and the write crossing advisory need the SAME rendering; the policy
+    thresholds themselves stay exact bytes.
+    """
+    mib = 1024 * 1024
+    if value >= mib:
+        return f"{value // mib:,} MiB"
+    return f"{value:,}-byte" if attributive else f"{value:,} bytes"
+
+
 def scratchpad_budget_bytes() -> int:
     """The pad's total cap in bytes: the configured value, else the DEFAULT.
 
@@ -660,6 +681,11 @@ def scratchpad_budget_bytes() -> int:
 #: adds essentially nothing over reading the directory, the spread is load rather
 #: than the walk, and a pad just UNDER the cap pays it on every write.
 SCRATCHPAD_BUDGET_SCAN_ENTRIES = 20_000
+
+#: The soft warning fires only on the write that carries a pad across this
+#: percentage. Three quarters leaves real runway for the agent to clean up before
+#: the hard cap refuses a write, without advising on routine small pads.
+SCRATCHPAD_SOFT_WARNING_PERCENT = 75
 
 #: The sentence EVERY content refusal ends with: where the material DOES belong.
 #: A refusal that only says no sends the agent to the next-worst place — the
@@ -935,17 +961,31 @@ def scratchpad_refusal(path: Path, root: Path) -> str | None:
     return f"{clause} — {tail} ({'/'.join(below)})."
 
 
-def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> None:
-    """Refuse a write whose NAME or SIZE is build output rather than scratch.
+def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> str | None:
+    """Refuse build output, or advise on the write that crosses 75% of the cap.
 
     Raises :class:`ScratchpadContentError` on a refused DIRECTORY segment, a
     refused suffix on the file name, a ``size`` over
     :data:`SCRATCHPAD_MAX_WRITE_BYTES`, a write that would take the pad past
     :data:`SCRATCHPAD_TOTAL_BUDGET_BYTES`, a pad too wide to finish measuring
     (:data:`SCRATCHPAD_BUDGET_SCAN_ENTRIES`), or a path that cannot be placed
-    inside the pad; returns ``None`` otherwise. ``url`` is echoed so the message
-    names the address the caller actually typed, and every message ends with
-    :data:`SCRATCHPAD_ELSEWHERE`, which is where the material belongs instead.
+    inside the pad. ``url`` is echoed so the refusal names the address the caller
+    actually typed, and every refusal ends with :data:`SCRATCHPAD_ELSEWHERE`,
+    which is where the material belongs instead.
+
+    An allowed write returns ``None`` below the soft threshold. It returns one
+    ``[scratch]`` advisory only when the true pre-write total was below 75% and
+    ``would_hold`` reaches or exceeds it: a stateless CROSSING, not a flag or a
+    warning on every later write, so the agent gets one nudge rather than repeat
+    nagging. The 75%
+    threshold leaves a quarter of the cap as cleanup runway before the hard
+    refusal. ``would_hold`` and the budget are the same integer byte totals the
+    refusal uses. The soft left side adds the replaced file's allocated bytes
+    back to ``held`` — which the hard cap deliberately excludes — so an overwrite
+    cannot masquerade as a fresh crossing. The advisory is built only after the
+    over-cap arm has raised; its percentage and remaining headroom therefore
+    cannot disagree with the refusal thresholds, and an exactly-full allowed pad
+    reports zero headroom.
 
     ``size`` is the payload's length in BYTES. It is optional for an edit's
     address/name preflight, before its hunks have been applied. Once the final
@@ -1002,3 +1042,26 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
             f"{would_hold:,} — over the {budget:,}-byte ceiling for a "
             f"pad. {SCRATCHPAD_ELSEWHERE}"
         )
+    try:
+        replaced_stat = replaced.stat(follow_symlinks=False)
+        replaced_allocated = (
+            0 if stat.S_ISDIR(replaced_stat.st_mode) else replaced_stat.st_blocks * 512
+        )
+    except OSError:
+        # The budget walk likewise treats an entry it cannot stat as zero.
+        replaced_allocated = 0
+    # Keep the refusal's replacement exclusion above, but reconstruct the actual
+    # pad-before total for the soft left side. Without these bytes, overwriting
+    # one large file on an already-warned pad looks like a NEW crossing each time.
+    held_before = held + replaced_allocated
+    if (
+        held_before * 100 < budget * SCRATCHPAD_SOFT_WARNING_PERCENT
+        and would_hold * 100 >= budget * SCRATCHPAD_SOFT_WARNING_PERCENT
+    ):
+        percent = would_hold * 100 // budget
+        return (
+            f"[scratch] The pad is {percent}% full "
+            f"({scratchpad_size_text(budget - would_hold)} left) — remove the biggest file "
+            f"first; {SCRATCHPAD_ELSEWHERE_SHORT}."
+        )
+    return None
