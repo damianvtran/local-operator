@@ -283,6 +283,29 @@ def _no_placement_sentence(provider: str) -> str:
     )
 
 
+def _stop_slice(server: RelayServer) -> None:
+    """Reap what this slice started on ``server`` (``register_ops``'s ``on_stop``).
+
+    TWO OWNERS, TWO LOOPS, and both are this slice's to close: the broker the peer
+    handler builds on first need (``owner.broker_for_relay``) and the sync engine
+    the cadence and the member announce build (``sync.sync_for_relay``). Neither has
+    any other production caller — the relay's stop hook is the only thing that can
+    say the device is quiet. ``RelayServer.stop()`` runs this BEFORE link teardown,
+    which is the right order: the loops stop while the links are still explainable.
+    A request already in flight can still land during this hook, so both accessors
+    refuse to BUILD a new owner once the relay's ``_stop`` is set; the closed latch
+    on each loop refuses to restart an existing one.
+
+    Broker first: it is the peer-facing front door, and a dispatch already in the
+    broker can still touch the sync engine, whose own ``close`` then runs second.
+    """
+    from local_operator.network.credentials import owner as owner_mod
+    from local_operator.network.credentials import sync as sync_mod
+
+    owner_mod.stop_broker_for_relay(server)
+    sync_mod.stop_engine_for_relay(server)
+
+
 def install(server: RelayServer) -> None:
     """Register this slice's ops on ``server``.
 
@@ -319,4 +342,8 @@ def install(server: RelayServer) -> None:
             "credential_sync_pull": ops.sync_pull,
         },
         slow={"net_broker": BROKER_OP_DEADLINE_S},
+        # THE SLICE OWNS ITS LOOPS' LIFETIME. Registered here because this is
+        # where the ops (and therefore the lazily built owners) first become
+        # reachable from a relay.
+        on_stop={"mesh-credentials": lambda: _stop_slice(server)},
     )
