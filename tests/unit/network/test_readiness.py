@@ -363,6 +363,321 @@ def test_a_missing_store_is_read_without_creating_one(
     assert not (ambient / "auth.db").exists()
 
 
+def _root_file_snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
+    import hashlib
+
+    return {
+        path.name: (
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in root.iterdir()
+        if path.is_file()
+    }
+
+
+def _seed_mcp_row(root: Path, url: str) -> Any:
+    import asyncio
+
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    storage = McpTokenStorage(url, auth)
+    asyncio.run(
+        storage.set_tokens(
+            OAuthToken.model_validate(
+                {"access_token": "ready-fixture-access", "refresh_token": "ready-fixture-refresh"}
+            )
+        )
+    )
+    return auth
+
+
+def test_ready_reads_a_populated_closed_store_without_side_effects(tmp_path: Path) -> None:
+    """A quiescent DB stays accurate without schema/WAL writes (QA round 1, Q-1)."""
+    url = "https://mcp.notion.com/mcp"
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
+        encoding="utf-8",
+    )
+    auth = _seed_mcp_row(tmp_path, url)
+    auth.upsert_credential("openai", {"type": "oauth", "access": "ready-fixture-provider"})
+    auth.close()
+    before = _root_file_snapshot(tmp_path)
+    root_mtime = tmp_path.stat().st_mtime_ns
+
+    fact = viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login(url) is True
+    finally:
+        viewer.close()
+    fact = readiness.collect_peer_facts(tmp_path)["mcp"]
+
+    server = fact["servers"][0]
+    assert server["has_row"] is True
+    assert server["auth_diagnostics"]["sharing_mode"] == "finite_only"
+    assert readiness.has_local_provider_credential(tmp_path, "openai", read_only=True) is True
+    assert _root_file_snapshot(tmp_path) == before
+    assert tmp_path.stat().st_mtime_ns == root_mtime
+
+
+def test_ready_reports_an_open_wal_as_unavailable_not_empty_or_stale(tmp_path: Path) -> None:
+    """Immutable reads cannot see a live WAL; say UNKNOWN, never invent empty."""
+    url = "https://mcp.notion.com/mcp"
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
+        encoding="utf-8",
+    )
+    auth = _seed_mcp_row(tmp_path, url)
+    try:
+        assert auth.read_only_sidecar_present(), "the fixture needs an uncheckpointed WAL"
+        before = _root_file_snapshot(tmp_path)
+        root_mtime = tmp_path.stat().st_mtime_ns
+
+        fact = viewer = readiness.ViewerFacts(tmp_path)
+        try:
+            assert viewer.holds_mcp_login(url) is None
+        finally:
+            viewer.close()
+        fact = readiness.collect_peer_facts(tmp_path)["mcp"]
+
+        server = fact["servers"][0]
+        assert server["has_row"] is None
+        assert server["auth_diagnostics"]["access_state"] == "unknown"
+        assert server["auth_diagnostics"]["sharing_mode"] == "unavailable"
+        assert _root_file_snapshot(tmp_path) == before
+        assert tmp_path.stat().st_mtime_ns == root_mtime
+    finally:
+        auth.close()
+
+
+# This is the verdict specification, not a set of examples chosen to fit the code.
+# ``member`` means placement.owner_device == the checked peer's device id.
+_CREDENTIAL_TRUTH_TABLE = {
+    ("self", "healthy"): (True, ""),
+    ("self", "absent"): (False, readiness.CODE_NO_CREDENTIAL),
+    ("self", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("self", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("member", "healthy"): (True, ""),
+    ("member", "absent"): (False, readiness.CODE_UNKNOWN),
+    ("member", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("member", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("viewer", "healthy"): (True, ""),
+    ("viewer", "absent"): (True, ""),
+    ("viewer", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("viewer", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("third", "healthy"): (True, ""),
+    ("third", "absent"): (True, ""),
+    ("third", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("third", "open_wal"): (False, readiness.CODE_UNKNOWN),
+}
+
+
+def _truth_fixture(
+    root: Path, placement_shape: str, store_state: str, *, observation: bool = False
+) -> Any:
+    """Build one real store/placement cell; return the writer the cell keeps open."""
+    from local_operator.network import store
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.credentials.types import credential_key_for_mcp
+    from tests.unit.mcp.test_credential_status import NETWORK, URL, _record
+
+    root.mkdir()
+    store.save(_record(), root)
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+    (root / "config.yml").write_text(
+        'version: "0.0.0"\nvalues:\n  hosting: openai\n  model_name: gpt-5\n',
+        encoding="utf-8",
+    )
+    mcp_key = credential_key_for_mcp(URL)
+    if placement_shape != "self":
+        owner = {"member": PEER, "viewer": VIEWER, "third": THIRD}[placement_shape]
+        owner_name = {"member": "holder", "viewer": "viewer", "third": "third-box"}[placement_shape]
+        with placement_mod.mutate(NETWORK, root, self_device=owner) as document:
+            for key, provider, kind in (
+                ("openai", "openai", "oauth-rotating"),
+                (mcp_key, URL, "mcp-rotating"),
+            ):
+                document.declare(
+                    key,
+                    owner_device=owner,
+                    owner_device_name=owner_name,
+                    provider=provider,
+                    kind=kind,
+                    by=owner,
+                )
+                # The member-owned cell deliberately includes the owner among
+                # holders: that is the shape whose generic borrow branch used
+                # to hide the owner's own absent store.
+                document.grant(key, PEER, scope="session", by=owner)
+        if observation:
+            observations = PlacementState(NETWORK, root=root)
+            for key in ("openai", mcp_key):
+                observations.observe(
+                    key,
+                    "owner_offline",
+                    reason="no answer",
+                    owner_device=owner,
+                    retry_after_ms=15_000,
+                )
+            observations.save()
+
+    auth = None
+    if store_state in {"healthy", "open_wal"}:
+        auth = _seed_mcp_row(root, URL)
+        auth.upsert_credential("openai", {"type": "oauth", "access": "ready-openai-fixture"})
+        if store_state == "healthy":
+            auth.close()
+            auth = None
+        else:
+            assert auth.read_only_sidecar_present()
+    elif store_state == "corrupt":
+        (root / "auth.db").write_bytes(b"not a database")
+    else:
+        assert store_state == "absent"
+    return auth
+
+
+def _truth_viewer(placement_shape: str) -> _FakeViewer:
+    placement = {}
+    if placement_shape != "self":
+        owner = {"member": PEER, "viewer": VIEWER, "third": THIRD}[placement_shape]
+        placement = {
+            "owner_device": owner,
+            "owner_device_name": "owner",
+            "holders": [{"device": PEER, "scope": "session"}],
+        }
+    return _FakeViewer(device_id=VIEWER, rows=[], holds_mcp=False, placement=placement)
+
+
+@pytest.mark.parametrize(
+    ("placement_shape", "store_state", "ok", "code"),
+    [
+        (shape, state, expected_ok, expected_code)
+        for (shape, state), (expected_ok, expected_code) in _CREDENTIAL_TRUTH_TABLE.items()
+    ],
+)
+def test_credential_verdict_truth_table(
+    tmp_path: Path, placement_shape: str, store_state: str, ok: bool, code: str
+) -> None:
+    """Every placement/store cell reaches its specified FINAL rendered verdict."""
+    root = tmp_path / "cfg"
+    auth = _truth_fixture(root, placement_shape, store_state)
+    try:
+        facts = readiness.collect_peer_facts(root)
+        expected_fact = {"healthy": True, "absent": False}.get(store_state)
+        assert facts["has_local"] is expected_fact
+        assert facts["mcp"]["servers"][0]["has_row"] is expected_fact
+        viewer = _truth_viewer(placement_shape)
+        member = _member()
+        rows = (
+            readiness.model_credential_row(member, facts, viewer=viewer, peer_label="holder"),
+            readiness.mcp_credential_rows(member, facts, viewer=viewer, peer_label="holder")[0],
+        )
+        for row in rows:
+            assert row["ok"] is ok, (placement_shape, store_state, row)
+            assert row.get("code", "") == code, (placement_shape, store_state, row)
+            rendered = readiness.render_check_lines([row])
+            assert row["detail"] in rendered[0]
+            assert len(rendered) == 1 + (0 if row["ok"] else len(row["remedies"]))
+    finally:
+        if auth is not None:
+            auth.close()
+
+
+@pytest.mark.parametrize("placement_shape", ["member", "viewer", "third"])
+@pytest.mark.parametrize("store_state", ["healthy", "absent", "corrupt", "open_wal"])
+def test_observation_failure_precedes_store_uncertainty(
+    tmp_path: Path, placement_shape: str, store_state: str
+) -> None:
+    """A real observation failure outranks uncertainty, never a positive own row."""
+    root = tmp_path / "cfg"
+    auth = _truth_fixture(root, placement_shape, store_state, observation=True)
+    try:
+        facts = readiness.collect_peer_facts(root)
+        row = readiness.model_credential_row(
+            _member(),
+            facts,
+            viewer=_truth_viewer(placement_shape),
+            peer_label="holder",
+        )
+        if store_state == "healthy":
+            assert row["ok"] is True
+            assert row["detail"] == "holder serves openai from its own login"
+        else:
+            assert row["ok"] is False
+            assert row["code"] == readiness.CODE_OBSERVED_FAILURE
+            assert "not reachable" in row["detail"]
+        rendered = readiness.render_check_lines([row])
+        assert row["detail"] in rendered[0]
+    finally:
+        if auth is not None:
+            auth.close()
+
+
+@pytest.mark.parametrize("viewer_state", ["corrupt", "open_wal"])
+def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) -> None:
+    """A viewer store that cannot be read must not get a sign-in-first remedy."""
+    from tests.unit.mcp.test_credential_status import URL
+
+    peer_root = tmp_path / "peer"
+    viewer_root = tmp_path / "viewer"
+    peer_root.mkdir()
+    viewer_root.mkdir()
+    (peer_root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+    auth = None
+    if viewer_state == "open_wal":
+        auth = _seed_mcp_row(viewer_root, URL)
+        assert auth.read_only_sidecar_present()
+    else:
+        (viewer_root / "auth.db").write_bytes(b"not a database")
+    viewer = None
+    try:
+        facts = readiness.collect_peer_facts(peer_root)
+        assert facts["mcp"]["servers"][0]["has_row"] is False
+        viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
+        row = readiness.mcp_credential_rows(_member(), facts, viewer=viewer, peer_label="holder")[0]
+        viewer.close()
+        viewer = None
+
+        assert row["ok"] is False
+        assert row["code"] == readiness.CODE_UNKNOWN
+        assert "this device's credential store could not be read" in row["detail"]
+        rendered = readiness.render_check_lines([row])
+        assert row["detail"] in rendered[0]
+        assert "sign in here first" not in "\n".join(rendered)
+
+        if viewer_state == "open_wal":
+            assert auth is not None
+            auth.close()
+            auth = None
+            control_viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
+            try:
+                control = readiness.mcp_credential_rows(
+                    _member(), facts, viewer=control_viewer, peer_label="holder"
+                )[0]
+            finally:
+                control_viewer.close()
+            assert control["code"] == readiness.CODE_NOT_SHARED
+            assert "does not share it" in control["detail"]
+    finally:
+        if viewer is not None:
+            viewer.close()
+        if auth is not None:
+            auth.close()
+
+
 def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
     """An ``auth.db`` that exists but cannot be opened is "could not be read",
     never a crash (convergence round 2, MAJOR class): every open keeps
@@ -377,9 +692,14 @@ def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (tmp_path / "auth.db").write_bytes(b"not a database")
-    fact = readiness.mcp_servers_fact(tmp_path)
+    fact = viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login("https://mcp.notion.com/mcp") is None
+    finally:
+        viewer.close()
+    fact = readiness.collect_peer_facts(tmp_path)["mcp"]
     assert fact["servers"][0]["has_row"] is None
-    assert readiness.has_local_provider_credential(tmp_path, "openai") is None
+    assert readiness.has_local_provider_credential(tmp_path, "openai", read_only=True) is None
     viewer = readiness.ViewerFacts(tmp_path)
     try:
         assert viewer.holds_mcp_login("https://mcp.notion.com/mcp") is None
