@@ -140,6 +140,31 @@ def test_every_named_key_has_a_mapping() -> None:
         assert compiled.startswith("pyautogui.press(")
 
 
+@pytest.mark.parametrize(
+    ("alias", "compiled"),
+    [
+        (("Return",), "pyautogui.press('enter')"),
+        (("Escape",), "pyautogui.press('esc')"),
+        (("Page_Down",), "pyautogui.press('pagedown')"),
+        (("super",), "pyautogui.press('win')"),
+        (("Control_L", "minus"), "pyautogui.hotkey('ctrl', '-')"),
+        (("ctrl", "shift", "equal"), "pyautogui.hotkey('ctrl', 'shift', '=')"),
+        (("ctrl", "plus"), "pyautogui.hotkey('ctrl', '+')"),
+    ],
+)
+def test_an_alias_compiles_exactly_as_its_canonical_key(
+    alias: tuple[str, ...], compiled: str
+) -> None:
+    """The guest receives the canonical key; the alias never reaches it.
+
+    Normalisation happens in the protocol validator, so the compiler needs no
+    alias table of its own -- this pins that the compiled statement for an
+    alias is the one its canonical spelling has always produced.
+    """
+
+    assert actions.compile_action(KeyAction(observation_id="o", keys=alias), None) == compiled
+
+
 def test_coordinate_corners_round_trip() -> None:
     geo = _geo()
     for x, y in ((0, 0), (1919, 1079)):
