@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -35,20 +36,49 @@ MAX_STREAM_SECONDS = 60
 AUTHORIZATION_LEASE_SECONDS = 30
 
 
+logger = logging.getLogger(__name__)
+
+
 class RelayStreamResponse(StreamingResponse):
-    """Finalize a proxy generator even when ASGI cancels its response task."""
+    """Finalize the proxied origin even when ASGI cancels this response task.
+
+    Two losses have to be covered separately, which is why the origin's own
+    close arrives as ``on_close`` rather than being reached through the body
+    generator alone. Starlette's task-group cancellation does not reliably
+    finalize an async-for body blocked between sends; and a cancellation that
+    lands before the generator's first ``__anext__`` leaves ``aclose()`` on that
+    generator a no-op, so its ``finally`` never runs. A parked
+    ``http.response.start`` is exactly that second case. Repeating the close is
+    safe: ``httpx.Response.aclose`` is guarded by ``is_closed``.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        on_close: Callable[[], Awaitable[None]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_close = on_close
 
     async def stream_response(self, send) -> None:
         try:
             await super().stream_response(send)
         finally:
-            # Starlette's task-group cancellation does not reliably finalize
-            # an async-for body blocked between sends. Without this explicit
-            # close, the origin stream and its connection outlive the cancelled
-            # request until garbage collection (and can hold server shutdown).
-            close = getattr(self.body_iterator, "aclose", None)
-            if close is not None:
+            await self._release_origin()
+
+    async def _release_origin(self) -> None:
+        for close in (getattr(self.body_iterator, "aclose", None), self._on_close):
+            if close is None:
+                continue
+            try:
                 await close()
+            except Exception:
+                # The in-flight exception belongs to the request — normally the
+                # CancelledError that brought us here — so a failing cleanup
+                # must not replace it. CancelledError is a BaseException and so
+                # still propagates untouched.
+                logger.debug("relay stream cleanup failed", exc_info=True)
 
 
 PROOF_HEADER = "x-radient-tunnel-assertion"
@@ -726,7 +756,10 @@ class Gateway:
                 await upstream.aclose()
 
         return RelayStreamResponse(
-            stream(), status_code=upstream.status_code, headers=response_headers
+            stream(),
+            on_close=upstream.aclose,
+            status_code=upstream.status_code,
+            headers=response_headers,
         )
 
     async def websocket(self, socket: WebSocket) -> None:

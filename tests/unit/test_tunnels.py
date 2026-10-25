@@ -3727,6 +3727,50 @@ def test_rearm_starts_the_windows_task_too(tmp_path, monkeypatch, connection) ->
     assert install.rearm_if_parked(provider="radient", credential_id=7) == ""
 
 
+def _relay_stream_exchange(signing_key):
+    """The ASGI scope and ``receive`` for one authorized events request.
+
+    ``receive`` answers the empty request body once and then parks forever;
+    every caller here cancels the response instead of letting the request run
+    to completion, so the parked branch is unreachable by construction. It is
+    annotated rather than inferred because an inferred ``dict | None`` is not
+    Starlette's ``Receive``.
+    """
+    from starlette.types import Message
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/sessions/events",
+        "raw_path": b"/api/sessions/events",
+        "query_string": b"",
+        "headers": [
+            (b"host", HOST.encode()),
+            (
+                PROOF_HEADER.encode(),
+                proof(signing_key, target="/api/sessions/events").encode(),
+            ),
+        ],
+        "client": ("127.0.0.1", 1),
+        "server": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+    body_read = False
+
+    async def receive() -> Message:
+        nonlocal body_read
+        if not body_read:
+            body_read = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.Future()
+        raise AssertionError("the parked receive must never return")
+
+    return scope, receive
+
+
 @pytest.mark.asyncio
 async def test_cancelling_a_stream_closes_the_upstream_body(connection, signing_key):
     """Cancellation must finalize the proxy generator, not only the ASGI task.
@@ -3749,40 +3793,11 @@ async def test_cancelling_a_stream_closes_the_upstream_body(connection, signing_
             closed.set()
 
     def origin(request):
-        return httpx.Response(
-            200, stream=Endless(), headers={"content-type": "text/event-stream"}
-        )
+        return httpx.Response(200, stream=Endless(), headers={"content-type": "text/event-stream"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
         gateway = Gateway(connection, upstream, mobile_password="pw")
-        scope = {
-            "type": "http",
-            "asgi": {"version": "3.0", "spec_version": "2.3"},
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/api/sessions/events",
-            "raw_path": b"/api/sessions/events",
-            "query_string": b"",
-            "headers": [
-                (b"host", HOST.encode()),
-                (
-                    PROOF_HEADER.encode(),
-                    proof(signing_key, target="/api/sessions/events").encode(),
-                ),
-            ],
-            "client": ("127.0.0.1", 1),
-            "server": ("127.0.0.1", 1),
-            "root_path": "",
-        }
-        body_read = False
-
-        async def receive():
-            nonlocal body_read
-            if not body_read:
-                body_read = True
-                return {"type": "http.request", "body": b"", "more_body": False}
-            await asyncio.Future()
+        scope, receive = _relay_stream_exchange(signing_key)
 
         first = asyncio.Event()
 
@@ -3797,6 +3812,85 @@ async def test_cancelling_a_stream_closes_the_upstream_body(connection, signing_
         with pytest.raises(asyncio.CancelledError):
             await task
         assert closed.is_set(), "cancelled streaming response left its upstream body open"
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_before_the_body_starts_still_releases_the_origin(
+    connection, signing_key
+):
+    """A cancel parked on the headers message must still release the origin.
+
+    ``aclose()`` on an async generator that never started does not run its
+    ``finally``, so a cancellation landing while ``http.response.start`` is
+    parked never reaches ``stream()``'s own close. The origin's close therefore
+    has to hang off the response itself, not off the body generator.
+    """
+    closed = asyncio.Event()
+
+    class Endless(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0)
+                yield b"data: " + b"x" * 65536 + b"\n\n"
+
+        async def aclose(self):
+            closed.set()
+
+    def origin(request):
+        return httpx.Response(200, stream=Endless(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        scope, receive = _relay_stream_exchange(signing_key)
+        started = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                started.set()
+                await asyncio.Future()
+
+        task = asyncio.create_task(gateway.app()(scope, receive, send))
+        await asyncio.wait_for(started.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set(), "a parked response start left the origin body open"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_origin_close_does_not_mask_the_cancellation(connection, signing_key):
+    """Cleanup failure is logged, never substituted for the request's outcome."""
+    closed = asyncio.Event()
+
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0)
+                yield b"data: " + b"x" * 65536 + b"\n\n"
+
+        async def aclose(self):
+            closed.set()
+            raise RuntimeError("origin close failed")
+
+    def origin(request):
+        return httpx.Response(200, stream=Broken(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        scope, receive = _relay_stream_exchange(signing_key)
+        first = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first.set()
+                await asyncio.Future()
+
+        task = asyncio.create_task(gateway.app()(scope, receive, send))
+        await asyncio.wait_for(first.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set()
 
 
 @pytest.mark.asyncio
@@ -3847,14 +3941,13 @@ async def test_a_lease_ending_under_backpressure_still_completes_the_response(
 
                 def stalled_reader() -> bytes:
                     with closing(socket.create_connection(("127.0.0.1", port))) as sock:
-                        # Linux's delayed-ACK/flow-control behavior can reduce a
-                        # 4 KiB receive window to ~8 KiB per four seconds once
-                        # this socket stalls; that leaves a real backpressured
-                        # response draining long after the test deadline even
-                        # with no gateway involved (raw-socket control). Keep a
-                        # receive buffer large enough to drain, while the real
-                        # uvicorn write-side high-water mark still forces the
-                        # lease path through its blocked-send case.
+                        # Linux with a 4 KiB SO_RCVBUF drains at about
+                        # 8 KiB per ~0.2 s (~44 KB/s). A multi-MB backlog then
+                        # needs ~80 s, so that arm cannot reach the 20 s bound
+                        # with no gateway involved (raw-socket control), while
+                        # the real uvicorn write-side high-water mark still
+                        # forces the lease path through its blocked-send case
+                        # at a buffer large enough to drain.
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
                         sock.sendall(
                             b"GET /api/sessions/events HTTP/1.1\r\nHost: "
