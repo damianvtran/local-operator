@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import errno
 import hmac
+import logging
 import os
 import socket
 import threading
@@ -68,6 +69,8 @@ from local_operator.secrets.protocol import (
     send_frame,
     socket_path,
 )
+
+logger = logging.getLogger(__name__)
 
 #: How long the broker waits for a session to acknowledge a redaction notice
 #: before serving the value anyway. See :meth:`SecretBroker._notify_session`
@@ -303,7 +306,16 @@ class SecretBroker:
         self._bound_inode = None
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Stop accepting, let in-flight requests finish, then clean up."""
+        """Stop accepting, let in-flight requests finish, then clean up.
+
+        ``Thread.join(timeout)`` returns nothing either way, so the accept
+        thread's outcome is read from ``is_alive()`` after the join instead of
+        assumed. A listener still alive at the deadline is named in a warning
+        and its handle is KEPT — this path is also reached from
+        ``serve_forever`` on the way out, so a wedged thread must not turn a
+        shutdown into an exception. A thread that ignores its stop cannot be
+        killed from here; keeping the handle makes the condition observable.
+        """
         self._stopping.set()
         server, self._server = self._server, None
         if server is not None:
@@ -311,9 +323,19 @@ class SecretBroker:
                 server.close()
             except OSError:  # pragma: no cover - close rarely fails
                 pass
-        if self._accept_thread is not None:
-            self._accept_thread.join(timeout=timeout)
-            self._accept_thread = None
+        accept_thread = self._accept_thread
+        if accept_thread is not None:
+            accept_thread.join(timeout=timeout)
+            if accept_thread.is_alive():
+                logger.warning(
+                    "secrets: broker accept thread did not stop within the %.1fs "
+                    "stop timeout and is still running — it was not killed; the "
+                    "broker is stopping and the thread's handle is kept so this "
+                    "stays observable",
+                    timeout,
+                )
+            else:
+                self._accept_thread = None
         with self._lock:
             workers = list(self._workers) + list(self._watchers)
             sessions = list(self._sessions.values())
