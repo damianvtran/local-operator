@@ -15,6 +15,7 @@ where D1's change lives.
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -52,14 +53,29 @@ def test_the_route_acquires_before_any_response_exists() -> None:
     # draft pre-engage path, and a test anchored on the full argument list went
     # red for a change that preserved the property it exists to assert. Matching
     # the receiver and the method keeps the assertion about what it names.
-    acquire = body.index("host(request).session(session_id")
-    subscribe = body.index("bridge.subscribe(")
+    #
+    # THE MATCH ALSO TOLERATES A WRAPPED CALL AND A HOISTED RECEIVER, for that
+    # same reason one level down. A formatter is free to break this expression
+    # across lines, and holding the pool in a local (`pool = host(request)`)
+    # is a spelling of the same acquire: Black did both to this route, and the
+    # literal `host(request).session(session_id` prefix this test used to index
+    # stopped existing while the ordering it pins did not change. So the search
+    # runs on whitespace-collapsed source and accepts either receiver; what is
+    # asserted is still WHEN the bridge is acquired, never how the call reads.
+    flat = " ".join(body.split())
+    acquired = re.search(r"(?:host\(request\)|\bpool)\.session\(\s*session_id", flat)
+    assert acquired is not None, (
+        "the stream route no longer acquires its bridge through a call on the "
+        "request's pool, so the hand-off this test pins has moved: " + flat[:400]
+    )
+    acquire = acquired.start()
+    subscribe = flat.index("bridge.subscribe(")
     assert acquire < subscribe, (
         "the bridge must be acquired before the subscription is taken; the "
         "capacity refusal and the move fence both depend on it happening while a "
         "JSON status is still possible"
     )
-    assert "await context.__aenter__()" in body[:subscribe], (
+    assert "await context.__aenter__()" in flat[:subscribe], (
         "and the acquire must be AWAITED before the subscribe, not merely ordered "
         "before it in the source"
     )
