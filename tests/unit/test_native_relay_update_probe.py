@@ -8,6 +8,7 @@ when the hosted private-manager prerequisite is blocked.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -97,3 +98,27 @@ def test_generation_child_import_outside_its_tree_is_refused(
 
     with pytest.raises(probe.ProbeFailure, match="outside intended generation"):
         probe._assert_generation_imports(generation, env, root, "base")  # noqa: SLF001
+
+
+def test_one_shot_label_preserves_full_head_within_github_limit() -> None:
+    """The shortened prefix fits GitHub without weakening exact-head parsing."""
+    repo = Path(__file__).resolve().parents[2]
+    wrapper = (repo / "scripts/native-delegated-once-wrapper.sh").read_text(encoding="utf-8")
+    workflow = (repo / ".github/workflows/native-delegated-once.yml").read_text(encoding="utf-8")
+    prefix = "native-"
+    head = "0123456789abcdef0123456789abcdef01234567"
+    label = f"{prefix}{head}"
+    assert len(label) == 47 <= 50
+
+    bash_pattern = r"^native-([0-9a-f]{40})$"
+    assert f'[[ "$EXPECTED_HEAD" =~ {bash_pattern} ]]' in wrapper
+    assert f"startsWith(github.event.label.name, '{prefix}')" in workflow
+    match = re.fullmatch(bash_pattern.removeprefix("^").removesuffix("$"), label)
+    assert match is not None and match.group(1) == head
+    for invalid in (
+        f"native-delegated-once-{head}",
+        f"{prefix}{head[:-1]}",
+        f"{prefix}{head}0",
+        f"{prefix}{head.upper()}",
+    ):
+        assert re.fullmatch(bash_pattern.removeprefix("^").removesuffix("$"), invalid) is None

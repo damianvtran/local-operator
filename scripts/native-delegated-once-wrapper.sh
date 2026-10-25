@@ -16,7 +16,9 @@ unset NATIVE_PROC_ROOT
 source "$GITHUB_WORKSPACE/scripts/native_cgroup_evidence.sh"
 # The one-shot label carries the independently reviewed commit. The workflow
 # need not contain its own commit SHA, and a later/relabelled head cannot pass.
-[[ "$EXPECTED_HEAD" =~ ^native-delegated-once-([0-9a-f]{40})$ ]] || {
+# native- + 40 hex characters is 47 characters, within GitHub's 50-character
+# label limit; shortening the prefix must never truncate the reviewed head.
+[[ "$EXPECTED_HEAD" =~ ^native-([0-9a-f]{40})$ ]] || {
   printf 'label does not carry one exact reviewed head\n' >&2
   exit 2
 }

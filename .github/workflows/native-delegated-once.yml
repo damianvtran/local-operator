@@ -1,5 +1,5 @@
 # One operator-authorized diagnostic, never a standing privileged CI gate.
-# The operator applies native-delegated-once-<exact-reviewed-head> once after
+# The operator applies native-<exact-reviewed-head> once after
 # wrapper/provenance/cleanup review. The wrapper verifies that head and these
 # content hashes; any earlier run consumes the authorization (including relabel).
 name: Native delegated relay update once
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   delegated-diagnostic-once:
     if: >-
-      startsWith(github.event.label.name, 'native-delegated-once-') &&
+      startsWith(github.event.label.name, 'native-') &&
       github.run_attempt == 1
     runs-on: ubuntu-24.04
     timeout-minutes: 18
@@ -35,7 +35,7 @@ jobs:
       - name: Run the one authorized delegated diagnostic
         env:
           EXPECTED_HEAD: ${{ github.event.label.name }}
-          EXPECTED_WRAPPER_SHA256: bf76296966a9a5b942796e2c8a5d23d0a04f0b7ad6cab7f35d60fe51a74f5083
+          EXPECTED_WRAPPER_SHA256: cca745bff0c639e93ae547f23524ce634083cc392ecd087b4a3c6be09fca00c5
           EXPECTED_PROBE_SHA256: bd22408a6fedb81b8f766669241d189cd6bd459303a7803daa22f593bdd19c68
           EXPECTED_SCOPE_LIB_SHA256: 1f7ad6a655ab1b4f28686262dc1da1126ab5f872aeaebb27beee5c83512e25b6
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
