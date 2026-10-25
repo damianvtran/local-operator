@@ -2918,9 +2918,7 @@ def test_peer_restart_row_is_unknown_offline_and_uses_only_receiver_evidence() -
     assert "peer_restart" in rendered, rendered
     assert row["remedies"][0] in rendered, rendered
 
-    no_record = readiness.peer_restart_row(
-        _member(), {}, record=None, peer_label="cloud-node-1"
-    )
+    no_record = readiness.peer_restart_row(_member(), {}, record=None, peer_label="cloud-node-1")
     assert no_record["code"] == readiness.CODE_UNKNOWN, no_record
     assert no_record["source"] == readiness.SOURCE_UNKNOWN, no_record
     assert "<network> <this-device-id> update" in no_record["remedies"][0]

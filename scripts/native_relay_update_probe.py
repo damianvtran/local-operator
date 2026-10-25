@@ -268,7 +268,7 @@ def _install_source(source: Path, sha: str, version: str, ref: str) -> Path:
 def _write_pinned_unit(unit: Path, generation: Path, port: int) -> None:
     rendered = relay.render_systemd(port=port)
     current_image = procname.supervised_image()
-    if current_image not in rendered:
+    if not current_image or current_image not in rendered:
         raise ProbeFailure("could not identify the rendered unit image for the historical fixture")
     old_image = update._generation_install_root(generation) / "bin" / "python3"  # noqa: SLF001
     if not old_image.is_file():
@@ -317,12 +317,12 @@ def _refresh(generation: Path, scratch: Path, label: str) -> dict[str, Any]:
     wrapper = wrapper_dir / "ps"
     wrapper.write_text(
         "#!/bin/sh\n"
-        "if [ -f \"$LOP_NATIVE_PS_FAIL_ONCE\" ]; then\n"
-        "  rm -f \"$LOP_NATIVE_PS_FAIL_ONCE\"\n"
+        'if [ -f "$LOP_NATIVE_PS_FAIL_ONCE" ]; then\n'
+        '  rm -f "$LOP_NATIVE_PS_FAIL_ONCE"\n'
         "  echo 'intentional one-shot ps failure' >&2\n"
         "  exit 1\n"
         "fi\n"
-        "exec \"$LOP_NATIVE_REAL_PS\" \"$@\"\n",
+        'exec "$LOP_NATIVE_REAL_PS" "$@"\n',
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
@@ -423,11 +423,7 @@ def main() -> int:
             raise ProbeBlocked("real Linux user systemd is required")
         if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
             raise ProbeBlocked("invoke this probe through a private dbus-run-session")
-        missing = [
-            name
-            for name in ("systemctl", "ps", "git")
-            if shutil.which(name) is None
-        ]
+        missing = [name for name in ("systemctl", "ps", "git") if shutil.which(name) is None]
         if _systemd_binary() is None:
             missing.append("systemd")
         if missing:
@@ -436,9 +432,7 @@ def main() -> int:
         if Path(os.environ.get("HOME", "")).resolve() != real_home:
             raise ProbeBlocked("HOME must be the runner's real home for manager addressability")
         occupied = [
-            str(path)
-            for path in (stable, unit, *launchers)
-            if path.exists() or path.is_symlink()
+            str(path) for path in (stable, unit, *launchers) if path.exists() or path.is_symlink()
         ]
         if occupied:
             raise ProbeBlocked(
@@ -496,9 +490,7 @@ def main() -> int:
             "port": port,
             "strace_available": shutil.which("strace") is not None,
         }
-        _require(
-            ["systemctl", "--user", "set-environment", f"LOCAL_OPERATOR_CONFIG_DIR={config}"]
-        )
+        _require(["systemctl", "--user", "set-environment", f"LOCAL_OPERATOR_CONFIG_DIR={config}"])
         owns_artifacts = True
 
         base_generation = _install_source(base_source, base_sha, head_version, args.base)
@@ -583,9 +575,7 @@ def main() -> int:
             result["cleanup_error"] = f"{type(exc).__name__}: {exc}"
             exit_code = 1
         args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(
-            json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        args.json.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(
             f"native relay update: {result['status']} — "
             f"{result.get('reason', 'see JSON receipt')}"

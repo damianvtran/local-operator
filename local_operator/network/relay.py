@@ -14609,9 +14609,7 @@ def refresh_unit_if_stale() -> Any:
             # fail this step loudly unless the RUNNING process and `current`
             # were both read and match; an unreadable comparison is not success.
             loaded = (
-                update.generation_of_process(restarted_pid)
-                if restarted_pid is not None
-                else None
+                update.generation_of_process(restarted_pid) if restarted_pid is not None else None
             )
             current_generation = update.current_generation()
             if restarted_stale is True:

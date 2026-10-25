@@ -1294,9 +1294,7 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
     )
 
 
-def restart_authority_fact(
-    root: Path, *, network_id: str, viewer_device_id: str
-) -> dict[str, Any]:
+def restart_authority_fact(root: Path, *, network_id: str, viewer_device_id: str) -> dict[str, Any]:
     """The RECEIVER's current restart grant for one authenticated viewer.
 
     `net_restart` reads the sender's row from the receiver's store on every use.
@@ -1375,9 +1373,7 @@ def peer_restart_row(
             )
         ),
         remedies=(
-            []
-            if granted is True
-            else [remedy if known else f"if restart is refused, {remedy}"]
+            [] if granted is True else [remedy if known else f"if restart is refused, {remedy}"]
         ),
         source=SOURCE_PEER if known else SOURCE_UNKNOWN,
         observed={
